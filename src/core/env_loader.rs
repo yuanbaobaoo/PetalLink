@@ -1,9 +1,11 @@
 //! .env 加载器（开发期便利，对齐 `legacy/lib/core/config/env_loader.dart`）。
 //!
 //! client_secret 解析优先级（高 → 低）：
-//! 1. 构建期环境变量 `TAURI_CLIENT_SECRET`（编译期注入，覆盖最强）→ 见 `constants.rs`
+//! 1. 构建期环境变量 `HWCLOUD_CLIENT_SECRET`（由 build.rs 从 .env 注入，编译期常量）→ 见 `constants.rs`
 //! 2. `.env` 文件（开发期通过 dotenvy 加载）→ 本模块
 //! 3. 默认占位符（登录会被拒绝）
+//!
+//! 注意：构建期缺失凭据会由 build.rs panic 阻断，不会到达此处。
 //!
 //! 文件不存在或解析失败时静默跳过，secret 回退到占位符。
 

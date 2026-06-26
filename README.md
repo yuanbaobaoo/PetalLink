@@ -138,8 +138,8 @@ cd app && npm run build    # 类型检查 + Vite 打包
 ### 生产发布（.app + DMG）
 
 ```bash
-# 编译期注入 client_id 和 client_secret（两者均无默认值，必须提供）
-TAURI_CLIENT_ID=<你的AGC_CLIENT_ID> TAURI_CLIENT_SECRET=<你的64位hex> cargo tauri build
+# 编译期自动读取 .env 文件注入凭据（无需手动设置环境变量）
+cargo tauri build
 ```
 
 **产物位置**：

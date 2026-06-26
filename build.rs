@@ -1,6 +1,8 @@
 // Tauri 构建脚本：
-// 1. 读取 tauri.conf.json 生成构建期常量（tauri_build::build）
-// 2. 将 assets/ 内的图标同步到 icons/，使 assets/ 成为唯一图源——
+// 1. 注入凭证：读取 .env 中的 HWCLOUD_CLIENT_ID / HWCLOUD_CLIENT_SECRET，
+//    通过 rustc-env 注入编译期常量（option_env! 可获取）。缺失任一则 panic 阻断构建。
+// 2. 读取 tauri.conf.json 生成构建期常量（tauri_build::build）
+// 3. 将 assets/ 内的图标同步到 icons/，使 assets/ 成为唯一图源——
 //    每次 cargo build / cargo tauri dev 自动覆盖，无需手动复制。
 //
 // 说明：
@@ -15,6 +17,9 @@ use std::process::Command;
 
 const ASSETS_DIR: &str = "assets";
 const ICONS_DIR: &str = "icons";
+const ENV_CLIENT_ID_KEY: &str = "HWCLOUD_CLIENT_ID";
+const ENV_CLIENT_SECRET_KEY: &str = "HWCLOUD_CLIENT_SECRET";
+const ENV_FILE: &str = ".env";
 
 /// assets/ PNG → icons/ PNG 映射（对齐 tauri.conf.json bundle.icon 所列文件）。
 /// 像素尺寸一一对应：assets/icon-NN.png(NN×NN) → icons/NNxNN.png。
@@ -44,6 +49,9 @@ const ICONSET_MAP: &[(&str, &str)] = &[
 ];
 
 fn main() {
+    // ★ 最早阶段：注入凭证（缺失则 panic 阻断构建）
+    inject_env_credentials();
+
     tauri_build::build();
 
     // assets/ 变化时重新同步图标（tauri.conf.json 由 tauri_build 自行声明跟踪，
@@ -55,6 +63,78 @@ fn main() {
         // 同步失败不阻断构建（图标缺失时 Tauri 会回退到默认图标），仅告警
         println!("cargo:warning=图标同步 assets/ → icons/ 失败：{e}");
     }
+}
+
+/// 将 .env 中的 HWCLOUD_CLIENT_ID / HWCLOUD_CLIENT_SECRET 注入编译期环境变量。
+///
+/// 优先级：已显式设置的环境变量 > .env 文件。缺失任一则 panic 阻断构建。
+///
+/// - `cargo:rustc-env=KEY=VALUE` 使 `option_env!("KEY")` 在编译期可见。
+/// - `cargo:rerun-if-changed=.env` 确保凭证变更触发重新编译。
+fn inject_env_credentials() {
+    // 检测 cargo 构建环境是否已设置（用户显式 export / 命令行前缀）
+    let env_id = std::env::var(ENV_CLIENT_ID_KEY).ok().filter(|v| !v.is_empty());
+    let env_secret = std::env::var(ENV_CLIENT_SECRET_KEY).ok().filter(|v| !v.is_empty());
+
+    let (client_id, client_secret) = if env_id.is_some() && env_secret.is_some() {
+        // 已通过环境变量显式设置，直接使用
+        println!(
+            "cargo:warning=使用构建环境变量 {ENV_CLIENT_ID_KEY} / {ENV_CLIENT_SECRET_KEY}"
+        );
+        (env_id.unwrap(), env_secret.unwrap())
+    } else {
+        // 从 .env 文件读取
+        let env_path = Path::new(ENV_FILE);
+        if !env_path.exists() {
+            panic!(
+                "{ENV_FILE} 不存在！请复制 .env.example 为 .env 并填入 {ENV_CLIENT_ID_KEY} 和 {ENV_CLIENT_SECRET_KEY}。"
+            );
+        }
+
+        let content = fs::read_to_string(env_path).unwrap_or_else(|e| {
+            panic!("读取 {ENV_FILE} 失败：{e}");
+        });
+
+        let mut id = String::new();
+        let mut secret = String::new();
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((k, v)) = trimmed.split_once('=') {
+                match k.trim() {
+                    ENV_CLIENT_ID_KEY => id = v.trim().to_string(),
+                    ENV_CLIENT_SECRET_KEY => secret = v.trim().to_string(),
+                    _ => {}
+                }
+            }
+        }
+
+        // 校验：两者必须同时非空
+        if id.is_empty() && secret.is_empty() {
+            panic!(
+                "{ENV_FILE} 中 {ENV_CLIENT_ID_KEY} 和 {ENV_CLIENT_SECRET_KEY} 均为空。请填入真实凭据。"
+            );
+        }
+        if id.is_empty() {
+            panic!("{ENV_FILE} 中 {ENV_CLIENT_ID_KEY} 为空。请填入真实凭据。");
+        }
+        if secret.is_empty() {
+            panic!("{ENV_FILE} 中 {ENV_CLIENT_SECRET_KEY} 为空。请填入真实凭据。");
+        }
+
+        println!("cargo:warning=已从 {ENV_FILE} 注入 {ENV_CLIENT_ID_KEY} / {ENV_CLIENT_SECRET_KEY} 到编译期常量");
+        (id, secret)
+    };
+
+    // 注入 rustc 编译期环境变量（option_env! 可见）
+    println!("cargo:rustc-env={ENV_CLIENT_ID_KEY}={client_id}");
+    println!("cargo:rustc-env={ENV_CLIENT_SECRET_KEY}={client_secret}");
+
+    // .env 变化时重新运行 build.rs
+    println!("cargo:rerun-if-changed={ENV_FILE}");
+    println!("cargo:rerun-if-changed=.env.example");
 }
 
 /// 将 assets/ 图标同步到 icons/：复制 PNG + 重新生成 icon.icns。

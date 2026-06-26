@@ -2,25 +2,27 @@
 //!
 //! # 安全提醒
 //! `CLIENT_SECRET` 和 `CLIENT_ID` 切勿提交到仓库。解析优先级（高 → 低）：
-//! 1. 构建期环境变量（`TAURI_CLIENT_SECRET` / `TAURI_CLIENT_ID`，编译期注入）
+//! 1. 构建期环境变量（`HWCLOUD_CLIENT_SECRET` / `HWCLOUD_CLIENT_ID`，由 build.rs 从 .env 注入，或手动设置）
 //! 2. `.env` 文件（开发期通过 dotenvy 加载）
-//! 3. 硬编码默认值（仅 CLIENT_ID 有公开默认值；CLIENT_SECRET 默认占位符会导致登录被拒）
+//! 3. 硬编码默认值（CLIENT_SECRET 默认占位符会导致登录被拒）
+//!
+//! 构建期若缺失任一凭据，build.rs 会 panic 阻断编译（cargo tauri dev / build 均适用）。
 
 use once_cell::sync::OnceCell;
 
-/// AGC Web 应用 CLIENT_ID —— 无硬编码默认值，必须由用户通过环境变量或 .env 提供。
-/// 实际运行时优先读取环境变量 `HWCLOUD_CLIENT_ID` 或构建期 `TAURI_CLIENT_ID`。
+/// AGC Web 应用 CLIENT_ID —— 无硬编码默认值，必须由用户通过 .env 提供。
+/// 实际运行时优先读取构建期注入的值，其次读取运行时环境变量（dotenvy）。
 
-/// 构建期通过 `TAURI_CLIENT_ID` 环境变量注入的 client_id。
+/// 构建期通过 `HWCLOUD_CLIENT_ID` 环境变量注入的 client_id（由 build.rs 从 .env 注入）。
 /// 未配置时为空字符串，运行时再回退到 .env / 空值。
-pub const BUILD_CLIENT_ID: &str = match option_env!("TAURI_CLIENT_ID") {
+pub const BUILD_CLIENT_ID: &str = match option_env!("HWCLOUD_CLIENT_ID") {
     Some(v) => v,
     None => "",
 };
 
-/// 构建期通过 `TAURI_CLIENT_SECRET` 环境变量注入的 secret。
+/// 构建期通过 `HWCLOUD_CLIENT_SECRET` 环境变量注入的 secret（由 build.rs 从 .env 注入）。
 /// 未配置时为空字符串，运行时再回退到 .env / 占位符。
-pub const BUILD_SECRET: &str = match option_env!("TAURI_CLIENT_SECRET") {
+pub const BUILD_SECRET: &str = match option_env!("HWCLOUD_CLIENT_SECRET") {
     Some(v) => v,
     None => "",
 };
