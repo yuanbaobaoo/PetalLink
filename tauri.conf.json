@@ -1,0 +1,53 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "PetalLink",
+  "version": "1.0.0",
+  "identifier": "io.github.yuanbaobaoo.PetalLink",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "app/dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "title": "PetalLink - 华为云盘客户端开源版",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 700,
+        "minHeight": 480,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": true,
+        "titleBarStyle": "Visible",
+        "hiddenTitle": false,
+        "trafficLightPosition": { "x": 16, "y": 18 }
+      }
+    ],
+    "security": {
+      "csp": null
+    },
+    "macOSPrivateApi": true
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.png"
+    ],
+    "macOS": {
+      "frameworks": [],
+      "minimumSystemVersion": "12.0",
+      "exceptionDomain": "",
+      "signingIdentity": null,
+      "entitlements": "src/Entitlements.plist"
+    },
+    "createUpdaterArtifacts": false
+  }
+}

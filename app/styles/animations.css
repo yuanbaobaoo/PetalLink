@@ -1,0 +1,88 @@
+/**
+ * 动画定义 —— 对齐 design-rules.md §8
+ * 所有动画提供 prefers-reduced-motion 降级（无障碍）。
+ */
+
+/* 旋转（同步中图标） */
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+.spin-icon {
+  animation: spin 1s linear infinite;
+}
+
+/* 菜单淡入 */
+@keyframes menu-fade-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+.menu-fade-in {
+  animation: menu-fade-in 0.12s ease-out;
+}
+
+/* Popover 滑入 */
+@keyframes popover-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.popover-in {
+  animation: popover-in 0.12s ease-out;
+}
+
+/* 对话框淡入 */
+@keyframes dialog-fade-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+.dialog-fade-in {
+  animation: dialog-fade-in 0.15s ease-out;
+}
+
+/* Toast 淡入淡出 */
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.toast-in {
+  animation: toast-in 0.2s ease-out;
+}
+
+/* Reduced Motion 降级 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- 沙盒关闭：双向同步需读写用户挂载目录（~/hwcloud-drive）。自用侧载工具，非 App Store 分发。 -->
+	<key>com.apple.security.app-sandbox</key>
+	<false/>
+	<!-- OAuth 回调监听 127.0.0.1:9999 loopback HTTP server -->
+	<key>com.apple.security.network.server</key>
+	<true/>
+	<!-- 调用华为 Drive REST API（全程 HTTPS） -->
+	<key>com.apple.security.network.client</key>
+	<true/>
+	<!-- 后台运行：关闭窗口后同步引擎继续运行 -->
+	<key>com.apple.security.application-groups</key>
+	<array/>
+</dict>
+</plist>

@@ -1,0 +1,110 @@
+[package]
+name = "PetalLink"
+version = "1.0.0"
+description = "PetalLink — 基于 Tauri 的 macOS 华为云盘开源客户端"
+authors = ["PetalLink"]
+edition = "2021"
+rust-version = "1.77"
+
+# 库形态：Tauri 2 推荐 lib + bin 双入口（便于测试与移动端复用）
+[lib]
+name = "petal_link_lib"
+path = "src/lib.rs"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "PetalLink"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# === Tauri 核心 ===
+tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
+tauri-plugin-shell = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-os = "2"
+tauri-plugin-process = "2"
+tauri-plugin-single-instance = "2"
+
+# === 序列化 / 配置 ===
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# === 异步运行时 ===
+tokio = { version = "1", features = ["full"] }
+
+# === HTTP 客户端（华为 Drive REST API） ===
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "multipart"] }
+
+# === 键钥安全存储（macOS Keychain + 跨平台降级） ===
+keyring = "3"
+
+# === SQLite 数据库（同步状态 / 传输队列） ===
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# === 日志 ===
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+
+# === 文件系统监听（macOS 底层 FSEvents） ===
+notify = "7"
+notify-debouncer-full = "0.4"
+
+# === 加密 / 哈希 ===
+sha2 = "0.10"
+rand = "0.8"
+base64 = "0.22"
+hex = "0.4"
+
+# === .env 解析（client_secret 开发期注入） ===
+dotenvy = "0.15"
+
+# === 系统路径（Application Support 等） ===
+dirs = "5"
+
+# === 文件属性（macOS xattr 占位符标记） ===
+xattr = "1"
+
+# === 时间 / 并发工具 ===
+chrono = { version = "0.4", features = ["serde"] }
+async-trait = "0.1"
+once_cell = "1"
+parking_lot = "0.12"
+
+# === 正则（skip pattern glob 简化匹配） ===
+regex = "1"
+
+# === URL 处理 ===
+url = "2"
+percent-encoding = "2"
+futures-util = "0.3"
+futures = "0.3"
+
+# === 错误处理 ===
+thiserror = "1"
+anyhow = "1"
+
+# === macOS 原生集成（activationPolicy / 系统托盘 / 开机自启） ===
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5"
+objc2-foundation = { version = "0.2", features = ["NSNotification", "NSString", "NSProcessInfo"] }
+objc2-app-kit = { version = "0.2", features = ["NSApplication", "NSStatusItem", "NSMenu", "NSWorkspace", "NSWindow", "NSRunningApplication", "NSImage"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+wiremock = "0.6"
+tempfile = "3"
+mockall = "0.13"
+filetime = "0.2"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

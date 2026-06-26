@@ -1,0 +1,107 @@
+<!-- 同步状态条，全局进度 + 失败数点击查看详情 -->
+<script setup lang="ts">
+import { computed, ref } from "vue";
+import { useSyncStore } from "@/stores/sync";
+import { MateIcon, MateDialog, MateButton } from "@/components/mate";
+
+const sync = useSyncStore();
+
+const statusText = computed(() => {
+  if (sync.isIndexing) return "正在读取云端索引…";
+  if (sync.hasActiveTransfer) return "同步中";
+  return "同步完成";
+});
+
+const lastSyncFormatted = computed(() => {
+  if (!sync.lastSyncTime) return "";
+  const d = new Date(sync.lastSyncTime);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+});
+
+const isIdle = computed(() => !sync.hasActiveTransfer && !sync.isIndexing);
+
+const showFailedDialog = ref(false);
+function handleShowFailed(): void { showFailedDialog.value = true; }
+</script>
+
+<template>
+  <div class="sync-bar" v-if="sync.mountConfigured">
+    <!-- 全局进度条 -->
+    <div class="sync-progress" v-if="sync.total > 0 && sync.completed < sync.total">
+      <div class="sync-progress__bar">
+        <div class="sync-progress__fill" :style="{ '--progress-pct': (sync.progress * 100) + '%' }" />
+      </div>
+      <span class="sync-progress__text">{{ Math.round(sync.progress * 100) }}%</span>
+    </div>
+
+    <div class="sync-bar__left">
+      <MateIcon
+        :name="isIdle ? 'check' : 'sync'"
+        :size="16"
+        :spin="!isIdle"
+        :class="{ 'is-success': isIdle, 'is-active': !isIdle }"
+      />
+      <span class="sync-bar__text">{{ statusText }}</span>
+      <span v-if="lastSyncFormatted && isIdle" class="sync-bar__time">· 上次同步 {{ lastSyncFormatted }}</span>
+    </div>
+
+    <div class="sync-bar__tags">
+      <span v-if="sync.uploading" class="tag tag--primary">上传 {{ sync.uploading }}</span>
+      <span v-if="sync.downloading" class="tag tag--primary">下载 {{ sync.downloading }}</span>
+      <span v-if="sync.editing" class="tag tag--warning">编辑中 {{ sync.editing }}</span>
+      <span v-if="sync.conflict" class="tag tag--warning">冲突 {{ sync.conflict }}</span>
+      <span v-if="sync.failed" class="tag tag--error" @click="handleShowFailed">失败 {{ sync.failed }}</span>
+    </div>
+
+    <MateButton v-if="sync.failed" variant="text" icon="refresh" @click="sync.retryFailed()">重试失败项</MateButton>
+
+    <!-- 失败项弹窗 -->
+    <MateDialog
+      :open="showFailedDialog"
+      title-icon="alert"
+      danger
+      :title="`同步失败项 (${sync.failedItems.length})`"
+      @update:open="(v) => (showFailedDialog = v)"
+    >
+      <div v-if="sync.failedItems.length === 0" class="failed-empty">暂无失败项详情</div>
+      <div v-else class="failed-list">
+        <div v-for="(item, i) in sync.failedItems" :key="i" class="failed-item">
+          <div class="failed-item__path">{{ item.relative_path }}</div>
+          <div v-if="item.error_message" class="failed-item__err">{{ item.error_message }}</div>
+        </div>
+      </div>
+      <template #footer>
+        <MateButton variant="primary" @click="showFailedDialog = false">关闭</MateButton>
+      </template>
+    </MateDialog>
+  </div>
+</template>
+
+<style scoped>
+.sync-bar {
+  height: var(--sync-bar-height); display: flex; align-items: center; padding: 0 var(--space-lg);
+  gap: var(--space-sm); border-bottom: 0.5px solid var(--border); background-color: var(--bg-container);
+  font-size: var(--font-body-sm); flex-shrink: 0;
+}
+.sync-bar__left { display: flex; align-items: center; gap: var(--space-sm); flex: 3; min-width: 0; }
+.sync-bar__left :deep(.is-success) { color: var(--color-success); }
+.sync-bar__left :deep(.is-active) { color: var(--color-brand); }
+.sync-bar__text { color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sync-bar__time { color: var(--text-secondary); }
+.sync-bar__tags { display: flex; gap: var(--space-xs); flex: 4; justify-content: flex-end; flex-wrap: wrap; }
+.tag { display: inline-flex; align-items: center; padding: 1px 6px; border-radius: var(--radius-sm); font-size: var(--font-caption); font-weight: var(--fw-medium); line-height: 18px; }
+.tag--primary { background-color: var(--color-brand-lighter); color: var(--color-brand); }
+.tag--warning { background-color: var(--color-warning-bg); color: var(--color-warning); }
+.tag--error { background-color: var(--color-error-bg); color: var(--color-error); cursor: pointer; }
+
+.sync-progress { display: flex; align-items: center; gap: var(--space-sm); flex: 1; max-width: 200px; margin-right: var(--space-lg); }
+.sync-progress__bar { flex: 1; height: 4px; background-color: var(--bg-active); border-radius: 2px; overflow: hidden; }
+.sync-progress__fill { height: 100%; width: var(--progress-pct, 0%); background-color: var(--color-brand); border-radius: 2px; transition: width 0.3s ease; }
+.sync-progress__text { font-size: var(--font-caption); color: var(--text-secondary); min-width: 36px; text-align: right; }
+
+.failed-empty { color: var(--text-secondary); }
+.failed-list { display: flex; flex-direction: column; gap: var(--space-sm); max-height: 320px; overflow-y: auto; }
+.failed-item__path { font-size: var(--font-body-sm); font-weight: var(--fw-medium); color: var(--text-primary); }
+.failed-item__err { font-size: var(--font-caption); color: var(--color-error); margin-top: 2px; }
+</style>

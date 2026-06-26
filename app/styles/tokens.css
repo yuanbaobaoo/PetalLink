@@ -1,0 +1,134 @@
+/**
+ * CloudMate 设计令牌 —— TDesign Enterprise × macOS Native
+ *
+ * 完整复刻 `ai-context/design-rules.md` §2/§3/§6 的所有 CSS 变量。
+ * 所有组件必须引用这些变量，禁止硬编码颜色/尺寸。
+ */
+
+:root {
+  /* === 品牌色（TDesign Brand Blue） === */
+  --color-brand: #0052d9;
+  --color-brand-hover: #366ef4;
+  --color-brand-active: #003cab;
+  --color-brand-light: #d9e1ff;
+  --color-brand-lighter: #f2f3ff;
+
+  /* === 功能色（语义色 · 状态标识） === */
+  --color-success: #2ba471;
+  --color-success-bg: #e3f9e9;
+  --color-warning: #e37318;
+  --color-warning-bg: #fff1e9;
+  --color-error: #d54941;
+  --color-error-bg: #fff0ed;
+
+  /* === 14 级灰阶 === */
+  --gray-1: #f3f3f3;
+  --gray-2: #eeeeee;
+  --gray-3: #e8e8e8;
+  --gray-4: #dddddd;
+  --gray-5: #c6c6c6;
+  --gray-6: #a6a6a6;
+  --gray-7: #8b8b8b;
+  --gray-8: #777777;
+  --gray-9: #5e5e5e;
+  --gray-10: #4b4b4b;
+  --gray-11: #393939;
+  --gray-12: #2c2c2c;
+  --gray-13: #242424;
+  --gray-14: #181818;
+
+  /* === 语义别名 === */
+  --bg-page: #f5f5f5;
+  --bg-container: #ffffff;
+  --bg-hover: #f3f3f3;
+  --bg-active: #e8e8e8;
+  --border: #dddddd;
+  --border-hover: #c6c6c6;
+  --text-primary: rgba(0, 0, 0, 0.9);
+  --text-secondary: rgba(0, 0, 0, 0.6);
+  --text-placeholder: rgba(0, 0, 0, 0.35);
+
+  /* === macOS 窗口专用色 === */
+  --titlebar-bg: #ebebeb;
+  --titlebar-border: #d0d0d0;
+  --window-outer-bg: #5a5a5a;
+  --traffic-close: #ff5f57;
+  --traffic-minimize: #ffbd2e;
+  --traffic-maximize: #28c840;
+
+  /* === 字号阶梯 === */
+  --font-display: 36px;
+  --font-title-lg: 24px;
+  --font-title-md: 20px;
+  --font-title-sm: 16px;
+  --font-body: 14px;
+  --font-body-sm: 13px;
+  --font-caption: 12px;
+
+  /* === 字重 === */
+  --fw-regular: 400;
+  --fw-medium: 500;
+  --fw-semibold: 600;
+
+  /* === 圆角 === */
+  --radius-sm: 3px;
+  --radius-md: 6px;
+  --radius-lg: 9px;
+
+  /* === 间距（4-grid） === */
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 12px;
+  --space-lg: 16px;
+  --space-xl: 24px;
+  --space-xxl: 32px;
+
+  /* === 阴影 === */
+  --shadow-card: 0 1px 4px rgba(0, 0, 0, 0.08), 0 0 0 0.5px rgba(0, 0, 0, 0.06);
+  --shadow-dropdown: 0 4px 12px rgba(0, 0, 0, 0.12),
+    0 0 0 0.5px rgba(0, 0, 0, 0.06);
+  --shadow-modal: 0 8px 24px rgba(0, 0, 0, 0.16);
+  --shadow-window: 0 20px 60px rgba(0, 0, 0, 0.3), 0 0 0 0.5px rgba(0, 0, 0, 0.1);
+
+  /* === 字体栈（系统字体，无 webfont） === */
+  --font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC",
+    "Helvetica Neue", sans-serif;
+  --font-mono: "SF Mono", "Menlo", "Monaco", "Consolas", monospace;
+
+  /* === 布局尺寸 === */
+  --sidebar-width: 220px;
+  --settings-nav-width: 200px;
+  --appbar-height: 56px;
+  --breadcrumb-height: 32px;
+  --sync-bar-height: 32px;
+  --file-header-height: 36px;
+  --file-row-height: 44px;
+  --transfer-popover-width: 420px;
+  --transfer-popover-height: 560px;
+}
+
+/* === 深色模式（跟随系统） === */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg-page: #181818;
+    --bg-container: #242424;
+    --bg-hover: #2c2c2c;
+    --bg-active: #2c2c2c;
+    --border: #3e3e3e;
+    --border-hover: #5e5e5e;
+    --text-primary: rgba(255, 255, 255, 0.9);
+    --text-secondary: rgba(255, 255, 255, 0.6);
+    --text-placeholder: rgba(255, 255, 255, 0.35);
+
+    --titlebar-bg: #2c2c2c;
+    --titlebar-border: #3e3e3e;
+    --window-outer-bg: #000000;
+
+    --color-brand-light: #1a3a8a;
+    --color-brand-lighter: #1f2a4a;
+
+    --shadow-card: 0 1px 4px rgba(0, 0, 0, 0.3), 0 0 0 0.5px rgba(255, 255, 255, 0.06);
+    --shadow-dropdown: 0 4px 12px rgba(0, 0, 0, 0.4),
+      0 0 0 0.5px rgba(255, 255, 255, 0.06);
+  }
+}

@@ -1,0 +1,578 @@
+//! 同步执行器 —— 并发池 + 传输队列 + 稳定性检查 + 配额校验。
+//!
+//! 对齐 `legacy/lib/sync/sync_executor.dart`。
+//!
+//! 并发数默认 6（可配置 1-20），使用 tokio Semaphore 限流。
+//! 传输队列（TransferQueue 表）记录进度，修剪历史（保留最近 100 条已结束任务）。
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use tokio::sync::Semaphore;
+
+use crate::data::repository::{
+    self, sync_status,
+    transfer_direction, transfer_state, SyncItem, TransferTask,
+};
+use crate::drive::{download_api::DownloadApi, files_api::FilesApi, upload_api::UploadApi};
+use crate::mount::manager::MountManager;
+use crate::sync::conflict::ConflictResolver;
+use crate::sync::stability::{StabilityChecker, StabilityResult};
+use crate::sync::state::{ActionResult, SyncAction, SyncActionType};
+
+/// 同步执行器 —— 持有全部外部依赖。
+pub struct SyncExecutor {
+    concurrency: u32,
+    files_api: Arc<FilesApi>,
+    download_api: Arc<DownloadApi>,
+    upload_api: Arc<UploadApi>,
+    mount: Option<Arc<MountManager>>,
+    conflict: Option<Arc<std::sync::Mutex<ConflictResolver>>>,
+    stability: Option<Arc<tokio::sync::Mutex<StabilityChecker>>>,
+    db: Option<Arc<parking_lot::Mutex<rusqlite::Connection>>>,
+}
+
+impl SyncExecutor {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        concurrency: u32,
+        files_api: Arc<FilesApi>,
+        download_api: Arc<DownloadApi>,
+        upload_api: Arc<UploadApi>,
+    ) -> Self {
+        Self {
+            concurrency,
+            files_api,
+            download_api,
+            upload_api,
+            mount: None,
+            conflict: None,
+            stability: None,
+            db: None,
+        }
+    }
+
+    /// 设置 mount manager（延迟注入，避免循环依赖）。
+    pub fn set_mount(&mut self, mount: Arc<MountManager>) {
+        self.mount = Some(mount);
+    }
+
+    /// 设置冲突解决器。
+    pub fn set_conflict(&mut self, conflict: Arc<std::sync::Mutex<ConflictResolver>>) {
+        self.conflict = Some(conflict);
+    }
+
+    /// 设置稳定性检查器。
+    pub fn set_stability(&mut self, s: Arc<tokio::sync::Mutex<StabilityChecker>>) {
+        self.stability = Some(s);
+    }
+
+    /// 设置 DB 连接。
+    pub fn set_db(&mut self, db: Arc<parking_lot::Mutex<rusqlite::Connection>>) {
+        self.db = Some(db);
+    }
+
+    /// 并发执行全部动作。
+    /// 对齐 dart `executor.executeAll`。
+    pub async fn execute_all(&self, actions: &[SyncAction]) -> Vec<ActionResult> {
+        // 修剪传输历史（保留最近 100 条）
+        self.prune_transfer_history();
+
+        let semaphore = Arc::new(Semaphore::new(self.concurrency as usize));
+        let mut handles = Vec::new();
+
+        for action in actions {
+            let sem = semaphore.clone();
+            let action = action.clone();
+            let self_clone = self.clone_executor(); // cheap clone of Arc'd fields
+
+            handles.push(tokio::spawn(async move {
+                let _permit = sem.acquire().await.unwrap();
+                self_clone.execute_one(&action).await
+            }));
+        }
+
+        let mut results = Vec::new();
+        for h in handles {
+            if let Ok(r) = h.await {
+                results.push(r);
+            }
+        }
+        results
+    }
+
+    /// 克隆执行器（只保留 Arc 字段的引用，轻量）。
+    pub fn clone_executor(&self) -> Self {
+        Self {
+            concurrency: self.concurrency,
+            files_api: self.files_api.clone(),
+            download_api: self.download_api.clone(),
+            upload_api: self.upload_api.clone(),
+            mount: self.mount.clone(),
+            conflict: self.conflict.clone(),
+            stability: self.stability.clone(),
+            db: self.db.clone(),
+        }
+    }
+
+    /// 执行单个动作。
+    async fn execute_one(&self, action: &SyncAction) -> ActionResult {
+        // 入队传输（仅 upload/download/conflict 可见于传输面板）
+        self.enqueue_transfer(action);
+
+        let result = match action.action_type {
+            SyncActionType::Upload => self.do_upload(action).await,
+            SyncActionType::Download => self.do_download(action).await,
+            SyncActionType::CreatePlaceholder => self.do_create_placeholder(action).await,
+            SyncActionType::CreateFolder => self.do_create_folder(action).await,
+            SyncActionType::DeleteFromCloud => self.do_delete_from_cloud(action).await,
+            SyncActionType::DeleteFromLocal => self.do_delete_from_local(action).await,
+            SyncActionType::CreateConflictCopy => self.do_conflict(action).await,
+            SyncActionType::BackupBeforeCloudDelete => self.do_backup_before_cloud_delete(action).await,
+            SyncActionType::Skip => ActionResult {
+                success: true,
+                error_message: Some(action.reason.clone().unwrap_or_default()),
+                deferred: false,
+                cloud_file: None,
+            },
+        };
+
+        // 传输状态清理
+        self.settle_transfer(action, &result);
+        result
+    }
+
+    /// 入队传输记录（仅 upload/download/conflict 可见）。
+    /// 公开供 sync_folder_recursive_impl 等直接调用下载/上传 API 的路径手动入队。
+    pub fn enqueue_transfer(&self, action: &SyncAction) {
+        let direction = match action.action_type {
+            SyncActionType::Upload | SyncActionType::CreateConflictCopy => transfer_direction::UPLOAD,
+            SyncActionType::Download => transfer_direction::DOWNLOAD,
+            _ => return, // 建目录/占位符/删除不入队
+        };
+        if let Some(db) = &self.db {
+            // 文件大小：上传取本地文件 size，下载取云端记录 size（本地可能是占位符 0 字节）
+            let total_size = match direction {
+                d if d == transfer_direction::UPLOAD => {
+                    action.local_path.as_ref()
+                        .and_then(|p| std::fs::metadata(p).ok())
+                        .map(|m| m.len() as i64)
+                        .unwrap_or(0)
+                }
+                _ => {
+                    action.cloud_file.as_ref()
+                        .map(|f| f.size)
+                        .unwrap_or(0)
+                }
+            };
+            { let conn = db.lock();
+                let task = TransferTask {
+                    id: 0,
+                    direction,
+                    file_id: action.file_id.clone(),
+                    local_path: action.local_path.clone(),
+                    name: action.relative_path.as_deref().unwrap_or("unknown").to_string(),
+                    total_size,
+                    transferred: 0,
+                    state: transfer_state::RUNNING,
+                    error_message: None,
+                    created_at: chrono::Utc::now().timestamp_millis(),
+                    finished_at: None,
+                    server_id: None,
+                    upload_id: None,
+                    resume_offset: 0,
+                };
+                let _ = repository::insert_transfer(&conn, &task);
+            }
+        }
+    }
+
+    /// 传输结果清理：更新状态 + 完成后 transferred=total_size。
+    fn settle_transfer(&self, action: &SyncAction, result: &ActionResult) {
+        if let Some(db) = &self.db {
+            { let conn = db.lock();
+                let state = if result.deferred {
+                    transfer_state::PENDING
+                } else if result.success {
+                    transfer_state::COMPLETED
+                } else {
+                    transfer_state::FAILED
+                };
+                // 完成时 transferred=total_size，进度条 100%；失败时保持原值
+                let transferred_sql = if result.success { "transferred = total_size" } else { "transferred = transferred" };
+                // 简单实现：更新最近的同路径 transfer 记录
+                let sql = format!(
+                    "UPDATE transfer_queue SET state = ?1, error_message = ?2, finished_at = ?3, {transferred_sql} WHERE local_path = ?4 AND state = ?5"
+                );
+                let _ = conn.execute(
+                    &sql,
+                    rusqlite::params![state, result.error_message.as_deref(), chrono::Utc::now().timestamp_millis(), action.local_path.as_deref(), transfer_state::RUNNING],
+                );
+            }
+        }
+    }
+
+    /// 修剪传输历史（保留最近 100 条已结束任务）。
+    fn prune_transfer_history(&self) {
+        if let Some(db) = &self.db {
+            { let conn = db.lock();
+                let _ = repository::prune_transfer_history(&conn, 100);
+            }
+        }
+    }
+
+    // ===== 各动作实现 =====
+
+    async fn do_upload(&self, action: &SyncAction) -> ActionResult {
+        let path = match &action.local_path {
+            Some(p) => PathBuf::from(p),
+            None => return ActionResult { success: false, error_message: Some("上载缺少本地路径".into()), deferred: false, cloud_file: None },
+        };
+        if !path.exists() {
+            return ActionResult { success: false, error_message: Some("本地文件不存在".into()), deferred: false, cloud_file: None };
+        }
+
+        // 稳定性检查（4 次重试，退避 [0s, 2s, 3s, 5s]，对齐 dart _checkStabilityWithRetry）
+        let backoffs = [0u64, 2, 3, 5];
+        let mut stable = false;
+        if let Some(stab) = &self.stability {
+            for &delay in &backoffs {
+                tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                let mut checker = stab.lock().await;
+                match checker.check(&path).await {
+                    StabilityResult::Editing => return ActionResult {
+                        success: false, error_message: Some("用户正在编辑，暂停自动同步".into()), deferred: true, cloud_file: None,
+                    },
+                    StabilityResult::Stable => { stable = true; break; }
+                    StabilityResult::Unstable => {} // 继续重试
+                }
+            }
+            if !stable {
+                return ActionResult {
+                    success: false, error_message: Some("文件尚不稳定，延迟到下次周期".into()), deferred: true, cloud_file: None,
+                };
+            }
+        }
+
+        let parent_id = action.parent_file_id.as_deref();
+        let has_cloud_id = action.file_id.is_some();
+        let size = path.metadata().map(|m| m.len()).unwrap_or(0);
+        let is_large = size > 20 * 1024 * 1024;
+        let rel = action.relative_path.as_deref().unwrap_or("?");
+
+        // 路由：已有 fileId → update；大文件 → 保留 resume（TODO: TransferQueue 持久化）；否则 POST 新上传
+        let result = if has_cloud_id && !is_large {
+            match self.upload_api.upload_update(action.file_id.as_ref().unwrap(), &path, parent_id, None).await {
+                Ok(f) => ActionResult { success: true, error_message: None, deferred: false, cloud_file: Some(f) },
+                Err(_e) => {
+                    // PATCH 失败已回退 delete+POST，重试 POST
+                    match self.upload_api.upload(&path, parent_id, None).await {
+                        Ok(f) => ActionResult { success: true, error_message: None, deferred: false, cloud_file: Some(f) },
+                        Err(e) => ActionResult { success: false, error_message: Some(e.to_string()), deferred: false, cloud_file: None },
+                    }
+                }
+            }
+        } else {
+            match self.upload_api.upload(&path, parent_id, None).await {
+                Ok(f) => ActionResult { success: true, error_message: None, deferred: false, cloud_file: Some(f) },
+                Err(e) => ActionResult { success: false, error_message: Some(e.to_string()), deferred: false, cloud_file: None },
+            }
+        };
+        if result.success {
+            tracing::info!(rel, size, "上传成功");
+        } else if !result.deferred {
+            tracing::warn!(rel, error = result.error_message.as_deref().unwrap_or("?"), "上传失败");
+        }
+        result
+    }
+
+    async fn do_download(&self, action: &SyncAction) -> ActionResult {
+        let local_path = match &action.local_path {
+            Some(p) => PathBuf::from(p),
+            None => return ActionResult { success: false, error_message: Some("下载缺少本地路径".into()), deferred: false, cloud_file: None },
+        };
+        let file_id = match &action.file_id {
+            Some(id) => id.clone(),
+            None => return ActionResult { success: false, error_message: Some("下载缺少 fileId".into()), deferred: false, cloud_file: None },
+        };
+
+        // 确保父目录存在（对齐 dart: parent.create(recursive: true)）
+        if let Some(parent) = local_path.parent() {
+            if let Err(e) = tokio::fs::create_dir_all(parent).await {
+                return ActionResult { success: false, error_message: Some(format!("创建父目录失败：{e}")), deferred: false, cloud_file: None };
+            }
+        }
+
+        // 备份被修改的占位符（改名保留，对齐 dart backupModifiedPlaceholderIfNeeded）
+        if let Some(m) = &self.mount {
+            let _ = m.backup_modified_placeholder_if_needed(&local_path).await;
+        }
+
+        let rel = action.relative_path.as_deref().unwrap_or("?");
+        let result = match self.download_api.download(&file_id, &local_path, None).await {
+            Ok(()) => {
+                if let Some(m) = &self.mount {
+                    let _ = m.mark_downloaded(&local_path).await;
+                }
+                ActionResult { success: true, error_message: None, deferred: false, cloud_file: None }
+            }
+            Err(e) => {
+                // 清理 .tmp 残留（对齐 dart: tmpPath.delete()）
+                let tmp = std::path::PathBuf::from(format!("{}.tmp", local_path.display()));
+                let _ = std::fs::remove_file(&tmp);
+                ActionResult { success: false, error_message: Some(e.to_string()), deferred: false, cloud_file: None }
+            }
+        };
+        if result.success {
+            tracing::info!(rel, "下载成功");
+        } else {
+            tracing::warn!(rel, error = result.error_message.as_deref().unwrap_or("?"), "下载失败");
+        }
+        result
+    }
+
+    async fn do_create_placeholder(&self, action: &SyncAction) -> ActionResult {
+        let cloud = match &action.cloud_file {
+            Some(c) => c,
+            None => return ActionResult { success: false, error_message: Some("缺少云端文件元数据".into()), deferred: false, cloud_file: None },
+        };
+        let rel_path = match &action.relative_path {
+            Some(p) => p,
+            None => return ActionResult { success: false, error_message: Some("缺少相对路径".into()), deferred: false, cloud_file: None },
+        };
+        if let Some(m) = &self.mount {
+            match m.create_placeholder_if_needed(rel_path, &cloud.id, cloud.size).await {
+                Ok(()) => {
+                    // 对齐 dart：写 DB 记录（status=cloudOnly），防止孤儿占位符
+                    if let (Some(db), Some(local_path)) = (&self.db, &action.local_path) {
+                        { let conn = db.lock();
+                            let _ = repository::upsert(&conn, &SyncItem {
+                                file_id: cloud.id.clone(), local_path: local_path.clone(),
+                                parent_folder_id: cloud.parent_folder.as_ref().and_then(|v| v.first().cloned()),
+                                name: cloud.name.clone(), is_folder: false, size: cloud.size,
+                                local_size: None, sha256: None, local_mtime: None,
+                                cloud_edited_time: cloud.edited_time.map(|t| t.timestamp_millis()),
+                                last_sync_time: None, status: sync_status::CLOUD_ONLY, error_message: None,
+                            });
+                        }
+                    }
+                    ActionResult { success: true, error_message: None, deferred: false, cloud_file: None }
+                }
+                Err(e) => ActionResult { success: false, error_message: Some(e.to_string()), deferred: false, cloud_file: None },
+            }
+        } else {
+            ActionResult { success: false, error_message: Some("mount manager 未初始化".into()), deferred: false, cloud_file: None }
+        }
+    }
+
+    async fn do_create_folder(&self, action: &SyncAction) -> ActionResult {
+        let rel = action.relative_path.as_deref().unwrap_or("?");
+        // 本地新文件夹（无云端文件）→ 调 createFolder API
+        let result = if let Some(cloud_file) = &action.cloud_file {
+            // 云端已有文件夹 → 本地 ensure
+            let _cloud = cloud_file;
+            if let Some(m) = &self.mount {
+                match m.ensure_folder(rel) {
+                    Ok(_) => ActionResult { success: true, error_message: None, deferred: false, cloud_file: None },
+                    Err(e) => ActionResult { success: false, error_message: Some(e.to_string()), deferred: false, cloud_file: None },
+                }
+            } else {
+                ActionResult { success: true, error_message: None, deferred: false, cloud_file: None }
+            }
+        } else {
+            // FIX:fileName 取相对路径的**最后一段**，而非整条 relative_path。
+            // 之前 name = "学习/程序设计"（含 /）撞华为文件名校验 → 400 21004002
+            // fileName can not contain '<>|:"*?/\'。这与 engine.rs 写 DB 时
+            // 取 rel.rsplit('/').next() 保持一致。
+            let full = action.relative_path.as_deref().unwrap_or("新建文件夹");
+            let name = full.rsplit('/').next().unwrap_or(full);
+            match self.files_api.create_folder(name, action.parent_file_id.as_deref()).await {
+                Ok(f) => ActionResult { success: true, error_message: None, deferred: false, cloud_file: Some(f) },
+                // 对齐 dart：400/409 时查同名已存在文件夹，存在则视为成功
+                // （同样用末段 name 匹配，与云端真名一致才能命中）
+                Err(ref e) if e.to_string().contains("400") || e.to_string().contains("409") => {
+                    if let Some(pid) = action.parent_file_id.as_deref() {
+                        if let Ok(list) = self.files_api.list_all(Some(pid)).await {
+                            if let Some(existing) = list.iter().find(|f| f.is_folder() && f.name == name) {
+                                ActionResult { success: true, error_message: None, deferred: false, cloud_file: Some(existing.clone()) }
+                            } else {
+                                ActionResult { success: false, error_message: Some(format!("{e}")), deferred: false, cloud_file: None }
+                            }
+                        } else {
+                            ActionResult { success: false, error_message: Some(format!("{e}")), deferred: false, cloud_file: None }
+                        }
+                    } else {
+                        ActionResult { success: false, error_message: Some(format!("{e}")), deferred: false, cloud_file: None }
+                    }
+                }
+                Err(e) => ActionResult { success: false, error_message: Some(e.to_string()), deferred: false, cloud_file: None },
+            }
+        };
+        if result.success {
+            tracing::info!(rel, "创建目录成功");
+        } else {
+            tracing::warn!(rel, error = result.error_message.as_deref().unwrap_or("?"), "创建目录失败");
+        }
+        result
+    }
+
+    async fn do_delete_from_cloud(&self, action: &SyncAction) -> ActionResult {
+        let file_id = match &action.file_id {
+            Some(id) => id.clone(),
+            None => return ActionResult { success: false, error_message: Some("缺少 fileId".into()), deferred: false, cloud_file: None },
+        };
+        let rel = action.relative_path.as_deref().unwrap_or("?");
+        let result = match self.files_api.delete(&file_id).await {
+            Ok(()) => ActionResult { success: true, error_message: None, deferred: false, cloud_file: None },
+            Err(e) => ActionResult { success: false, error_message: Some(e.to_string()), deferred: false, cloud_file: None },
+        };
+        if result.success {
+            tracing::info!(rel, "删除云端文件成功");
+        } else {
+            tracing::warn!(rel, error = result.error_message.as_deref().unwrap_or("?"), "删除云端文件失败");
+        }
+        result
+    }
+
+    async fn do_delete_from_local(&self, action: &SyncAction) -> ActionResult {
+        let path = match &action.local_path {
+            Some(p) => PathBuf::from(p),
+            None => return ActionResult { success: true, error_message: None, deferred: false, cloud_file: None }, // DB 清理场景
+        };
+        let rel = action.relative_path.as_deref().unwrap_or("?");
+        let result = if let Some(m) = &self.mount {
+            match m.delete_local(&path).await {
+                Ok(()) => ActionResult { success: true, error_message: None, deferred: false, cloud_file: None },
+                Err(e) => ActionResult { success: false, error_message: Some(e.to_string()), deferred: false, cloud_file: None },
+            }
+        } else {
+            ActionResult { success: true, error_message: None, deferred: false, cloud_file: None }
+        };
+        if result.success {
+            tracing::info!(rel, "删除本地文件成功");
+        } else {
+            tracing::warn!(rel, error = result.error_message.as_deref().unwrap_or("?"), "删除本地文件失败");
+        }
+        result
+    }
+
+    async fn do_conflict(&self, action: &SyncAction) -> ActionResult {
+        let local_path = match &action.local_path {
+            Some(p) => PathBuf::from(p),
+            None => return ActionResult { success: false, error_message: Some("冲突处理缺少本地路径".into()), deferred: false, cloud_file: None },
+        };
+        let cloud_file = match &action.cloud_file {
+            Some(c) => c,
+            None => return ActionResult { success: false, error_message: Some("冲突处理缺少云端文件元数据".into()), deferred: false, cloud_file: None },
+        };
+
+        // 获取本地 mtime
+        let local_mtime = tokio::fs::metadata(&local_path).await
+            .ok().and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| chrono::DateTime::from_timestamp(d.as_secs() as i64, d.subsec_nanos()).unwrap_or(chrono::Utc::now()))
+            .unwrap_or(chrono::Utc::now());
+
+        // 解析冲突
+        let resolution = if let Some(conflict) = &self.conflict {
+            if let Ok(mut resolver) = conflict.lock() {
+                resolver.resolve(&local_path, cloud_file, &local_mtime)
+            } else {
+                return ActionResult { success: false, error_message: Some("冲突解决器获取失败".into()), deferred: false, cloud_file: None };
+            }
+        } else {
+            return ActionResult { success: false, error_message: Some("冲突解决器未初始化".into()), deferred: false, cloud_file: None };
+        };
+
+        let rel = action.relative_path.as_deref().unwrap_or("?");
+        // 对齐 dart：cloud-wins → 本地副本保存到 copyPath，云端下载到 localPath
+        // local-wins → 云端副本下载到 copyPath，本地覆盖上传到云端
+        let result = match resolution.winner {
+            crate::sync::conflict::ConflictSide::Cloud => {
+                // 云端获胜：移动本地 → copyPath，下载云端 → localPath
+                // 改名失败绝不能继续下载——否则本地修改被覆盖且无副本，数据丢失。
+                // 返回失败保住本地原文件，下轮重试。
+                if let Err(e) = tokio::fs::rename(&local_path, &resolution.copy_path).await {
+                    ActionResult {
+                        success: false,
+                        error_message: Some(format!("冲突备份改名失败，跳过下载以保本地修改：{e}")),
+                        deferred: false,
+                        cloud_file: None,
+                    }
+                } else {
+                    match self.download_api.download(&cloud_file.id, &local_path, None).await {
+                        Ok(()) => {
+                            if let Some(m) = &self.mount { let _ = m.mark_downloaded(&local_path).await; }
+                            if let Some(m) = &self.mount { let _ = m.clear_placeholder_xattr(&resolution.copy_path).await; }
+                            ActionResult { success: true, error_message: None, deferred: false, cloud_file: None }
+                        }
+                        Err(e) => {
+                            let _ = tokio::fs::rename(&resolution.copy_path, &local_path).await;
+                            ActionResult { success: false, error_message: Some(e.to_string()), deferred: false, cloud_file: None }
+                        }
+                    }
+                }
+            }
+            crate::sync::conflict::ConflictSide::Local => {
+                // 本地获胜：下载云端旧版 → copyPath（败方副本），上传本地覆盖云端。
+                if let Err(e) = self.download_api.download(&cloud_file.id, &resolution.copy_path, None).await {
+                    ActionResult {
+                        success: false,
+                        error_message: Some(format!("冲突副本（云端旧版）下载失败，跳过覆盖以保云端旧版：{e}")),
+                        deferred: false,
+                        cloud_file: None,
+                    }
+                } else {
+                    if let Some(m) = &self.mount { let _ = m.clear_placeholder_xattr(&resolution.copy_path).await; }
+                    let parent_id = cloud_file.parent_folder.as_ref().and_then(|v| v.first().map(|s| s.as_str()));
+                    match self.upload_api.upload_update(&cloud_file.id, &local_path, parent_id, None).await {
+                        Ok(_) => ActionResult { success: true, error_message: None, deferred: false, cloud_file: None },
+                        Err(e) => ActionResult { success: false, error_message: Some(e.to_string()), deferred: false, cloud_file: None },
+                    }
+                }
+            }
+        };
+        if result.success {
+            tracing::info!(rel, "冲突处理完成");
+        } else {
+            tracing::warn!(rel, error = result.error_message.as_deref().unwrap_or("?"), "冲突处理失败");
+        }
+        result
+    }
+
+    /// 云端已删除但本地有未上传修改：改名备份副本（保内容），原路径腾空即满足云端删除。
+    /// 副本清掉占位 xattr，下轮作为全新本地文件上传（救援用户改动）。
+    async fn do_backup_before_cloud_delete(&self, action: &SyncAction) -> ActionResult {
+        let path = match &action.local_path {
+            Some(p) => PathBuf::from(p),
+            None => return ActionResult { success: true, error_message: None, deferred: false, cloud_file: None },
+        };
+        if !path.exists() {
+            return ActionResult { success: true, error_message: None, deferred: false, cloud_file: None };
+        }
+        // 本地 mtime 作为副本时间戳（败方=本地的修改时间）
+        let local_mtime = tokio::fs::metadata(&path).await
+            .ok().and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| chrono::DateTime::from_timestamp(d.as_secs() as i64, d.subsec_nanos()).unwrap_or(chrono::Utc::now()))
+            .unwrap_or_else(chrono::Utc::now);
+        let copy_path = crate::sync::conflict::dedupe_copy_path(&path, "本地副本", &local_mtime);
+        match tokio::fs::rename(&path, &copy_path).await {
+            Ok(()) => {
+                if let Some(m) = &self.mount { let _ = m.clear_placeholder_xattr(&copy_path).await; }
+                tracing::info!(
+                    src = %path.display(),
+                    backup = %copy_path.display(),
+                    "云端删除但本地有未上传修改，已备份副本"
+                );
+                ActionResult { success: true, error_message: None, deferred: false, cloud_file: None }
+            }
+            Err(e) => ActionResult {
+                success: false,
+                error_message: Some(format!("备份副本失败：{e}")),
+                deferred: false,
+                cloud_file: None,
+            },
+        }
+    }
+}
