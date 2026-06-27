@@ -114,7 +114,7 @@ cargo run --bin upload-tester -- <file_path>
 测试覆盖范围：
 
 | 类型 | 数量 | 覆盖模块 |
-|---|---|---|---|
+|---|---|---|
 | Rust 单元测试 | 175 | auth / config / pkce / conflict / sync / stability / constants / drive |
 | Rust 集成测试 | 12 | Drive API（7）+ OAuth 流程（5） |
 | 上传 wiremock 测试 | 8 | Location 头捕获 / HTTP 308 / rangeList / 端到端 22MB |
