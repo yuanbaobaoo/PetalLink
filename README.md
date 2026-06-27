@@ -206,7 +206,6 @@ PetalLink/
 |---|---|
 | [docs/概要设计文档.md](./docs/概要设计文档.md) | 项目架构、功能需求、数据流、API 接口、设计决策 |
 | [docs/api调用整理.md](./docs/api调用整理.md) | 华为 Drive REST API 完整清单（22 个接口，含分片上传 308/Location 详解） |
-| [ai-context/design-rules.md](./ai-context/design-rules.md) | UI 设计规范（Mate 组件库 + 设计令牌体系） |
 | [design/prototype/](./design/prototype/) | UI 设计原型（login / main / settings） |
 
 ---
