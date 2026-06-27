@@ -23,6 +23,8 @@ use crate::error::{AppError, AppResult};
 pub struct DriveClient {
     http: Client,
     auth: Arc<AuthService>,
+    /// Drive API base URL（默认 `DRIVE_API_BASE`；测试可注入 wiremock 地址）。
+    base_url: String,
 }
 
 impl DriveClient {
@@ -33,7 +35,19 @@ impl DriveClient {
             .pool_max_idle_per_host(15)
             .build()
             .expect("构建 reqwest client 失败");
-        Self { http, auth }
+        Self { http, auth, base_url: constants::DRIVE_API_BASE.to_string() }
+    }
+
+    /// 测试用：注入自定义 base URL（如 wiremock 地址）。
+    #[cfg(test)]
+    pub fn with_base_url(auth: Arc<AuthService>, base_url: String) -> Self {
+        let http = Client::builder()
+            .connect_timeout(Duration::from_secs(15))
+            .timeout(Duration::from_secs(60))
+            .pool_max_idle_per_host(15)
+            .build()
+            .expect("构建 reqwest client 失败");
+        Self { http, auth, base_url }
     }
 
     /// 获取 auth service 引用。
@@ -85,13 +99,13 @@ impl DriveClient {
 
     /// GET 请求（相对 driveApiBase 路径）。返回原始响应（调用方处理状态码）。
     pub async fn get(&self, path: &str) -> AppResult<reqwest::Response> {
-        let url = format!("{}{}", constants::DRIVE_API_BASE, path);
+        let url = format!("{}{}", self.base_url, path);
         self.execute_with_retry(Method::GET, &url, |r| r).await
     }
 
     /// POST 请求。
     pub async fn post(&self, path: &str, body: Option<Vec<u8>>, content_type: &str) -> AppResult<reqwest::Response> {
-        let url = format!("{}{}", constants::DRIVE_API_BASE, path);
+        let url = format!("{}{}", self.base_url, path);
         let ct = content_type.to_string();
         self.execute_with_retry(Method::POST, &url, move |r| {
             let mut r = r.header("Content-Type", &ct);
@@ -105,7 +119,7 @@ impl DriveClient {
 
     /// PATCH 请求。
     pub async fn patch(&self, path: &str, body: Vec<u8>, content_type: &str) -> AppResult<reqwest::Response> {
-        let url = format!("{}{}", constants::DRIVE_API_BASE, path);
+        let url = format!("{}{}", self.base_url, path);
         let ct = content_type.to_string();
         self.execute_with_retry(Method::PATCH, &url, move |r| {
             r.header("Content-Type", &ct).body(body.clone())
@@ -115,7 +129,7 @@ impl DriveClient {
 
     /// DELETE 请求。
     pub async fn delete(&self, path: &str) -> AppResult<reqwest::Response> {
-        let url = format!("{}{}", constants::DRIVE_API_BASE, path);
+        let url = format!("{}{}", self.base_url, path);
         self.execute_with_retry(Method::DELETE, &url, |r| r).await
     }
 }

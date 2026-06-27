@@ -220,27 +220,38 @@
 | **调用场景** | 大文件（>20MB）上载第一步：创建 resume 上传会话 |
 | **请求头** | `X-Upload-Content-Length: {totalSize}` |
 | **请求体** | `{ "fileName": "name", "parentFolder": ["{parentId}"] }`（JSON） |
-| **响应字段** | `serverId`（或 `id`），`uploadId` |
-| **关键细节** | `serverId`/`uploadId` 需持久化到 TransferQueue 表，供进程重启后断点续传 |
-| **代码位置** | `src/backend/src/drive/upload_api.rs:init_resume_session()` |
-| **官方文档** | https://developer.huawei.com/consumer/en/doc/HMSCore-References/server-api-filescreate-0000001050153629 |
+| **响应 body** | `{"sliceSize": 10485760}` — 仅返回推荐分片大小（10MB），**不含** `serverId`/`uploadId` |
+| **★ 响应头 Location** | 会话 URL，格式 `https://driveapis.cloud.huawei.com.cn/upload/drive/v1/{token}/files?uploadType=resume&uploadId={id}`。**后续所有分片 PUT 必须直接使用此 URL**，不能用 `serverId`/`uploadId` 拼接 |
+| **代码位置** | `src/drive/upload_api.rs:init_resume_session()` |
 
 ### 18. 大文件分片上传 —— 上传分片
 
 | 项目 | 内容 |
 |------|------|
-| **API 端点** | `https://driveapis.cloud.huawei.com.cn/upload/drive/v1/files/{serverId}?uploadId={uploadId}` |
+| **API 端点** | **直接使用 init 响应 `Location` 头返回的 URL**（不拼接） |
 | **方法** | `PUT` |
 | **Content-Type** | `application/octet-stream` |
-| **调用场景** | 循环上传每个 5MB 分片 |
+| **调用场景** | 循环上传分片（分片大小 = init 返回的 `sliceSize`，默认 5MB） |
 | **请求头** | `Content-Range: bytes {offset}-{end}/{totalSize}`, `Content-Length: {chunkLen}` |
 | **请求体** | 二进制分片数据 |
-| **响应** | 中间分片返回 `{"size": {已上传字节}}`，最后一片返回完整文件元数据 `{"id", "fileName", "size", ...}` |
-| **关键细节** | ① 单片最大 64MB（代码用 5MB）② 每片 3 次重试（退避 1s/2s/3s）③ offset 防御性校验：仅当 `returned > offset && returned <= totalSize` 时采纳，否则 fallback `offset += chunkLen`（防止服务端回滚或越界） |
-| **代码位置** | `src/backend/src/drive/upload_api.rs:put_chunk()` |
-| **官方文档** | https://developer.huawei.com/consumer/en/doc/HMSCore-References/server-api-filescreate-0000001050153629 |
+| **★ 中间响应** | **HTTP 308 Resume Incomplete**，body `{"sliceSize":10485760, "rangeList":["0-10485759"], "processTime":8000}`。`rangeList` 最后一段的 `end+1` 即为下一个 offset。**308 是正常响应（非错误）**，不应重试 |
+| **最终响应** | HTTP 200/201，body 含完整文件元数据 `{"id", "fileName", "size", ...}`（可能直到最后一片才返回） |
+| **重试策略** | 每片 3 次重试（退避 1s/2s/3s），仅在 4xx/5xx 时重试，308 直接前进 |
+| **代码位置** | `src/drive/upload_api.rs:put_chunk()` |
 
-### 19. 上传覆盖已有文件（PATCH）
+### 19. 大文件分片上传 —— 查询最终状态
+
+| 项目 | 内容 |
+|------|------|
+| **API 端点** | **init 响应 `Location` 头返回的 URL** |
+| **方法** | `PUT` |
+| **调用场景** | 所有分片发送完毕但未拿到文件元数据时（末片也返回 308），查询上传最终状态 |
+| **请求头** | `Content-Range: bytes */{totalSize}`, `Content-Length: 0` |
+| **响应** | HTTP 200，body 含完整文件元数据 `{"category":"drive#file","fileName":"...","id":"...","mimeType":"..."}` |
+| **关键细节** | `bytes */total` 是 Google Drive 协议的标准上传状态查询方式；需在分片循环结束后调用 |
+| **代码位置** | `src/drive/upload_api.rs:upload_resume()` / `upload_resume_with_token()` |
+
+### 20. 上传覆盖已有文件（PATCH）
 
 | 项目 | 内容 |
 |------|------|
@@ -257,7 +268,7 @@
 
 ## 四、下载 API
 
-### 20. 下载文件
+### 21. 下载文件
 
 | 项目 | 内容 |
 |------|------|
@@ -314,6 +325,9 @@ Token 端点（`/oauth2/v3/token`）除外——不注入 auth，否则导致循
 | 9 | Root 不是字面 `"root"`，是真实 folder ID | BFS | `_detectRootFolderId` 动态发现 |
 | 10 | `serverId` ≠ `fileId`（resume 会话标识 ≠ 文件标识） | Upload Resume | 尾部兜底用 `createdFileId` 查 `/files/{fid}`，不能用 `sid` |
 | 11 | 刷新 token 可能不含新 `refresh_token` | Token Refresh | 沿用旧 `refresh_token` |
+| 12 | Resume init 仅返回 `{"sliceSize":...}`，不含 `serverId`/`uploadId` | Upload Resume | **从 HTTP `Location` 响应头提取会话 URL**，后续 PUT 直接用该 URL |
+| 13 | 分片 PUT 返回 **HTTP 308**（非 200），body 含 `rangeList` | Upload Resume | 308 是正常中间响应（表示分片已接收），解析 `rangeList` 末尾 +1 作为下一 offset，**不重试** |
+| 14 | 全部 308 后无文件元数据 | Upload Resume | 向会话 URL 发 `PUT bytes */{total}` 查询最终状态 → 200 + 文件 JSON |
 | 12 | OIDC userinfo 常 404 | UserInfo | 静默跳过，不报错 |
 
 ---

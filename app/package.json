@@ -1,6 +1,6 @@
 {
   "name": "petallink-frontend",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "type": "module",
   "description": "PetalLink 前端 —— Vue3 + TS，与 Tauri Rust 后端通信",

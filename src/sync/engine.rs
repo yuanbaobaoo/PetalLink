@@ -257,6 +257,8 @@ impl SyncEngine {
             let session = crate::drive::upload_api::ResumeSession {
                 server_id: task.server_id.clone().unwrap_or_default(),
                 upload_id: task.upload_id.clone().unwrap_or_default(),
+                session_url: String::new(),
+                chunk_size: 0,
             };
 
             tracing::info!(name = %task.name, offset = task.resume_offset, "断点续传中...");

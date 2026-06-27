@@ -37,7 +37,7 @@ pub const APP_NAME: &str = "PetalLink";
 pub const APP_FULL_TITLE: &str = "PetalLink - 华为云盘客户端开源版";
 
 /// 应用版本号
-pub const APP_VERSION: &str = "1.0.0";
+pub const APP_VERSION: &str = "1.0.1";
 
 /// **Bundle Identifier（io.github.yuanbaobaoo.PetalLink）**
 /// 原 Flutter 工程 legacy/ 保留 io.gitcode.cloudmate 不变。

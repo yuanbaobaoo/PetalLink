@@ -21,7 +21,7 @@
 |---|---|
 | **授权登录** | OAuth 2.0 + PKCE（S256）；`openid profile drive` 全盘访问；Token 自动刷新 + Keychain 安全存储 |
 | **网盘主界面** | 双栏布局（侧边栏递归目录树 + 文件列表）；面包屑导航；搜索；新建文件夹 |
-| **文件操作** | 上传（≤20MB 单次 + >20MB 5MB 分片断点续传）、下载（流式原子写）、删除、重命名、移动、缩略图 |
+| **文件操作** | 上传（≤20MB multipart + >20MB 分片续传：init → Location 头 → 308 分片 → 状态查询）、下载（流式原子写）、删除、重命名、移动、缩略图 |
 | **双向同步** | 本地 FSEvents 实时监听 + 3s debounce；云端 BFS 全量索引 + 磁盘缓存（17K 文件启动 ~200ms）；三段式稳定性检查（mtime/size/lsof） |
 | **后台运行** | 关闭窗口 / ⌘Q 不退出，仅隐藏 UI 层；系统菜单栏图标始终保留；同步引擎在后台持续运行 |
 | **开机自启动** | 设置页开关，LaunchAgent plist（带 `--hidden` 参数，开机只显示菜单栏图标） |
@@ -97,7 +97,7 @@ cargo tauri dev
 ## 测试
 
 ```bash
-# Rust 单元测试（164 个）
+# Rust 单元测试（175 个）
 cargo test --lib
 
 # Rust 集成测试（wiremock 模拟华为 API，12 个）
@@ -107,23 +107,17 @@ cargo test --test oauth_flow_test
 # 全部 Rust 测试
 cargo test
 
-# Rust 代码质量检查（零警告）
-cargo clippy -- -D warnings
-
-# 前端类型检查
-cd app && npm run type-check
-
-# 前端测试（Vitest）
-cd app && npm run test
+# 大文件上传独立测试
+cargo run --bin upload-tester -- <file_path>
 ```
 
 测试覆盖范围：
 
 | 类型 | 数量 | 覆盖模块 |
-|---|---|---|
-| Rust 单元测试 | 164 | auth / config / pkce / conflict / sync / stability / constants / drive |
+|---|---|---|---|
+| Rust 单元测试 | 175 | auth / config / pkce / conflict / sync / stability / constants / drive |
 | Rust 集成测试 | 12 | Drive API（7）+ OAuth 流程（5） |
-| 前端 TS 类型检查 | — | 严格模式，零错误 |
+| 上传 wiremock 测试 | 8 | Location 头捕获 / HTTP 308 / rangeList / 端到端 22MB |
 
 ---
 
@@ -180,6 +174,7 @@ PetalLink/
 ├── src/                         # Rust 后端（Tauri）
 │   ├── main.rs                  # 入口
 │   ├── lib.rs                   # 应用装配 + 命令注册 + setup
+│   ├── bin/upload_tester.rs     # 大文件上传独立测试工具
 │   ├── commands.rs              # 42 个 Tauri 命令
 │   ├── auth/                    # OAuth + PKCE + Keychain
 │   ├── drive/                   # 华为 Drive REST API 客户端
@@ -210,15 +205,11 @@ PetalLink/
 | 文档 | 说明 |
 |---|---|
 | [docs/概要设计文档.md](./docs/概要设计文档.md) | 项目架构、功能需求、数据流、API 接口、设计决策 |
-| [docs/api调用整理.md](./docs/api调用整理.md) | 华为 Drive REST API 完整清单（20 个接口） |
+| [docs/api调用整理.md](./docs/api调用整理.md) | 华为 Drive REST API 完整清单（22 个接口，含分片上传 308/Location 详解） |
 | [ai-context/design-rules.md](./ai-context/design-rules.md) | UI 设计规范（Mate 组件库 + 设计令牌体系） |
 | [design/prototype/](./design/prototype/) | UI 设计原型（login / main / settings） |
 
 ---
-
-## 已知限制
-
-- **大文件上传（>20MB）**：华为 Drive API resume 分片上传接口近期变更，初始化响应仅返回 `{"sliceSize":10485760}`，不包含 `serverId`/`uploadId`，分片 PUT 无法定位会话。小文件 multipart 接口在 >20MB 时返回 400。当前 >20MB 文件上传将失败，需手动压缩或分割。详见 `src/drive/upload_api.rs` 顶部 TODO。
 
 ## License
 
