@@ -216,6 +216,10 @@ PetalLink/
 
 ---
 
+## 已知限制
+
+- **大文件上传（>20MB）**：华为 Drive API resume 分片上传接口近期变更，初始化响应仅返回 `{"sliceSize":10485760}`，不包含 `serverId`/`uploadId`，分片 PUT 无法定位会话。小文件 multipart 接口在 >20MB 时返回 400。当前 >20MB 文件上传将失败，需手动压缩或分割。详见 `src/drive/upload_api.rs` 顶部 TODO。
+
 ## License
 
 [Apache License 2.0](LICENSE) © 2026 PetalLink

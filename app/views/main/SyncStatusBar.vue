@@ -8,7 +8,7 @@ const sync = useSyncStore();
 
 const statusText = computed(() => {
   if (sync.isIndexing) return "正在读取云端索引…";
-  if (sync.hasActiveTransfer) return "同步中";
+  if (sync.isRunning || sync.hasActiveTransfer) return "同步中";
   return "同步完成";
 });
 
@@ -19,7 +19,7 @@ const lastSyncFormatted = computed(() => {
   return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
 });
 
-const isIdle = computed(() => !sync.hasActiveTransfer && !sync.isIndexing);
+const isIdle = computed(() => !sync.hasActiveTransfer && !sync.isIndexing && !sync.isRunning);
 
 const showFailedDialog = ref(false);
 function handleShowFailed(): void { showFailedDialog.value = true; }

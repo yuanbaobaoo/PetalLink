@@ -28,9 +28,9 @@ use crate::mount::skip::should_skip;
 /// 被通知的变更路径集合（相对路径）
 pub type ChangeSet = Vec<String>;
 
-/// warmup 窗口长度（秒）。须 > 1 个 debounce 周期，确保历史回放的所有 flush
-/// 都落在此窗口内被丢弃。3s debounce → 取 8s 足够覆盖回放 + 1 次 flush 余量。
-const WARMUP_SECS: u64 = 8;
+/// warmup 窗口长度（秒）。仅需覆盖 FSEvents 历史回放（watcher 注册后立即涌入的
+/// BFS 目录/占位符创建事件），2s 足够。之前 8s 会误吞用户启动后立即做的删除操作。
+const WARMUP_SECS: u64 = 2;
 
 /// 本地文件监视器。
 pub struct LocalWatcher {
@@ -109,17 +109,13 @@ impl LocalWatcher {
                 if let Ok(event) = res {
                     // warmup 期间的事件视为 FSEvents 历史回放（含 BFS/首次 cycle 建的
                     // 目录/占位符），直接丢弃。此处是 fsevents 线程，用 try_lock 非阻塞。
-                    // 锁竞争（极少）时不丢，保守放行（warmup 主要是兜底，cycle 还有
-                    // is_indexing / startup 守卫）。
+                    // 锁竞争（极少）时不丢，保守放行。
                     if let Ok(g) = warming_up_clone.try_lock() {
                         if *g {
+                            tracing::debug!(kind = ?event.kind, paths = ?event.paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(), "warmup: 丢弃事件");
                             return;
                         }
                     }
-                    // notify 回调运行在 fsevents 线程（非 Tokio runtime），
-                    // 不能用 tokio::spawn / .await（会 panic "no reactor running"）。
-                    // 用 blocking_send 把事件送到 tokio 消费任务：可从任意线程调用，
-                    // 阻塞至通道有容量，不丢事件。
                     let _ = tx.blocking_send(event);
                 }
             },
@@ -154,6 +150,11 @@ impl LocalWatcher {
                         if paths.is_empty() {
                             continue;
                         }
+                        tracing::debug!(
+                            kind = ?event.kind,
+                            paths = ?paths,
+                            "watcher: 检测到本地文件变更"
+                        );
                         // 追加到 pending
                         let mut guard = pending.lock().await;
                         for p in paths {
@@ -233,20 +234,24 @@ fn extract_relative_paths(
             .unwrap_or_default();
         // 跳过应排除的文件
         if should_skip(&name, skip_patterns) {
+            tracing::debug!(path = %p.display(), "watcher: 跳过排除文件");
             continue;
         }
         if let Ok(rel) = p.strip_prefix(mount_dir) {
             paths.push(rel.to_string_lossy().to_string());
+        } else {
+            tracing::debug!(path = %p.display(), mount = %mount_dir.display(), "watcher: 路径不在挂载目录下，跳过");
         }
     }
-    // 仅关注文件变更（创建/修改/删除），忽略 access/其他
+    // 仅关注文件/目录变更事件（创建/修改/删除/其他）。
+    // EventKind::Other 也需包含：Finder 粘贴/复制等操作在 macOS 上可能产生 Other 事件。
     match event.kind {
-        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => paths,
+        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) | EventKind::Other => {
+            tracing::debug!(kind = ?event.kind, paths = ?paths, "watcher: 接受事件");
+            paths
+        }
         _ => {
-            // folder 创建/删除也应追踪
-            if matches!(event.kind, EventKind::Create(_) | EventKind::Remove(_)) {
-                return paths;
-            }
+            tracing::debug!(kind = ?event.kind, "watcher: 忽略非变更事件");
             Vec::new()
         }
     }

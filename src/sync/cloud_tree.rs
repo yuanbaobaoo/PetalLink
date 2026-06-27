@@ -31,8 +31,8 @@ use crate::drive::models::DriveFile;
 use crate::error::AppResult;
 use crate::mount::manager::MountManager;
 
-/// BFS 并发数
-const INDEXING_CONCURRENCY: usize = 8;
+    /// BFS 并发数
+    const INDEXING_CONCURRENCY: usize = 8;
 
 /// 缓存 JSON 结构
 #[derive(Debug, Clone, Serialize, Deserialize)]

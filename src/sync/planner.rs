@@ -80,10 +80,21 @@ impl SyncPlanner {
         // === 文件夹 ===
         if cloud.map(|c| c.is_folder()).unwrap_or(false) {
             if !local_exists {
-                // 文件夹双向删除禁用（安全：级联丢失风险）
-                // 对齐 dart：db 有记录且非启动恢复期 → skip
+                // 会话内本地删除目录 → 同步删除云端（用户主动行为，非系统保护场景）
                 if db_exists && !snap.is_startup_resume {
-                    return None; // skip — 用户手动删除云端文件夹的语义已禁用
+                    return Some(SyncAction {
+                        action_type: SyncActionType::DeleteFromCloud,
+                        relative_path: Some(rel_path.to_string()),
+                        file_id: cloud.unwrap().id.clone().into(),
+                        parent_file_id: None,
+                        local_path: None,
+                        cloud_file: None,
+                        reason: Some("本地目录已删除 → 同步删除云端".to_string()),
+                    });
+                }
+                // 启动恢复期 + DELETED tombstone → 跳过（不重建）
+                if db_exists && snap.is_startup_resume && db.unwrap().status == crate::data::repository::sync_status::DELETED {
+                    return None;
                 }
                 // 否则本地缺失 → 创建文件夹
                 return Some(SyncAction {
@@ -240,6 +251,19 @@ impl SyncPlanner {
                     reason: Some("会话内删除 → 双向删除云端".to_string()),
                 });
             }
+            // 启动恢复期 / 无 DB：检查是否是用户主动删除的 tombstone
+            if db_exists && snap.is_startup_resume && db.unwrap().status == crate::data::repository::sync_status::DELETED {
+                // 用户主动删除的 tombstone → 跳过（不重建占位符）
+                return Some(SyncAction {
+                    action_type: SyncActionType::Skip,
+                    relative_path: Some(rel_path.to_string()),
+                    file_id: None,
+                    parent_file_id: None,
+                    local_path: None,
+                    cloud_file: None,
+                    reason: Some("用户已删除（tombstone）→ 跳过".to_string()),
+                });
+            }
             // 启动恢复期 或 无 DB → 创建占位符
             let reason = if snap.is_startup_resume && db_exists {
                 "启动后恢复删除 → 重建占位".to_string()
@@ -257,16 +281,17 @@ impl SyncPlanner {
             });
         }
 
-        // === 本地无 + 云端无 + DB 有（双方都删了，清理 DB 记录） ===
+        // === 本地无 + 云端无 + DB 有（双方都删了，或云端树缓存滞后）===
+        // 优先尝试 DeleteFromCloud（用 DB 中的 fileId），404 即视为已删除；清理 DB。
         if !local_exists && !cloud_exists && db_exists {
             return Some(SyncAction {
-                action_type: SyncActionType::DeleteFromLocal,
+                action_type: SyncActionType::DeleteFromCloud,
                 relative_path: Some(rel_path.to_string()),
-                file_id: None,
+                file_id: Some(db.unwrap().file_id.clone()),
                 parent_file_id: None,
                 local_path: None,
                 cloud_file: None,
-                reason: Some("双方都已删除 → 清理 DB 记录".to_string()),
+                reason: Some("本地已删除（云端树缓存可能滞后）→ 尝试删云端".to_string()),
             });
         }
 

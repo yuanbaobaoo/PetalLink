@@ -206,6 +206,22 @@ pub fn ensure_engine_started(app: &AppHandle) -> AppResult<()> {
         crate::sync::stability::StabilityChecker::new(),
     )));
     executor.set_db(DB.clone());
+    // 传输进度实时推送通道：每次传输结算时触发前端刷新
+    let (transfer_update_tx, mut transfer_update_rx) = tokio::sync::broadcast::channel::<()>(64);
+    executor.set_transfer_update_tx(transfer_update_tx);
+    // 传输进度实时推送监听器
+    {
+        let app_for_transfer = app.clone();
+        tauri::async_runtime::spawn(async move {
+            loop {
+                match transfer_update_rx.recv().await {
+                    Ok(()) => emit_transfer_update(&app_for_transfer),
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                }
+            }
+        });
+    }
 
     // 构造 SyncEngine（set_mount/set_executor 必须在 Arc::new 之前）
     let mut engine = SyncEngine::new(
@@ -396,14 +412,72 @@ pub async fn drive_create_folder(name: String, parent_id: Option<String>) -> App
 }
 
 #[tauri::command]
-pub async fn drive_delete_file(id: String) -> AppResult<()> {
+pub async fn drive_delete_file(app: AppHandle, id: String) -> AppResult<()> {
     // 索引中（云端树 BFS 重建）：删除会与索引并发改云端，且 cloud_tree 不完整
     // 无法正确反映删除后的状态 → 拒绝，等索引完成。
     if sync_engine().ok().map(|e| e.current_state().is_indexing).unwrap_or(false) {
         return Err(AppError::generic("正在读取云端索引，请稍后再试".to_string()));
     }
+    // ★ 查询 DB 中是否有本地同步记录（用于同步删除本地文件）
+    let local_info: Option<(String, bool)> = {
+        let conn = DB.lock();
+        repository::find_by_file_id(&conn, &id)
+            .ok()
+            .flatten()
+            .map(|r| (r.local_path.clone(), r.is_folder))
+    };
     match FILES_API.delete(&id).await {
-        Ok(()) => { tracing::info!(file_id = %id, "删除云端文件成功"); Ok(()) }
+        Ok(()) => {
+            tracing::info!(file_id = %id, "删除云端文件成功");
+            if let Some((local_path, is_folder)) = local_info {
+                if let Ok(m) = mount() {
+                    let abs_path = m.mount_dir().join(&local_path);
+                    if abs_path.exists() && !is_folder {
+                        // ★ 文件：删除本地副本 + 标记 DB 为 DELETED（tombstone 防云端重建）
+                        if let Err(e) = m.delete_local(&abs_path).await {
+                            tracing::warn!(path = %local_path, error = %e, "删除本地文件失败（云端已删除）");
+                        } else {
+                            tracing::info!(path = %local_path, "已同步删除本地文件");
+                        }
+                        let conn = DB.lock();
+                        let _ = conn.execute(
+                            "UPDATE sync_items SET status=?1 WHERE file_id=?2",
+                            rusqlite::params![repository::sync_status::DELETED, id],
+                        );
+                        if let Some(eng) = try_sync_engine() {
+                            eng.cloud_tree_remove(&local_path);
+                            eng.path_to_id_remove(&local_path);
+                            eng.add_recently_deleted(&local_path);
+                        }
+                    } else if is_folder {
+                        // ★ 目录：删除本地目录 + 标记 DB 为 DELETED
+                        if let Err(e) = tokio::fs::remove_dir_all(&abs_path).await {
+                            tracing::warn!(path = %local_path, error = %e, "删除本地目录失败");
+                        } else {
+                            tracing::info!(path = %local_path, "已同步删除本地目录");
+                        }
+                        let conn = DB.lock();
+                        let _ = conn.execute(
+                            "UPDATE sync_items SET status=?1 WHERE local_path=?2 OR local_path LIKE ?3",
+                            rusqlite::params![repository::sync_status::DELETED, local_path, format!("{local_path}/%")],
+                        );
+                        if let Some(eng) = try_sync_engine() {
+                            let mut ct = eng.cloud_tree_lock();
+                            let mut p2i = eng.path_to_id_lock();
+                            ct.retain(|k, _| k != &local_path && !k.starts_with(&format!("{local_path}/")));
+                            p2i.retain(|k, _| k != &local_path && !k.starts_with(&format!("{local_path}/")));
+                            drop(ct);
+                            drop(p2i);
+                            eng.add_recently_deleted(&local_path);
+                            tracing::info!(path = %local_path, "目录已从云端+本地删除，缓存已清理");
+                        }
+                    }
+                }
+            }
+            // ★ 通知前端刷新目录树
+            emit_folder_content_changed(&app);
+            Ok(())
+        }
         Err(e) => { tracing::warn!(file_id = %id, error = %e, "删除云端文件失败"); Err(e) }
     }
 }
@@ -467,7 +541,7 @@ pub async fn drive_upload_file(
 ) -> AppResult<DriveFile> {
     let path = std::path::PathBuf::from(&local_path);
     let progress: crate::drive::upload_api::ProgressFn = Box::new(|_| {});
-    UPLOAD_API.upload(&path, parent_id.as_deref(), Some(&progress)).await
+    UPLOAD_API.upload(&path, parent_id.as_deref(), Some(&progress), None).await
 }
 
 // ========================================================================
@@ -494,6 +568,43 @@ pub async fn sync_manual_refresh(app: AppHandle) -> AppResult<()> {
         emit_sync_state(&app, &st);
     }
     result
+}
+
+/// 查询文件本地同步状态（供前端删除确认用）。
+/// 返回 "folder" | "synced" | "placeholder" | "not_synced"
+#[tauri::command]
+pub fn sync_check_file_local_status(file_id: String) -> AppResult<String> {
+    let conn = DB.lock();
+    let record = repository::find_by_file_id(&conn, &file_id)
+        .ok()
+        .flatten();
+    let Some(record) = record else {
+        return Ok("not_synced".to_string());
+    };
+    if record.is_folder {
+        return Ok("folder".to_string());
+    }
+    // 检查本地文件是否存在且有真实内容（非占位符）
+    if let Ok(m) = mount() {
+        let abs_path = m.mount_dir().join(&record.local_path);
+        if abs_path.exists() {
+            if let Ok(meta) = std::fs::metadata(&abs_path) {
+                if meta.len() > 0 {
+                    // 进一步确认不是占位符（占位符 0 字节已过滤，但检查 xattr 更严谨）
+                let is_placeholder = xattr::get(&abs_path, crate::mount::manager::XATTR_STATE)
+                    .ok()
+                    .flatten()
+                    .map(|b| String::from_utf8_lossy(&b) == crate::mount::manager::STATE_PLACEHOLDER)
+                        .unwrap_or(false);
+                    if !is_placeholder {
+                        return Ok("synced".to_string());
+                    }
+                }
+            }
+            return Ok("placeholder".to_string());
+        }
+    }
+    Ok("not_synced".to_string())
 }
 
 #[tauri::command]
@@ -755,7 +866,64 @@ async fn sync_folder_recursive_impl(
     );
 
     let mut done: i64 = 0;
-    // 5. 下载
+
+    // ★ 5. 为本地独有文件补建缺失的云端父目录链（解决目录结构被压平的问题）。
+    //    场景：用户往同步目录粘贴了 b/c/d/a.txt，云端只知道 A 文件夹，不知道 b、c、d。
+    //    若直接上传 a.txt，parent_subrel 查不到 b/c/d 的云端 ID → 回退到 A 的 ID →
+    //    所有文件都被平铺到 A 下。必须在文件上传前先建好目录链。
+    {
+        // 收集所有需要上传的文件的祖先目录路径
+        let mut missing_dirs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for (subrel, _) in &to_upload {
+            let parts: Vec<&str> = subrel.split('/').collect();
+            // parts 的最后一段是文件名，之前的是目录层级
+            for i in 1..parts.len() {
+                let ancestor = parts[..i].join("/");
+                if !cloud_folders.contains(&ancestor) && !folder_rel_to_id.contains_key(&ancestor) {
+                    missing_dirs.insert(ancestor);
+                }
+            }
+        }
+        // 按深度升序创建（父目录先建，子目录才能找到父 ID）
+        let mut sorted_dirs: Vec<String> = missing_dirs.into_iter().collect();
+        sorted_dirs.sort_by_key(|p| p.matches('/').count());
+        for dir_rel in &sorted_dirs {
+            let dir_name = dir_rel.rsplit('/').next().unwrap_or(dir_rel);
+            let parent_rel = parent_subrel_of(dir_rel);
+            let parent_id = if parent_rel.is_empty() {
+                Some(folder_id)
+            } else {
+                folder_rel_to_id.get(&parent_rel).map(|s| s.as_str())
+            };
+            match FILES_API.create_folder(dir_name, parent_id).await {
+                Ok(f) => {
+                    folder_rel_to_id.insert(dir_rel.clone(), f.id.clone());
+                    // 本地也建目录（确保后续 scan 能看到）
+                    let _ = tokio::fs::create_dir_all(dest_dir.join(dir_rel)).await;
+                    tracing::info!(dir = %dir_rel, cloud_id = %f.id, "sync_folder_recursive: 已补建云端父目录");
+                }
+                Err(e) => {
+                    // 409/400 时查同名已存在目录，存在则视为成功
+                    let msg = e.to_string();
+                    if msg.contains("400") || msg.contains("409") {
+                        if let Some(pid) = parent_id {
+                            if let Ok(list) = FILES_API.list_all(Some(pid)).await {
+                                if let Some(existing) = list.iter().find(|c| c.is_folder() && c.name == dir_name) {
+                                    folder_rel_to_id.insert(dir_rel.clone(), existing.id.clone());
+                                    let _ = tokio::fs::create_dir_all(dest_dir.join(dir_rel)).await;
+                                    tracing::info!(dir = %dir_rel, cloud_id = %existing.id, "sync_folder_recursive: 父目录已存在（409容错）");
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                    tracing::warn!(dir = %dir_rel, error = %e, "sync_folder_recursive: 补建云端父目录失败，其内文件将继续上传（可能平铺）");
+                }
+            }
+        }
+    }
+
+    // 6. 下载
     for (subrel, f) in &to_download {
         let dest = dest_dir.join(subrel);
         let full_rel = if rel_path.is_empty() {
@@ -787,16 +955,19 @@ async fn sync_folder_recursive_impl(
             &f.id, &dest, &f.name, f.size,
             f.edited_time.map(|t| t.timestamp_millis()),
         ).await;
-        // 结算传输记录
+        // 结算传输记录（成功时 transferred=total_size，失败时保持原值）
         {
             let conn = DB.lock();
-            let state = if download_result.is_ok() {
-                repository::transfer_state::COMPLETED
+            let (state, transferred_sql) = if download_result.is_ok() {
+                (repository::transfer_state::COMPLETED, "transferred = total_size")
             } else {
-                repository::transfer_state::FAILED
+                (repository::transfer_state::FAILED, "transferred = transferred")
             };
+            let sql = format!(
+                "UPDATE transfer_queue SET state=?1, error_message=?2, finished_at=?3, {transferred_sql} WHERE id=?4"
+            );
             let _ = conn.execute(
-                "UPDATE transfer_queue SET state=?1, error_message=?2, finished_at=?3, transferred=CASE WHEN ?1=1 THEN total_size ELSE transferred END WHERE id=?4",
+                &sql,
                 rusqlite::params![state,
                     download_result.as_ref().err().map(|e| e.to_string()).as_deref(),
                     chrono::Utc::now().timestamp_millis(),
@@ -809,7 +980,7 @@ async fn sync_folder_recursive_impl(
         done += 1;
         let _ = app.emit("folder_sync_progress", FolderSyncProgress { done: done as usize, total });
     }
-    // 6. 上传
+    // 7. 上传
     for (subrel, local_path) in &to_upload {
         let parent_subrel = parent_subrel_of(subrel);
         let parent_id = folder_rel_to_id.get(&parent_subrel).map(|s| s.as_str()).unwrap_or(folder_id);
@@ -839,17 +1010,20 @@ async fn sync_folder_recursive_impl(
                 resume_offset: 0,
             }).unwrap_or(0)
         };
-        let upload_result = UPLOAD_API.upload(local_path, Some(parent_id), None).await;
-        // 结算传输记录
+        let upload_result = UPLOAD_API.upload(local_path, Some(parent_id), None, None).await;
+        // 结算传输记录（成功时 transferred=total_size，失败时保持原值）
         {
             let conn = DB.lock();
-            let state = if upload_result.is_ok() {
-                repository::transfer_state::COMPLETED
+            let (state, transferred_sql) = if upload_result.is_ok() {
+                (repository::transfer_state::COMPLETED, "transferred = total_size")
             } else {
-                repository::transfer_state::FAILED
+                (repository::transfer_state::FAILED, "transferred = transferred")
             };
+            let sql = format!(
+                "UPDATE transfer_queue SET state=?1, error_message=?2, finished_at=?3, {transferred_sql} WHERE id=?4"
+            );
             let _ = conn.execute(
-                "UPDATE transfer_queue SET state=?1, error_message=?2, finished_at=?3, transferred=CASE WHEN ?1=1 THEN total_size ELSE transferred END WHERE id=?4",
+                &sql,
                 rusqlite::params![state,
                     upload_result.as_ref().err().map(|e| e.to_string()).as_deref(),
                     chrono::Utc::now().timestamp_millis(),
@@ -896,7 +1070,7 @@ async fn sync_folder_recursive_impl(
     Ok(done)
 }
 
-/// 递归扫描目录，收集"真实内容文件"（subrel → PathBuf）：跳过 .tmp、.hwcloud_ 前缀、0 字节占位。
+/// 递归扫描目录，收集"真实内容文件"（subrel → PathBuf）：跳过 .tmp、.hwcloud_ 前缀、占位符（需 xattr 验证）。
 fn scan_dir_for_real_files(
     base: &Path,
     current: &Path,
@@ -914,8 +1088,9 @@ fn scan_dir_for_real_files(
                 continue;
             }
             let meta = entry.metadata()?;
-            if meta.len() == 0 {
-                continue; // 占位文件
+            // 跳过占位符（xattr state=placeholder），0 字节用户文件（如空配置）不是占位符
+            if meta.len() == 0 && crate::mount::manager::is_placeholder_file(&path) {
+                continue;
             }
             let rel = path.strip_prefix(base).unwrap_or(&path).to_string_lossy().to_string();
             out.insert(rel, path);

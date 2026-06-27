@@ -5,9 +5,9 @@
 //! 防止 flush 卡死挂起关机。relaunch 场景跳过（缓存已清，flush 无意义）。
 //!
 //! # 索引完整性双保险
-//! 退出时额外把云端树缓存标记为不完整（`complete=false`）。这样即使退出发生在
-//! BFS 哨兵还没写下的窗口（startup→BFS 之间），下次 startup 也能检测到「未完成」
-//! 并强制全量重跑 BFS，绝不拿残缺缓存去触发文件同步。纯本地文件操作，非阻塞。
+//! 仅当同步引擎当前正在索引（is_indexing=true）时才把云端树缓存标记为不完整。
+//! 正常退出（索引已完成）时保留完整缓存，下次启动秒级加载，不再重复全量 BFS。
+//! 这确保：① BFS 中途强退 → 下次重跑（哨兵 + 本双保险）；② 正常退出 → 缓存复用。
 
 use std::time::Duration;
 use tauri::AppHandle;
@@ -22,9 +22,13 @@ pub fn flush_with_timeout(_handle: &AppHandle) {
     // 独立线程跑，主线程阻塞 join + 超时兜底（RunEvent::Exit 在主线程）
     let (tx, rx) = std::sync::mpsc::channel::<()>();
     std::thread::spawn(move || {
-        // 索引完整性双保险：若索引可能在进行中，先把缓存标记为不完整
-        // （下次 startup 必重跑 BFS，而非拿残缺缓存触发文件同步）
-        crate::sync::cloud_tree::mark_cache_incomplete_if_exists();
+        // 索引完整性双保险：仅当 BFS 正在跑时才把缓存标记为不完整。
+        // 正常退出（索引已完成）保留完整缓存，下次启动无需重跑 BFS。
+        if let Some(engine) = crate::commands::try_sync_engine() {
+            if engine.current_state().is_indexing {
+                crate::sync::cloud_tree::mark_cache_incomplete_if_exists();
+            }
+        }
         // take 全局引擎 → drop → LocalWatcher 释放 FSEvents 句柄
         // （DB 为 rusqlite autocommit，每次 execute 已落盘，无需额外 commit）
         crate::commands::drop_runtime();

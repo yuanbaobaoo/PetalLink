@@ -38,10 +38,13 @@ on("sync_state", (state: unknown) => {
   sync.applyState(state as SyncGlobalState);
 }).catch(() => {});
 
-// 监听目录内容变化 → 刷新文件列表
+// 监听目录内容变化 → 刷新文件列表 + 侧边栏
 on("folder_content_changed", () => {
   const browser = useFileBrowserStore();
   browser.refresh().catch(() => {});
+  // 计数器触发侧边栏刷新（布尔值无法重复触发 watch）
+  const sync = useSyncStore();
+  sync.sidebarRefresh++;
 }).catch(() => {});
 
 // 监听传输队列变化 → 重新加载

@@ -17,12 +17,15 @@ pub mod sync_status {
     pub const SYNCING: i32 = 3;
     pub const FAILED: i32 = 4;
     pub const CONFLICT: i32 = 5;
+    /// 用户已主动删除（tombstone：防云端重建）
+    pub const DELETED: i32 = 7;
 }
 
 // ===== 传输方向常量（对齐 dart TransferDirectionType） =====
 pub mod transfer_direction {
     pub const UPLOAD: i32 = 0;
     pub const DOWNLOAD: i32 = 1;
+    pub const DELETE: i32 = 2;
 }
 
 // ===== 传输状态常量（对齐 dart TransferStateType） =====

@@ -30,6 +30,9 @@ export interface FailedItem {
 /** 释放空间安全校验结果 */
 export type FreeUpResult = "safe" | "not_in_cloud" | "not_synced";
 
+/** 文件本地同步状态（供删除确认用） */
+export type FileLocalStatus = "folder" | "synced" | "placeholder" | "not_synced";
+
 /** 手动刷新（全量 BFS + 同步周期） */
 export function manualRefresh(): Promise<void> {
   return invoke<void>("sync_manual_refresh");
@@ -38,6 +41,11 @@ export function manualRefresh(): Promise<void> {
 /** 安全校验释放空间 */
 export function checkSafeFreeUp(relPath: string, fileId: string): Promise<string> {
   return invoke<string>("sync_check_safe_free_up", { relPath, fileId });
+}
+
+/** 查询文件本地同步状态（供删除确认） */
+export function checkFileLocalStatus(fileId: string): Promise<string> {
+  return invoke<string>("sync_check_file_local_status", { fileId });
 }
 
 /** 执行释放空间（删本地 + 建占位符 + 更新 DB） */

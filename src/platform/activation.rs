@@ -1,8 +1,8 @@
 //! 激活策略 —— activationPolicy 切换 + --hidden 检测 + 退出拦截标志。
 //!
 //! 对齐 `legacy/macos/Runner/AppDelegate.swift`。
-//! 注：activationPolicy 通过 osascript 切换（System Events）。
-//!     正式版可改 objc2-app-kit 直接调 NSApp.setActivationPolicy 更可靠，但需对应 feature 门控。
+//! activationPolicy 通过 objc2-app-kit 直接调 NSApp.setActivationPolicy，
+//! 不再依赖 osascript + System Events（需辅助功能权限，常静默失败）。
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -22,7 +22,16 @@ pub fn is_launched_manually() -> bool {
 
 #[cfg(target_os = "macos")]
 pub fn set_regular() {
-    run_osascript("regular");
+    // 使用 objc2 msg_send! 直接调 NSApp.setActivationPolicy，不再依赖 osascript
+    // （osascript 需辅助功能权限，常静默失败导致 Dock 图标不消失）。
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use objc2::rc::Retained;
+    let cls = objc2::class!(NSApplication);
+    let app: Retained<AnyObject> = unsafe { msg_send![cls, sharedApplication] };
+    // NSApplicationActivationPolicyRegular = 0
+    let _: () = unsafe { msg_send![&app, setActivationPolicy: 0i32] };
+    let _: () = unsafe { msg_send![&app, activateIgnoringOtherApps: true] };
     tracing::info!("已设 .regular policy");
 }
 
@@ -31,7 +40,13 @@ pub fn set_regular() {}
 
 #[cfg(target_os = "macos")]
 pub fn set_accessory() {
-    run_osascript("accessory");
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use objc2::rc::Retained;
+    let cls = objc2::class!(NSApplication);
+    let app: Retained<AnyObject> = unsafe { msg_send![cls, sharedApplication] };
+    // NSApplicationActivationPolicyAccessory = 1
+    let _: () = unsafe { msg_send![&app, setActivationPolicy: 1i32] };
     tracing::info!("已设 .accessory policy");
 }
 
@@ -42,23 +57,6 @@ pub fn init_activation_policy() {
     if is_launched_manually() { set_regular(); }
     else { set_accessory(); }
 }
-
-#[cfg(target_os = "macos")]
-fn run_osascript(policy: &str) {
-    let exe_name = std::env::current_exe()
-        .ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-        .unwrap_or_else(|| "PetalLink".to_string());
-    let script = format!(
-        r#"tell application "System Events" to set activation policy of process "{}" to {}"#,
-        exe_name, policy
-    );
-    let _ = std::process::Command::new("osascript")
-        .args(["-e", &script])
-        .output();
-}
-
-#[cfg(not(target_os = "macos"))]
-fn run_osascript(_policy: &str) {}
 
 #[cfg(test)]
 mod tests {

@@ -24,6 +24,8 @@ export const useSyncStore = defineStore("sync", () => {
   const isIndexing = ref(false);
   const lastSyncTime = ref<number | null>(null);
   const contentChanged = ref(false);
+  // 侧边栏刷新计数器（folder_content_changed 事件每触一次 +1，布尔值无法重复触发 watch）
+  const sidebarRefresh = ref(0);
   // 是否已配置同步目录
   const mountConfigured = ref(false);
   // 同步目录路径
@@ -53,7 +55,12 @@ export const useSyncStore = defineStore("sync", () => {
     isRunning.value = s.is_running ?? false;
     lastSyncTime.value = s.last_sync_time ?? null;
     isIndexing.value = s.is_indexing ?? false;
-    contentChanged.value = s.content_changed ?? false;
+    if (s.content_changed) {
+      contentChanged.value = true;
+      sidebarRefresh.value++;
+    } else {
+      contentChanged.value = false;
+    }
   }
 
   /** 初始化：加载配置判断阶段；配置就绪时主动拉一次当前同步状态，
@@ -105,5 +112,6 @@ export const useSyncStore = defineStore("sync", () => {
     isRunning, isIndexing, lastSyncTime, contentChanged,
     mountConfigured, setupPhase, mountDir, progress, hasActiveTransfer,
     init, applyState, triggerManualRefresh, retryFailed,
+    sidebarRefresh,
   };
 });

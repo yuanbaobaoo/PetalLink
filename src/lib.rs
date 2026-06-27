@@ -131,6 +131,7 @@ pub fn run() {
             // Sync
             commands::sync_manual_refresh,
             commands::sync_check_safe_free_up,
+            commands::sync_check_file_local_status,
             commands::sync_free_up_space,
             commands::sync_download_on_demand,
             commands::sync_folder_recursive,
@@ -172,6 +173,14 @@ pub fn run() {
             platform::activation::init_activation_policy();
             // 创建系统托盘
             platform::tray::setup(app.handle());
+
+            // ★ 开机自启（--hidden）：隐藏主窗口，仅展示菜单栏图标
+            if !platform::activation::is_launched_manually() {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.hide();
+                    tracing::info!("--hidden 模式：主窗口已隐藏，仅保留菜单栏图标");
+                }
+            }
 
             // 加载配置（仅一次，token 检测 + 引擎初始化共用）
             let mut config = core::config_store::ConfigStore::load().unwrap_or_default();

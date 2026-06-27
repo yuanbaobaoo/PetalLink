@@ -253,7 +253,7 @@ impl MountManager {
         get_xattr(path, XATTR_STATE)
     }
 
-    /// 删除本地文件（安全：0 字节文件若非占位符则拒绝删除）。
+    /// 删除本地文件（安全：0 字节文件若非占位符则拒绝删除，返回 ok 但跳过）。
     /// 对齐 dart `deleteLocal`。
     pub async fn delete_local(&self, local_path: &Path) -> AppResult<()> {
         if !local_path.exists() {
@@ -262,13 +262,12 @@ impl MountManager {
         let meta = tokio::fs::metadata(local_path)
             .await
             .map_err(|e| AppError::generic(format!("读取文件元数据失败：{e}")))?;
-        // 0 字节文件：必须是占位符才删
+        // 0 字节文件：必须是占位符才删；否则保留（用户文件如 .gitkeep）——返回 Ok 表示「已处理」
         if meta.len() == 0 {
             let is_pl = self.get_xattr_state(local_path).ok().map(|s| s == STATE_PLACEHOLDER).unwrap_or(false);
             if !is_pl {
-                return Err(AppError::generic(
-                    "拒绝删除非占位 0 字节文件（可能是用户创建的，如 .gitkeep）",
-                ));
+                tracing::debug!(path = %local_path.display(), "保留非占位 0 字节文件");
+                return Ok(());
             }
         }
         tokio::fs::remove_file(local_path)
@@ -419,7 +418,8 @@ fn scan_recursive(
             scan_recursive(base, &abs, skip_patterns, out)?;
         } else if file_type.is_file() {
             let size = meta.len();
-            let is_placeholder = size == 0;
+            // 占位符判断用 xattr state，而非 0 字节（用户空文件如 .gitkeep 不是占位符）
+            let is_placeholder = size == 0 && is_placeholder_file(&abs);
             out.push(LocalFileEntry {
                 absolute_path: abs,
                 relative_path: rel,
@@ -438,6 +438,20 @@ fn legacy_placeholder_path(path: &Path) -> PathBuf {
     let mut s = path.as_os_str().to_owned();
     s.push(LEGACY_PLACEHOLDER_SUFFIX);
     PathBuf::from(s)
+}
+
+/// 通过 xattr 判断是否为占位符（state=placeholder）。
+pub fn is_placeholder_file(path: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        xattr::get(path, XATTR_STATE)
+            .ok()
+            .flatten()
+            .map(|b| String::from_utf8_lossy(&b) == STATE_PLACEHOLDER)
+            .unwrap_or(false)
+    }
+    #[cfg(not(target_os = "macos"))]
+    false
 }
 
 #[cfg(test)]

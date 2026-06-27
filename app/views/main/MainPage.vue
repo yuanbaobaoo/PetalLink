@@ -1,8 +1,7 @@
 <!-- 主页面，左栏 220px 侧边栏 + 右侧文件区 -->
 <script setup lang="ts">
 import { onMounted, computed, ref } from "vue";
-import { MateButton, MateIcon, MateSearchField, MateTextField, MateDialog, MateCircularProgress, MateEmpty, MateInfoBanner } from "@/components/mate";
-import { showToast } from "@/components/mate";
+import { MateButton, MateIcon, MateSearchField, MateCircularProgress, MateEmpty, MateInfoBanner } from "@/components/mate";
 import Sidebar from "./Sidebar.vue";
 import Breadcrumb from "./Breadcrumb.vue";
 import FileListView from "./FileListView.vue";
@@ -16,9 +15,6 @@ import * as platformApi from "@/api/platform";
 import * as configApi from "@/api/config";
 import { useAsyncAction } from "@/composables/useAsyncAction";
 
-// 新建文件夹默认名称
-const DEFAULT_FOLDER_NAME = "未命名文件夹";
-
 const browser = useFileBrowserStore();
 const sync = useSyncStore();
 // 搜索关键词
@@ -28,14 +24,10 @@ const searchResults = ref<driveApi.DriveFile[]>([]);
 const isSearching = ref(false);
 // 同步目录是否已配置
 const mountConfigured = computed(() => sync.mountConfigured);
-// 新建文件夹对话框
-const showNewFolderDialog = ref(false);
-const newFolderName = ref("");
 // 传输队列 Popover
 const showTransferPopover = ref(false);
 // 异步按钮 loading + 防重复点击
 const { loading: refreshLoading, run: runRefresh } = useAsyncAction();
-const { loading: createLoading, run: runCreate } = useAsyncAction();
 const { loading: finderLoading, run: runFinder } = useAsyncAction();
 
 // 定义事件
@@ -59,16 +51,6 @@ async function handleSearch(): Promise<void> {
   finally { isSearching.value = false; }
 }
 function handleClearSearch(): void { searchKeyword.value = ""; searchResults.value = []; }
-
-function handleNewFolder(): void { newFolderName.value = ""; showNewFolderDialog.value = true; }
-async function handleConfirmCreateFolder(): Promise<void> {
-  const name = newFolderName.value.trim() || DEFAULT_FOLDER_NAME;
-  showNewFolderDialog.value = false;
-  await runCreate(async () => {
-    try { await driveApi.createFolder(name, browser.current.id || undefined); await browser.refresh(); showToast(`已创建「${name}」`); }
-    catch (e) { showToast("创建失败：" + ((e as { message?: string }).message ?? String(e)), { variant: "error" }); }
-  });
-}
 
 async function handleOpenInFinder(): Promise<void> {
   await runFinder(async () => {
@@ -98,7 +80,6 @@ async function handleRefreshAll(): Promise<void> {
           <div class="app-bar__sep" />
           <MateButton v-if="mountConfigured" variant="icon-text" icon="refresh" tooltip="拉取云端索引，创建本地目录与占位文件" :loading="refreshLoading || sync.isIndexing" :disabled="refreshLoading || sync.isIndexing" @click="handleRefreshAll">同步索引</MateButton>
           <MateButton variant="icon-text" icon="transfer" tooltip="传输队列" @click="showTransferPopover = !showTransferPopover">传输队列</MateButton>
-          <MateButton variant="icon-text" icon="folder-open" tooltip="新建文件夹" @click="handleNewFolder">新建目录</MateButton>
           <MateButton v-if="mountConfigured" variant="icon-text" icon="folder-open" tooltip="在 Finder 中打开同步目录" :loading="finderLoading" :disabled="finderLoading" @click="handleOpenInFinder">Finder</MateButton>
         </div>
         <MateButton variant="icon" icon="settings" tooltip="设置" @click="handleOpenSettings" />
@@ -135,14 +116,6 @@ async function handleRefreshAll(): Promise<void> {
       <TransferPopover v-if="showTransferPopover" class="transfer-popover-anchor" @close="showTransferPopover = false" />
     </div>
 
-    <!-- 新建文件夹对话框 -->
-    <MateDialog :open="showNewFolderDialog" title="新建文件夹" @update:open="(v) => (showNewFolderDialog = v)">
-      <MateTextField v-model="newFolderName" autofocus placeholder="文件夹名称" width="100%" @enter="handleConfirmCreateFolder" />
-      <template #footer>
-        <MateButton variant="text" @click="showNewFolderDialog = false">取消</MateButton>
-        <MateButton variant="primary" icon="folder-open" :loading="createLoading" :disabled="createLoading" @click="handleConfirmCreateFolder">创建</MateButton>
-      </template>
-    </MateDialog>
   </div>
 </template>
 

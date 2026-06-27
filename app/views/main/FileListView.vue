@@ -404,9 +404,23 @@ function handleShowProps(f: DriveFile): void {
 async function handleDelete(f: DriveFile): Promise<void> {
   closeMenu();
   if (!assertSyncAllowed()) return;
+  // ★ 检查本地同步状态，决定删除确认文案
+  let localStatus = "not_synced";
+  if (sync.mountConfigured) {
+    try { localStatus = await syncApi.checkFileLocalStatus(f.id); } catch { /* ignore */ }
+  }
+  const isFolder = driveApi.isFolder(f);
+  let content: string;
+  if (isFolder) {
+    content = `确定删除文件夹「${f.name}」吗？删除后进入回收站。`;
+  } else if (localStatus === "synced") {
+    content = `确定删除「${f.name}」吗？\n\n⚠️ 此文件已双端对齐到本地，删除后云端和本地文件将同时被移除。删除后进入回收站，可从回收站恢复。`;
+  } else {
+    content = `确定删除「${f.name}」吗？删除后进入回收站。`;
+  }
   const ok = await confirmDialog({
     title: "删除文件", titleIcon: "trash", danger: true, confirmText: "删除",
-    content: `确定删除「${f.name}」吗？删除后进入回收站。`,
+    content,
   });
   if (!ok) return;
   try { await driveApi.deleteFile(f.id); await browser.refresh(); showToast("已删除"); }
@@ -443,9 +457,23 @@ async function handleBulkDelete(): Promise<void> {
   await runBulkDelete(async () => {
     if (checked.value.size === 0) return;
     if (!assertSyncAllowed()) return;
+    // ★ 检查选中项中是否有本地已同步的文件
+    let syncedCount = 0;
+    if (sync.mountConfigured) {
+      for (const id of checked.value) {
+        try {
+          const status = await syncApi.checkFileLocalStatus(id);
+          if (status === "synced") syncedCount++;
+        } catch { /* ignore */ }
+      }
+    }
+    let content = `确定删除选中的 ${checked.value.size} 项吗？删除后进入回收站。`;
+    if (syncedCount > 0) {
+      content = `确定删除选中的 ${checked.value.size} 项吗？\n\n⚠️ 其中 ${syncedCount} 项已双端对齐到本地，删除后云端和本地文件将同时被移除。删除后进入回收站，可从回收站恢复。`;
+    }
     const ok = await confirmDialog({
       title: "批量删除", titleIcon: "trash", danger: true, confirmText: "删除",
-      content: `确定删除选中的 ${checked.value.size} 项吗？删除后进入回收站。`,
+      content,
     });
     if (!ok) return;
     let n = 0;

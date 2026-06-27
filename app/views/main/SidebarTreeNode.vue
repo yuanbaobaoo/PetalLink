@@ -1,8 +1,9 @@
 <!-- 侧边栏目录树节点，递归自引用 -->
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { ref, onMounted, watch } from "vue";
 import { MateIcon, MateCircularProgress } from "@/components/mate";
 import { useFileBrowserStore } from "@/stores/fileBrowser";
+import { useSyncStore } from "@/stores/sync";
 import * as driveApi from "@/api/drive";
 import type { DriveFile } from "@/api/drive";
 import type { FolderLocation } from "@/stores/fileBrowser";
@@ -20,6 +21,7 @@ const props = withDefaults(defineProps<{
 }>(), { depth: 0, activeId: "" });
 
 const browser = useFileBrowserStore();
+const sync = useSyncStore();
 
 const expanded = ref(props.depth === 0);
 const loading = ref(false);
@@ -32,15 +34,20 @@ onMounted(() => {
   if (props.depth === 0) loadChildren();
 });
 
+/** 监听侧边栏刷新计数器：每次递增时重新加载已展开节点的子目录 */
+watch(() => sync.sidebarRefresh, () => {
+  if (expanded.value) {
+    loadChildren();
+  }
+});
+
 async function loadChildren(): Promise<void> {
   loading.value = true;
   try {
     const all = await driveApi.listFiles(props.location.id || undefined);
     const folders = all.filter(driveApi.isFolder);
-    console.log("[SidebarTreeNode] loadChildren:", props.location.name, "->", all.length, "items,", folders.length, "folders");
     children.value = folders;
   } catch (e) {
-    console.error("[SidebarTreeNode] loadChildren error:", e);
     children.value = [];
   } finally {
     loading.value = false;

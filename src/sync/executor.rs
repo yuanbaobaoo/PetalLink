@@ -30,6 +30,8 @@ pub struct SyncExecutor {
     conflict: Option<Arc<std::sync::Mutex<ConflictResolver>>>,
     stability: Option<Arc<tokio::sync::Mutex<StabilityChecker>>>,
     db: Option<Arc<parking_lot::Mutex<rusqlite::Connection>>>,
+    /// 传输更新通知发送端（每次传输结算时触发前端刷新）
+    transfer_update_tx: Option<tokio::sync::broadcast::Sender<()>>,
 }
 
 impl SyncExecutor {
@@ -49,6 +51,7 @@ impl SyncExecutor {
             conflict: None,
             stability: None,
             db: None,
+            transfer_update_tx: None,
         }
     }
 
@@ -70,6 +73,16 @@ impl SyncExecutor {
     /// 设置 DB 连接。
     pub fn set_db(&mut self, db: Arc<parking_lot::Mutex<rusqlite::Connection>>) {
         self.db = Some(db);
+    }
+
+    /// 设置传输更新通知通道（每次结算时触发前端刷新）。
+    pub fn set_transfer_update_tx(&mut self, tx: tokio::sync::broadcast::Sender<()>) {
+        self.transfer_update_tx = Some(tx);
+    }
+
+    /// 获取 UploadApi 引用（供引擎断点续传等外部调用）。
+    pub fn upload_api(&self) -> &Arc<UploadApi> {
+        &self.upload_api
     }
 
     /// 并发执行全部动作。
@@ -112,6 +125,7 @@ impl SyncExecutor {
             conflict: self.conflict.clone(),
             stability: self.stability.clone(),
             db: self.db.clone(),
+            transfer_update_tx: self.transfer_update_tx.clone(),
         }
     }
 
@@ -119,6 +133,8 @@ impl SyncExecutor {
     async fn execute_one(&self, action: &SyncAction) -> ActionResult {
         // 入队传输（仅 upload/download/conflict 可见于传输面板）
         self.enqueue_transfer(action);
+
+        tracing::debug!(rel = action.relative_path.as_deref(), action_type = ?action.action_type, "executor: 开始执行");
 
         let result = match action.action_type {
             SyncActionType::Upload => self.do_upload(action).await,
@@ -142,16 +158,15 @@ impl SyncExecutor {
         result
     }
 
-    /// 入队传输记录（仅 upload/download/conflict 可见）。
+    /// 入队传输记录（仅 upload/download/conflict 可见）。返回 transfer id。
     /// 公开供 sync_folder_recursive_impl 等直接调用下载/上传 API 的路径手动入队。
-    pub fn enqueue_transfer(&self, action: &SyncAction) {
+    pub fn enqueue_transfer(&self, action: &SyncAction) -> Option<i64> {
         let direction = match action.action_type {
             SyncActionType::Upload | SyncActionType::CreateConflictCopy => transfer_direction::UPLOAD,
             SyncActionType::Download => transfer_direction::DOWNLOAD,
-            _ => return, // 建目录/占位符/删除不入队
+            _ => return None, // 建目录/占位符/删除不入队
         };
         if let Some(db) = &self.db {
-            // 文件大小：上传取本地文件 size，下载取云端记录 size（本地可能是占位符 0 字节）
             let total_size = match direction {
                 d if d == transfer_direction::UPLOAD => {
                     action.local_path.as_ref()
@@ -165,50 +180,88 @@ impl SyncExecutor {
                         .unwrap_or(0)
                 }
             };
-            { let conn = db.lock();
-                let task = TransferTask {
-                    id: 0,
-                    direction,
-                    file_id: action.file_id.clone(),
-                    local_path: action.local_path.clone(),
-                    name: action.relative_path.as_deref().unwrap_or("unknown").to_string(),
-                    total_size,
-                    transferred: 0,
-                    state: transfer_state::RUNNING,
-                    error_message: None,
-                    created_at: chrono::Utc::now().timestamp_millis(),
-                    finished_at: None,
-                    server_id: None,
-                    upload_id: None,
-                    resume_offset: 0,
-                };
-                let _ = repository::insert_transfer(&conn, &task);
+            let conn = db.lock();
+            let task = TransferTask {
+                id: 0,
+                direction,
+                file_id: action.file_id.clone(),
+                local_path: action.local_path.clone(),
+                name: action.relative_path.as_deref().unwrap_or("unknown").to_string(),
+                total_size,
+                transferred: 0,
+                state: transfer_state::RUNNING,
+                error_message: None,
+                created_at: chrono::Utc::now().timestamp_millis(),
+                finished_at: None,
+                server_id: None,
+                upload_id: None,
+                resume_offset: 0,
+            };
+            let id = repository::insert_transfer(&conn, &task).ok();
+            // 立即通知前端显示新传输项
+            if let Some(ref tx) = self.transfer_update_tx {
+                let _ = tx.send(());
             }
+            id
+        } else {
+            None
         }
     }
 
     /// 传输结果清理：更新状态 + 完成后 transferred=total_size。
     fn settle_transfer(&self, action: &SyncAction, result: &ActionResult) {
         if let Some(db) = &self.db {
-            { let conn = db.lock();
-                let state = if result.deferred {
-                    transfer_state::PENDING
-                } else if result.success {
-                    transfer_state::COMPLETED
-                } else {
-                    transfer_state::FAILED
-                };
-                // 完成时 transferred=total_size，进度条 100%；失败时保持原值
-                let transferred_sql = if result.success { "transferred = total_size" } else { "transferred = transferred" };
-                // 简单实现：更新最近的同路径 transfer 记录
-                let sql = format!(
-                    "UPDATE transfer_queue SET state = ?1, error_message = ?2, finished_at = ?3, {transferred_sql} WHERE local_path = ?4 AND state = ?5"
-                );
+            let conn = db.lock();
+            let state = if result.deferred {
+                transfer_state::PENDING
+            } else if result.success {
+                transfer_state::COMPLETED
+            } else {
+                transfer_state::FAILED
+            };
+            let is_delete = action.action_type == SyncActionType::DeleteFromCloud
+                || action.action_type == SyncActionType::DeleteFromLocal;
+            if is_delete {
+                let name = action.relative_path.as_deref().unwrap_or("?");
                 let _ = conn.execute(
-                    &sql,
-                    rusqlite::params![state, result.error_message.as_deref(), chrono::Utc::now().timestamp_millis(), action.local_path.as_deref(), transfer_state::RUNNING],
+                    "UPDATE transfer_queue SET state=?1, error_message=?2, finished_at=?3, transferred=total_size WHERE name=?4 AND direction=?5 AND state=?6",
+                    rusqlite::params![state, result.error_message.as_deref(), chrono::Utc::now().timestamp_millis(), name, transfer_direction::DELETE, transfer_state::RUNNING],
+                );
+            } else if let Some(ref lp) = action.local_path {
+                let size = if result.success { std::fs::metadata(lp).ok().map(|m| m.len() as i64).unwrap_or(0) } else { 0 };
+                let _ = conn.execute(
+                    "UPDATE transfer_queue SET state=?1, error_message=?2, finished_at=?3, transferred=?4 WHERE local_path=?5 AND state=?6",
+                    rusqlite::params![state, result.error_message.as_deref(), chrono::Utc::now().timestamp_millis(), size, lp.as_str(), transfer_state::RUNNING],
                 );
             }
+            // 触发前端传输面板刷新
+            if let Some(ref tx) = self.transfer_update_tx {
+                let _ = tx.send(());
+            }
+        }
+    }
+
+    /// 入队删除传输记录（供 do_delete_from_cloud / do_delete_from_local 用）。
+    fn enqueue_delete_transfer(&self, action: &SyncAction) {
+        if let Some(db) = &self.db {
+            let conn = db.lock();
+            let task = TransferTask {
+                id: 0,
+                direction: transfer_direction::DELETE,
+                file_id: action.file_id.clone(),
+                local_path: action.local_path.clone(),
+                name: action.relative_path.as_deref().unwrap_or("unknown").to_string(),
+                total_size: 0,
+                transferred: 0,
+                state: transfer_state::RUNNING,
+                error_message: None,
+                created_at: chrono::Utc::now().timestamp_millis(),
+                finished_at: None,
+                server_id: None,
+                upload_id: None,
+                resume_offset: 0,
+            };
+            let _ = repository::insert_transfer(&conn, &task);
         }
     }
 
@@ -259,21 +312,33 @@ impl SyncExecutor {
         let size = path.metadata().map(|m| m.len()).unwrap_or(0);
         let is_large = size > 20 * 1024 * 1024;
         let rel = action.relative_path.as_deref().unwrap_or("?");
+        // 断点续传回调：持久化 serverId/uploadId/offset
+        let db_resume = self.db.clone();
+        let task_name = action.relative_path.clone().unwrap_or_default();
+        let on_resume: crate::drive::upload_api::ResumeProgressFn = Box::new(move |sid, uid, offset| {
+            if let Some(ref db) = db_resume {
+                let conn = db.lock();
+                let _ = conn.execute(
+                    "UPDATE transfer_queue SET server_id=?1, upload_id=?2, resume_offset=?3, transferred=?3 WHERE name=?4 AND state=?5",
+                    rusqlite::params![sid, uid, offset as i64, task_name, transfer_state::RUNNING],
+                );
+            }
+        });
+        let resume_cb: Option<&crate::drive::upload_api::ResumeProgressFn> = if is_large { Some(&on_resume) } else { None };
 
-        // 路由：已有 fileId → update；大文件 → 保留 resume（TODO: TransferQueue 持久化）；否则 POST 新上传
+        // 路由：已有 fileId → update；否则 POST 新上传
         let result = if has_cloud_id && !is_large {
             match self.upload_api.upload_update(action.file_id.as_ref().unwrap(), &path, parent_id, None).await {
                 Ok(f) => ActionResult { success: true, error_message: None, deferred: false, cloud_file: Some(f) },
                 Err(_e) => {
-                    // PATCH 失败已回退 delete+POST，重试 POST
-                    match self.upload_api.upload(&path, parent_id, None).await {
+                    match self.upload_api.upload(&path, parent_id, None, resume_cb).await {
                         Ok(f) => ActionResult { success: true, error_message: None, deferred: false, cloud_file: Some(f) },
                         Err(e) => ActionResult { success: false, error_message: Some(e.to_string()), deferred: false, cloud_file: None },
                     }
                 }
             }
         } else {
-            match self.upload_api.upload(&path, parent_id, None).await {
+            match self.upload_api.upload(&path, parent_id, None, resume_cb).await {
                 Ok(f) => ActionResult { success: true, error_message: None, deferred: false, cloud_file: Some(f) },
                 Err(e) => ActionResult { success: false, error_message: Some(e.to_string()), deferred: false, cloud_file: None },
             }
@@ -422,9 +487,20 @@ impl SyncExecutor {
             None => return ActionResult { success: false, error_message: Some("缺少 fileId".into()), deferred: false, cloud_file: None },
         };
         let rel = action.relative_path.as_deref().unwrap_or("?");
+        // 入队传输记录
+        self.enqueue_delete_transfer(action);
         let result = match self.files_api.delete(&file_id).await {
             Ok(()) => ActionResult { success: true, error_message: None, deferred: false, cloud_file: None },
-            Err(e) => ActionResult { success: false, error_message: Some(e.to_string()), deferred: false, cloud_file: None },
+            Err(e) => {
+                let msg = e.to_string();
+                // 404 表示云端已不存在（可能已被前序操作删除），视为成功
+                if msg.contains("404") {
+                    tracing::info!(rel, file_id, "云端文件已不存在（404），视为删除成功");
+                    ActionResult { success: true, error_message: None, deferred: false, cloud_file: None }
+                } else {
+                    ActionResult { success: false, error_message: Some(msg), deferred: false, cloud_file: None }
+                }
+            }
         };
         if result.success {
             tracing::info!(rel, "删除云端文件成功");

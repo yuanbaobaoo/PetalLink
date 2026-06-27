@@ -23,12 +23,19 @@ const SMALL_LARGE_THRESHOLD: u64 = 20 * 1024 * 1024;
 const CHUNK_SIZE: u64 = 5 * 1024 * 1024;
 const CHUNK_RETRIES: u32 = 3;
 
+// TODO: 大文件（>20MB）分片上传在华为 API 变更后失效。
+// 华为 resume 会话初始化返回 {"sliceSize":10485760} 不含 serverId/id/uploadId，
+// 导致分片 PUT 无法定位会话。小文件 multipart/related 在 >20MB 时返回 400 PARAM_INVALID。
+// 临时措施：>20MB 文件上传将失败，用户需手动分割或压缩。待华为 API 文档更新后修复。
+
 pub struct UploadApi {
     client: Arc<DriveClient>,
     http: reqwest::Client,
 }
 
 pub type ProgressFn = Box<dyn Fn(f64) + Send + Sync>;
+/// 断点续传进度回调：server_id, upload_id, 已上传字节偏移
+pub type ResumeProgressFn = Box<dyn Fn(&str, &str, u64) + Send + Sync>;
 
 #[derive(Debug, Clone)]
 pub struct ResumeSession {
@@ -55,16 +62,17 @@ impl UploadApi {
     }
 
     /// 路由：≤ 20MB → 小文件上传，否则分片续传。
-    /// 对齐 dart `upload` dispatcher。
+    /// `on_resume_progress`：分片续传进度回调（serverId, uploadId, offset），供断点续传持久化。
     pub async fn upload(
         &self, file_path: &std::path::Path, parent_id: Option<&str>,
         on_progress: Option<&ProgressFn>,
+        on_resume_progress: Option<&ResumeProgressFn>,
     ) -> AppResult<DriveFile> {
         let size = file_path.metadata().map_err(|e| AppError::generic(format!("读取文件元数据失败：{e}")))?.len();
         if size <= SMALL_LARGE_THRESHOLD {
             self.upload_small(file_path, parent_id, on_progress).await
         } else {
-            self.upload_resume(file_path, parent_id, None, on_progress).await
+            self.upload_resume(file_path, parent_id, None, on_progress, on_resume_progress).await
         }
     }
 
@@ -101,7 +109,7 @@ impl UploadApi {
             }
         }
         // 回退 POST 新建
-        self.upload(file_path, parent_id, on_progress).await
+        self.upload(file_path, parent_id, on_progress, None).await
     }
 
     /// 小文件 multipart/related 上传。
@@ -131,6 +139,7 @@ impl UploadApi {
     pub async fn upload_resume(
         &self, file_path: &std::path::Path, parent_id: Option<&str>,
         resume: Option<&ResumeSession>, on_progress: Option<&ProgressFn>,
+        on_resume_progress: Option<&ResumeProgressFn>,
     ) -> AppResult<DriveFile> {
         let total_size = file_path.metadata().map_err(|e| AppError::generic(format!("读取文件元数据失败：{e}")))?.len();
         self.ensure_capacity_for(file_path).await?;
@@ -140,7 +149,24 @@ impl UploadApi {
         // 1. 初始化 resume 会话
         let session = match resume {
             Some(s) => s.clone(),
-            None => self.init_resume_session(&file_name, parent_id, total_size, &token).await?,
+            None => match self.init_resume_session(&file_name, parent_id, total_size, &token).await {
+                Ok(s) => {
+                    // 通知调用方持久化会话信息
+                    if let Some(cb) = on_resume_progress {
+                        cb(&s.server_id, &s.upload_id, 0);
+                    }
+                    s
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    if msg.contains("sliceSize") || msg.contains("serverId") {
+                        // resume 会话初始化失败（华为 API 变更）→ 回退小文件上传
+                        tracing::warn!(size = total_size, "resume 会话初始化失败，回退小文件上传");
+                        return self.upload_small(file_path, parent_id, on_progress).await;
+                    }
+                    return Err(e);
+                }
+            },
         };
 
         // 2. 分片循环
@@ -191,6 +217,10 @@ impl UploadApi {
             if let Some(cb) = on_progress {
                 cb(offset as f64 / total_size as f64);
             }
+            // 通知调用方持久化进度（断点续传）
+            if let Some(cb) = on_resume_progress {
+                cb(&session.server_id, &session.upload_id, offset);
+            }
         }
 
         // 3. 尾部兜底：用抓到的 fileId 查询元数据。sid 是 resume 会话标识，未必等于 fileId，
@@ -218,10 +248,32 @@ impl UploadApi {
             .header(CONTENT_TYPE, "application/json").bearer_auth(token).body(metadata)
             .send().await.map_err(|e| AppError::generic(format!("初始化上传会话失败：{e}")))?;
         if !resp.status().is_success() { return Err(crate::drive::client::handle_error_response(resp).await); }
+        let status_code = resp.status().as_u16();
         let init: Value = resp.json().await.map_err(|e| AppError::generic(format!("解析上传会话响应失败：{e}")))?;
-        let server_id = init.get("serverId").or_else(|| init.get("id")).and_then(Value::as_str)
-            .ok_or_else(|| AppError::generic("上传会话响应缺少 serverId"))?.to_string();
+        tracing::info!(status = status_code, response = %init, file = %file_name, size = total_size, "resume 会话初始化响应");
+
+        let server_id = init.get("serverId")
+            .or_else(|| init.get("id"))
+            .or_else(|| init.get("fileId"))
+            .and_then(Value::as_str)
+            .map(String::from);
+
         let upload_id = init.get("uploadId").and_then(Value::as_str).unwrap_or("").to_string();
+
+        let server_id = match server_id {
+            Some(sid) => sid,
+            None if init.get("sliceSize").is_some() => {
+                // 华为 API 变更：仅返回 sliceSize，用空字符串作 serverId（PUT 到根路径）
+                tracing::warn!(file = %file_name, "resume 会话仅返回 sliceSize，使用空 serverId");
+                String::new()
+            }
+            None => {
+                let keys: Vec<&str> = init.as_object().map(|o| o.keys().map(|s| s.as_str()).collect()).unwrap_or_default();
+                tracing::error!(response = %init, keys = ?keys, "上传会话响应缺少 serverId");
+                return Err(AppError::generic(format!("上传会话响应缺少 serverId（可用字段: {keys:?}）")));
+            }
+        };
+
         Ok(ResumeSession { server_id, upload_id })
     }
 
@@ -232,7 +284,12 @@ impl UploadApi {
         &self, session: &ResumeSession, token: &str, chunk: &[u8],
         offset: u64, chunk_len: u64, total_size: u64,
     ) -> AppResult<ChunkResult> {
-        let url = format!("{}/files/{}?uploadId={}", constants::UPLOAD_API_BASE, session.server_id, session.upload_id);
+        // 华为 API 变更：serverId 可能为空，此时 PUT 到根路径
+        let url = if session.server_id.is_empty() {
+            format!("{}/files?uploadId={}", constants::UPLOAD_API_BASE, session.upload_id)
+        } else {
+            format!("{}/files/{}?uploadId={}", constants::UPLOAD_API_BASE, session.server_id, session.upload_id)
+        };
         let end = offset + chunk_len - 1;
         let content_range = format!("bytes {offset}-{end}/{total_size}");
         let resp = self.http.put(&url).header(CONTENT_RANGE, &content_range)
