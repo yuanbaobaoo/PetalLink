@@ -35,8 +35,7 @@ jobs:
 
       - name: Build Tauri app
         run: |
-          cd app
-          npx tauri build --target aarch64-apple-darwin
+          app/node_modules/.bin/tauri build --target aarch64-apple-darwin
         env:
           HWCLOUD_CLIENT_ID: ${{ secrets.HWCLOUD_CLIENT_ID || '' }}
           HWCLOUD_CLIENT_SECRET: ${{ secrets.HWCLOUD_CLIENT_SECRET || '' }}
