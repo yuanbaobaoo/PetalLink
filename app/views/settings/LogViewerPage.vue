@@ -1,6 +1,6 @@
 <!-- 日志查看页，级别筛选 + 清空 + 导出 -->
 <script setup lang="ts">
-import { ref, computed, onMounted } from "vue";
+import { ref, computed, onMounted, onUnmounted } from "vue";
 import { save } from "@tauri-apps/plugin-dialog";
 import { MateButton, MateTag, MateEmpty, MateCircularProgress } from "@/components/mate";
 import { showToast } from "@/components/mate";
@@ -13,33 +13,48 @@ type Level = "ALL" | "INFO" | "WARN" | "ERROR";
 const filter = ref<Level>("ALL");
 // 原始日志记录
 const records = ref<LogRecord[]>([]);
-// 加载状态
-const loading = ref(false);
+// 加载状态（仅首次加载显示 spinner）
+const loading = ref(true);
+// 定时轮询句柄
+let pollTimer: ReturnType<typeof setInterval> | null = null;
 // 导出操作 loading + 防重复
 const { loading: exportLoading, run: runExport } = useAsyncAction();
 // 清空操作 loading + 防重复
 const { loading: clearLoading, run: runClear } = useAsyncAction();
 
-// 按级别筛选后的日志
+// 按级别精确筛选后的日志
 const filtered = computed(() => {
   if (filter.value === "ALL") return records.value;
-  const threshold = filter.value === "ERROR" ? ["ERROR"] : filter.value === "WARN" ? ["WARN", "ERROR"] : ["INFO", "WARN", "ERROR"];
-  return records.value.filter((r) => threshold.includes(r.level.toUpperCase()));
+  return records.value.filter((r) => r.level.toUpperCase() === filter.value);
 });
 
 const emit = defineEmits<{ (e: "back"): void }>();
 
 /**
- * 挂载后加载日志列表
+ * 挂载后首次加载日志列表，并启动 2 秒轮询保持实时更新
  */
-onMounted(load);
+onMounted(() => {
+  load();
+  pollTimer = setInterval(load, 2000);
+});
+
+/**
+ * 卸载时清除轮询定时器
+ */
+onUnmounted(() => {
+  if (pollTimer !== null) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+});
 
 async function load(): Promise<void> {
-  loading.value = true;
   try {
-    records.value = await logsApi.listLogs();
+    const data = await logsApi.listLogs();
+    records.value = data;
   } catch {
-    records.value = [];
+    // 轮询失败静默保留旧数据，不覆盖为空
+    if (records.value.length === 0) records.value = [];
   } finally {
     loading.value = false;
   }
@@ -145,6 +160,7 @@ async function handleExportLogs(): Promise<void> {
 .log-appbar__title { font-size: var(--font-title-sm); font-weight: var(--fw-semibold); }
 .log-toolbar { display: flex; align-items: center; gap: var(--space-sm); padding: var(--space-md) var(--space-lg); flex-shrink: 0; }
 .log-filters { display: flex; gap: var(--space-sm); }
+.log-filters :deep(.mate-tag) { cursor: pointer; user-select: none; }
 .log-body { flex: 1; overflow-y: auto; padding: var(--space-md); }
 .log-loading { display: flex; justify-content: center; padding: var(--space-xl); }
 .log-item { display: flex; gap: var(--space-md); padding: var(--space-sm) var(--space-md); border-bottom: 0.5px solid var(--border); }
