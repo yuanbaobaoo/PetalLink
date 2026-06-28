@@ -53,6 +53,7 @@
   },
   "plugins": {
     "updater": {
+      "pubkey": "",
       "endpoints": [
         "https://github.com/yuanbaobaoo/PetalLink/releases/latest/download/PetalLink_update.json"
       ],

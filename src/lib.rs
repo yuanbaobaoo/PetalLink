@@ -93,11 +93,16 @@ pub fn run() {
         // 单实例守护：第二个进程启动时直接退出（已运行实例聚焦到前台）。
         // 防止双进程各自创建 FSEvents watcher 监听同一挂载目录 → 互相触发 sync cycle
         // → 基于 stale cloud_tree 误判「本地新建」疯狂上传。必须最先注册。
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            // 第二实例尝试启动 → 聚焦已运行实例的主窗口
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            // 第二实例尝试启动。
+            // 若新实例带 --hidden（LaunchAgent 重复触发），不显示窗口；
+            // 否则是用户手动打开 → 聚焦已运行实例的主窗口。
+            let is_hidden = argv.iter().any(|a| a == "--hidden");
             if let Some(w) = app.get_webview_window("main") {
-                let _ = w.show();
-                let _ = w.set_focus();
+                if !is_hidden {
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                }
             }
         }))
         .plugin(tauri_plugin_shell::init())
@@ -175,8 +180,17 @@ pub fn run() {
         .setup(|app| {
             // 最早阶段：根据 --hidden 参数设置 activationPolicy
             platform::activation::init_activation_policy();
+            // ★ 必须最早安装：拦截 Dock/Cmd+Q 退出，防止 macOS 直接杀进程
+            platform::activation::install_terminate_interceptor();
             // 创建系统托盘
             platform::tray::setup(app.handle());
+
+            // ★ 启动期清理：若 LaunchAgent 已启用，移除 Login Items 中的重复项。
+            //   避免「LaunchAgent 带 --hidden」+「Login Items 不带 --hidden」双重启动，
+            //   Login Items 触发 single-instance 回调顶出窗口。
+            if platform::launch_at_login::is_enabled() {
+                platform::launch_at_login::remove_from_login_items();
+            }
 
             // 手动启动 → 显示主窗口并聚焦；开机自启（--hidden）→ 窗口保持隐藏（visible:false 默认），仅菜单栏图标后台运行
             if platform::activation::is_launched_manually() {

@@ -74,6 +74,36 @@ fn resolve_paths() -> (Option<PathBuf>, PathBuf) {
     }
 }
 
+/// 从 macOS Login Items（系统设置 > 通用 > 登录项）移除 PetalLink。
+///
+/// 我们通过 LaunchAgent 管理开机自启，如用户此前手动添加到 Login Items 或
+/// macOS 还原会话时自动添加，会造成「LaunchAgent 带 --hidden」+「Login Items 不带 --hidden」
+/// 双重启动：Login Items 触发 single-instance 回调 → 无条件 show() 顶出窗口。
+///
+/// 此函数通过 osascript 调用 System Events 删除 Login Items 中的 PetalLink。
+/// 如果 System Events 未授权或 PetalLink 不在 Login Items 中，静默忽略。
+pub fn remove_from_login_items() {
+    let script = format!(
+        "tell application \"System Events\" to delete every login item whose name is \"{name}\"",
+        name = crate::constants::APP_NAME,
+    );
+    match Command::new("osascript").arg("-e").arg(&script).output() {
+        Ok(output) if output.status.success() => {
+            tracing::info!("已从 Login Items 移除 {}", crate::constants::APP_NAME);
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            // 常见无权限错误：System Events 未授权辅助功能
+            if !stderr.trim().is_empty() {
+                tracing::debug!(stderr = %stderr.trim(), "移除 Login Items 失败（可能未授权或不存在）");
+            }
+        }
+        Err(e) => {
+            tracing::debug!(error = %e, "osascript 调用失败，Login Items 清理跳过");
+        }
+    }
+}
+
 /// 启用/禁用开机自启：写/删 LaunchAgent plist + launchctl bootstrap/bootout。
 pub fn set_enabled(enabled: bool) -> std::io::Result<()> {
     let dir = launch_agents_dir().ok_or_else(|| {
@@ -94,8 +124,13 @@ pub fn set_enabled(enabled: bool) -> std::io::Result<()> {
             std::fs::remove_file(&path)?;
             tracing::info!(label, "开机自启已禁用，LaunchAgent plist 已移除");
         }
+        // 同时清理 Login Items（如果存在）
+        remove_from_login_items();
         return Ok(());
     }
+
+    // 启用：先清除 Login Items 中的重复项（防止双重启动 - 见 remove_from_login_items 文档）
+    remove_from_login_items();
 
     // 启用：先卸载旧实例（避免重复 bootstrap 报错），再写 plist，最后 bootstrap
     let label = BUNDLE_IDENTIFIER;
