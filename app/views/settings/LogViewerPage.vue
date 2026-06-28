@@ -1,4 +1,4 @@
-<!-- 日志查看页，级别筛选 + 清空 + 导出 -->
+<!-- 日志查看页，级别筛选 + 清空 + 导出。inline 模式下不显示 AppBar，直接嵌入父容器。 -->
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from "vue";
 import { save } from "@tauri-apps/plugin-dialog";
@@ -7,6 +7,13 @@ import { showToast } from "@/components/mate";
 import { useAsyncAction } from "@/composables/useAsyncAction";
 import * as logsApi from "@/api/logs";
 import type { LogRecord } from "@/api/logs";
+
+const props = withDefaults(defineProps<{
+  /** 内嵌模式：不渲染顶部 AppBar，由父组件提供导航 */
+  inline?: boolean;
+}>(), {
+  inline: false,
+});
 
 type Level = "ALL" | "INFO" | "WARN" | "ERROR";
 // 日志级别筛选
@@ -116,9 +123,9 @@ async function handleExportLogs(): Promise<void> {
 </script>
 
 <template>
-  <div class="log-page">
-    <!-- AppBar -->
-    <div class="log-appbar">
+  <div :class="['log-page', { 'log-page--inline': inline }]">
+    <!-- AppBar（独立页面模式） -->
+    <div v-if="!inline" class="log-appbar">
       <MateButton variant="icon" icon="arrow" tooltip="返回" class="log-appbar__back" @click="emit('back')" />
       <span class="log-appbar__title">同步日志</span>
     </div>
@@ -155,6 +162,7 @@ async function handleExportLogs(): Promise<void> {
 
 <style scoped>
 .log-page { display: flex; flex-direction: column; width: 100%; height: 100%; background: var(--bg-page); }
+.log-page--inline { height: 100%; background: transparent; }
 .log-appbar { height: var(--appbar-height); display: flex; align-items: center; gap: var(--space-sm); padding: 0 var(--space-lg); border-bottom: 0.5px solid var(--border); background: var(--bg-container); flex-shrink: 0; }
 .log-appbar__back { transform: rotate(180deg); }
 .log-appbar__title { font-size: var(--font-title-sm); font-weight: var(--fw-semibold); }

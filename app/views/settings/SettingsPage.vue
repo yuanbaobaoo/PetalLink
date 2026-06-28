@@ -1,12 +1,13 @@
 <!-- 设置页，左导航 200px + 右设置区 -->
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from "vue";
+import { ref, computed, onMounted } from "vue";
 import { MateNavItem, MateSectionHeader, MateStepper, MateNumberField, MateTextField, MateSwitch, MateButton, MateInfoBanner, MateLogoWithText, MateIcon } from "@/components/mate";
 import { confirmDialog, showToast } from "@/components/mate";
 import * as configApi from "@/api/config";
 import * as platformApi from "@/api/platform";
 import * as driveApi from "@/api/drive";
 import * as authApi from "@/api/auth";
+import LogViewerPage from "@/views/settings/LogViewerPage.vue";
 import { useAuthStore } from "@/stores/auth";
 import { useAsyncAction } from "@/composables/useAsyncAction";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -78,16 +79,6 @@ onMounted(async () => {
   try { about.value = await driveApi.getAbout(); } catch {}
   try { appVersion.value = await platformApi.getAppVersion(); } catch {}
   saved.value = true;
-});
-
-// 点击「日志查看」tab 直接跳转日志页，无需中间按钮
-let prevTab: TabKey = "syncDir";
-watch(activeTab, (tab, old) => {
-  if (tab === "logs") {
-    prevTab = old ?? "syncDir";
-    emit("open-logs");
-    activeTab.value = prevTab;
-  }
 });
 
 async function handleSave(): Promise<void> {
@@ -307,8 +298,8 @@ function fmtSize(bytes: number): string {
           </div>
         </section>
 
-        <!-- 日志查看 — 点击 tab 直接跳转日志查看页，此处无内容 -->
-        <section v-if="activeTab === 'logs'" class="settings-section" />
+        <!-- 日志查看 — 内嵌在设置页中，保留左侧导航 -->
+        <LogViewerPage v-if="activeTab === 'logs'" inline />
 
         <!-- 关于 -->
         <section v-if="activeTab === 'about'" class="settings-section">
