@@ -35,6 +35,11 @@ jobs:
 
       - name: Build Tauri app
         run: |
+          # 构建期需要 .env（含 OAuth 凭据），CI 用占位符即可——运行时优先读取环境变量
+          cat > .env << 'EOF'
+          HWCLOUD_CLIENT_ID=PLACEHOLDER
+          HWCLOUD_CLIENT_SECRET=PLACEHOLDER
+          EOF
           app/node_modules/.bin/tauri build --target aarch64-apple-darwin
         env:
           HWCLOUD_CLIENT_ID: ${{ secrets.HWCLOUD_CLIENT_ID || '' }}
