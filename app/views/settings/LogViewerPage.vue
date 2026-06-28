@@ -171,9 +171,9 @@ async function handleExportLogs(): Promise<void> {
 .log-toolbar { display: flex; align-items: center; gap: var(--space-sm); padding: var(--space-md) var(--space-lg); flex-shrink: 0; }
 .log-filters { display: flex; gap: var(--space-sm); }
 .log-filters :deep(.mate-tag) { cursor: pointer; user-select: none; }
-.log-body { flex: 1; overflow-y: auto; padding: var(--space-md); }
+.log-body { flex: 1; overflow-y: auto; padding: 0 var(--space-md); }
 .log-loading { display: flex; justify-content: center; padding: var(--space-xl); }
-.log-item { display: flex; gap: var(--space-md); padding: var(--space-sm) var(--space-md); border-bottom: 0.5px solid var(--border); }
+.log-item { display: flex; gap: var(--space-md); padding: var(--space-sm) 0; border-bottom: 0.5px solid var(--border); }
 .log-item__content { flex: 1; min-width: 0; }
 .log-item__msg { font-size: var(--font-body); color: var(--text-primary); }
 .log-item__meta { font-size: var(--font-caption); color: var(--text-secondary); font-family: var(--font-mono); margin-top: 2px; }
