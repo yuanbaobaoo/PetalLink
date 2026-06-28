@@ -56,7 +56,6 @@
       "endpoints": [
         "https://github.com/yuanbaobaoo/PetalLink/releases/latest/download/update.json"
       ],
-      "pubkey": "",
       "windows": {
         "installMode": "passive"
       }
