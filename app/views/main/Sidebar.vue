@@ -5,6 +5,7 @@ import { MateAppLogo } from "@/components/mate";
 import SidebarTreeNode from "./SidebarTreeNode.vue";
 import { useFileBrowserStore, ROOT } from "@/stores/fileBrowser";
 import { useAuthStore } from "@/stores/auth";
+import { useUpdaterStore } from "@/stores/updater";
 import * as authApi from "@/api/auth";
 import * as driveApi from "@/api/drive";
 import type { DriveAbout } from "@/api/drive";
@@ -16,6 +17,7 @@ const FALLBACK_INITIAL = "华";
 
 const browser = useFileBrowserStore();
 const auth = useAuthStore();
+const updater = useUpdaterStore();
 
 const userLabel = computed(() => authApi.primaryLabel(auth.userInfo) ?? LOADING_LABEL);
 const userInitial = computed(() => authApi.initial(auth.userInfo) ?? FALLBACK_INITIAL);
@@ -62,6 +64,20 @@ function fmtSize(bytes: number): string {
         <div v-if="quotaText" class="account-info__secondary">{{ quotaText }}</div>
       </div>
     </div>
+
+    <!-- 更新提示条：有可用更新时显示 -->
+    <div
+      v-if="updater.updateAvailable && !updater.dismissed"
+      class="sidebar__update-banner"
+      @click="updater.showDialog()"
+    >
+      <svg class="update-banner__icon" viewBox="0 0 16 16" width="14" height="14" fill="none">
+        <path d="M8 1.5a5.5 5.5 0 0 0-1 10.91v1.34a.5.5 0 0 0 .8.4L9.75 12.5h.17A5.5 5.5 0 0 0 8 1.5Z" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+        <circle cx="8" cy="8" r="1.25" fill="currentColor"/>
+      </svg>
+      <span class="update-banner__text">新版本 {{ updater.newVersion }}</span>
+      <button class="update-banner__close" @click.stop="updater.dismissUpdate" title="关闭">×</button>
+    </div>
   </aside>
 </template>
 
@@ -74,4 +90,45 @@ function fmtSize(bytes: number): string {
 .account-info { flex: 1; min-width: 0; }
 .account-info__primary { font-size: var(--font-body-sm); font-weight: var(--fw-medium); color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .account-info__secondary { font-size: var(--font-caption); color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 更新提示条 */
+.sidebar__update-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-lg);
+  margin: 0 var(--space-sm) var(--space-sm);
+  background: linear-gradient(135deg, var(--color-brand), var(--color-brand-hover));
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: opacity 0.15s;
+  flex-shrink: 0;
+}
+.sidebar__update-banner:hover { opacity: 0.9; }
+.update-banner__icon { color: #fff; flex-shrink: 0; }
+.update-banner__text {
+  flex: 1;
+  font-size: var(--font-caption);
+  font-weight: var(--fw-medium);
+  color: #fff;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.update-banner__close {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.25);
+  color: #fff;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.update-banner__close:hover { background: rgba(255,255,255,0.4); }
 </style>

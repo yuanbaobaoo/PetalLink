@@ -9,11 +9,13 @@ import * as driveApi from "@/api/drive";
 import * as authApi from "@/api/auth";
 import LogViewerPage from "@/views/settings/LogViewerPage.vue";
 import { useAuthStore } from "@/stores/auth";
+import { useUpdaterStore } from "@/stores/updater";
 import { useAsyncAction } from "@/composables/useAsyncAction";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readDir } from "@tauri-apps/plugin-fs";
 
 const auth = useAuthStore();
+const updater = useUpdaterStore();
 
 type TabKey = "syncDir" | "transfer" | "advanced" | "account" | "logs" | "about";
 // 当前激活的 Tab
@@ -150,6 +152,16 @@ async function handleLogout(): Promise<void> {
     await auth.logout();
     emit("back");
   });
+}
+
+async function handleCheckUpdate(): Promise<void> {
+  const hasUpdate = await updater.manualCheck();
+  if (!hasUpdate && updater.phase === "upToDate") {
+    showToast("已是最新版本", { variant: "success" });
+  } else if (updater.phase === "error") {
+    showToast(updater.errorMessage || "检查更新失败", { variant: "error" });
+  }
+  // hasUpdate=true → updater.phase="available" → UpdateDialog 会自动弹出
 }
 
 async function handleSelectDir(): Promise<void> {
@@ -308,6 +320,19 @@ function fmtSize(bytes: number): string {
             <MateLogoWithText :height="30" />
             <div class="about-version">版本 {{ appVersion || "..." }}</div>
             <div class="about-tagline">基于 Tauri 的 macOS 客户端</div>
+            <div class="about-update">
+              <MateButton
+                variant="secondary"
+                icon="refresh"
+                :loading="updater.isChecking"
+                :disabled="updater.isChecking"
+                @click="handleCheckUpdate"
+              >
+                {{ updater.isChecking ? '检查中…' : '检查更新' }}
+              </MateButton>
+              <span v-if="updater.phase === 'upToDate'" class="about-update-hint">已是最新版本</span>
+              <span v-else-if="updater.phase === 'error'" class="about-update-hint about-update-hint--error">检查失败</span>
+            </div>
             <div class="about-links">
               <a href="https://github.com/yuanbaobaoo/PetalLink" target="_blank" class="about-link" rel="noopener noreferrer">
                 <MateIcon name="github" :size="16" />
@@ -366,6 +391,9 @@ function fmtSize(bytes: number): string {
 .account-name { font-size: var(--font-title-sm); font-weight: var(--fw-semibold); color: var(--text-primary); }
 .about-version { font-size: var(--font-caption); color: var(--text-secondary); margin-top: var(--space-sm); }
 .about-tagline { font-size: var(--font-caption); color: var(--text-secondary); }
+.about-update { display: flex; align-items: center; gap: var(--space-md); margin-top: var(--space-lg); }
+.about-update-hint { font-size: var(--font-caption); color: var(--color-success); }
+.about-update-hint--error { color: var(--color-error); }
 .settings-footer { height: var(--appbar-height); display: flex; align-items: center; gap: var(--space-md); padding: 0 var(--space-xl); border-top: 0.5px solid var(--border); background: var(--bg-container); flex-shrink: 0; }
 .footer-saved { font-size: var(--font-caption); color: var(--color-success); display: inline-flex; align-items: center; gap: var(--space-xs); }
 .footer-dot { width: 6px; height: 6px; border-radius: 50%; background-color: var(--color-success); display: inline-block; }

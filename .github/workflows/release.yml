@@ -1,0 +1,108 @@
+# PetalLink Release Workflow
+# 当推送 v* 标签时自动构建 macOS (aarch64) 并发布 GitHub Release。
+# 产物包括 .dmg（手动安装）和 .app.tar.gz（自动更新），以及 update.json。
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    # 允许手动触发
+
+jobs:
+  build-and-release:
+    name: Build & Release (macOS aarch64)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install frontend deps
+        run: |
+          cd app
+          npm ci
+
+      - name: Build Tauri app
+        run: |
+          cargo tauri build --target aarch64-apple-darwin
+        env:
+          HWCLOUD_CLIENT_ID: ${{ secrets.HWCLOUD_CLIENT_ID || '' }}
+          HWCLOUD_CLIENT_SECRET: ${{ secrets.HWCLOUD_CLIENT_SECRET || '' }}
+
+      - name: Collect and rename artifacts
+        run: |
+          mkdir -p dist
+          cp target/aarch64-apple-darwin/release/bundle/dmg/*.dmg dist/ 2>/dev/null || true
+          cp target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz dist/ 2>/dev/null || true
+
+          # 重命名加架构后缀，便于区分
+          for f in dist/*.dmg; do
+            base=$(basename "$f" .dmg)
+            mv "$f" "dist/${base}_aarch64.dmg"
+          done 2>/dev/null || true
+          for f in dist/*.app.tar.gz; do
+            base=$(basename "$f" .app.tar.gz)
+            mv "$f" "dist/${base}_aarch64.app.tar.gz"
+          done 2>/dev/null || true
+
+      - name: Generate update.json
+        run: |
+          TAG=${GITHUB_REF#refs/tags/}
+          VERSION=${TAG#v}
+          echo "Tag: $TAG, Version: $VERSION"
+
+          TAR_FILE=$(ls dist/*_aarch64.app.tar.gz 2>/dev/null | head -1)
+          TAR_NAME=$(basename "$TAR_FILE" 2>/dev/null || echo "")
+
+          cat > dist/update.json << JSONEOF
+          {
+            "version": "$VERSION",
+            "notes": "详见 https://github.com/yuanbaobaoo/PetalLink/releases/tag/$TAG",
+            "pub_date": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+            "platforms": {
+              "darwin-aarch64": {
+                "signature": "",
+                "url": "https://github.com/yuanbaobaoo/PetalLink/releases/download/$TAG/$TAR_NAME"
+              }
+            }
+          }
+          JSONEOF
+
+          echo "Generated update.json:"
+          cat dist/update.json
+
+      - name: List dist
+        run: ls -la dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "${{ github.ref_name }}"
+          body: |
+            ## 更新内容
+
+            详见 [CHANGELOG](https://github.com/yuanbaobaoo/PetalLink/blob/main/CHANGELOG.md)
+
+            ## 安装方式
+
+            - **手动安装**: 下载 `.dmg` 文件，双击挂载后拖入 Applications 文件夹
+            - **自动更新**: 应用内检查更新（无需手动下载）
+          files: |
+            dist/*.dmg
+            dist/*.app.tar.gz
+            dist/update.json
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

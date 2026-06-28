@@ -1289,6 +1289,24 @@ pub fn transfer_list_all() -> AppResult<Vec<repository::TransferTask>> {
     repository::list_all_transfers(&conn)
 }
 
+/// 检查是否有进行中的传输任务（PENDING / RUNNING）。
+/// 供更新流程使用：重启前等待所有传输完成。
+#[tauri::command]
+pub fn transfer_has_active() -> AppResult<bool> {
+    let conn = DB.lock();
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM transfer_queue WHERE state IN (?1, ?2)",
+            rusqlite::params![
+                repository::transfer_state::PENDING,
+                repository::transfer_state::RUNNING
+            ],
+            |row| row.get(0),
+        )
+        .map_err(|e| AppError::generic(format!("查询传输状态失败：{e}")))?;
+    Ok(count > 0)
+}
+
 #[tauri::command]
 pub fn transfer_clear_completed() -> AppResult<()> {
     let conn = DB.lock();

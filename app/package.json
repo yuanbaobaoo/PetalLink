@@ -1,6 +1,6 @@
 {
   "name": "petallink-frontend",
-  "version": "1.0.1",
+  "version": "1.0.3",
   "private": true,
   "type": "module",
   "description": "PetalLink 前端 —— Vue3 + TS，与 Tauri Rust 后端通信",
@@ -20,6 +20,7 @@
     "@tauri-apps/plugin-notification": "^2.0.0",
     "@tauri-apps/plugin-os": "^2.0.0",
     "@tauri-apps/plugin-process": "^2.0.0",
+    "@tauri-apps/plugin-updater": "^2.0.0",
     "pinia": "^2.2.0",
     "vue": "^3.5.0",
     "vue-router": "^4.4.0"

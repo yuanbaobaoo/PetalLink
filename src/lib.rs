@@ -26,7 +26,7 @@ pub fn init_logger() {
     use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,petal_link_lib=info"));
+        .unwrap_or_else(|_| EnvFilter::new("info,petal_link_lib=info,tauri_plugin_updater=warn"));
 
     let stdout_layer = fmt::layer()
         .with_target(false)
@@ -106,6 +106,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             // Auth
             commands::auth_check_secret,
@@ -146,6 +147,7 @@ pub fn run() {
             commands::config_import_json,
             // Transfer
             commands::transfer_list_all,
+            commands::transfer_has_active,
             commands::transfer_clear_completed,
             commands::transfer_clear_failed,
             commands::transfer_clear_finished,
