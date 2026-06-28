@@ -8,7 +8,7 @@ import { useAsyncAction } from "@/composables/useAsyncAction";
 import * as logsApi from "@/api/logs";
 import type { LogRecord } from "@/api/logs";
 
-const props = withDefaults(defineProps<{
+withDefaults(defineProps<{
   /** 内嵌模式：不渲染顶部 AppBar，由父组件提供导航 */
   inline?: boolean;
 }>(), {

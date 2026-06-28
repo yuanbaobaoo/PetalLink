@@ -322,7 +322,7 @@ function fmtSize(bytes: number): string {
             <div class="about-tagline">基于 Tauri 的 macOS 客户端</div>
             <div class="about-update">
               <MateButton
-                variant="secondary"
+                variant="text"
                 icon="refresh"
                 :loading="updater.isChecking"
                 :disabled="updater.isChecking"

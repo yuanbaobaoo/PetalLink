@@ -50,7 +50,7 @@ async function handleStartUpdate(): Promise<void> {
   // 下载完成后自动等待传输
   if (updater.phase === "downloaded") {
     const ok = await updater.waitForTransfers();
-    if (ok && updater.phase === "ready") {
+    if (ok) {
       await relaunch();
     }
   }
