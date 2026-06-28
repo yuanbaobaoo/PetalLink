@@ -14,10 +14,18 @@ import { confirmDialog, showToast } from "@/components/mate";
 import { useAsyncAction } from "@/composables/useAsyncAction";
 import { on } from "@/api/tauri";
 
-// 同步状态文案（仅云端，未同步到本地）
+// 同步状态文案：仅云端（未同步到本地）
 const SYNC_STATUS_CLOUD_ONLY = "仅云端（未同步到本地）";
+// 同步状态文案：已双端对齐，文件已下载到本地
+const SYNC_STATUS_SYNCED_LOCAL = "已同步到本地";
+// 同步状态文案：本地仅占位符，实际内容在云端
+const SYNC_STATUS_PLACEHOLDER = "本地占位";
+// 同步状态文案：文件夹
+const SYNC_STATUS_FOLDER = "文件夹";
 
+// 文件浏览器 store
 const browser = useFileBrowserStore();
+// 同步全局状态 store
 const sync = useSyncStore();
 
 // 镜像根目录（下载目标用）
@@ -25,21 +33,27 @@ const mountDir = computed(() => sync.mountDir);
 
 // 列宽（可拖拽调整）
 const sizeWidth = ref(100);
+// 修改时间列宽
 const timeWidth = ref(150);
 
-// 多选 + 选中聚焦
+// 多选集合
 const checked = ref<Set<string>>(new Set());
+// 是否显示复选框列
 const showCheckboxes = ref(false);
+// 当前选中聚焦的文件 ID
 const selectedId = ref<string>("");
-// 批量/同步异步按钮 loading + 防重复点击
+// 批量删除异步操作防重复
 const { loading: bulkDeleteLoading, run: runBulkDelete } = useAsyncAction();
+// 批量下载异步操作防重复
 const { loading: bulkDownloadLoading, run: runBulkDownload } = useAsyncAction();
+// 批量释放空间异步操作防重复
 const { loading: bulkFreeUpLoading, run: runBulkFreeUp } = useAsyncAction();
 // 右键「同步」非 MateButton，仅用 run 做防重复（不绑 loading 显示）
 const { run: runSyncItem } = useAsyncAction();
 
-// 排序
+// 排序字段
 const sortField = ref<"name" | "size" | "modifiedTime">("name");
+// 排序方向（true=升序）
 const sortAsc = ref(true);
 
 // 当前文件夹文件列表
@@ -67,10 +81,78 @@ const headerCheck = computed<boolean | null>(() => {
 // 缩略图缓存（文件 ID → 图片 URL）
 const thumbUrls = ref<Record<string, string>>({});
 
+// 拖拽列宽状态
+let dragStartX = 0;
+// 拖拽起始列宽
+let dragStartW = 0;
+// 当前拖拽的列（null 表示未拖拽）
+const dragging = ref<"size" | "time" | null>(null);
+
+// 同步进度对话框：downloadOnDemand 到镜像目录
+const downloading = ref<{ open: boolean; name: string }>({ open: false, name: "" });
+
+// 文件夹递归同步进度弹窗状态
+const folderSync = ref<{ open: boolean; name: string; done: number; total: number }>({
+  open: false, name: "", done: 0, total: 0,
+});
+// 文件夹同步进度事件监听器清理函数
+let unlistenFolderSync: (() => void) | null = null;
+
+// 右键菜单状态
+const contextMenu = ref<{ show: boolean; x: number; y: number; file: DriveFile | null; canFreeUp: boolean }>({
+  show: false, x: 0, y: 0, file: null, canFreeUp: false,
+});
+// 右键菜单 DOM 引用（用于定位钳制）
+const ctxMenuEl = ref<HTMLElement | null>(null);
+
+// 重命名对话框状态
+const showRenameDialog = ref(false);
+// 重命名目标文件
+const renameTarget = ref<DriveFile | null>(null);
+// 重命名输入值
+const renameValue = ref("");
+
+// 属性对话框状态
+const showPropsDialog = ref(false);
+// 属性目标文件
+const propsTarget = ref<DriveFile | null>(null);
+
+// 批量文件同步状态缓存（fileId → "synced" | "placeholder" | "not_synced" | "folder"）
+const fileStatuses = ref<Record<string, string>>({});
+
 /**
- * 监听排序文件变化，自动加载缩略图
+ * 监听排序文件变化，自动加载缩略图和批量同步状态
  */
-watch(sortedFiles, () => { loadThumbs(); });
+watch(sortedFiles, () => {
+  loadThumbs();
+  refreshBatchStatus();
+});
+
+/**
+ * 批量拉取当前文件列表中所有文件的同步状态。
+ * 仅在已配置挂载目录时执行。
+ */
+async function refreshBatchStatus(): Promise<void> {
+  if (!sync.mountConfigured) return;
+  const ids = sortedFiles.value.map((f) => f.id);
+  if (ids.length === 0) return;
+  try {
+    const map = await syncApi.getBatchFileStatus(ids);
+    fileStatuses.value = map;
+  } catch {
+    // 批量查询失败时清空缓存，回退到默认云朵图标
+    fileStatuses.value = {};
+  }
+}
+
+/**
+ * 获取文件同步状态字符串
+ *
+ * @param f - 文件对象
+ */
+function getFileStatus(f: DriveFile): string {
+  return fileStatuses.value[f.id] ?? "not_synced";
+}
 
 /**
  * 判断文件是否为缩略图类型（图片/视频）
@@ -81,6 +163,7 @@ function isThumbnailType(f: DriveFile): boolean {
   const mime = f.mime_type ?? "";
   return mime.startsWith("image/") || mime.startsWith("video/");
 }
+
 /**
  * 获取文件缩略图 URL
  *
@@ -89,6 +172,7 @@ function isThumbnailType(f: DriveFile): boolean {
 function thumbUrl(f: DriveFile): string {
   return thumbUrls.value[f.id] ?? "";
 }
+
 /**
  * 预加载当前列表中所有文件的缩略图
  */
@@ -101,12 +185,6 @@ async function loadThumbs(): Promise<void> {
   }
 }
 
-// 拖拽列宽状态
-let dragStartX = 0;
-let dragStartW = 0;
-// 当前拖拽的列（null 表示未拖拽）
-const dragging = ref<"size" | "time" | null>(null);
-
 /**
  * 开始拖拽调整列宽
  *
@@ -117,6 +195,7 @@ function startDrag(col: "size" | "time", e: MouseEvent): void {
   dragging.value = col; dragStartX = e.clientX;
   dragStartW = col === "size" ? sizeWidth.value : timeWidth.value;
 }
+
 /**
  * 拖拽中更新列宽
  *
@@ -127,6 +206,7 @@ function onDrag(e: MouseEvent): void {
   const newW = Math.max(64, Math.min(400, dragStartW + e.clientX - dragStartX));
   if (dragging.value === "size") sizeWidth.value = newW; else timeWidth.value = newW;
 }
+
 /**
  * 结束拖拽
  */
@@ -139,6 +219,7 @@ function handleToggleSelectAll(): void {
   if (checkedCount.value === sortedFiles.value.length) checked.value.clear();
   else { checked.value.clear(); sortedFiles.value.forEach(f => checked.value.add(f.id)); }
 }
+
 /**
  * 切换单个文件的选中状态
  *
@@ -159,6 +240,7 @@ function formatSize(bytes: number): string {
   const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), u.length - 1);
   return `${(bytes / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 1)} ${u[i]}`;
 }
+
 /**
  * 格式化时间显示
  *
@@ -173,6 +255,8 @@ function formatTime(iso?: string): string {
 
 /**
  * 相对路径（跳过根节点名）
+ *
+ * @param f - 文件对象
  */
 function relPathOf(f: DriveFile): string {
   const segs = browser.pathStack.slice(1).map(p => p.name);
@@ -181,27 +265,40 @@ function relPathOf(f: DriveFile): string {
 }
 
 /**
- * 同步状态图标名
+ * 同步状态图标名：根据实际批量查询结果返回对应图标
  *
- * @param _f - 文件对象（当前未使用，预留扩展）
+ * @param f - 文件对象
  */
-function syncStatusIcon(_f: DriveFile): string {
-  return "cloud"; // 默认 cloud-only（未同步到本地）
+function syncStatusIcon(f: DriveFile): string {
+  const status = getFileStatus(f);
+  if (status === "synced") return "local";
+  if (status === "folder") return "folder";
+  return "cloud";
 }
+
 /**
  * 同步状态描述文案
  *
- * @param _f - 文件对象（当前未使用，预留扩展）
+ * @param f - 文件对象
  */
-function syncStatusText(_f: DriveFile): string {
+function syncStatusText(f: DriveFile): string {
+  const status = getFileStatus(f);
+  if (status === "synced") return SYNC_STATUS_SYNCED_LOCAL;
+  if (status === "placeholder") return SYNC_STATUS_PLACEHOLDER;
+  if (status === "folder") return SYNC_STATUS_FOLDER;
   return SYNC_STATUS_CLOUD_ONLY;
 }
+
 /**
  * 同步状态 CSS 类名
  *
- * @param _f - 文件对象（当前未使用，预留扩展）
+ * @param f - 文件对象
  */
-function syncStatusClass(_f: DriveFile): string {
+function syncStatusClass(f: DriveFile): string {
+  const status = getFileStatus(f);
+  if (status === "synced") return "is-synced-local";
+  if (status === "placeholder") return "is-placeholder";
+  if (status === "folder") return "is-folder-status";
   return "is-cloud-only";
 }
 
@@ -218,11 +315,10 @@ function handleDoubleClick(f: DriveFile): void {
   }
 }
 
-// 同步进度对话框调 downloadOnDemand 到镜像目录
-const downloading = ref<{ open: boolean; name: string }>({ open: false, name: "" });
-
-/** 全局索引读取期间禁止选择目录/文件同步：cloud_tree 正在 BFS 重建，
- *  此时选择同步会基于不完整数据，且与全局拉取并发易冲突。 */
+/**
+ * 全局索引读取期间禁止选择目录/文件同步：cloud_tree 正在 BFS 重建，
+ * 此时选择同步会基于不完整数据，且与全局拉取并发易冲突。
+ */
 function assertSyncAllowed(): boolean {
   if (sync.isIndexing) {
     showToast("正在读取云端索引，请稍后再试", { variant: "warning" });
@@ -231,7 +327,11 @@ function assertSyncAllowed(): boolean {
   return true;
 }
 
-/** 同步该目录/文件：文件夹→递归同步子树，文件→downloadOnDemand */
+/**
+ * 同步该目录/文件：文件夹→递归同步子树，文件→downloadOnDemand
+ *
+ * @param f - 文件对象
+ */
 async function handleSyncItem(f: DriveFile): Promise<void> {
   await runSyncItem(async () => {
     closeMenu();
@@ -250,15 +350,12 @@ async function handleSyncItem(f: DriveFile): Promise<void> {
   });
 }
 
-// 文件夹递归同步进度弹窗状态
-const folderSync = ref<{ open: boolean; name: string; done: number; total: number }>({
-  open: false, name: "", done: 0, total: 0,
-});
-// 文件夹同步进度事件监听器清理函数
-let unlistenFolderSync: (() => void) | null = null;
-
-/** 递归同步文件夹子树（在 runSyncItem 内调用，不再自裹防重复）。
- *  开进度弹窗 → 监听 folder_sync_progress → 调 syncFolderRecursive → 关弹窗。 */
+/**
+ * 递归同步文件夹子树（在 runSyncItem 内调用，不再自裹防重复）。
+ * 开进度弹窗 → 监听 folder_sync_progress → 调 syncFolderRecursive → 关弹窗。
+ *
+ * @param f - 文件对象
+ */
 async function doSyncFolder(f: DriveFile): Promise<void> {
   const rel = relPathOf(f);
   folderSync.value = { open: true, name: f.name, done: 0, total: 0 };
@@ -307,14 +404,6 @@ async function handleSyncFile(f: DriveFile): Promise<void> {
   }
 }
 
-// ===== 右键菜单 =====
-// 右键菜单状态
-const contextMenu = ref<{ show: boolean; x: number; y: number; file: DriveFile | null; canFreeUp: boolean }>({
-  show: false, x: 0, y: 0, file: null, canFreeUp: false,
-});
-// 右键菜单 DOM 引用
-const ctxMenuEl = ref<HTMLElement | null>(null);
-
 /**
  * 显示右键操作菜单
  *
@@ -332,10 +421,12 @@ async function handleShowActionMenu(e: MouseEvent, f: DriveFile): Promise<void> 
   contextMenu.value = { show: true, x: e.clientX, y: e.clientY, file: f, canFreeUp };
   nextTick(clampMenuToViewport);
 }
+
 /**
  * 关闭右键菜单
  */
 function closeMenu(): void { contextMenu.value.show = false; }
+
 /**
  * 菜单定位钳制：右/下溢出视口时翻转方向（向左/向上展开），保证完整可见。
  */
@@ -356,11 +447,6 @@ function clampMenuToViewport(): void {
   contextMenu.value = { ...contextMenu.value, x, y };
 }
 
-// 重命名对话框状态
-const showRenameDialog = ref(false);
-const renameTarget = ref<DriveFile | null>(null);
-const renameValue = ref("");
-
 /**
  * 打开重命名对话框
  *
@@ -370,6 +456,7 @@ function handleRename(f: DriveFile): void {
   renameTarget.value = f; renameValue.value = f.name;
   showRenameDialog.value = true; closeMenu();
 }
+
 /**
  * 确认重命名
  */
@@ -382,10 +469,6 @@ async function handleConfirmRename(): Promise<void> {
   try { await driveApi.renameFile(renameTarget.value.id, newName); await browser.refresh(); showToast("已重命名"); }
   catch (e) { showToast("重命名失败：" + ((e as { message?: string }).message ?? String(e)), { variant: "error" }); }
 }
-
-// 属性对话框状态
-const showPropsDialog = ref(false);
-const propsTarget = ref<DriveFile | null>(null);
 
 /**
  * 显示文件属性
@@ -531,6 +614,11 @@ async function handleBulkFreeUp(): Promise<void> {
   });
 }
 
+/**
+ * 排序切换：同字段翻转方向，不同字段切换字段并默认升序
+ *
+ * @param field - 排序字段
+ */
 function handleSort(field: "name" | "size" | "modifiedTime"): void {
   if (sortField.value === field) sortAsc.value = !sortAsc.value;
   else { sortField.value = field; sortAsc.value = true; }
@@ -708,6 +796,9 @@ function handleSort(field: "name" | "size" | "modifiedTime"): void {
 .file-col--time { width: var(--time-col-width, 150px); }
 .file-col--status { width: 60px; display: flex; align-items: center; justify-content: center; color: var(--text-placeholder); flex-shrink: 0; }
 .file-col--status :deep(.is-cloud-only) { color: var(--text-placeholder); }
+.file-col--status :deep(.is-synced-local) { color: var(--color-success); }
+.file-col--status :deep(.is-placeholder) { color: var(--text-secondary); }
+.file-col--status :deep(.is-folder-status) { color: var(--color-brand); }
 .file-col--actions { width: 40px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
 .file-row :deep(.is-folder) { color: var(--color-brand); }
 .file-thumb { width: 20px; height: 20px; border-radius: var(--radius-sm); object-fit: cover; flex-shrink: 0; }

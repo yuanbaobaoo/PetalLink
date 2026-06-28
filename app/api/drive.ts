@@ -36,12 +36,20 @@ export type FileCategory =
   | "Folder" | "Audio" | "Video" | "Image" | "Document"
   | "Package" | "Archive" | "Executable" | "None";
 
-/** 是否文件夹（大小写不敏感，兼容后端返回 "Folder" / "folder"） */
+/**
+ * 是否文件夹（大小写不敏感，兼容后端返回 "Folder" / "folder"）
+ *
+ * @param f - 文件对象
+ */
 export function isFolder(f: DriveFile): boolean {
   return (f.category ?? "").toLowerCase() === "folder";
 }
 
-/** 文件类型图标（返回 icon-name，配合 <MateIcon :name="..."> 使用） */
+/**
+ * 文件类型图标（返回 icon-name，配合 <MateIcon :name="..."> 使用）
+ *
+ * @param f - 文件对象
+ */
 export function fileTypeIcon(f: DriveFile): string {
   if (isFolder(f)) return "folder";
   const cat = (f.category ?? "").toLowerCase();
@@ -57,7 +65,11 @@ export function fileTypeIcon(f: DriveFile): string {
   }
 }
 
-/** 列举目录内容（folders-first 排序） */
+/**
+ * 列举目录内容（folders-first 排序）
+ *
+ * @param parentId - 父目录 ID，null 表示根目录
+ */
 export async function listFiles(parentId?: string): Promise<DriveFile[]> {
   const result = await invoke<FileListResult>("drive_list", {
     parentId: parentId || null,
@@ -68,7 +80,12 @@ export async function listFiles(parentId?: string): Promise<DriveFile[]> {
   return [...folders, ...others];
 }
 
-/** 搜索文件 */
+/**
+ * 搜索文件
+ *
+ * @param keyword - 搜索关键词
+ * @param parentId - 父目录 ID，null 表示全局搜索
+ */
 export async function searchFiles(keyword: string, parentId?: string): Promise<DriveFile[]> {
   const result = await invoke<FileListResult>("drive_search", {
     keyword,
@@ -79,22 +96,40 @@ export async function searchFiles(keyword: string, parentId?: string): Promise<D
   return [...folders, ...others];
 }
 
-/** 创建文件夹 */
+/**
+ * 创建文件夹
+ *
+ * @param name - 文件夹名称
+ * @param parentId - 父目录 ID
+ */
 export function createFolder(name: string, parentId?: string): Promise<DriveFile> {
   return invoke<DriveFile>("drive_create_folder", { name, parentId: parentId || null });
 }
 
-/** 删除文件（软删除进回收站） */
+/**
+ * 删除文件（软删除进回收站）
+ *
+ * @param id - 文件 ID
+ */
 export function deleteFile(id: string): Promise<void> {
   return invoke<void>("drive_delete_file", { id });
 }
 
-/** 重命名文件 */
+/**
+ * 重命名文件
+ *
+ * @param id - 文件 ID
+ * @param newName - 新名称
+ */
 export function renameFile(id: string, newName: string): Promise<DriveFile> {
   return invoke<DriveFile>("drive_rename_file", { id, newName });
 }
 
-/** 获取缩略图（返回 base64 data URL） */
+/**
+ * 获取缩略图（返回 base64 data URL）
+ *
+ * @param fileId - 文件 ID
+ */
 export async function getThumbnail(fileId: string): Promise<string | null> {
   try {
     const bytes = await invoke<number[]>("drive_get_thumbnail", { fileId });
@@ -107,17 +142,29 @@ export async function getThumbnail(fileId: string): Promise<string | null> {
   }
 }
 
-/** 获取配额信息 */
+/**
+ * 获取配额信息
+ */
 export function getAbout(): Promise<DriveAbout> {
   return invoke<DriveAbout>("drive_get_about");
 }
 
-/** 下载文件 */
+/**
+ * 下载文件到本地路径
+ *
+ * @param fileId - 文件 ID
+ * @param destPath - 目标本地路径
+ */
 export function downloadFile(fileId: string, destPath: string): Promise<void> {
   return invoke<void>("drive_download_file", { fileId, destPath });
 }
 
-/** 上传文件 */
+/**
+ * 上传本地文件到云端
+ *
+ * @param localPath - 本地文件路径
+ * @param parentId - 目标父目录 ID
+ */
 export function uploadFile(localPath: string, parentId?: string): Promise<DriveFile> {
   return invoke<DriveFile>("drive_upload_file", { localPath, parentId: parentId || null });
 }
