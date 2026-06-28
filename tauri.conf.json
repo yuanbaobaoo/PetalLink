@@ -4,9 +4,9 @@
   "version": "1.0.3",
   "identifier": "io.github.yuanbaobaoo.PetalLink",
   "build": {
-    "beforeDevCommand": "npm run dev",
+    "beforeDevCommand": "cd app && npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "cd app && npm run build",
     "frontendDist": "app/dist"
   },
   "app": {
