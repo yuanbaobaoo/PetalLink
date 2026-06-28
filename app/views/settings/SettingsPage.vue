@@ -1,6 +1,6 @@
 <!-- 设置页，左导航 200px + 右设置区 -->
 <script setup lang="ts">
-import { ref, computed, onMounted } from "vue";
+import { ref, computed, onMounted, watch } from "vue";
 import { MateNavItem, MateSectionHeader, MateStepper, MateNumberField, MateTextField, MateSwitch, MateButton, MateInfoBanner, MateLogoWithText, MateIcon } from "@/components/mate";
 import { confirmDialog, showToast } from "@/components/mate";
 import * as configApi from "@/api/config";
@@ -78,6 +78,16 @@ onMounted(async () => {
   try { about.value = await driveApi.getAbout(); } catch {}
   try { appVersion.value = await platformApi.getAppVersion(); } catch {}
   saved.value = true;
+});
+
+// 点击「日志查看」tab 直接跳转日志页，无需中间按钮
+let prevTab: TabKey = "syncDir";
+watch(activeTab, (tab, old) => {
+  if (tab === "logs") {
+    prevTab = old ?? "syncDir";
+    emit("open-logs");
+    activeTab.value = prevTab;
+  }
 });
 
 async function handleSave(): Promise<void> {
@@ -297,16 +307,8 @@ function fmtSize(bytes: number): string {
           </div>
         </section>
 
-        <!-- 日志查看 -->
-        <section v-if="activeTab === 'logs'" class="settings-section">
-          <MateSectionHeader icon="list" text="日志查看" />
-          <div class="card">
-            <MateIcon name="list" :size="22" class="card-icon" />
-            <div class="card-title">完整同步日志</div>
-            <div class="card-desc">按级别筛选查看，全保留不自动清理（Q3 决策）。</div>
-            <MateButton variant="primary" icon="list" @click="emit('open-logs')">查看日志</MateButton>
-          </div>
-        </section>
+        <!-- 日志查看 — 点击 tab 直接跳转日志查看页，此处无内容 -->
+        <section v-if="activeTab === 'logs'" class="settings-section" />
 
         <!-- 关于 -->
         <section v-if="activeTab === 'about'" class="settings-section">
