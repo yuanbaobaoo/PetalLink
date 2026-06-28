@@ -97,7 +97,19 @@ jobs:
         with:
           name: "${{ github.ref_name }}"
           body: |
-            ${{ github.ref_name }}
+            ## 安装说明
+
+            macOS 安全策略会拦截从互联网下载的未签名应用，双击 DMG 时可能提示「磁盘映像损坏」。请先移除隔离标记再打开：
+
+            ```bash
+            xattr -d com.apple.quarantine ~/Downloads/PetalLink_*_aarch64.dmg
+            ```
+
+            然后将 PetalLink.app 拖入 Applications 文件夹启动即可。
+
+            > 💡 这是开源项目暂未配置 Apple 公证（$99/年），不影响应用安全性。
+            >
+            > 自动更新功能不受影响，后续版本可通过应用内更新。
           files: |
             dist/*.dmg
             dist/*.app.tar.gz
