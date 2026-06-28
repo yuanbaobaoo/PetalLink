@@ -36,8 +36,8 @@ pub const APP_NAME: &str = "PetalLink";
 /// 应用完整标题（窗口标题栏、关于页、任务切换器）
 pub const APP_FULL_TITLE: &str = "PetalLink - 华为云盘客户端开源版";
 
-/// 应用版本号
-pub const APP_VERSION: &str = "1.0.1";
+/// 应用版本号（编译期从 Cargo.toml 注入）
+pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// **Bundle Identifier（io.github.yuanbaobaoo.PetalLink）**
 /// 原 Flutter 工程 legacy/ 保留 io.gitcode.cloudmate 不变。

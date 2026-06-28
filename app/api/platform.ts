@@ -17,3 +17,8 @@ export function launchAtLoginIsEnabled(): Promise<boolean> {
 export function launchAtLoginSetEnabled(enabled: boolean): Promise<boolean> {
   return invoke<boolean>("launch_at_login_set_enabled", { enabled });
 }
+
+/** 获取应用版本号（读取 Cargo.toml 编译期注入的版本） */
+export function getAppVersion(): Promise<string> {
+  return invoke<string>("app_get_version");
+}

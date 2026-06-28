@@ -607,6 +607,69 @@ pub fn sync_check_file_local_status(file_id: String) -> AppResult<String> {
     Ok("not_synced".to_string())
 }
 
+/// 批量查询文件同步状态（供前端文件列表状态列展示用）。
+/// 接受文件 ID 列表，返回 fileId → "folder" | "synced" | "placeholder" | "not_synced" 映射。
+/// 未挂载同步目录时回退到仅 DB 状态判断。
+#[tauri::command]
+pub fn sync_batch_file_status(file_ids: Vec<String>) -> AppResult<HashMap<String, String>> {
+    let conn = DB.lock();
+    let mount_opt = mount().ok();
+    let mut result: HashMap<String, String> = HashMap::with_capacity(file_ids.len());
+
+    for file_id in &file_ids {
+        let status = match repository::find_by_file_id(&conn, file_id)
+            .ok()
+            .flatten()
+        {
+            None => "not_synced",
+            Some(record) => {
+                if record.is_folder {
+                    "folder"
+                } else if let Some(ref m) = mount_opt {
+                    let abs_path = m.mount_dir().join(&record.local_path);
+                    if abs_path.exists() {
+                        if let Ok(meta) = std::fs::metadata(&abs_path) {
+                            if meta.len() > 0 {
+                                // 进一步确认不是占位符（占位符 0 字节已过滤，但 xattr 更严谨）
+                                let is_placeholder =
+                                    xattr::get(&abs_path, crate::mount::manager::XATTR_STATE)
+                                        .ok()
+                                        .flatten()
+                                        .map(|b| {
+                                            String::from_utf8_lossy(&b)
+                                                == crate::mount::manager::STATE_PLACEHOLDER
+                                        })
+                                        .unwrap_or(false);
+                                if !is_placeholder {
+                                    "synced"
+                                } else {
+                                    "placeholder"
+                                }
+                            } else {
+                                "placeholder"
+                            }
+                        } else {
+                            "placeholder"
+                        }
+                    } else {
+                        "not_synced"
+                    }
+                } else {
+                    // 未配置挂载目录：仅从 DB 状态判定
+                    if record.status == repository::sync_status::SYNCED {
+                        "synced"
+                    } else {
+                        "not_synced"
+                    }
+                }
+            }
+        };
+        result.insert(file_id.clone(), status.to_string());
+    }
+
+    Ok(result)
+}
+
 #[tauri::command]
 pub async fn sync_check_safe_free_up(rel_path: String, file_id: String) -> AppResult<String> {
     // 引擎已启动 → 用 cloud_tree + DB 精确校验
@@ -1390,6 +1453,12 @@ pub fn logs_export(path: String) -> AppResult<()> {
 pub fn logs_clear() -> AppResult<()> {
     crate::core::logging::clear();
     Ok(())
+}
+
+/// 获取应用版本号（编译期从 Cargo.toml 注入，保持与打包版本一致）。
+#[tauri::command]
+pub fn app_get_version() -> String {
+    crate::constants::APP_VERSION.to_string()
 }
 
 /// 推送同步状态到前端（Tauri event）

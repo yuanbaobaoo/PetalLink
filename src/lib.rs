@@ -132,6 +132,7 @@ pub fn run() {
             commands::sync_manual_refresh,
             commands::sync_check_safe_free_up,
             commands::sync_check_file_local_status,
+            commands::sync_batch_file_status,
             commands::sync_free_up_space,
             commands::sync_download_on_demand,
             commands::sync_folder_recursive,
@@ -156,6 +157,7 @@ pub fn run() {
             commands::logs_list,
             commands::logs_export,
             commands::logs_clear,
+            commands::app_get_version,
         ])
         // 关窗拦截：关闭按钮/Cmd+W → 隐藏到后台 accessory（不退出），仅 tray 退出放行
         .on_window_event(|window, event| {
@@ -174,12 +176,15 @@ pub fn run() {
             // 创建系统托盘
             platform::tray::setup(app.handle());
 
-            // ★ 开机自启（--hidden）：隐藏主窗口，仅展示菜单栏图标
-            if !platform::activation::is_launched_manually() {
+            // 手动启动 → 显示主窗口并聚焦；开机自启（--hidden）→ 窗口保持隐藏（visible:false 默认），仅菜单栏图标后台运行
+            if platform::activation::is_launched_manually() {
                 if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.hide();
-                    tracing::info!("--hidden 模式：主窗口已隐藏，仅保留菜单栏图标");
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                    tracing::info!("手动启动：显示主窗口");
                 }
+            } else {
+                tracing::info!("--hidden 模式：主窗口保持隐藏，仅保留菜单栏图标");
             }
 
             // 加载配置（仅一次，token 检测 + 引擎初始化共用）

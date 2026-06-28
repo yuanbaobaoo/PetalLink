@@ -54,6 +54,8 @@ const userLabel = computed(() => authApi.primaryLabel(userInfo.value) ?? "未获
 const userInitial = computed(() => authApi.initial(userInfo.value) ?? "华");
 // 存储配额
 const about = ref<driveApi.DriveAbout | null>(null);
+// 应用版本号
+const appVersion = ref("");
 
 const showFooter = computed(() => ["syncDir", "transfer", "advanced"].includes(activeTab.value));
 
@@ -74,6 +76,7 @@ onMounted(async () => {
   } catch {}
   try { autoLaunch.value = await platformApi.launchAtLoginIsEnabled(); } catch {}
   try { about.value = await driveApi.getAbout(); } catch {}
+  try { appVersion.value = await platformApi.getAppVersion(); } catch {}
   saved.value = true;
 });
 
@@ -310,8 +313,18 @@ function fmtSize(bytes: number): string {
           <MateSectionHeader icon="cloud" text="关于" />
           <div class="card card--about">
             <MateLogoWithText :height="30" />
-            <div class="about-version">版本 1.0.0</div>
-            <div class="about-tagline">基于 Tauri + Rust + Vue3 的 macOS 原生客户端 · 自用优先 · 可侧载分发</div>
+            <div class="about-version">版本 {{ appVersion || "..." }}</div>
+            <div class="about-tagline">基于 Tauri 的 macOS 客户端</div>
+            <div class="about-links">
+              <a href="https://github.com/yuanbaobaoo/PetalLink" target="_blank" class="about-link" rel="noopener noreferrer">
+                <MateIcon name="github" :size="16" />
+                GitHub
+              </a>
+              <a href="https://gitcode.com/yuanbaobaoo/PetalLink" target="_blank" class="about-link" rel="noopener noreferrer">
+                <MateIcon name="gitcode" :size="16" />
+                GitCode
+              </a>
+            </div>
           </div>
         </section>
       </div>
@@ -364,4 +377,7 @@ function fmtSize(bytes: number): string {
 .footer-saved { font-size: var(--font-caption); color: var(--color-success); display: inline-flex; align-items: center; gap: var(--space-xs); }
 .footer-dot { width: 6px; height: 6px; border-radius: 50%; background-color: var(--color-success); display: inline-block; }
 .footer-error { font-size: var(--font-caption); color: var(--color-error); }
+.about-links { display: flex; gap: var(--space-lg); margin-top: var(--space-md); }
+.about-link { display: inline-flex; align-items: center; gap: var(--space-xs); font-size: var(--font-body-sm); color: var(--color-brand); text-decoration: none; transition: color 0.15s; }
+.about-link:hover { color: var(--color-brand-hover); text-decoration: underline; }
 </style>
