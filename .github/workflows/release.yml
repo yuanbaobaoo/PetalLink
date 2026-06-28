@@ -44,9 +44,14 @@ jobs:
         run: |
           mkdir -p dist
           cp target/aarch64-apple-darwin/release/bundle/dmg/*.dmg dist/ 2>/dev/null || true
-          cp target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz dist/ 2>/dev/null || true
 
-          # 重命名加架构后缀，便于区分
+          # 手动打包 .app.tar.gz（关闭 createUpdaterArtifacts 以跳过签名）
+          APP_DIR="target/aarch64-apple-darwin/release/bundle/macos/PetalLink.app"
+          if [ -d "$APP_DIR" ]; then
+            tar -czf dist/PetalLink.app.tar.gz -C target/aarch64-apple-darwin/release/bundle/macos PetalLink.app
+          fi
+
+          # 重命名加架构后缀
           for f in dist/*.dmg; do
             base=$(basename "$f" .dmg)
             mv "$f" "dist/${base}_aarch64.dmg"

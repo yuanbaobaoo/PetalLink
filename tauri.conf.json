@@ -49,7 +49,7 @@
       "signingIdentity": null,
       "entitlements": "Entitlements.plist"
     },
-    "createUpdaterArtifacts": true
+    "createUpdaterArtifacts": false
   },
   "plugins": {
     "updater": {
