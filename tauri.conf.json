@@ -54,7 +54,7 @@
   "plugins": {
     "updater": {
       "endpoints": [
-        "https://github.com/yuanbaobaoo/PetalLink/releases/latest/download/update.json"
+        "https://github.com/yuanbaobaoo/PetalLink/releases/latest/download/PetalLink_update.json"
       ],
       "windows": {
         "installMode": "passive"

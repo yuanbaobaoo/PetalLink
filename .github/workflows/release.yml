@@ -72,7 +72,7 @@ jobs:
           TAR_FILE=$(ls dist/*_aarch64.app.tar.gz 2>/dev/null | head -1)
           TAR_NAME=$(basename "$TAR_FILE" 2>/dev/null || echo "")
 
-          cat > dist/update.json << JSONEOF
+          cat > dist/PetalLink_update.json << JSONEOF
           {
             "version": "$VERSION",
             "notes": "详见 https://github.com/yuanbaobaoo/PetalLink/releases/tag/$TAG",
@@ -86,8 +86,8 @@ jobs:
           }
           JSONEOF
 
-          echo "Generated update.json:"
-          cat dist/update.json
+          echo "Generated PetalLink_update.json:"
+          cat dist/PetalLink_update.json
 
       - name: List dist
         run: ls -la dist/
@@ -97,18 +97,11 @@ jobs:
         with:
           name: "${{ github.ref_name }}"
           body: |
-            ## 更新内容
-
-            详见 [CHANGELOG](https://github.com/yuanbaobaoo/PetalLink/blob/main/CHANGELOG.md)
-
-            ## 安装方式
-
-            - **手动安装**: 下载 `.dmg` 文件，双击挂载后拖入 Applications 文件夹
-            - **自动更新**: 应用内检查更新（无需手动下载）
+            ${{ github.ref_name }}
           files: |
             dist/*.dmg
             dist/*.app.tar.gz
-            dist/update.json
+            dist/PetalLink_update.json
           draft: false
           prerelease: false
         env:
