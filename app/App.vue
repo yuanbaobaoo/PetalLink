@@ -8,14 +8,16 @@
 import { computed, onMounted, ref } from "vue";
 import { useAuthStore } from "@/stores/auth";
 import { useSyncStore } from "@/stores/sync";
-import { useUpdaterStore } from "@/stores/updater";
+// TODO: 自动更新功能暂时禁用
+// import { useUpdaterStore } from "@/stores/updater";
 import { on } from "@/api/tauri";
 import LoginPage from "@/views/LoginPage.vue";
 import MainPage from "@/views/main/MainPage.vue";
 import SettingsPage from "@/views/settings/SettingsPage.vue";
 import LogViewerPage from "@/views/settings/LogViewerPage.vue";
 import IconSprite from "@/components/IconSprite.vue";
-import UpdateDialog from "@/components/UpdateDialog.vue";
+// TODO: 自动更新功能暂时禁用
+// import UpdateDialog from "@/components/UpdateDialog.vue";
 import { MateAppLogo, MateDialogHost, MateToastHost } from "@/components/mate";
 
 const auth = useAuthStore();
@@ -39,11 +41,12 @@ const showMain = computed(() => auth.status === "loggedIn");
     await on("navigate_settings", () => openSettings());
   } catch {}
 
+  // TODO: 自动更新功能暂时禁用
   // 启动后延迟静默检查更新（不阻塞启动流程）
-  const updater = useUpdaterStore();
-  setTimeout(() => {
-    updater.silentCheck();
-  }, 3000);
+  // const updater = useUpdaterStore();
+  // setTimeout(() => {
+  //   updater.silentCheck();
+  // }, 3000);
 });
 
 /** 显示设置页（全局事件，MainPage 通过 emit 触发） */
@@ -60,8 +63,9 @@ function openLogs(): void { currentPage.value = "logs"; }
     <!-- 全局对话框 / Toast 宿主（模块级状态，任意处 await confirmDialog / showToast） -->
     <MateDialogHost />
     <MateToastHost />
+    <!-- TODO: 自动更新功能暂时禁用 -->
     <!-- 更新对话框（独立于全局 dialog 系统，有自己的状态机） -->
-    <UpdateDialog />
+    <!-- <UpdateDialog /> -->
 
   <div v-if="showSplash" class="splash">
     <MateAppLogo :size="56" />

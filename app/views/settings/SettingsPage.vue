@@ -9,13 +9,15 @@ import * as driveApi from "@/api/drive";
 import * as authApi from "@/api/auth";
 import LogViewerPage from "@/views/settings/LogViewerPage.vue";
 import { useAuthStore } from "@/stores/auth";
-import { useUpdaterStore } from "@/stores/updater";
+// TODO: 自动更新功能暂时禁用
+// import { useUpdaterStore } from "@/stores/updater";
 import { useAsyncAction } from "@/composables/useAsyncAction";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readDir } from "@tauri-apps/plugin-fs";
 
 const auth = useAuthStore();
-const updater = useUpdaterStore();
+// TODO: 自动更新功能暂时禁用
+// const updater = useUpdaterStore();
 
 type TabKey = "syncDir" | "transfer" | "advanced" | "account" | "logs" | "about";
 // 当前激活的 Tab
@@ -154,6 +156,8 @@ async function handleLogout(): Promise<void> {
   });
 }
 
+// TODO: 自动更新功能暂时禁用
+/*
 async function handleCheckUpdate(): Promise<void> {
   const hasUpdate = await updater.manualCheck();
   if (!hasUpdate && updater.phase === "upToDate") {
@@ -163,6 +167,7 @@ async function handleCheckUpdate(): Promise<void> {
   }
   // hasUpdate=true → updater.phase="available" → UpdateDialog 会自动弹出
 }
+*/
 
 async function handleSelectDir(): Promise<void> {
   await runSelectDir(async () => {
@@ -320,6 +325,8 @@ function fmtSize(bytes: number): string {
             <MateLogoWithText :height="30" />
             <div class="about-version">版本 {{ appVersion || "..." }}</div>
             <div class="about-tagline">基于 Tauri 的 macOS 客户端</div>
+            <!-- TODO: 自动更新功能暂时禁用 -->
+            <!--
             <div class="about-update">
               <MateButton
                 variant="text"
@@ -333,6 +340,7 @@ function fmtSize(bytes: number): string {
               <span v-if="updater.phase === 'upToDate'" class="about-update-hint">已是最新版本</span>
               <span v-else-if="updater.phase === 'error'" class="about-update-hint about-update-hint--error">检查失败</span>
             </div>
+            -->
             <div class="about-links">
               <a href="https://github.com/yuanbaobaoo/PetalLink" target="_blank" class="about-link" rel="noopener noreferrer">
                 <MateIcon name="github" :size="16" />
