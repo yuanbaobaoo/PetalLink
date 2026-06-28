@@ -207,8 +207,8 @@ impl SyncEngine {
             let _ = repository::reset_stale_statuses(&conn);
         }
 
-        // ★ 恢复未完成的上传任务（断点续传）
-        self.resume_incomplete_uploads().await;
+        // ★ 恢复/清理所有中断的传输任务（kill 后重启用）
+        self.recover_interrupted_transfers().await;
 
         // 首次全量 sync
         self.run_sync_cycle("startup-resume").await?;
@@ -227,70 +227,181 @@ impl SyncEngine {
         Ok(())
     }
 
-    /// 恢复中断的上传任务（断点续传）
-    async fn resume_incomplete_uploads(&self) {
-        let incomplete: Vec<repository::TransferTask> = {
+    /// 恢复/清理所有中断的传输任务（kill 后重启时调用）。
+    /// - 下载：清理 .tmp → 标记 FAILED（planner 下轮重新创建下载任务）
+    /// - 上传有断点（server_id+upload_id+本地文件在）：尝试续传，失败则标记 FAILED
+    /// - 上传无断点：标记 FAILED（planner 下轮重新创建上传任务）
+    /// - 删除：标记 FAILED
+    async fn recover_interrupted_transfers(&self) {
+        let all: Vec<repository::TransferTask> = {
             let conn = self.db.lock();
             repository::list_all_transfers(&conn).unwrap_or_default()
-                .into_iter()
-                .filter(|t| t.direction == repository::transfer_direction::UPLOAD
-                    && (t.state == repository::transfer_state::RUNNING
-                        || t.state == repository::transfer_state::PENDING))
-                .filter(|t| t.server_id.is_some() && t.upload_id.is_some())
-                .collect()
         };
-        if incomplete.is_empty() {
+
+        // 只关心 RUNNING / PENDING（kill 时未完成的任务）
+        let interrupted: Vec<&repository::TransferTask> = all
+            .iter()
+            .filter(|t| {
+                t.state == repository::transfer_state::RUNNING
+                    || t.state == repository::transfer_state::PENDING
+            })
+            .collect();
+
+        if interrupted.is_empty() {
             return;
         }
-        tracing::info!(count = incomplete.len(), "发现未完成的上传任务，开始断点续传");
 
-        for task in &incomplete {
-            let Some(ref local_path) = task.local_path else { continue };
-            let path = std::path::PathBuf::from(local_path);
-            if !path.exists() {
-                tracing::warn!(path = %local_path, "断点续传：本地文件不存在，跳过");
-                continue;
-            }
-            let Some(ref exec) = self.executor else { break };
-            let upload_api = exec.upload_api();
+        let now_ms = || chrono::Utc::now().timestamp_millis();
+        let mut resumed = 0u32;
+        let mut failed_dl = 0u32;
+        let mut failed_ul = 0u32;
+        let mut failed_del = 0u32;
 
-            let session = crate::drive::upload_api::ResumeSession {
-                server_id: task.server_id.clone().unwrap_or_default(),
-                upload_id: task.upload_id.clone().unwrap_or_default(),
-                session_url: String::new(),
-                chunk_size: 0,
-            };
-
-            tracing::info!(name = %task.name, offset = task.resume_offset, "断点续传中...");
-
-            let db_clone = self.db.clone();
-            let task_id = task.id;
-            let on_resume: crate::drive::upload_api::ResumeProgressFn = Box::new(move |_sid, _uid, offset| {
-                let conn = db_clone.lock();
+        for task in &interrupted {
+            // --- DOWNLOAD ---
+            if task.direction == repository::transfer_direction::DOWNLOAD {
+                // 清理孤儿 .tmp 文件（下载写 .tmp 再 rename，kill 后 .tmp 残留）
+                if let Some(ref local_path) = task.local_path {
+                    let tmp = format!("{}.tmp", local_path);
+                    let _ = std::fs::remove_file(&tmp);
+                }
+                let conn = self.db.lock();
                 let _ = conn.execute(
-                    "UPDATE transfer_queue SET resume_offset=?1, transferred=?1 WHERE id=?2",
-                    rusqlite::params![offset as i64, task_id],
+                    "UPDATE transfer_queue SET state=?1, error_message=?2, finished_at=?3 WHERE id=?4",
+                    rusqlite::params![
+                        repository::transfer_state::FAILED,
+                        "进程中断，下载未完成",
+                        now_ms(),
+                        task.id
+                    ],
                 );
-            });
+                drop(conn);
+                failed_dl += 1;
+                tracing::info!(name = %task.name, "中断下载已标记为失败，.tmp 已清理");
+            }
+            // --- UPLOAD ---
+            else if task.direction == repository::transfer_direction::UPLOAD {
+                // 有断点信息且本地文件还在 → 尝试续传
+                if task.server_id.is_some()
+                    && task.upload_id.is_some()
+                    && task.local_path.is_some()
+                {
+                    let local_path = task.local_path.as_ref().unwrap();
+                    let path = std::path::PathBuf::from(local_path);
+                    if !path.exists() {
+                        let conn = self.db.lock();
+                        let _ = conn.execute(
+                            "UPDATE transfer_queue SET state=?1, error_message=?2, finished_at=?3 WHERE id=?4",
+                            rusqlite::params![
+                                repository::transfer_state::FAILED,
+                                "本地文件不存在，无法续传",
+                                now_ms(),
+                                task.id
+                            ],
+                        );
+                        drop(conn);
+                        failed_ul += 1;
+                        continue;
+                    }
 
-            match upload_api.upload_resume(&path, None, Some(&session), None, Some(&on_resume)).await {
-                Ok(f) => {
-                    tracing::info!(name = %task.name, cloud_id = %f.id, "断点续传完成");
+                    let Some(ref exec) = self.executor else { break; };
+                    let upload_api = exec.upload_api();
+                    let session = crate::drive::upload_api::ResumeSession {
+                        server_id: task.server_id.clone().unwrap_or_default(),
+                        upload_id: task.upload_id.clone().unwrap_or_default(),
+                        session_url: String::new(),
+                        chunk_size: 0,
+                    };
+
+                    let db_clone = self.db.clone();
+                    let task_id = task.id;
+                    let on_resume: crate::drive::upload_api::ResumeProgressFn =
+                        Box::new(move |_sid, _uid, offset| {
+                            let conn = db_clone.lock();
+                            let _ = conn.execute(
+                                "UPDATE transfer_queue SET resume_offset=?1, transferred=?1 WHERE id=?2",
+                                rusqlite::params![offset as i64, task_id],
+                            );
+                        });
+
+                    tracing::info!(name = %task.name, offset = task.resume_offset, "尝试断点续传…");
+
+                    match upload_api
+                        .upload_resume(&path, None, Some(&session), None, Some(&on_resume))
+                        .await
+                    {
+                        Ok(f) => {
+                            let conn = self.db.lock();
+                            let _ = conn.execute(
+                                "UPDATE transfer_queue SET state=?1, finished_at=?2, transferred=total_size WHERE id=?3",
+                                rusqlite::params![
+                                    repository::transfer_state::COMPLETED,
+                                    now_ms(),
+                                    task_id
+                                ],
+                            );
+                            drop(conn);
+                            resumed += 1;
+                            tracing::info!(name = %task.name, cloud_id = %f.id, "断点续传完成");
+                        }
+                        Err(e) => {
+                            let conn = self.db.lock();
+                            let _ = conn.execute(
+                                "UPDATE transfer_queue SET state=?1, error_message=?2, finished_at=?3 WHERE id=?4",
+                                rusqlite::params![
+                                    repository::transfer_state::FAILED,
+                                    format!("续传失败: {e}"),
+                                    now_ms(),
+                                    task_id
+                                ],
+                            );
+                            drop(conn);
+                            failed_ul += 1;
+                            tracing::warn!(name = %task.name, error = %e, "断点续传失败");
+                        }
+                    }
+                } else {
+                    // 无断点信息 → 标记 FAILED，planner 下轮重建
                     let conn = self.db.lock();
                     let _ = conn.execute(
-                        "UPDATE transfer_queue SET state=?1, finished_at=?2, transferred=total_size WHERE id=?3",
-                        rusqlite::params![repository::transfer_state::COMPLETED, chrono::Utc::now().timestamp_millis(), task_id],
+                        "UPDATE transfer_queue SET state=?1, error_message=?2, finished_at=?3 WHERE id=?4",
+                        rusqlite::params![
+                            repository::transfer_state::FAILED,
+                            "进程中断，上传未完成",
+                            now_ms(),
+                            task.id
+                        ],
                     );
-                }
-                Err(e) => {
-                    tracing::warn!(name = %task.name, error = %e, "断点续传失败");
-                    let conn = self.db.lock();
-                    let _ = conn.execute(
-                        "UPDATE transfer_queue SET state=?1, error_message=?2 WHERE id=?3",
-                        rusqlite::params![repository::transfer_state::FAILED, e.to_string(), task_id],
-                    );
+                    drop(conn);
+                    failed_ul += 1;
+                    tracing::info!(name = %task.name, "中断上传（无断点）已标记为失败");
                 }
             }
+            // --- DELETE ---
+            else if task.direction == repository::transfer_direction::DELETE {
+                let conn = self.db.lock();
+                let _ = conn.execute(
+                    "UPDATE transfer_queue SET state=?1, error_message=?2, finished_at=?3 WHERE id=?4",
+                    rusqlite::params![
+                        repository::transfer_state::FAILED,
+                        "进程中断",
+                        now_ms(),
+                        task.id
+                    ],
+                );
+                drop(conn);
+                failed_del += 1;
+            }
+        }
+
+        if resumed > 0 || failed_dl > 0 || failed_ul > 0 || failed_del > 0 {
+            tracing::info!(
+                resumed,
+                failed_download = failed_dl,
+                failed_upload = failed_ul,
+                failed_delete = failed_del,
+                "中断传输恢复完成"
+            );
         }
     }
 
