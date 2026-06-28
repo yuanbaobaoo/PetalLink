@@ -39,6 +39,7 @@ jobs:
         env:
           HWCLOUD_CLIENT_ID: ${{ secrets.HWCLOUD_CLIENT_ID || '' }}
           HWCLOUD_CLIENT_SECRET: ${{ secrets.HWCLOUD_CLIENT_SECRET || '' }}
+          TAURI_SIGNING_PRIVATE_KEY: ""
 
       - name: Collect and rename artifacts
         run: |
