@@ -163,6 +163,8 @@ async function handleExportLogs(): Promise<void> {
 <style scoped>
 .log-page { display: flex; flex-direction: column; width: 100%; height: 100%; background: var(--bg-page); }
 .log-page--inline { height: 100%; background: transparent; }
+.log-page--inline .log-toolbar { padding-left: 0; padding-right: 0; padding-top: 0; }
+.log-page--inline .log-body { padding-left: 0; padding-right: 0; }
 .log-appbar { height: var(--appbar-height); display: flex; align-items: center; gap: var(--space-sm); padding: 0 var(--space-lg); border-bottom: 0.5px solid var(--border); background: var(--bg-container); flex-shrink: 0; }
 .log-appbar__back { transform: rotate(180deg); }
 .log-appbar__title { font-size: var(--font-title-sm); font-weight: var(--fw-semibold); }
