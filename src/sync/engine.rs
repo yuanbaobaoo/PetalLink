@@ -1039,6 +1039,38 @@ impl SyncEngine {
         let _ = self.state_tx.send(st);
     }
 
+    /// 实时重算传输队列的进行中计数并推送 SyncGlobalState（不重置 is_running）。
+    ///
+    /// 供 transfer_update 监听器调用：双端对齐/手动下载/传输进度等不经过 sync cycle 的场景，
+    /// 入队/结算 RUNNING 传输后，需刷新状态条的 uploading/downloading 计数。
+    /// 与 [`update_and_push_state`] 区别：后者只在周期结束调用且重置 is_running；
+    /// 本方法保留 is_running/is_indexing 原值，仅刷新传输计数，避免误清「同步中」。
+    pub fn push_live_transfer_state(&self) {
+        let (uploading, downloading) = {
+            let conn = self.db.lock();
+            let uploading: u64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM transfer_queue WHERE state=?1 AND direction=?2",
+                    params![repository::transfer_state::RUNNING, repository::transfer_direction::UPLOAD],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap_or(0) as u64;
+            let downloading: u64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM transfer_queue WHERE state=?1 AND direction=?2",
+                    params![repository::transfer_state::RUNNING, repository::transfer_direction::DOWNLOAD],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap_or(0) as u64;
+            (uploading, downloading)
+        };
+        let mut st = self.state.lock().clone();
+        st.uploading = uploading;
+        st.downloading = downloading;
+        *self.state.lock() = st.clone();
+        let _ = self.state_tx.send(st);
+    }
+
     async fn scan_local(&self) -> HashMap<String, LocalFileEntry> {
         match &self.mount {
             Some(m) => m.scan_local(&self.skip_patterns).await.unwrap_or_default().into_iter()

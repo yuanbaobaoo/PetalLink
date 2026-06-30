@@ -138,12 +138,11 @@ jobs:
             ```bash
             xattr -d com.apple.quarantine ~/Downloads/PetalLink_*_aarch64.dmg
             ```
+            或者
+            ```
+            xattr -d com.apple.quarantine /Applications/PetalLink.app    
+            ```
 
-            然后将 PetalLink.app 拖入 Applications 文件夹启动即可。
-
-            > 💡 这是开源项目暂未配置 Apple 公证（$99/年），不影响应用安全性。
-            >
-            > 自动更新功能不受影响，后续版本可通过应用内更新。
           files: |
             dist/*.dmg
             dist/*.app.tar.gz

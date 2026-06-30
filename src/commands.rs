@@ -230,6 +230,10 @@ pub fn ensure_engine_started(app: &AppHandle) -> AppResult<()> {
                         emit_transfer_update(&app_for_transfer);
                         // 同步刷新托盘菜单的「正在传输」段（入队/进度/结算）
                         crate::platform::tray::refresh_menu(&app_for_transfer);
+                        // 刷新状态条 uploading/downloading 计数（双端对齐等非 sync cycle 场景）
+                        if let Some(e) = try_sync_engine() {
+                            e.push_live_transfer_state();
+                        }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,

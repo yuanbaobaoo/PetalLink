@@ -1,6 +1,6 @@
 [package]
 name = "PetalLink"
-version = "1.0.4"
+version = "1.0.5"
 description = "PetalLink — 基于 Tauri 的 macOS 华为云盘开源客户端"
 authors = ["PetalLink"]
 edition = "2021"
