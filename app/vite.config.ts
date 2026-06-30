@@ -1,12 +1,12 @@
 /// PetalLink 前端 Vite 配置
-import { defineConfig } from "vite";
+import { defineConfig, type UserConfig } from "vite";
 import vue from "@vitejs/plugin-vue";
 import { fileURLToPath, URL } from "node:url";
 
 // Tauri 用固定端口 1420，HMR 与 Rust 端 devUrl 对齐
 const host = process.env.TAURI_DEV_HOST;
 
-export default defineConfig(async () => ({
+const config: UserConfig = {
   plugins: [vue()],
 
   // @ 路径别名指向当前目录（与 tsconfig.json paths 一致）
@@ -53,4 +53,6 @@ export default defineConfig(async () => ({
     minify: !process.env.TAURI_ENV_DEBUG ? "esbuild" : false,
     sourcemap: !!process.env.TAURI_ENV_DEBUG,
   },
-}));
+};
+
+export default defineConfig(config);

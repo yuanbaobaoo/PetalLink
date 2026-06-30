@@ -318,9 +318,8 @@ function fmtSize(bytes: number): string {
           <MateSectionHeader icon="cloud" text="关于" />
           <div class="card card--about">
             <MateLogoWithText :height="30" />
-            <div class="about-version">版本 {{ appVersion || "..." }}</div>
-            <div class="about-tagline">基于 Tauri 的 macOS 客户端</div>
-            <div class="about-update">
+            <div class="about-version-row">
+              <span class="about-version">版本 {{ appVersion || "..." }}</span>
               <MateButton
                 variant="text"
                 icon="refresh"
@@ -333,6 +332,7 @@ function fmtSize(bytes: number): string {
               <span v-if="updater.phase === 'upToDate'" class="about-update-hint">已是最新版本</span>
               <span v-else-if="updater.phase === 'error'" class="about-update-hint about-update-hint--error">检查失败</span>
             </div>
+            <div class="about-tagline">一款开源免费的华为云盘客户端</div>
             <!-- 更新包下载进度：正在下载时展示进度条，点击重新打开弹窗 -->
             <div
               v-if="updater.isUpdateDownloading"
@@ -403,9 +403,10 @@ function fmtSize(bytes: number): string {
 .card-path { font-size: var(--font-caption); font-family: var(--font-mono); color: var(--text-secondary); background: var(--bg-hover); padding: 2px var(--space-sm); border-radius: var(--radius-sm); }
 .account-avatar { width: 56px; height: 56px; border-radius: 50%; background: linear-gradient(135deg, var(--color-brand), var(--color-brand-hover)); color: #fff; font-size: 22px; font-weight: var(--fw-semibold); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
 .account-name { font-size: var(--font-title-sm); font-weight: var(--fw-semibold); color: var(--text-primary); }
-.about-version { font-size: var(--font-caption); color: var(--text-secondary); margin-top: var(--space-sm); }
+/* 版本号 + 检查更新按钮同一行 */
+.about-version-row { display: flex; align-items: center; gap: var(--space-sm); margin-top: var(--space-sm); flex-wrap: wrap; }
+.about-version { font-size: var(--font-caption); color: var(--text-secondary); }
 .about-tagline { font-size: var(--font-caption); color: var(--text-secondary); }
-.about-update { display: flex; align-items: center; gap: var(--space-md); margin-top: var(--space-lg); }
 .about-update-hint { font-size: var(--font-caption); color: var(--color-success); }
 .about-update-hint--error { color: var(--color-error); }
 /* 更新包下载进度（关于页） */
