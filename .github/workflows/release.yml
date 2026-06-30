@@ -130,7 +130,16 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           name: "${{ github.ref_name }}"
+          # generate_release_notes: true 会自动生成「自上个 tag 以来的 commits/PR 变更说明」，
+          # 并接在下方自定义 body 之后（action-gh-release 的 pre-pend 语义）。
+          generate_release_notes: true
           body: |
+            ## 更新内容
+
+            ${{ github.event.head_commit.message }}
+
+            ---
+
             ## 安装说明
 
             macOS 安全策略会拦截从互联网下载的未签名应用，双击 DMG 时可能提示「磁盘映像损坏」。请先移除隔离标记再打开：
@@ -140,7 +149,7 @@ jobs:
             ```
             或者
             ```
-            xattr -d com.apple.quarantine /Applications/PetalLink.app    
+            xattr -d com.apple.quarantine /Applications/PetalLink.app
             ```
 
           files: |
