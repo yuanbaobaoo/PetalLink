@@ -53,7 +53,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "untrusted comment: minisign public key: 9849E861943DBB45\nRWRFuz2UYehJmK1q/bUx6XfRv3RnCYmMnX6rYK4l/Odxf96Y5XLi4MHt",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDk4NDlFODYxOTQzREJCNDUKUldSRnV6MlVZZWhKbUsxcS9iVXg2WGZSdjNSbkNZbU1uWDZyWUs0bC9PZHhmOTZZNVhMaTRNSHQK",
       "endpoints": [
         "https://github.com/yuanbaobaoo/PetalLink/releases/latest/download/PetalLink_update.json"
       ],
