@@ -8,11 +8,10 @@ import type { DriveFile } from "@/api/drive";
 import * as syncApi from "@/api/sync";
 import {
   MateIcon, MateCheckbox, MateButton, MateDialog, MateTextField,
-  MateCircularProgress, MateLinearProgress, MateEmpty,
+  MateCircularProgress, MateEmpty,
 } from "@/components/mate";
 import { confirmDialog, showToast } from "@/components/mate";
 import { useAsyncAction } from "@/composables/useAsyncAction";
-import { on } from "@/api/tauri";
 
 // 同步状态文案：仅云端（未同步到本地）
 const SYNC_STATUS_CLOUD_ONLY = "仅云端（未同步到本地）";
@@ -91,12 +90,6 @@ const dragging = ref<"size" | "time" | null>(null);
 // 同步进度对话框：downloadOnDemand 到镜像目录
 const downloading = ref<{ open: boolean; name: string }>({ open: false, name: "" });
 
-// 文件夹递归同步进度弹窗状态
-const folderSync = ref<{ open: boolean; name: string; done: number; total: number }>({
-  open: false, name: "", done: 0, total: 0,
-});
-// 文件夹同步进度事件监听器清理函数
-let unlistenFolderSync: (() => void) | null = null;
 
 // 右键菜单状态
 const contextMenu = ref<{ show: boolean; x: number; y: number; file: DriveFile | null; canFreeUp: boolean }>({
@@ -352,31 +345,19 @@ async function handleSyncItem(f: DriveFile): Promise<void> {
 
 /**
  * 递归同步文件夹子树（在 runSyncItem 内调用，不再自裹防重复）。
- * 开进度弹窗 → 监听 folder_sync_progress → 调 syncFolderRecursive → 关弹窗。
+ *
+ * 后台异步执行：后端立即返回，不阻塞 UI。进度实时出现在传输队列（菜单栏图标 + 传输弹窗），
+ * 用户可继续操作其他功能。完成无需 toast（传输队列本身显示完成态 + 后端会广播目录刷新）。
  *
  * @param f - 文件对象
  */
 async function doSyncFolder(f: DriveFile): Promise<void> {
   const rel = relPathOf(f);
-  folderSync.value = { open: true, name: f.name, done: 0, total: 0 };
-  // 监听后端进度事件
-  try {
-    unlistenFolderSync = await on<{ done: number; total: number }>("folder_sync_progress", (p) => {
-      folderSync.value.done = p.done;
-      folderSync.value.total = p.total;
-    });
-  } catch { /* 监听失败不阻断，仅无进度刷新 */ }
-  try {
-    const n = await syncApi.syncFolderRecursive(f.id, rel);
-    await browser.refresh();
-    showToast(n > 0 ? `已同步 ${n} 项` : "目录已是最新");
-  } catch (e) {
+  showToast(`开始双向对齐「${f.name}」，进度见传输队列`);
+  // 后台执行：不 await（命令立即返回），失败仅告警
+  syncApi.syncFolderRecursive(f.id, rel).catch((e) => {
     showToast("同步失败：" + ((e as { message?: string }).message ?? String(e)), { variant: "error" });
-  } finally {
-    unlistenFolderSync?.();
-    unlistenFolderSync = null;
-    folderSync.value.open = false;
-  }
+  });
 }
 
 /**
@@ -751,17 +732,6 @@ function handleSort(field: "name" | "size" | "modifiedTime"): void {
         <span class="dl-name">{{ downloading.name }}</span>
       </div>
     </MateDialog>
-
-    <!-- 文件夹递归同步进度对话框（非关闭式，同步完成自动关） -->
-    <MateDialog :open="folderSync.open" :title="`同步 ${folderSync.name}`" :close-on-overlay="false" title-icon="sync">
-      <div class="fs-pane">
-        <MateLinearProgress :value="folderSync.total > 0 ? folderSync.done / folderSync.total : null" />
-        <div class="fs-text">
-          正在双向对齐… {{ folderSync.total > 0 ? Math.round((folderSync.done / folderSync.total) * 100) : 0 }}%
-          <span class="fs-count">（{{ folderSync.done }}/{{ folderSync.total }}）</span>
-        </div>
-      </div>
-    </MateDialog>
   </div>
 </template>
 
@@ -830,7 +800,4 @@ function handleSort(field: "name" | "size" | "modifiedTime"): void {
 /* 下载进度 */
 .dl-pane { display: flex; align-items: center; gap: var(--space-md); }
 .dl-name { font-size: var(--font-body); color: var(--text-primary); }
-.fs-pane { display: flex; flex-direction: column; gap: var(--space-sm); }
-.fs-text { font-size: var(--font-body-sm); color: var(--text-secondary); }
-.fs-count { color: var(--text-secondary); opacity: 0.7; }
 </style>

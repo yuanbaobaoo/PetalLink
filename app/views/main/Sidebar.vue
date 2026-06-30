@@ -5,8 +5,7 @@ import { MateAppLogo } from "@/components/mate";
 import SidebarTreeNode from "./SidebarTreeNode.vue";
 import { useFileBrowserStore, ROOT } from "@/stores/fileBrowser";
 import { useAuthStore } from "@/stores/auth";
-// TODO: 自动更新功能暂时禁用
-// import { useUpdaterStore } from "@/stores/updater";
+import { useUpdaterStore } from "@/stores/updater";
 import * as authApi from "@/api/auth";
 import * as driveApi from "@/api/drive";
 import type { DriveAbout } from "@/api/drive";
@@ -18,8 +17,7 @@ const FALLBACK_INITIAL = "华";
 
 const browser = useFileBrowserStore();
 const auth = useAuthStore();
-// TODO: 自动更新功能暂时禁用
-// const updater = useUpdaterStore();
+const updater = useUpdaterStore();
 
 const userLabel = computed(() => authApi.primaryLabel(auth.userInfo) ?? LOADING_LABEL);
 const userInitial = computed(() => authApi.initial(auth.userInfo) ?? FALLBACK_INITIAL);
@@ -67,9 +65,7 @@ function fmtSize(bytes: number): string {
       </div>
     </div>
 
-    <!-- TODO: 自动更新功能暂时禁用 -->
-    <!--
-    更新提示条：有可用更新时显示
+    <!-- 更新提示条：有可用更新时显示 -->
     <div
       v-if="updater.updateAvailable && !updater.dismissed"
       class="sidebar__update-banner"
@@ -82,7 +78,6 @@ function fmtSize(bytes: number): string {
       <span class="update-banner__text">新版本 {{ updater.newVersion }}</span>
       <button class="update-banner__close" @click.stop="updater.dismissUpdate" title="关闭">×</button>
     </div>
-    -->
   </aside>
 </template>
 

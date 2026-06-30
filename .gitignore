@@ -53,6 +53,9 @@ app.*.map.json
 .env.*
 !.env.example
 .workbuddy
+*.key
+*.pem
+
 # 独立诊断/验证脚本（依赖本地 token，不应进仓库）
 tool/
 # IDE 内部工作目录

@@ -49,11 +49,11 @@
       "signingIdentity": null,
       "entitlements": "Entitlements.plist"
     },
-    "createUpdaterArtifacts": false
+    "createUpdaterArtifacts": true
   },
   "plugins": {
     "updater": {
-      "pubkey": "",
+      "pubkey": "untrusted comment: minisign public key: 9849E861943DBB45\nRWRFuz2UYehJmK1q/bUx6XfRv3RnCYmMnX6rYK4l/Odxf96Y5XLi4MHt",
       "endpoints": [
         "https://github.com/yuanbaobaoo/PetalLink/releases/latest/download/PetalLink_update.json"
       ],

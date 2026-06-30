@@ -79,6 +79,15 @@ pub fn mount() -> AppResult<Arc<MountManager>> {
 /// 全局 SyncEngine（setup 或首次配置时注入；运行期共享同一实例）
 static SYNC_ENGINE: Mutex<Option<Arc<SyncEngine>>> = Mutex::new(None);
 
+/// 全局传输更新广播发送端（供非 executor 路径的同步进度回调触发前端刷新，如双端对齐）。
+/// 由 ensure_engine_started 创建并 set。回调拿不到 AppHandle，但能通过此全局 tx 触发刷新。
+static TRANSFER_UPDATE_TX: Mutex<Option<tokio::sync::broadcast::Sender<()>>> = Mutex::new(None);
+
+/// 设置传输更新广播发送端。
+pub fn set_transfer_update_tx(tx: tokio::sync::broadcast::Sender<()>) {
+    *TRANSFER_UPDATE_TX.lock() = Some(tx);
+}
+
 /// 设置 SyncEngine。
 pub fn set_sync_engine(e: Arc<SyncEngine>) {
     *SYNC_ENGINE.lock() = Some(e);
@@ -208,7 +217,9 @@ pub fn ensure_engine_started(app: &AppHandle) -> AppResult<()> {
     executor.set_db(DB.clone());
     // 传输进度实时推送通道：每次传输结算时触发前端刷新
     let (transfer_update_tx, mut transfer_update_rx) = tokio::sync::broadcast::channel::<()>(64);
-    executor.set_transfer_update_tx(transfer_update_tx);
+    executor.set_transfer_update_tx(transfer_update_tx.clone());
+    // 存入全局，供双端对齐等非 executor 路径的进度回调触发前端刷新
+    set_transfer_update_tx(transfer_update_tx);
     // 传输进度实时推送监听器
     {
         let app_for_transfer = app.clone();
@@ -849,16 +860,27 @@ pub async fn sync_folder_recursive(app: AppHandle, folder_id: String, rel_path: 
         tracing::info!("sync_folder_recursive: 已有目录同步进行中，跳过");
         return Ok(0);
     }
-    let result = sync_folder_recursive_impl(&app, &eng, &folder_id, &rel_path).await;
-    eng.end_folder_sync();
-    // 完成后广播 contentChanged 让前端目录刷新
-    {
-        let mut st = eng.current_state();
-        st.content_changed = true;
-        st.last_sync_time = Some(chrono::Utc::now().timestamp_millis());
-        emit_sync_state(&app, &st);
-    }
-    result
+    // 后台异步执行：立即返回，不阻塞前端。传输项实时进传输队列（菜单栏/弹窗可见）。
+    // spawn 内 finally 释放 folder_syncing 锁 + 广播 contentChanged（前端目录刷新）。
+    let eng_clone = eng.clone();
+    let app_clone = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let result = sync_folder_recursive_impl(&app_clone, &eng_clone, &folder_id, &rel_path).await;
+        // 无论成功失败都释放锁（防 panic 泄漏 → 放在 spawn 任务收尾，确定性释放）
+        eng_clone.end_folder_sync();
+        // 完成后广播 contentChanged 让前端目录刷新
+        {
+            let mut st = eng_clone.current_state();
+            st.content_changed = true;
+            st.last_sync_time = Some(chrono::Utc::now().timestamp_millis());
+            emit_sync_state(&app_clone, &st);
+        }
+        match &result {
+            Ok(done) => tracing::info!(done, rel = %rel_path, "sync_folder_recursive（后台）完成"),
+            Err(e) => tracing::warn!(error = %e, rel = %rel_path, "sync_folder_recursive（后台）失败"),
+        }
+    });
+    Ok(0)
 }
 
 async fn sync_folder_recursive_impl(
@@ -1020,6 +1042,9 @@ async fn sync_folder_recursive_impl(
                 resume_offset: 0,
             }).unwrap_or(0)
         };
+        // 入队即通知：前端传输面板 + 托盘菜单立即显示新下载项
+        emit_transfer_update(app);
+        crate::platform::tray::refresh_menu(app);
         let download_result = download_to_dest(
             &f.id, &dest, &f.name, f.size,
             f.edited_time.map(|t| t.timestamp_millis()),
@@ -1043,6 +1068,9 @@ async fn sync_folder_recursive_impl(
                     task_id],
             );
         }
+        // 结算后通知：传输面板 + 托盘菜单刷新（状态变化/消失）
+        emit_transfer_update(app);
+        crate::platform::tray::refresh_menu(app);
         if let Err(e) = download_result {
             tracing::warn!(subrel = %subrel, error = %e, "sync_folder_recursive: 下载失败");
         }
@@ -1079,7 +1107,17 @@ async fn sync_folder_recursive_impl(
                 resume_offset: 0,
             }).unwrap_or(0)
         };
-        let upload_result = UPLOAD_API.upload(local_path, Some(parent_id), None, None).await;
+        // 入队即通知：前端传输面板 + 托盘菜单立即显示新上传项
+        emit_transfer_update(app);
+        crate::platform::tray::refresh_menu(app);
+        // 进度回调：节流写 transferred + 通知刷新（按 task_id 更新，500ms 节流）
+        let prog_db = DB.clone();
+        let prog_task_id = task_id;
+        let prog_throttle = std::sync::atomic::AtomicI64::new(0);
+        let on_progress: crate::drive::upload_api::ProgressFn = Box::new(move |ratio: f64| {
+            emit_transfer_progress(&prog_db, prog_task_id, ratio, &prog_throttle);
+        });
+        let upload_result = UPLOAD_API.upload(local_path, Some(parent_id), Some(&on_progress), None).await;
         // 结算传输记录（成功时 transferred=total_size，失败时保持原值）
         {
             let conn = DB.lock();
@@ -1099,6 +1137,9 @@ async fn sync_folder_recursive_impl(
                     task_id],
             );
         }
+        // 结算后通知：传输面板 + 托盘菜单刷新（状态变化/消失）
+        emit_transfer_update(app);
+        crate::platform::tray::refresh_menu(app);
         match upload_result {
             Ok(uploaded) => {
                 eng.cloud_tree_insert(full_rel.clone(), uploaded.clone());
@@ -1493,6 +1534,55 @@ pub fn emit_sync_state(app: &AppHandle, state: &SyncGlobalState) {
 /// 推送目录内容变更通知（触发前端 folderChildren 刷新）
 pub fn emit_folder_content_changed(app: &AppHandle) {
     let _ = app.emit("folder_content_changed", ());
+}
+
+/// 节流写传输进度并触发前端刷新（供双端对齐等非 executor 路径的同步进度回调用）。
+///
+/// - `db`：传输队列 DB 连接（全局）
+/// - `task_id`：transfer_queue 行 id
+/// - `ratio`：进度比例（0.0-1.0）
+/// - `last_emit_ms`：节流状态（AtomicI64，500ms 节流）
+///
+/// 与 executor::emit_throttled_progress 同构，但按 task_id 更新（双端对齐串行执行）。
+fn emit_transfer_progress(
+    db: &Arc<Mutex<rusqlite::Connection>>,
+    task_id: i64,
+    ratio: f64,
+    last_emit_ms: &std::sync::atomic::AtomicI64,
+) {
+    use std::sync::atomic::Ordering;
+    const PROGRESS_THROTTLE_MS: i64 = 500;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let last = last_emit_ms.load(Ordering::Relaxed);
+    if last != 0 && now - last < PROGRESS_THROTTLE_MS {
+        return;
+    }
+    last_emit_ms.store(now, Ordering::Relaxed);
+    // 写 transferred = ratio * total_size（查 total_size 防越界）
+    {
+        let conn = db.lock();
+        let total: i64 = conn
+            .query_row(
+                "SELECT total_size FROM transfer_queue WHERE id=?1",
+                rusqlite::params![task_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        if total > 0 {
+            let transferred = (ratio * total as f64) as i64;
+            let _ = conn.execute(
+                "UPDATE transfer_queue SET transferred=?1 WHERE id=?2",
+                rusqlite::params![transferred, task_id],
+            );
+        }
+    }
+    // 通过全局 tx 触发前端 + 托盘菜单刷新（回调拿不到 AppHandle，故走全局 tx）
+    if let Some(tx) = TRANSFER_UPDATE_TX.lock().as_ref() {
+        let _ = tx.send(());
+    }
 }
 
 /// 推送传输队列变更通知
