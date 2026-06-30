@@ -786,10 +786,19 @@ impl SyncEngine {
             } else {
                 action.file_id.clone()
             };
-            // 对齐 dart：失败且 fileId=null（新增上传失败）→ 跳过 DB 写入，由全局状态计数反映
-            let Some(file_id) = file_id else {
-                tracing::debug!(rel = %rel, status, "跳过 DB 写入（fileId=null）");
-                continue;
+            // 新增上传失败（fileId=null）→ 写入 pending: 占位项（status=FAILED），
+            // 让 retry_failed 能找到它（否则重试按钮失效）。占位 fileId 前缀 pending: 不会与真实 fileId 冲突。
+            // 其他失败（无 local_path，如缺少 fileId 的下载）仍跳过 DB 写入。
+            let file_id = match file_id {
+                Some(fid) => fid,
+                None => {
+                    if action.action_type == SyncActionType::Upload && action.local_path.is_some() {
+                        format!("{}{}", repository::PENDING_FILE_ID_PREFIX, rel)
+                    } else {
+                        tracing::debug!(rel = %rel, status, "跳过 DB 写入（fileId=null 且非上传）");
+                        continue;
+                    }
+                }
             };
 
             // 读取本地真实 mtime/size（对齐 dart _updateDbFromResults 从本地文件 stat）。
@@ -815,6 +824,15 @@ impl SyncEngine {
                     rusqlite::params![rel],
                 );
             }
+            // 成功上传/覆盖上传 → 清掉同路径的 pending: 占位孤儿行。
+            // PK 是 (file_id, local_path)，真实 fileId 与 pending: 占位 fileId 是不同主键，
+            // upsert 不会覆盖占位行 → 必须显式删除，避免残留孤儿导致 planner 误判。
+            if result.success && !file_id.starts_with(repository::PENDING_FILE_ID_PREFIX) {
+                let _ = conn.execute(
+                    "DELETE FROM sync_items WHERE local_path=?1 AND file_id LIKE ?2",
+                    rusqlite::params![rel, format!("{}%", repository::PENDING_FILE_ID_PREFIX)],
+                );
+            }
 
             // upsert（对齐 dart insertOnConflictUpdate）
             let _ = repository::upsert(&conn, &repository::SyncItem {
@@ -830,7 +848,8 @@ impl SyncEngine {
                 cloud_edited_time: cloud_file.and_then(|f| f.edited_time.map(|t| t.timestamp_millis())),
                 last_sync_time: Some(chrono::Utc::now().timestamp_millis()),
                 status,
-                error_message: result.error_message.clone(),
+                // 成功时清空 error_message（Skip 收敛等场景 result 可能带 reason，但已同步不应残留错误）
+                error_message: if result.success { None } else { result.error_message.clone() },
             });
         }
         drop(conn);

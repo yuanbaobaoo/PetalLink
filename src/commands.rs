@@ -215,7 +215,11 @@ pub fn ensure_engine_started(app: &AppHandle) -> AppResult<()> {
         tauri::async_runtime::spawn(async move {
             loop {
                 match transfer_update_rx.recv().await {
-                    Ok(()) => emit_transfer_update(&app_for_transfer),
+                    Ok(()) => {
+                        emit_transfer_update(&app_for_transfer);
+                        // 同步刷新托盘菜单的「正在传输」段（入队/进度/结算）
+                        crate::platform::tray::refresh_menu(&app_for_transfer);
+                    }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 }
@@ -256,6 +260,8 @@ pub fn ensure_engine_started(app: &AppHandle) -> AppResult<()> {
                     Ok(state) => {
                         emit_sync_state(&bridge_app, &state);
                         emit_transfer_update(&bridge_app);
+                        // 同步刷新托盘菜单的「正在传输」段（引擎状态推送）
+                        crate::platform::tray::refresh_menu(&bridge_app);
                         if state.content_changed {
                             emit_folder_content_changed(&bridge_app);
                         }

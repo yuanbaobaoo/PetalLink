@@ -46,8 +46,8 @@ tokio = { version = "1", features = ["full"] }
 # === HTTP 客户端（华为 Drive REST API） ===
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "multipart"] }
 
-# === 键钥安全存储（macOS Keychain + 跨平台降级） ===
-keyring = "3"
+# === Token 加密存储（ChaCha20-Poly1305 AEAD + 机器码绑定） ===
+chacha20poly1305 = "0.11"
 
 # === SQLite 数据库（同步状态 / 传输队列） ===
 rusqlite = { version = "0.32", features = ["bundled"] }

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// OAuth Token 对（需求 F-AUTH-03）。
-/// access_token + refresh_token + 过期时间，持久化到 Keychain。
+/// access_token + refresh_token + 过期时间，加密持久化到本地文件（机器码绑定）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenPair {
     pub access_token: String,

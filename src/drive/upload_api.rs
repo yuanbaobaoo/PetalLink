@@ -31,6 +31,10 @@ const SMALL_LARGE_THRESHOLD: u64 = 20 * 1024 * 1024;
 /// 默认分片大小（华为 API sliceSize 通常返回 10MB，此处为兜底值）
 const DEFAULT_CHUNK_SIZE: u64 = 5 * 1024 * 1024;
 const CHUNK_RETRIES: u32 = 3;
+/// 分片全部发完后的最终状态查询轮询次数（华为服务端异步合并，立即查询常得 308）
+const FINAL_STATUS_MAX_POLLS: u32 = 5;
+/// 每次最终状态查询的间隔（秒）
+const FINAL_STATUS_POLL_INTERVAL_SECS: u64 = 3;
 
 pub struct UploadApi {
     client: Arc<DriveClient>,
@@ -153,33 +157,10 @@ impl UploadApi {
             }
         }
 
-        // 所有分片已发送但未拿到文件元数据 → 查询上传状态。
-        // Google Drive 协议：向 session URL 发送空 PUT（Content-Range: bytes */total）查询进度。
-        // 若上传已完成，服务器返回 200/201 + 文件元数据。
+        // 所有分片已发送但未拿到文件元数据 → 轮询查询上传状态（华为异步合并，详见 query_final_status）。
         if !session.session_url.is_empty() {
             tracing::info!(session_url = %session.session_url, "所有分片已发送，查询上传状态...");
-            let status_resp = self.http.put(&session.session_url)
-                .header(CONTENT_RANGE, format!("bytes */{total_size}"))
-                .header(CONTENT_LENGTH, "0")
-                .bearer_auth(token)
-                .send()
-                .await;
-            match status_resp {
-                Ok(r) if r.status().is_success() => {
-                    if let Ok(body) = r.json::<Value>().await {
-                        tracing::info!(response = %body, "上传状态查询成功");
-                        if let Some(f) = DriveFile::from_json(&body) { return Ok(f); }
-                    }
-                }
-                Ok(r) => {
-                    let status = r.status().as_u16();
-                    let body = r.text().await.unwrap_or_default();
-                    tracing::warn!(status, body = %body, "上传状态查询返回非 2xx");
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "上传状态查询请求失败");
-                }
-            }
+            return self.query_final_status(&session.session_url, token, total_size).await;
         }
 
         Err(AppError::generic("分片上传完成但未拿到最终文件元数据，请等待下一轮云端轮询自动发现"))
@@ -359,31 +340,10 @@ impl UploadApi {
             }
         }
 
-        // 所有分片已发送但未拿到文件元数据 → 查询上传状态
+        // 所有分片已发送但未拿到文件元数据 → 轮询查询上传状态（华为异步合并，详见 query_final_status）。
         if !session.session_url.is_empty() {
             tracing::info!(session_url = %session.session_url, "所有分片已发送，查询上传状态...");
-            let status_resp = self.http.put(&session.session_url)
-                .header(CONTENT_RANGE, format!("bytes */{total_size}"))
-                .header(CONTENT_LENGTH, "0")
-                .bearer_auth(&token)
-                .send()
-                .await;
-            match status_resp {
-                Ok(r) if r.status().is_success() => {
-                    if let Ok(body) = r.json::<Value>().await {
-                        tracing::info!(response = %body, "上传状态查询成功");
-                        if let Some(f) = DriveFile::from_json(&body) { return Ok(f); }
-                    }
-                }
-                Ok(r) => {
-                    let status = r.status().as_u16();
-                    let body = r.text().await.unwrap_or_default();
-                    tracing::warn!(status, body = %body, "上传状态查询返回非 2xx");
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "上传状态查询请求失败");
-                }
-            }
+            return self.query_final_status(&session.session_url, &token, total_size).await;
         }
 
         Err(AppError::generic(
@@ -514,6 +474,70 @@ impl UploadApi {
     async fn ensure_capacity_for(&self, file_path: &std::path::Path) -> AppResult<()> {
         let size = file_path.metadata().map_err(|e| AppError::generic(format!("读取文件元数据失败：{e}")))?.len() as i64;
         crate::drive::about_api::AboutApi::new(self.client.clone()).ensure_capacity(size).await
+    }
+
+    /// 所有分片发完后的最终状态查询（轮询重试）。
+    ///
+    /// 华为云盘大文件上传的最终合并是**异步**的：所有分片网络层已发出，
+    /// 但服务端合并确认有延迟，立即查询常返回 308（Resume Incomplete）。
+    /// 本方法循环查询（默认 5 次，间隔 3 秒），期间复用同一 session，**不重传数据**：
+    /// - 2xx：服务端合并完成，返回文件元数据
+    /// - 308：服务端仍在合并，等待后重试
+    /// - 其他/请求失败：记录后继续（不立即放弃，给服务端更多时间）
+    ///
+    /// 全部轮询后仍无元数据 → Err（保持兜底语义，靠下轮云端轮询发现）
+    async fn query_final_status(
+        &self,
+        session_url: &str,
+        token: &str,
+        total_size: u64,
+    ) -> AppResult<DriveFile> {
+        for attempt in 1..=FINAL_STATUS_MAX_POLLS {
+            let status_resp = self
+                .http
+                .put(session_url)
+                .header(CONTENT_RANGE, format!("bytes */{total_size}"))
+                .header(CONTENT_LENGTH, "0")
+                .bearer_auth(token)
+                .send()
+                .await;
+            match status_resp {
+                Ok(r) if r.status().is_success() => {
+                    // 2xx：服务端合并完成
+                    if let Ok(body) = r.json::<Value>().await {
+                        tracing::info!(response = %body, "上传状态查询成功（第 {attempt} 次）");
+                        if let Some(f) = DriveFile::from_json(&body) {
+                            return Ok(f);
+                        }
+                    }
+                    // 2xx 但无元数据：罕见，继续重试
+                    tracing::warn!("上传状态查询 2xx 但无文件元数据，继续重试（第 {attempt} 次）");
+                }
+                Ok(r) => {
+                    let status = r.status().as_u16();
+                    let body = r.text().await.unwrap_or_default();
+                    // 308 = Resume Incomplete：服务端仍在异步合并，正常现象，等待重试
+                    if attempt < FINAL_STATUS_MAX_POLLS {
+                        tracing::warn!(
+                            attempt, max = FINAL_STATUS_MAX_POLLS, status, body = %body,
+                            "上传状态查询返回非 2xx（服务端异步合并中），等待重试"
+                        );
+                    } else {
+                        tracing::warn!(status, body = %body, "上传状态查询返回非 2xx（已到最大重试）");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, attempt, "上传状态查询请求失败，继续重试");
+                }
+            }
+            // 未成功且未到最后一次 → 等待后重试
+            if attempt < FINAL_STATUS_MAX_POLLS {
+                tokio::time::sleep(Duration::from_secs(FINAL_STATUS_POLL_INTERVAL_SECS)).await;
+            }
+        }
+        Err(AppError::generic(
+            "分片上传完成但未拿到最终文件元数据，请等待下一轮云端轮询自动发现",
+        ))
     }
 }
 

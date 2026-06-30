@@ -46,9 +46,6 @@ pub const BUNDLE_IDENTIFIER: &str = "io.github.yuanbaobaoo.PetalLink";
 /// 可执行文件名（须与 Cargo.toml [[bin]] name 一致；决定进程名 / .app 内 MacOS/<exec>）
 pub const EXECUTABLE_NAME: &str = "PetalLink";
 
-/// Keychain service 前缀（与原 Flutter 工程一致，避免换 bundle id 丢凭据）
-pub const KEYCHAIN_SERVICE_PREFIX: &str = "hwcloud.";
-
 // ===== OAuth scope =====
 /// 授权域。当前用 `drive`（全盘访问），原因见需求文档 §6.1：
 /// `drive.file` 只能访问本应用创建/打开过的文件，网页/其他客户端上传的看不到。

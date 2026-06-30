@@ -57,7 +57,9 @@ impl SyncPlanner {
         for rel_path in all_paths {
             if let Some(action) = self.decide(rel_path, snapshot) {
                 // 过滤 Skip 类型（对齐 dart plan() 的 action.type != SyncActionType.skip 过滤）
-                if action.action_type == SyncActionType::Skip {
+                // ★ 例外：携带 cloud_file 的 Skip 是 pending 占位项的收敛动作（上次失败实为成功），
+                //   必须放行到 engine，让其 upsert 真实 fileId + 清理 pending 孤儿行。
+                if action.action_type == SyncActionType::Skip && action.cloud_file.is_none() {
                     continue;
                 }
                 actions.push(action);
@@ -119,6 +121,20 @@ impl SyncPlanner {
 
         // === 三方都存在（文件）===
         if local_has_content && cloud_exists && db_exists {
+            // ★ pending: 占位项 + 云端已有 → 上次「失败」其实成功（如 308 误判），收敛为已同步。
+            // 用 Skip 携带真实 cloud_file：engine 结算时 upsert 真实 fileId + status=SYNCED +
+            // 清理 pending 孤儿行。避免重复上传（华为不查重）和 Download 覆盖（cloud_edited_time=None 误判）。
+            if db.unwrap().file_id.starts_with(crate::data::repository::PENDING_FILE_ID_PREFIX) {
+                return Some(SyncAction {
+                    action_type: SyncActionType::Skip,
+                    relative_path: Some(rel_path.to_string()),
+                    file_id: cloud.unwrap().id.clone().into(),
+                    parent_file_id: None,
+                    local_path: None,
+                    cloud_file: Some(cloud.unwrap().clone()),
+                    reason: Some("pending 占位项发现云端已有 → 收敛为已同步（上次失败实为成功）".to_string()),
+                });
+            }
             let local_changed = is_local_changed(local.unwrap(), db.unwrap());
             let cloud_changed = is_cloud_changed(cloud.unwrap(), db.unwrap());
             if local_changed && cloud_changed {
@@ -172,6 +188,20 @@ impl SyncPlanner {
         // === 本地有 + 云端无 ===
         if local_exists && !cloud_exists {
             if db_exists {
+                // ★ pending: 占位项（新增上传失败 / retry 后仍未成功）→ 重新计划上传。
+                // 绝不能走下面的 BackupBeforeCloudDelete / DeleteFromLocal，否则会删本地文件（数据丢失）。
+                // 占位 fileId 无真实云端对应，云端无此文件是「还没传上去」而非「云端删了」。
+                if db.unwrap().file_id.starts_with(crate::data::repository::PENDING_FILE_ID_PREFIX) {
+                    return Some(SyncAction {
+                        action_type: SyncActionType::Upload,
+                        relative_path: Some(rel_path.to_string()),
+                        file_id: None,
+                        parent_file_id: None,
+                        local_path: Some(local.unwrap().absolute_path.to_string_lossy().to_string()),
+                        cloud_file: None,
+                        reason: Some("pending 占位项（上传待重试）→ 重新上传".to_string()),
+                    });
+                }
                 // 文件夹：云端删除也不删本地（双向删除禁用 + 保目录结构）。
                 // 关键：若云端删了整个目录但本地改了其内某文件，该文件会走 BackupBeforeCloudDelete
                 // 改名备份，此时父目录链必须存在——否则副本无家可归。目录不删即保留栖身之所。
@@ -565,6 +595,72 @@ mod tests {
         let actions = SyncPlanner.plan(&snapshot);
         assert!(actions.iter().any(|a| a.action_type == SyncActionType::DeleteFromLocal));
         assert!(!actions.iter().any(|a| a.action_type == SyncActionType::BackupBeforeCloudDelete));
+    }
+
+    /// ★ pending: 占位项（新增上传失败）→ 必须重新 Upload，绝不 DeleteFromLocal（防数据丢失）。
+    /// 场景：本地有文件 + 云端无（上传失败）+ DB 是 pending: 占位 + mtime 一致（is_local_changed=false）。
+    /// 若无护栏会走 DeleteFromLocal 删本地文件 → 这是必须防住的危险路径。
+    #[test]
+    fn test_pending_placeholder_reuploads_not_delete() {
+        let mut local = HashMap::new();
+        // mtime/size 与 db 一致（is_local_changed=false）—— 正是会触发 DeleteFromLocal 的危险条件
+        local.insert("A/big.mp4".to_string(), make_local("A/big.mp4", 800_000_000, 2000, false));
+        let mut db = HashMap::new();
+        // pending: 占位 fileId + status=FAILED
+        db.insert(
+            "A/big.mp4".to_string(),
+            make_db("pending:A/big.mp4", 2000, 800_000_000, 0, sync_status::FAILED),
+        );
+        let snapshot = SyncSnapshot { local, cloud: HashMap::new(), db, is_startup_resume: false };
+        let actions = SyncPlanner.plan(&snapshot);
+        // 必须 Upload，绝不 DeleteFromLocal / BackupBeforeCloudDelete
+        assert!(actions.iter().any(|a| a.action_type == SyncActionType::Upload), "pending 占位应重新 Upload");
+        assert!(!actions.iter().any(|a| a.action_type == SyncActionType::DeleteFromLocal), "绝不能删本地文件");
+        assert!(!actions.iter().any(|a| a.action_type == SyncActionType::BackupBeforeCloudDelete), "绝不能备份改名");
+    }
+
+    /// ★ pending: 占位项即使 retry 后 status=SYNCED 也应重新 Upload（cloud 仍无此文件）。
+    /// retry_failed 把 FAILED→SYNCED，但 file_id 仍是 pending: 前缀，cloud_exists=false → 必须重传。
+    #[test]
+    fn test_pending_placeholder_after_retry_reuploads() {
+        let mut local = HashMap::new();
+        local.insert("A/big.mp4".to_string(), make_local("A/big.mp4", 800_000_000, 2000, false));
+        let mut db = HashMap::new();
+        // retry 后 status=SYNCED，但 file_id 仍 pending: 前缀
+        db.insert(
+            "A/big.mp4".to_string(),
+            make_db("pending:A/big.mp4", 2000, 800_000_000, 0, sync_status::SYNCED),
+        );
+        let snapshot = SyncSnapshot { local, cloud: HashMap::new(), db, is_startup_resume: false };
+        let actions = SyncPlanner.plan(&snapshot);
+        assert!(actions.iter().any(|a| a.action_type == SyncActionType::Upload), "retry 后的 pending 占位仍应 Upload");
+        assert!(!actions.iter().any(|a| a.action_type == SyncActionType::DeleteFromLocal), "绝不能删本地文件");
+    }
+
+    /// ★ pending 占位项 + 云端已存在 → 收敛为已同步（上次 308 误判实为成功），绝不重复上传/下载。
+    /// 这正是用户遇到的场景：分片发完 308 误判失败，但文件其实已上传成功，下轮 cloud_tree 发现了它。
+    /// 必须返回携带真实 cloud_file 的 Skip（放行到 engine 收敛），而非 Upload（重复）或 Download（无意义覆盖）。
+    #[test]
+    fn test_pending_placeholder_with_cloud_resolves() {
+        let mut local = HashMap::new();
+        local.insert("A/big.mp4".to_string(), make_local("A/big.mp4", 800_000_000, 2000, false));
+        let mut cloud = HashMap::new();
+        // 云端已有该文件（说明上次「失败」其实成功了）
+        cloud.insert("A/big.mp4".to_string(), make_cloud("real-fid-123", "big.mp4", false, 2000));
+        let mut db = HashMap::new();
+        // pending: 占位项（cloud_edited_time=0/None → 会被 is_cloud_changed 误判为 true）
+        db.insert(
+            "A/big.mp4".to_string(),
+            make_db("pending:A/big.mp4", 2000, 800_000_000, 0, sync_status::FAILED),
+        );
+        let snapshot = SyncSnapshot { local, cloud, db, is_startup_resume: false };
+        let actions = SyncPlanner.plan(&snapshot);
+        // 必须收敛（Skip 携带真实 cloud_file），绝不重复上传/下载
+        let resolve = actions.iter().find(|a| a.action_type == SyncActionType::Skip && a.cloud_file.is_some());
+        assert!(resolve.is_some(), "pending + 云端已有应返回收敛 Skip（携带 cloud_file）");
+        assert_eq!(resolve.unwrap().file_id.as_deref(), Some("real-fid-123"), "应携带真实 fileId");
+        assert!(!actions.iter().any(|a| a.action_type == SyncActionType::Upload), "绝不能重复上传");
+        assert!(!actions.iter().any(|a| a.action_type == SyncActionType::Download), "绝不能下载覆盖");
     }
 
     /// 云端删除整个目录 + 目录内某文件本地改过 → 目录 skip + 改过文件备份 + 未改文件删除。

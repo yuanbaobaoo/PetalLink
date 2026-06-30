@@ -6,7 +6,9 @@
 //! 传输队列（TransferQueue 表）记录进度，修剪历史（保留最近 100 条已结束任务）。
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::Semaphore;
 
@@ -14,11 +16,18 @@ use crate::data::repository::{
     self, sync_status,
     transfer_direction, transfer_state, SyncItem, TransferTask,
 };
-use crate::drive::{download_api::DownloadApi, files_api::FilesApi, upload_api::UploadApi};
+use crate::drive::{
+    download_api::{DownloadApi, ProgressFn as DownloadProgressFn},
+    files_api::FilesApi,
+    upload_api::{ProgressFn as UploadProgressFn, UploadApi},
+};
 use crate::mount::manager::MountManager;
 use crate::sync::conflict::ConflictResolver;
 use crate::sync::stability::{StabilityChecker, StabilityResult};
 use crate::sync::state::{ActionResult, SyncAction, SyncActionType};
+
+/// 进度更新节流间隔（毫秒）。下载流式每个 chunk 都回调，过频写 DB+emit 会卡顿。
+const PROGRESS_THROTTLE_MS: i64 = 500;
 
 /// 同步执行器 —— 持有全部外部依赖。
 pub struct SyncExecutor {
@@ -32,6 +41,49 @@ pub struct SyncExecutor {
     db: Option<Arc<parking_lot::Mutex<rusqlite::Connection>>>,
     /// 传输更新通知发送端（每次传输结算时触发前端刷新）
     transfer_update_tx: Option<tokio::sync::broadcast::Sender<()>>,
+}
+
+// ===== 进度更新（节流） =====
+
+/// 节流写传输进度到 DB 并通知前端刷新。
+///
+/// - `db` / `tx`：传输队列 DB 连接 + 传输更新广播发送端
+/// - `local_path`：用于定位 transfer_queue 行（WHERE local_path AND state=RUNNING）
+/// - `transferred`：已传输字节数
+/// - `last_emit_ms`：上次 emit 的 epoch 毫秒（AtomicI64，0=从未 emit）；按 500ms 节流
+///
+/// 节流状态由每个传输任务的闭包独立持有，无共享状态、无锁、无竞态。
+/// AtomicI64 是 Send+Sync，满足 ProgressFn 的线程安全要求。
+fn emit_throttled_progress(
+    db: &Option<Arc<parking_lot::Mutex<rusqlite::Connection>>>,
+    tx: &Option<tokio::sync::broadcast::Sender<()>>,
+    local_path: &str,
+    transferred: i64,
+    last_emit_ms: &AtomicI64,
+) {
+    // 节流：距上次 emit 不足 PROGRESS_THROTTLE_MS 则跳过
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let last = last_emit_ms.load(Ordering::Relaxed);
+    if last != 0 && now - last < PROGRESS_THROTTLE_MS {
+        return;
+    }
+    last_emit_ms.store(now, Ordering::Relaxed);
+
+    // 更新 DB 进度（仅 RUNNING 行）
+    if let Some(db) = db {
+        let conn = db.lock();
+        let _ = conn.execute(
+            "UPDATE transfer_queue SET transferred=?1 WHERE local_path=?2 AND state=?3",
+            rusqlite::params![transferred, local_path, transfer_state::RUNNING],
+        );
+    }
+    // 通知前端 + 托盘菜单刷新
+    if let Some(tx) = tx {
+        let _ = tx.send(());
+    }
 }
 
 impl SyncExecutor {
@@ -326,19 +378,29 @@ impl SyncExecutor {
         });
         let resume_cb: Option<&crate::drive::upload_api::ResumeProgressFn> = if is_large { Some(&on_resume) } else { None };
 
-        // 路由：已有 fileId → update；否则 POST 新上传
+        // 进度回调：节流写 transferred 并通知前端刷新（500ms 一次）
+        // throttle 节流状态由闭包 move 捕获，跨多次回调持久；AtomicI64 内部可变，Fn 闭包可用 &。
+        let db_prog = self.db.clone();
+        let tx_prog = self.transfer_update_tx.clone();
+        let lp_prog = action.local_path.clone().unwrap_or_default();
+        let total = size;
+        let throttle = AtomicI64::new(0);
+        let on_progress: UploadProgressFn = Box::new(move |ratio: f64| {
+            let transferred = (ratio * total as f64) as i64;
+            emit_throttled_progress(&db_prog, &tx_prog, &lp_prog, transferred, &throttle);
+        });
         let result = if has_cloud_id && !is_large {
-            match self.upload_api.upload_update(action.file_id.as_ref().unwrap(), &path, parent_id, None).await {
+            match self.upload_api.upload_update(action.file_id.as_ref().unwrap(), &path, parent_id, Some(&on_progress)).await {
                 Ok(f) => ActionResult { success: true, error_message: None, deferred: false, cloud_file: Some(f) },
                 Err(_e) => {
-                    match self.upload_api.upload(&path, parent_id, None, resume_cb).await {
+                    match self.upload_api.upload(&path, parent_id, Some(&on_progress), resume_cb).await {
                         Ok(f) => ActionResult { success: true, error_message: None, deferred: false, cloud_file: Some(f) },
                         Err(e) => ActionResult { success: false, error_message: Some(e.to_string()), deferred: false, cloud_file: None },
                     }
                 }
             }
         } else {
-            match self.upload_api.upload(&path, parent_id, None, resume_cb).await {
+            match self.upload_api.upload(&path, parent_id, Some(&on_progress), resume_cb).await {
                 Ok(f) => ActionResult { success: true, error_message: None, deferred: false, cloud_file: Some(f) },
                 Err(e) => ActionResult { success: false, error_message: Some(e.to_string()), deferred: false, cloud_file: None },
             }
@@ -374,7 +436,15 @@ impl SyncExecutor {
         }
 
         let rel = action.relative_path.as_deref().unwrap_or("?");
-        let result = match self.download_api.download(&file_id, &local_path, None).await {
+        // 进度回调：节流写 transferred 并通知前端刷新（500ms 一次）
+        let db_prog = self.db.clone();
+        let tx_prog = self.transfer_update_tx.clone();
+        let lp_prog = local_path.to_string_lossy().to_string();
+        let throttle = AtomicI64::new(0);
+        let on_progress: DownloadProgressFn = Box::new(move |received: u64, _total: u64| {
+            emit_throttled_progress(&db_prog, &tx_prog, &lp_prog, received as i64, &throttle);
+        });
+        let result = match self.download_api.download(&file_id, &local_path, Some(&on_progress)).await {
             Ok(()) => {
                 if let Some(m) = &self.mount {
                     let _ = m.mark_downloaded(&local_path).await;

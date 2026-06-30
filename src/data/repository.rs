@@ -28,6 +28,12 @@ pub mod transfer_direction {
     pub const DELETE: i32 = 2;
 }
 
+/// 新增上传失败的占位 fileId 前缀。
+/// 新增文件上传时云端无真实 fileId，失败时用此前缀 + 相对路径生成占位 fileId 写入 sync_items，
+/// 让 retry_failed 能找到失败项。成功上传后由真实 fileId 覆盖（先清占位行）。
+/// planner 据此前缀判断「待上传占位项」→ 重新 Upload，绝不删本地。
+pub const PENDING_FILE_ID_PREFIX: &str = "pending:";
+
 // ===== 传输状态常量（对齐 dart TransferStateType） =====
 pub mod transfer_state {
     pub const PENDING: i32 = 0;

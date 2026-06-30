@@ -2,7 +2,7 @@
 //!
 //! 对齐 `legacy/lib/core/config/config_store.dart`。
 //!
-//! 存储位置：`<ApplicationSupport>/config.json`，不含 token（token 存 Keychain）。
+//! 存储位置：`<ApplicationSupport>/config.json`，不含 token（token 加密存 token.bin）。
 //! 支持导入/导出 JSON（F-CFG-04：备份恢复配置）。
 
 use std::fs;

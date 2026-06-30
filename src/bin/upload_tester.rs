@@ -3,8 +3,9 @@
 //! 用法:
 //!   cargo run --bin upload-tester -- <file_path>
 //!
-//! 自动获取 token：先尝试从环境变量/Keychain/文件读取，
-//! 如果都没有，则启动 OAuth 授权流程（打开浏览器，用户点击授权即可）。
+//! 自动获取 token：先尝试从环境变量读取，
+//! 若无则启动 OAuth 授权流程（打开浏览器，用户点击授权即可）。
+//! 注：主程序的 token.bin 为机器码绑定的加密文件，本工具无法读取，故仅支持环境变量/OAuth。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,16 +14,6 @@ use std::time::Instant;
 use petal_link_lib::auth::service::AuthService;
 use petal_link_lib::drive::client::DriveClient;
 use petal_link_lib::drive::upload_api::UploadApi;
-
-fn try_read_token_file(path: &std::path::Path) -> Option<String> {
-    if !path.exists() { return None; }
-    let raw = std::fs::read_to_string(path).ok()?;
-    let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    let token = parsed.get("access_token").and_then(|v| v.as_str())?;
-    // 跳过测试 mock token
-    if token.starts_with("at-") && token.len() < 20 { return None; }
-    Some(token.to_string())
-}
 
 async fn get_token() -> String {
     // 1. 环境变量
@@ -33,27 +24,7 @@ async fn get_token() -> String {
         }
     }
 
-    // 2. PetalLink Keychain
-    if let Ok(entry) = keyring::Entry::new(
-        petal_link_lib::constants::BUNDLE_IDENTIFIER,
-        "hwcloud.access_token",
-    ) {
-        if let Ok(t) = entry.get_password() {
-            eprintln!("✓ 从 Keychain 读取 token");
-            return t;
-        }
-    }
-
-    // 3. PetalLink Application Support token.json（FileTokenStore 降级路径）
-    if let Some(dir) = dirs::data_dir() {
-        let path = dir.join("io.github.yuanbaobaoo.PetalLink").join("token.json");
-        if let Some(t) = try_read_token_file(&path) {
-            eprintln!("✓ 从 {} 读取 token", path.display());
-            return t;
-        }
-    }
-
-    // 4. 未找到有效 token → 启动 OAuth 授权流程（自动获取新 token）
+    // 2. 未找到有效 token → 启动 OAuth 授权流程（自动获取新 token）
     eprintln!();
     eprintln!("══════════════════════════════════════════════");
     eprintln!("  未找到有效 token，开始 OAuth 授权流程...");

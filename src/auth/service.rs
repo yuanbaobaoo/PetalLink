@@ -77,7 +77,7 @@ pub struct AuthService {
 impl AuthService {
     /// 使用全局 token store 构造单例。
     pub fn new() -> Self {
-        let token_store: Arc<dyn TokenStore> = Arc::new(AdaptiveStoreWrapper);
+        let token_store: Arc<dyn TokenStore> = Arc::new(GlobalStoreWrapper);
         let refresher = Arc::new(TokenRefresher::new(token_store.clone()));
         Self {
             token_store,
@@ -350,11 +350,11 @@ fn open_browser(url: &str) -> bool {
     }
 }
 
-/// 包装全局 AdaptiveTokenStore 为 Arc<dyn TokenStore>。
+/// 包装全局加密 token 存储为 Arc<dyn TokenStore>。
 /// global_store 返回 &'static，但 trait object 需要 Arc；此处每次调用转发。
-struct AdaptiveStoreWrapper;
+struct GlobalStoreWrapper;
 
-impl TokenStore for AdaptiveStoreWrapper {
+impl TokenStore for GlobalStoreWrapper {
     fn load(&self) -> AppResult<Option<TokenPair>> {
         global_store().load()
     }

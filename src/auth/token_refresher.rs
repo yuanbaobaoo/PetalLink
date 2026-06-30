@@ -152,14 +152,14 @@ impl TokenRefresher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::token_store::AdaptiveTokenStore;
+    use crate::auth::token_store::EncryptedFileStore;
 
     #[tokio::test]
     async fn test_refresh_requires_logged_in() {
         // 无 token 时刷新应返回 not_logged_in
-        // 用真实 AdaptiveTokenStore（CI 环境通常无 Keychain → 降级文件，load 为 None）
-        let store = Arc::new(AdaptiveTokenStore::new());
-        // 确保无 token
+        // 用加密文件存储：无 token.bin → load 为 None → 刷新报 NotLoggedIn
+        let store = Arc::new(EncryptedFileStore);
+        // 确保无 token（幂等清除，文件不存在也成功）
         let _ = store.clear();
         let refresher = TokenRefresher::new(store);
         let result = refresher.refresh().await;
