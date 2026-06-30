@@ -145,6 +145,9 @@ function handleClose(): void {
               {{ transferWaiting ? '等待传输完成…' : '立即重启' }}
             </MateButton>
           </template>
+          <template v-else-if="updater.phase === 'downloading'">
+            <MateButton variant="text" @click="handleClose">后台下载</MateButton>
+          </template>
         </div>
       </div>
     </div>

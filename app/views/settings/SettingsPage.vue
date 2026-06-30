@@ -333,6 +333,20 @@ function fmtSize(bytes: number): string {
               <span v-if="updater.phase === 'upToDate'" class="about-update-hint">已是最新版本</span>
               <span v-else-if="updater.phase === 'error'" class="about-update-hint about-update-hint--error">检查失败</span>
             </div>
+            <!-- 更新包下载进度：正在下载时展示进度条，点击重新打开弹窗 -->
+            <div
+              v-if="updater.isUpdateDownloading"
+              class="about-update-progress"
+              @click="updater.showDownloadDialog()"
+            >
+              <div class="about-update-progress__head">
+                <span class="about-update-progress__label">正在下载更新</span>
+                <span class="about-update-progress__pct">{{ updater.downloadProgress }}%</span>
+              </div>
+              <div class="about-update-progress__bar">
+                <div class="about-update-progress__fill" :style="{ width: `${updater.downloadProgress}%` }" />
+              </div>
+            </div>
             <div class="about-links">
               <a href="https://github.com/yuanbaobaoo/PetalLink" target="_blank" class="about-link" rel="noopener noreferrer">
                 <MateIcon name="github" :size="16" />
@@ -394,6 +408,13 @@ function fmtSize(bytes: number): string {
 .about-update { display: flex; align-items: center; gap: var(--space-md); margin-top: var(--space-lg); }
 .about-update-hint { font-size: var(--font-caption); color: var(--color-success); }
 .about-update-hint--error { color: var(--color-error); }
+/* 更新包下载进度（关于页） */
+.about-update-progress { width: 100%; margin-top: var(--space-md); cursor: pointer; padding: var(--space-sm) 0; }
+.about-update-progress__head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+.about-update-progress__label { font-size: var(--font-caption); color: var(--text-secondary); }
+.about-update-progress__pct { font-size: var(--font-caption); font-weight: var(--fw-semibold); color: var(--color-brand); }
+.about-update-progress__bar { height: 4px; background-color: var(--bg-active); border-radius: 2px; overflow: hidden; }
+.about-update-progress__fill { height: 100%; background: linear-gradient(90deg, var(--color-brand), var(--color-brand-hover)); border-radius: 2px; transition: width 0.3s ease; }
 .settings-footer { height: var(--appbar-height); display: flex; align-items: center; gap: var(--space-md); padding: 0 var(--space-xl); border-top: 0.5px solid var(--border); background: var(--bg-container); flex-shrink: 0; }
 .footer-saved { font-size: var(--font-caption); color: var(--color-success); display: inline-flex; align-items: center; gap: var(--space-xs); }
 .footer-dot { width: 6px; height: 6px; border-radius: 50%; background-color: var(--color-success); display: inline-block; }

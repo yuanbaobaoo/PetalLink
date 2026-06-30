@@ -37,6 +37,10 @@ export const useUpdaterStore = defineStore("updater", () => {
   const isChecking = computed(() => phase.value === "checking");
   const isDownloading = computed(() => phase.value === "downloading");
   const newVersion = computed(() => updateInfo.value?.version ?? "");
+  /** 是否正在下载更新包（供侧边栏/关于页展示进度，弹窗关闭后仍为 true） */
+  const isUpdateDownloading = computed(() =>
+    phase.value === "downloading" || phase.value === "downloaded" || phase.value === "waitingTransfer",
+  );
 
   // ---- 动作 ----
 
@@ -84,6 +88,13 @@ export const useUpdaterStore = defineStore("updater", () => {
   /** 打开更新对话框（供侧边栏点击使用） */
   function showDialog(): void {
     if (phase.value === "available") {
+      dialogOpen.value = true;
+    }
+  }
+
+  /** 重新打开下载进度对话框（侧边栏/关于页下载进度条点击时调用） */
+  function showDownloadDialog(): void {
+    if (isUpdateDownloading.value || phase.value === "ready") {
       dialogOpen.value = true;
     }
   }
@@ -174,11 +185,13 @@ export const useUpdaterStore = defineStore("updater", () => {
     updateAvailable,
     isChecking,
     isDownloading,
+    isUpdateDownloading,
     newVersion,
     // 动作
     silentCheck,
     manualCheck,
     showDialog,
+    showDownloadDialog,
     downloadAndInstall,
     waitForTransfers,
     dismissUpdate,

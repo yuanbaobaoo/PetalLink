@@ -227,13 +227,10 @@ pub fn ensure_engine_started(app: &AppHandle) -> AppResult<()> {
             loop {
                 match transfer_update_rx.recv().await {
                     Ok(()) => {
+                        // emit_transfer_update 内部已统一刷新传输面板 + 状态条计数
                         emit_transfer_update(&app_for_transfer);
                         // 同步刷新托盘菜单的「正在传输」段（入队/进度/结算）
                         crate::platform::tray::refresh_menu(&app_for_transfer);
-                        // 刷新状态条 uploading/downloading 计数（双端对齐等非 sync cycle 场景）
-                        if let Some(e) = try_sync_engine() {
-                            e.push_live_transfer_state();
-                        }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -753,7 +750,7 @@ pub async fn sync_free_up_space(
 }
 
 #[tauri::command]
-pub async fn sync_download_on_demand(file_id: String, dest_path: String) -> AppResult<bool> {
+pub async fn sync_download_on_demand(app: AppHandle, file_id: String, dest_path: String) -> AppResult<bool> {
     // 全局索引读取中：禁止按需下载（同 sync_folder_recursive，cloud_tree 构建中）
     if let Some(e) = try_sync_engine() {
         if e.current_state().is_indexing {
@@ -770,7 +767,49 @@ pub async fn sync_download_on_demand(file_id: String, dest_path: String) -> AppR
             .flatten()
             .and_then(|r| r.cloud_edited_time)
     };
-    match download_to_dest(&file_id, &dest, &name, 0, existing_cet).await {
+    // 入队传输记录（按需下载也纳入传输队列 + 状态条「同步中」）
+    let task_id = {
+        let conn = DB.lock();
+        repository::insert_transfer(&conn, &repository::TransferTask {
+            id: 0,
+            direction: repository::transfer_direction::DOWNLOAD,
+            file_id: Some(file_id.clone()),
+            local_path: Some(dest_path.clone()),
+            name: name.clone(),
+            total_size: 0, // 按需下载无 DriveFile 元数据，size 未知
+            transferred: 0,
+            state: repository::transfer_state::RUNNING,
+            error_message: None,
+            created_at: chrono::Utc::now().timestamp_millis(),
+            finished_at: None,
+            server_id: None,
+            upload_id: None,
+            resume_offset: 0,
+        }).unwrap_or(0)
+    };
+    emit_transfer_update(&app); // 入队即通知：传输面板 + 状态条变「同步中」
+    let result = download_to_dest(&file_id, &dest, &name, 0, existing_cet).await;
+    // 结算传输记录（成功 transferred=total_size，失败保持）
+    {
+        let conn = DB.lock();
+        let (state, transferred_sql) = if result.is_ok() {
+            (repository::transfer_state::COMPLETED, "transferred = total_size")
+        } else {
+            (repository::transfer_state::FAILED, "transferred = transferred")
+        };
+        let sql = format!(
+            "UPDATE transfer_queue SET state=?1, error_message=?2, finished_at=?3, {transferred_sql} WHERE id=?4"
+        );
+        let _ = conn.execute(
+            &sql,
+            rusqlite::params![state,
+                result.as_ref().err().map(|e| e.to_string()).as_deref(),
+                chrono::Utc::now().timestamp_millis(),
+                task_id],
+        );
+    }
+    emit_transfer_update(&app); // 结算后通知：传输面板 + 状态条刷新
+    match result {
         Ok(()) => Ok(true),
         Err(e) => {
             // 清理 .tmp 残留
@@ -1592,4 +1631,10 @@ fn emit_transfer_progress(
 /// 推送传输队列变更通知
 pub fn emit_transfer_update(app: &AppHandle) {
     let _ = app.emit("transfer_update", ());
+    // 同时刷新状态条 uploading/downloading 计数：重算 transfer_queue RUNNING 数并推送 sync_state。
+    // 统一在此刷新，覆盖所有传输场景（自动同步 executor、双端对齐、手动下载），
+    // 无需每个调用点单独处理。
+    if let Some(e) = try_sync_engine() {
+        e.push_live_transfer_state();
+    }
 }

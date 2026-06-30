@@ -65,6 +65,22 @@ function fmtSize(bytes: number): string {
       </div>
     </div>
 
+    <!-- 更新包下载进度条：正在下载更新包时显示，点击重新打开弹窗 -->
+    <div
+      v-if="updater.isUpdateDownloading"
+      class="sidebar__update-progress"
+      @click="updater.showDownloadDialog()"
+      title="点击查看更新详情"
+    >
+      <div class="update-progress__head">
+        <span class="update-progress__label">正在下载更新</span>
+        <span class="update-progress__pct">{{ updater.downloadProgress }}%</span>
+      </div>
+      <div class="update-progress__bar">
+        <div class="update-progress__fill" :style="{ width: `${updater.downloadProgress}%` }" />
+      </div>
+    </div>
+
     <!-- 更新提示条：有可用更新时显示 -->
     <div
       v-if="updater.updateAvailable && !updater.dismissed"
@@ -90,6 +106,21 @@ function fmtSize(bytes: number): string {
 .account-info { flex: 1; min-width: 0; }
 .account-info__primary { font-size: var(--font-body-sm); font-weight: var(--fw-medium); color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .account-info__secondary { font-size: var(--font-caption); color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 更新包下载进度条（账号栏下方） */
+.sidebar__update-progress {
+  padding: var(--space-sm) var(--space-lg) var(--space-md);
+  border-top: 0.5px solid var(--border);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background-color 0.15s;
+}
+.sidebar__update-progress:hover { background-color: var(--bg-hover); }
+.update-progress__head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+.update-progress__label { font-size: var(--font-caption); color: var(--text-secondary); }
+.update-progress__pct { font-size: var(--font-caption); font-weight: var(--fw-semibold); color: var(--color-brand); }
+.update-progress__bar { height: 4px; background-color: var(--bg-active); border-radius: 2px; overflow: hidden; }
+.update-progress__fill { height: 100%; background: linear-gradient(90deg, var(--color-brand), var(--color-brand-hover)); border-radius: 2px; transition: width 0.3s ease; }
 
 /* 更新提示条 */
 .sidebar__update-banner {
