@@ -26,6 +26,9 @@ pub mod transfer_direction {
     pub const UPLOAD: i32 = 0;
     pub const DOWNLOAD: i32 = 1;
     pub const DELETE: i32 = 2;
+    /// 云端新版本覆盖本地已有文件（语义为「更新」，区别于首次拉取的 DOWNLOAD）。
+    /// 仅同步引擎的 Download 动作在本地已有真实内容时使用；与 DOWNLOAD 共享下载执行路径。
+    pub const DOWNLOAD_UPDATE: i32 = 3;
 }
 
 /// 新增上传失败的占位 fileId 前缀。

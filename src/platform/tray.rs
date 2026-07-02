@@ -192,6 +192,8 @@ fn format_transfer_status(task: &repository::TransferTask) -> String {
         "正在上传"
     } else if task.direction == transfer_direction::DOWNLOAD {
         "正在下载"
+    } else if task.direction == transfer_direction::DOWNLOAD_UPDATE {
+        "正在更新"
     } else {
         "正在删除"
     };

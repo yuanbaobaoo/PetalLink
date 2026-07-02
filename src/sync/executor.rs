@@ -215,7 +215,16 @@ impl SyncExecutor {
     pub fn enqueue_transfer(&self, action: &SyncAction) -> Option<i64> {
         let direction = match action.action_type {
             SyncActionType::Upload | SyncActionType::CreateConflictCopy => transfer_direction::UPLOAD,
-            SyncActionType::Download => transfer_direction::DOWNLOAD,
+            SyncActionType::Download => {
+                // 区分「更新」与「下载」：planner 的 Download 动作仅在本地已有真实内容、
+                // 云端较新时产生（local_has_content = !placeholder）。此处用「本地已存在且 size>0」
+                // 判定 → 标记为 DOWNLOAD_UPDATE（UI 显示「更新」）；本地不存在/为占位符 → DOWNLOAD。
+                let local_has_content = action.local_path.as_ref()
+                    .and_then(|p| std::fs::metadata(p).ok())
+                    .map(|m| m.len() > 0)
+                    .unwrap_or(false);
+                if local_has_content { transfer_direction::DOWNLOAD_UPDATE } else { transfer_direction::DOWNLOAD }
+            }
             _ => return None, // 建目录/占位符/删除不入队
         };
         if let Some(db) = &self.db {

@@ -32,6 +32,7 @@ onMounted(() => { transfer.loadAll(); });
 
 function dirIcon(direction: number): string {
   if (direction === TRANSFER_DIR.DOWNLOAD) return "download";
+  if (direction === TRANSFER_DIR.DOWNLOAD_UPDATE) return "refresh";
   if (direction === TRANSFER_DIR.DELETE) return "trash";
   return "transfer";
 }

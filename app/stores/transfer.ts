@@ -13,8 +13,8 @@ export const useTransferStore = defineStore("transfer", () => {
 
   // 上传任务
   const uploads = computed(() => tasks.value.filter((t) => t.direction === TRANSFER_DIR.UPLOAD));
-  // 下载任务
-  const downloads = computed(() => tasks.value.filter((t) => t.direction === TRANSFER_DIR.DOWNLOAD));
+  // 下载任务（含「更新」——云端新版本覆盖本地，本质也是下载方向）
+  const downloads = computed(() => tasks.value.filter((t) => t.direction === TRANSFER_DIR.DOWNLOAD || t.direction === TRANSFER_DIR.DOWNLOAD_UPDATE));
   // 进行中
   const running = computed(() => tasks.value.filter((t) => t.state === TRANSFER_STATE.RUNNING).length);
   // 等待中

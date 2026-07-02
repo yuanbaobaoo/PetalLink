@@ -6,7 +6,7 @@ import { invoke } from "./tauri";
 /** 传输任务 */
 export interface TransferTask {
   id: number;
-  direction: number; // 0=upload, 1=download
+  direction: number; // 0=upload, 1=download, 2=delete, 3=download-update
   file_id?: string;
   local_path?: string;
   name: string;
@@ -19,13 +19,14 @@ export interface TransferTask {
 }
 
 /** 传输方向常量 */
-export const TRANSFER_DIR = { UPLOAD: 0, DOWNLOAD: 1, DELETE: 2 } as const;
+export const TRANSFER_DIR = { UPLOAD: 0, DOWNLOAD: 1, DELETE: 2, DOWNLOAD_UPDATE: 3 } as const;
 
 /** 传输方向标签 */
 export const DIR_LABEL: Record<number, string> = {
   [TRANSFER_DIR.UPLOAD]: "上传",
   [TRANSFER_DIR.DOWNLOAD]: "下载",
   [TRANSFER_DIR.DELETE]: "删除",
+  [TRANSFER_DIR.DOWNLOAD_UPDATE]: "更新",
 };
 
 /** 传输状态常量 */
