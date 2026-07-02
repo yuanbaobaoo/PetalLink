@@ -64,7 +64,8 @@ pub struct AppConfig {
     pub mount_configured: bool,
     /// 并发传输数，范围 1-20（Q1 决策：默认 6）
     pub concurrency: u32,
-    /// 云端轮询间隔，默认 10 秒（v1.7 已移除定时轮询，此字段保留供历史配置迁移）
+    /// 云端定时刷新间隔（秒）。0 = 关闭自动刷新；开启时最小 60 秒。默认 900（15 分钟）。
+    /// 每次到期全量 BFS 重拉云端树，使云端的新增/修改/删除自动同步到本地。
     pub poll_interval_sec: u32,
     /// 变更 debounce 时长，默认 3 秒（F-MOUNT-09）
     pub debounce_sec: u32,
@@ -84,7 +85,7 @@ impl Default for AppConfig {
             mount_dir: String::new(),
             mount_configured: false,
             concurrency: 6,
-            poll_interval_sec: 10,
+            poll_interval_sec: 900,
             debounce_sec: 3,
             skip_patterns: DEFAULT_SKIP_PATTERNS.iter().map(|s| s.to_string()).collect(),
             sort_field: SortField::Name,
@@ -109,9 +110,10 @@ impl AppConfig {
                 self.concurrency
             )));
         }
-        if self.poll_interval_sec < 5 {
+        // 云端定时刷新间隔：0 = 关闭；开启时最小 60 秒（防止误设过小拖垮大网盘）
+        if self.poll_interval_sec != 0 && self.poll_interval_sec < 60 {
             return Err(AppError::config(format!(
-                "轮询间隔过短（最小 5 秒）：{}",
+                "云端刷新间隔必须为 0（关闭）或 ≥ 60 秒：{}",
                 self.poll_interval_sec
             )));
         }
@@ -170,7 +172,7 @@ mod tests {
         let c = AppConfig::default();
         assert_eq!(c.concurrency, 6);
         assert_eq!(c.debounce_sec, 3);
-        assert_eq!(c.poll_interval_sec, 10);
+        assert_eq!(c.poll_interval_sec, 900);
         assert!(!c.mount_configured);
         assert_eq!(c.mount_dir, "");
         assert!(c.validate().is_ok());
@@ -184,6 +186,23 @@ mod tests {
         c.concurrency = 21;
         assert!(c.validate().is_err());
         c.concurrency = 6;
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_poll_interval_range() {
+        let mut c = AppConfig::default();
+        // 0 = 关闭，合法
+        c.poll_interval_sec = 0;
+        assert!(c.validate().is_ok());
+        // 开启但 < 60 非法
+        c.poll_interval_sec = 30;
+        assert!(c.validate().is_err());
+        // 60 秒是开启下界，合法
+        c.poll_interval_sec = 60;
+        assert!(c.validate().is_ok());
+        // 默认值合法
+        c.poll_interval_sec = 900;
         assert!(c.validate().is_ok());
     }
 

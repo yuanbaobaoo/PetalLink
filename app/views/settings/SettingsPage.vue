@@ -34,6 +34,8 @@ const tabs: { key: TabKey; icon: string; label: string }[] = [
 // 传输设置
 const concurrency = ref(6);
 const debounceSec = ref(3);
+// 云端定时刷新间隔（秒）：0=关闭，默认 900（15 分钟）
+const pollIntervalSec = ref(900);
 const skipPatterns = ref(".DS_Store, .tmp, ~$*, .Trash");
 // 同步目录设置
 const mountDir = ref("");
@@ -76,6 +78,7 @@ onMounted(async () => {
     mountDir.value = config.mount_dir;
     mountConfigured.value = config.mount_configured;
     oauthPort.value = config.oauth_callback_port;
+    pollIntervalSec.value = config.poll_interval_sec;
   } catch {}
   try { autoLaunch.value = await platformApi.launchAtLoginIsEnabled(); } catch {}
   try { about.value = await driveApi.getAbout(); } catch {}
@@ -93,7 +96,7 @@ async function handleSave(): Promise<void> {
       mount_dir: mountDir.value,
       mount_configured: mountConfigured.value,
       concurrency: concurrency.value,
-      poll_interval_sec: 10,
+      poll_interval_sec: pollIntervalSec.value,
       debounce_sec: debounceSec.value,
       skip_patterns: skipPatterns.value.split(",").map(s => s.trim()).filter(s => s),
       sort_field: "name",
@@ -114,6 +117,7 @@ async function handleReset(): Promise<void> {
     mountDir.value = config.mount_dir;
     mountConfigured.value = config.mount_configured;
     oauthPort.value = config.oauth_callback_port;
+    pollIntervalSec.value = config.poll_interval_sec;
     saved.value = true;
   } catch {}
 }
@@ -253,6 +257,11 @@ function fmtSize(bytes: number): string {
             <div class="setting-label">Debounce 时长</div>
             <div class="setting-desc">文件变更后等待多少秒再触发同步上传，避免频繁修改导致重复传输。</div>
             <div class="setting-control"><MateNumberField v-model="debounceSec" :min="1" :max="600" suffix="秒" /><span class="suffix" /></div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-label">自动同步间隔</div>
+            <div class="setting-desc">每隔多久自动从云端拉取最新变更（新增/修改/删除）。0 = 关闭自动同步，仅手动点「同步索引」。设为 60 以上时生效。</div>
+            <div class="setting-control"><MateNumberField v-model="pollIntervalSec" :min="0" :max="86400" suffix="秒" /><span class="suffix" /></div>
           </div>
           <div class="group-header">同步过滤</div>
           <div class="setting-row">

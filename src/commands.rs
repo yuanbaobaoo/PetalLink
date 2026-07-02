@@ -247,6 +247,7 @@ pub fn ensure_engine_started(app: &AppHandle) -> AppResult<()> {
         DB.clone(),
         config.skip_patterns.clone(),
         config.debounce_sec,
+        config.poll_interval_sec,
     );
     engine.set_mount(mount.clone());
     engine.set_executor(executor);

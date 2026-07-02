@@ -169,9 +169,12 @@ fn from_json(json: &Value) -> (AppConfig, bool) {
     };
 
     let mut dirty = false;
-    // 自动升级旧默认值：文件中存的是旧版 hardcoded 30 → 替换为新默认值（10/3）。
-    if config.poll_interval_sec == 30 || config.debounce_sec == 30 {
-        if config.poll_interval_sec == 30 {
+    // 自动升级旧默认值：
+    // - poll_interval_sec：新版校验要求 0 或 ≥60。旧版可能存的是秒级小值（如 10/30），
+    //   这些值在「定时全量刷新」语义下过激进，统一迁移到新默认 900；0（关闭）与 ≥60 的值保留。
+    // - debounce_sec：旧版 hardcoded 30 → 新默认 3。
+    if (config.poll_interval_sec != 0 && config.poll_interval_sec < 60) || config.debounce_sec == 30 {
+        if config.poll_interval_sec != 0 && config.poll_interval_sec < 60 {
             config.poll_interval_sec = default.poll_interval_sec;
         }
         if config.debounce_sec == 30 {
@@ -228,26 +231,42 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn test_migration_30_to_new_defaults() {
-        // 旧配置 poll=30 debounce=30 应迁移为 10/3
+    fn test_migration_legacy_small_poll_to_new_default() {
+        // 旧配置 poll=30 debounce=30 应迁移为新默认 900/3
         let json = json!({
             "pollIntervalSec": 30,
             "debounceSec": 30,
             "concurrency": 6,
         });
         let config = from_json(&json).0;
-        assert_eq!(config.poll_interval_sec, 10);
+        assert_eq!(config.poll_interval_sec, 900);
         assert_eq!(config.debounce_sec, 3);
     }
 
     #[test]
-    fn test_no_migration_when_not_30() {
+    fn test_migration_legacy_small_poll_variants() {
+        // 旧版秒级小值（10/45）一律迁移到 900；0（关闭）与 ≥60 的值保留
+        for &old_poll in &[10u32, 30, 45] {
+            let json = json!({ "pollIntervalSec": old_poll });
+            let config = from_json(&json).0;
+            assert_eq!(config.poll_interval_sec, 900, "poll={old_poll} 应迁移到 900");
+        }
+        // 0 = 关闭，保留
+        assert_eq!(from_json(&json!({ "pollIntervalSec": 0 })).0.poll_interval_sec, 0);
+        // ≥60 保留
+        assert_eq!(from_json(&json!({ "pollIntervalSec": 60 })).0.poll_interval_sec, 60);
+        assert_eq!(from_json(&json!({ "pollIntervalSec": 600 })).0.poll_interval_sec, 600);
+    }
+
+    #[test]
+    fn test_no_migration_when_valid() {
+        // 合法的新版值不迁移
         let json = json!({
-            "pollIntervalSec": 15,
+            "pollIntervalSec": 120,
             "debounceSec": 5,
         });
         let config = from_json(&json).0;
-        assert_eq!(config.poll_interval_sec, 15);
+        assert_eq!(config.poll_interval_sec, 120);
         assert_eq!(config.debounce_sec, 5);
     }
 

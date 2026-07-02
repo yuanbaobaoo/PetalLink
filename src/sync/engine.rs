@@ -4,6 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 use parking_lot::Mutex;
 use tokio::sync::broadcast;
 use rusqlite::{Connection, params};
@@ -52,6 +53,8 @@ pub struct SyncEngine {
     mount_dir: Mutex<Option<String>>,
     skip_patterns: Vec<String>,
     debounce_secs: u32,
+    /// 云端定时刷新间隔（秒）。0 = 关闭。到期后全量 BFS 重拉云端树，使云端变更自动同步到本地。
+    poll_interval_secs: u32,
     state_tx: broadcast::Sender<SyncGlobalState>,
     #[allow(dead_code)]
     is_first_time: Mutex<bool>,
@@ -70,6 +73,7 @@ impl SyncEngine {
         db: Arc<Mutex<Connection>>,
         skip_patterns: Vec<String>,
         debounce_secs: u32,
+        poll_interval_secs: u32,
     ) -> Self {
         let (state_tx, _) = broadcast::channel(256);
         Self {
@@ -87,7 +91,7 @@ impl SyncEngine {
             state: Mutex::new(SyncGlobalState::default()),
             running: Mutex::new(false),
             mount_dir: Mutex::new(None),
-            skip_patterns, debounce_secs, state_tx,
+            skip_patterns, debounce_secs, poll_interval_secs, state_tx,
             is_first_time: Mutex::new(true),
             watcher: Mutex::new(None),
             shutdown: Mutex::new(false),
@@ -216,6 +220,9 @@ impl SyncEngine {
         // BFS 后启动 watcher
         self.start_watcher().await;
 
+        // 启动云端定时刷新任务（poll_interval_secs=0 时内部不启动）
+        self.start_cloud_refresh_timer().await;
+
         // 启动完成，复位运行状态
         {
             let mut st = self.state.lock().clone();
@@ -258,8 +265,10 @@ impl SyncEngine {
         let mut failed_del = 0u32;
 
         for task in &interrupted {
-            // --- DOWNLOAD ---
-            if task.direction == repository::transfer_direction::DOWNLOAD {
+            // --- DOWNLOAD（含 DOWNLOAD_UPDATE：执行路径相同，.tmp 清理/失败标记一致）---
+            if task.direction == repository::transfer_direction::DOWNLOAD
+                || task.direction == repository::transfer_direction::DOWNLOAD_UPDATE
+            {
                 // 清理孤儿 .tmp 文件（下载写 .tmp 再 rename，kill 后 .tmp 残留）
                 if let Some(ref local_path) = task.local_path {
                     let tmp = format!("{}.tmp", local_path);
@@ -495,6 +504,34 @@ impl SyncEngine {
                 });
             }
         }
+    }
+
+    /// 启动云端定时刷新后台任务（shutdown-aware）。
+    /// 间隔由 `poll_interval_secs` 决定，0 = 不启动。完全模仿 watcher 循环的
+    /// shutdown 检查模式：循环顶部与 sleep 唤醒后各检查一次，置位即退出。
+    /// 用 `sleep`（非 `interval`）：避免引擎 busy/索引中时累积欠债 tick。
+    /// 首次亦 sleep：`start()` 已在启动时做过一次 BFS + startup-resume cycle，无需立即再刷。
+    async fn start_cloud_refresh_timer(self: &Arc<Self>) {
+        if self.poll_interval_secs == 0 {
+            tracing::info!("云端定时刷新已关闭（poll_interval_secs=0）");
+            return;
+        }
+        let engine = self.clone();
+        tracing::info!(interval_secs = engine.poll_interval_secs, "启动云端定时刷新任务");
+        tokio::spawn(async move {
+            loop {
+                if *engine.shutdown.lock() {
+                    tracing::info!("云端定时刷新任务检测到 shutdown，退出循环");
+                    break;
+                }
+                tokio::time::sleep(Duration::from_secs(engine.poll_interval_secs as u64)).await;
+                if *engine.shutdown.lock() {
+                    tracing::info!("云端定时刷新任务检测到 shutdown，退出循环");
+                    break;
+                }
+                engine.run_auto_cloud_refresh().await;
+            }
+        });
     }
 
     /// 执行一次同步周期。
@@ -1004,8 +1041,8 @@ impl SyncEngine {
             .unwrap_or(0) as u64;
         let downloading: u64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM transfer_queue WHERE state=?1 AND direction=?2",
-                params![repository::transfer_state::RUNNING, repository::transfer_direction::DOWNLOAD],
+                "SELECT COUNT(*) FROM transfer_queue WHERE state=?1 AND direction IN (?2, ?3)",
+                params![repository::transfer_state::RUNNING, repository::transfer_direction::DOWNLOAD, repository::transfer_direction::DOWNLOAD_UPDATE],
                 |r| r.get::<_, i64>(0),
             )
             .unwrap_or(0) as u64;
@@ -1057,8 +1094,8 @@ impl SyncEngine {
                 .unwrap_or(0) as u64;
             let downloading: u64 = conn
                 .query_row(
-                    "SELECT COUNT(*) FROM transfer_queue WHERE state=?1 AND direction=?2",
-                    params![repository::transfer_state::RUNNING, repository::transfer_direction::DOWNLOAD],
+                    "SELECT COUNT(*) FROM transfer_queue WHERE state=?1 AND direction IN (?2, ?3)",
+                    params![repository::transfer_state::RUNNING, repository::transfer_direction::DOWNLOAD, repository::transfer_direction::DOWNLOAD_UPDATE],
                     |r| r.get::<_, i64>(0),
                 )
                 .unwrap_or(0) as u64;
@@ -1159,6 +1196,58 @@ impl SyncEngine {
         let mut state = self.state.lock().clone();
         state.content_changed = true;
         let _ = self.state_tx.send(state);
+        Ok(())
+    }
+
+    /// 自动定时刷新云端树（定时轮询专用，静默、容错）。
+    /// 对齐 `trigger_manual_sync_impl` 的核心流程（刷新 + 置换 + cycle），差异：
+    /// - 复用 `manual_syncing` 互斥锁，与手动刷新互斥，避免并发 BFS；
+    /// - 不强制 `content_changed = true`（静默刷新，真实变化由 planner 的
+    ///   `folder_content_changed` 事件驱动前端刷新，避免每 15 分钟无谓全量重拉 UI）；
+    /// - 失败仅 `warn` 不传播，后台任务不应因单次失败终止循环。
+    async fn run_auto_cloud_refresh(self: &Arc<Self>) {
+        // 与手动刷新互斥：若手动刷新进行中，跳过本次自动刷新
+        {
+            let mut guard = self.manual_syncing.lock();
+            if *guard {
+                tracing::info!("自动云端刷新：手动同步进行中，跳过本次");
+                return;
+            }
+            *guard = true;
+        }
+        let result = self.run_auto_cloud_refresh_impl().await;
+        *self.manual_syncing.lock() = false;
+        if let Err(e) = result {
+            tracing::warn!(error = %e, "自动云端刷新失败（忽略，下次定时重试）");
+        }
+    }
+
+    /// 自动云端刷新实现：刷新云端树 + 置换缓存 + 跑同步周期（持有 manual_syncing 锁时调用）。
+    async fn run_auto_cloud_refresh_impl(&self) -> AppResult<()> {
+        let mount_dir = self.mount_dir.lock().clone().unwrap_or_default();
+        let abs_dir = mount_dir.replace("~/", &format!("{}/", std::env::var("HOME").unwrap_or_default()));
+
+        // 广播 is_indexing=true：与手动刷新一致，BFS 期间 watcher 事件被丢弃，避免脏 diff
+        {
+            let mut st = self.state.lock().clone();
+            st.is_indexing = true;
+            *self.state.lock() = st.clone();
+            let _ = self.state_tx.send(st);
+        }
+        // 无论成败都要复位 is_indexing，避免状态条卡在索引态
+        let refresh_result = cloud_tree::refresh_cloud_tree(&self.files_api, &self.mount, &abs_dir).await;
+        {
+            let mut st = self.state.lock().clone();
+            st.is_indexing = false;
+            *self.state.lock() = st.clone();
+            let _ = self.state_tx.send(st);
+        }
+        let (tree, p2i, root) = refresh_result?;
+        *self.cloud_tree.lock() = tree;
+        *self.path_to_id.lock() = p2i;
+        *self.root_folder_id.lock() = root;
+        // is_indexing 已复位为 false，run_sync_cycle 守卫放行，正常进入 cycle
+        self.run_sync_cycle("auto-cloud-refresh").await?;
         Ok(())
     }
     pub async fn retry_failed(&self) -> AppResult<()> {
@@ -1309,7 +1398,7 @@ mod tests {
         let files_api = std::sync::Arc::new(FilesApi::new(client.clone()));
         let download_api = std::sync::Arc::new(DownloadApi::new(client.clone()));
         let upload_api = std::sync::Arc::new(UploadApi::new(client));
-        let eng = SyncEngine::new(files_api, download_api, upload_api, db.clone(), vec![], 3);
+        let eng = SyncEngine::new(files_api, download_api, upload_api, db.clone(), vec![], 3, 0);
         (eng, db)
     }
 
