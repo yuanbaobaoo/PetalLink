@@ -8,11 +8,14 @@
 use serde::Serialize;
 use thiserror::Error;
 
-/// 所有自定义异常基类。序列化为前端可解析的 tagged enum。
+/// 所有自定义异常基类。序列化为前端可解析的扁平结构。
+///
+/// 自定义 Serialize 把字段提到顶层（`kind`/`code`/`message`/`status_code`/`error_code`），
+/// `message` 始终是字符串。这样前端 `AppError.message: string` 直接可读，
+/// 避免默认 tagged-enum 序列化把 payload 嵌套进 `message` 导致渲染成 `[object Object]`。
 ///
 /// `code` 字段供前端按错误类别渲染（登录态切换 / toast 文案 / 阻塞弹窗）。
-#[derive(Debug, Clone, Error, Serialize)]
-#[serde(tag = "kind", content = "message")]
+#[derive(Debug, Clone, Error)]
 pub enum AppError {
     /// OAuth 流程相关（取消 / state 不匹配 / 超时 / 被拒绝 / 浏览器打不开）
     #[error("{message}")]
@@ -46,6 +49,76 @@ pub enum AppError {
     /// 通用错误（文件系统、序列化等）
     #[error("{message}")]
     Generic { message: String },
+}
+
+/// 自定义序列化：扁平结构，`message` 始终为字符串，匹配前端 `AppError` 接口。
+/// 形如 `{"kind":"Token","code":"refresh_failed","message":"...","status_code":null,"error_code":null}`。
+impl Serialize for AppError {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        // 各变体字段数固定取最大（6），serde 自动按实际写出
+        match self {
+            AppError::Auth { code, message } => {
+                let mut s = serializer.serialize_struct("AppError", 5)?;
+                s.serialize_field("kind", "Auth")?;
+                s.serialize_field("code", code)?;
+                s.serialize_field("message", message)?;
+                s.serialize_field("status_code", &None::<u16>)?;
+                s.serialize_field("error_code", &None::<String>)?;
+                s.end()
+            }
+            AppError::Token { code, message } => {
+                let mut s = serializer.serialize_struct("AppError", 5)?;
+                s.serialize_field("kind", "Token")?;
+                s.serialize_field("code", code)?;
+                s.serialize_field("message", message)?;
+                s.serialize_field("status_code", &None::<u16>)?;
+                s.serialize_field("error_code", &None::<String>)?;
+                s.end()
+            }
+            AppError::DriveApi { code, message, status_code, error_code } => {
+                let mut s = serializer.serialize_struct("AppError", 5)?;
+                s.serialize_field("kind", "DriveApi")?;
+                s.serialize_field("code", code)?;
+                s.serialize_field("message", message)?;
+                s.serialize_field("status_code", status_code)?;
+                s.serialize_field("error_code", error_code)?;
+                s.end()
+            }
+            AppError::Config { message } => {
+                let mut s = serializer.serialize_struct("AppError", 5)?;
+                s.serialize_field("kind", "Config")?;
+                s.serialize_field("code", &None::<&str>)?;
+                s.serialize_field("message", message)?;
+                s.serialize_field("status_code", &None::<u16>)?;
+                s.serialize_field("error_code", &None::<String>)?;
+                s.end()
+            }
+            AppError::QuotaExceeded { required, remaining, message } => {
+                let mut s = serializer.serialize_struct("AppError", 5)?;
+                s.serialize_field("kind", "QuotaExceeded")?;
+                s.serialize_field("code", &None::<&str>)?;
+                s.serialize_field("message", message)?;
+                s.serialize_field("status_code", &None::<u16>)?;
+                s.serialize_field("error_code", &None::<String>)?;
+                // required/remaining 不暴露到前端（前端不消费，避免冗余）
+                let _ = (required, remaining);
+                s.end()
+            }
+            AppError::Generic { message } => {
+                let mut s = serializer.serialize_struct("AppError", 5)?;
+                s.serialize_field("kind", "Generic")?;
+                s.serialize_field("code", &None::<&str>)?;
+                s.serialize_field("message", message)?;
+                s.serialize_field("status_code", &None::<u16>)?;
+                s.serialize_field("error_code", &None::<String>)?;
+                s.end()
+            }
+        }
+    }
 }
 
 /// OAuth 错误子码（对齐 dart `AuthException` 工厂）
@@ -275,12 +348,44 @@ mod tests {
         }
     }
 
+
     #[test]
-    fn test_serde_roundtrip() {
-        // 前端能解析错误结构
+    fn test_serde_flat_structure() {
+        // 序列化后 message 必须是字符串（非嵌套对象），kind/code 在顶层
         let e = AppError::auth_denied(Some("用户拒绝"));
-        let json = serde_json::to_string(&e).unwrap();
-        assert!(json.contains("Auth"));
-        assert!(json.contains("用户拒绝"));
+        let v: serde_json::Value = serde_json::to_value(&e).unwrap();
+        assert_eq!(v["kind"], "Auth");
+        assert_eq!(v["code"], "denied");
+        // message 是字符串而非嵌套对象（修复 [object Object] 渲染 bug）
+        assert_eq!(v["message"], "授权失败：用户拒绝");
+        assert!(v["message"].is_string());
+        assert!(v.get("status_code").is_some());
+    }
+
+    #[test]
+    fn test_serde_network_vs_refresh_distinct() {
+        // 网络错误 → DriveApi/network（「网络连接失败」）；token 刷新失败 → Token/refresh_failed
+        // 两者 kind/code 不同，前端据此渲染不同文案
+        let net = AppError::drive_network(Some("timeout"));
+        let refresh = AppError::token_refresh_failed(Some("invalid_grant"));
+        let nv: serde_json::Value = serde_json::to_value(&net).unwrap();
+        let rv: serde_json::Value = serde_json::to_value(&refresh).unwrap();
+        assert_eq!(nv["kind"], "DriveApi");
+        assert_eq!(nv["code"], "network");
+        assert_eq!(nv["message"], "网络连接失败，请检查网络");
+        assert_eq!(rv["kind"], "Token");
+        assert_eq!(rv["code"], "refresh_failed");
+        assert!(rv["message"].as_str().unwrap().contains("Token 刷新失败"));
+        assert_ne!(nv["kind"], rv["kind"]);
+    }
+
+    #[test]
+    fn test_serde_driveapi_carries_status_code() {
+        // DriveApi 变体透出 status_code / error_code（顶层）
+        let e = AppError::drive_from_status(404, "not found");
+        let v: serde_json::Value = serde_json::to_value(&e).unwrap();
+        assert_eq!(v["kind"], "DriveApi");
+        assert_eq!(v["status_code"], 404);
+        assert!(v["message"].is_string());
     }
 }

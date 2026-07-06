@@ -8,15 +8,18 @@ import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 /**
- * 后端错误结构。
- * kind 标识错误类别，message 为用户可读中文描述。
+ * 后端错误结构（扁平）。
+ * kind 标识错误类别，message 为用户可读中文描述（始终为字符串）。
+ * code 为子错误码（如 refresh_failed / network / denied），仅 Auth/Token/DriveApi 有。
  */
 export interface AppError {
   kind: "Auth" | "Token" | "DriveApi" | "Config" | "QuotaExceeded" | "Generic";
   message: string;
+  // 子错误码（Auth/Token/DriveApi 有值，其余为 null）
+  code?: string | null;
   // DriveApi 特有字段
-  status_code?: number;
-  error_code?: string;
+  status_code?: number | null;
+  error_code?: string | null;
 }
 
 /**

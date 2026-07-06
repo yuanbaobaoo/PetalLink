@@ -91,7 +91,13 @@ impl TokenRefresher {
             .form(&body)
             .send()
             .await
-            .map_err(|e| AppError::token_refresh_failed(Some(&e.to_string())))?;
+            // 区分网络错误 vs token 刷新失败：超时/连接失败 → 网络连接失败，
+            // 其余（含真正的 token 拒绝）→ token 刷新失败。对齐 drive::client::classify_error
+            .map_err(|e| if e.is_timeout() || e.is_connect() {
+                AppError::drive_network(Some(&e.to_string()))
+            } else {
+                AppError::token_refresh_failed(Some(&e.to_string()))
+            })?;
 
         let status = resp.status();
         let text = resp
