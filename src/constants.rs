@@ -39,9 +39,17 @@ pub const APP_FULL_TITLE: &str = "PetalLink - 华为云盘客户端开源版";
 /// 应用版本号（编译期从 Cargo.toml 注入）
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// **Bundle Identifier（io.github.yuanbaobaoo.PetalLink）**
-/// 原 Flutter 工程 legacy/ 保留 io.gitcode.cloudmate 不变。
-pub const BUNDLE_IDENTIFIER: &str = "io.github.yuanbaobaoo.PetalLink";
+/// **Bundle Identifier**（release：io.github.yuanbaobaoo.PetalLink）
+///
+/// dev 构建追加 `-dev` 后缀，隔离数据目录 / 单实例锁 / LaunchAgent，
+/// 避免 `cargo tauri dev` 与正式安装版读写同一份配置/数据库/缓存造成数据错乱。
+/// 单实例插件的 socket 由 tauri.conf.json 的 identifier 决定，需配合
+/// `cargo tauri dev --config tauri.dev.conf.json` 同步覆盖。
+pub const BUNDLE_IDENTIFIER: &str = if cfg!(debug_assertions) {
+    "io.github.yuanbaobaoo.PetalLink-dev"
+} else {
+    "io.github.yuanbaobaoo.PetalLink"
+};
 
 /// 可执行文件名（须与 Cargo.toml [[bin]] name 一致；决定进程名 / .app 内 MacOS/<exec>）
 pub const EXECUTABLE_NAME: &str = "PetalLink";
@@ -193,8 +201,9 @@ mod tests {
 
     #[test]
     fn test_bundle_identifier_is_github() {
-        // 关键断言：bundle id 为 io.github.yuanbaobaoo.PetalLink（原 io.gitcode.cloudmate 仅保留在 legacy/）
-        assert_eq!(BUNDLE_IDENTIFIER, "io.github.yuanbaobaoo.PetalLink");
+        // 测试默认 debug 编译 → 应为 -dev 后缀（隔离数据目录/单实例锁/LaunchAgent）。
+        // release 构建下值为 io.github.yuanbaobaoo.PetalLink（原 io.gitcode.cloudmate 仅保留在 legacy/）
+        assert_eq!(BUNDLE_IDENTIFIER, "io.github.yuanbaobaoo.PetalLink-dev");
     }
 
     #[test]

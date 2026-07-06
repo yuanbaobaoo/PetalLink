@@ -87,10 +87,15 @@ cp .env.example .env
 ### 4. 启动开发环境
 
 ```bash
-cargo tauri dev
+cargo tauri dev --config tauri.dev.conf.json
 ```
 
 前端运行在 `http://localhost:1420`（HMR 热更新），Rust 后端自动编译启动。
+
+> `--config tauri.dev.conf.json` 把 identifier 覆盖为 `...-dev`，使 dev 构建与正式安装版
+> 隔离（独立数据目录 `~/Library/Application Support/io.github.yuanbaobaoo.PetalLink-dev/`、
+> 独立单实例锁），避免数据错乱。dev 首次运行需重新登录并选一个与正式版不同的挂载目录。
+> （不加该参数会与正式安装版共用数据目录，仅在确认未安装正式版时才可省略。）
 
 ---
 
