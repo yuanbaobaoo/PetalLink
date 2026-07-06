@@ -1318,9 +1318,10 @@ impl SyncEngine {
         *self.cloud_tree.lock() = tree;
         *self.path_to_id.lock() = p2i;
         *self.root_folder_id.lock() = root;
-        // 全量成功后：清旧 cursor（重建增量基线）+ 计数归零
+        // 全量成功后：清旧 cursor + 计数归零 + 重建增量基线（否则本会话后续一直走全量）
         let _ = std::fs::remove_file(&cursor_path);
         self.incremental_since_full.store(0, Ordering::Relaxed);
+        self.try_init_changes_cursor_abs(abs_dir).await;
         Ok(())
     }
 
@@ -1328,7 +1329,12 @@ impl SyncEngine {
     /// 已有 cursor 则不重复初始化；不支持时退化为「首次自动刷新走全量」，不报错。
     async fn try_init_changes_cursor(&self, mount_dir: &str) {
         let abs_dir = mount_dir.replace("~/", &format!("{}/", std::env::var("HOME").unwrap_or_default()));
-        let cursor_path = match crate::core::cache_paths::changes_cursor_file(&abs_dir) {
+        self.try_init_changes_cursor_abs(&abs_dir).await;
+    }
+
+    /// 同 try_init_changes_cursor，但直接用 abs_dir（供 try_incremental_or_full_refresh 复用）。
+    async fn try_init_changes_cursor_abs(&self, abs_dir: &str) {
+        let cursor_path = match crate::core::cache_paths::changes_cursor_file(abs_dir) {
             Ok(p) => p,
             Err(_) => return,
         };
@@ -1348,6 +1354,7 @@ impl SyncEngine {
             Err(e) => tracing::debug!(error = %e, "取 changes 首页游标失败（忽略，首次自动刷新会全量回退）"),
         }
     }
+
 
     /// 把增量 changes merge 进内存 cloud_tree + path_to_id（按 fileId 反查 rel_path 增删改）。
     ///

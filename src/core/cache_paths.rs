@@ -61,13 +61,16 @@ pub fn changes_cursor_file(abs_mount_dir: &str) -> AppResult<PathBuf> {
     )))
 }
 
-/// 删除指定同步目录对应的两个缓存文件（快照 + 云端树）。
+/// 删除指定同步目录对应的缓存文件（快照 + 云端树 + changes 游标）。
 /// 供 CacheService.clearAll / 更换目录重置复用。错误仅忽略。
 pub fn clear_cache_files(abs_mount_dir: &str) {
     if let Ok(f) = sync_state_cache_file(abs_mount_dir) {
         let _ = fs::remove_file(&f);
     }
     if let Ok(f) = cloud_tree_cache_file(abs_mount_dir) {
+        let _ = fs::remove_file(&f);
+    }
+    if let Ok(f) = changes_cursor_file(abs_mount_dir) {
         let _ = fs::remove_file(&f);
     }
 }
