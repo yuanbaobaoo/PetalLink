@@ -12,12 +12,13 @@ use crate::drive::client::{handle_error_response, DriveClient};
 use crate::drive::models::DriveFile;
 use crate::error::{AppError, AppResult};
 
-/// 变更类型。
+/// 变更类型。判定依据：华为 change 事件的 `changeType` 字段（真机验证）。
+/// 已知值：`trashDone`（移入回收站/软删除）。其余（create/update/untrash 等）按非删除处理。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChangeKind {
-    /// 文件被移除（云端删除）。具体判定见 Change::from_json 注释。
+    /// 文件被移入回收站（软删除）。changeType == "trashDone" 或 file.recycled == true。
     Removed,
-    /// 文件新增或元数据修改（含内容更新、改名、移动）。
+    /// 文件新增或元数据修改（含内容更新、改名、移动、从回收站恢复等）。
     Modified,
 }
 
@@ -60,43 +61,41 @@ impl ChangeListResult {
 }
 
 impl Change {
-    /// 从单条 change JSON 解析。
+    /// 从单条 change JSON 解析。已校准（阶段二真机验证，2026-07-06）：
     ///
-    /// 删除判定：华为删除事件的字段名需触发真实删除才能 100% 确认，当前用防御性多键探测
-    /// （removed / fileDeleted），命中任一即为删除；删除事件只带 fileId，构造最小 DriveFile。
-    /// 增/改事件：file 字段内是完整 DriveFile。
+    /// 华为 change 事件结构（与 GDrive 差异显著）：
+    /// ```json
+    /// { "category":"drive#change", "changeType":"trashDone", "deleted":false,
+    ///   "file":{...完整 DriveFile，删除事件也带...}, "fileId":"...", "type":"File" }
+    /// ```
+    /// - **删除判定**：`changeType == "trashDone"`（移入回收站）。**非** GDrive 的 `removed:true`。
+    ///   注意 `deleted` 字段恒为 false（华为用 changeType 区分，不用 deleted）。
+    /// - **file 字段**：所有事件都带完整 file（删除事件 file.recycled==true）。
+    /// - 删除事件也带完整 file，直接解析即可，无需构造最小 DriveFile。
     pub fn from_json(v: &serde_json::Value) -> Option<Self> {
-        // 删除判定：优先看显式标志，再看是否缺 file 元数据
-        let is_removed = v
-            .get("removed")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
-            || v.get("fileDeleted").and_then(|v| v.as_bool()).unwrap_or(false);
+        // 删除判定：changeType == "trashDone" 为主，file.recycled 兜底
+        let is_removed = v.get("changeType").and_then(|v| v.as_str()) == Some("trashDone")
+            || v.get("file").and_then(|f| f.get("recycled")).and_then(|v| v.as_bool()).unwrap_or(false);
 
-        let file = if is_removed {
-            // 删除事件可能只带 fileId，构造最小 DriveFile（id 来自 fileId 字段）
-            let id = v.get("fileId").and_then(|v| v.as_str())
-                .or_else(|| v.get("id").and_then(|v| v.as_str()))?
-                .to_string();
-            DriveFile {
-                id,
-                name: String::new(),
-                category: crate::drive::models::FileCategory::None,
-                size: 0,
-                parent_folder: None,
-                description: None,
-                created_time: None,
-                edited_time: None,
-                mime_type: None,
-                content_hash: None,
-                thumbnail_link: None,
-            }
-        } else {
-            // 增/改事件：file 字段内是完整 DriveFile
-            // 注意 DriveFile::from_json 返回 Option；解析失败则整条 change 返回 None（被 filter_map 过滤）
-            let file_json = v.get("file").unwrap_or(v);
-            DriveFile::from_json(file_json)?
-        };
+        // file 字段：所有事件都带完整 file；解析失败则用 fileId 构造最小 DriveFile 兜底
+        let file = v.get("file")
+            .and_then(DriveFile::from_json)
+            .or_else(|| {
+                // 极端兜底：file 缺失或解析失败，用顶层 fileId 构造最小 DriveFile
+                v.get("fileId").and_then(|v| v.as_str()).map(|id| DriveFile {
+                    id: id.to_string(),
+                    name: String::new(),
+                    category: crate::drive::models::FileCategory::None,
+                    size: 0,
+                    parent_folder: None,
+                    description: None,
+                    created_time: None,
+                    edited_time: None,
+                    mime_type: None,
+                    content_hash: None,
+                    thumbnail_link: None,
+                })
+            })?;
 
         Some(Self {
             kind: if is_removed { ChangeKind::Removed } else { ChangeKind::Modified },
@@ -177,38 +176,59 @@ mod tests {
 
     #[test]
     fn test_parse_modified_change() {
-        // 增/改事件：file 字段内是完整文件
+        // 增/改事件（校准自真机）：changeType 非 trashDone，file 字段内是完整文件，游标用 newStartCursor
         let json = serde_json::json!({
+            "category": "drive#changeList",
             "changes": [{
-                "file": { "id": "f1", "fileName": "a.txt", "mimeType": "text/plain", "size": 100 }
+                "category": "drive#change",
+                "changeType": "update",
+                "deleted": false,
+                "file": { "id": "f1", "fileName": "a.txt", "mimeType": "text/plain", "size": 100 },
+                "fileId": "f1",
+                "type": "File"
             }],
-            "nextCursor": "cur123"
+            "newStartCursor": "311298"
         });
         let r = ChangeListResult::from_json(&json);
         assert_eq!(r.changes.len(), 1);
         assert_eq!(r.changes[0].kind, ChangeKind::Modified);
         assert_eq!(r.changes[0].file.name, "a.txt");
-        assert_eq!(r.next_cursor.as_deref(), Some("cur123"));
+        assert_eq!(r.next_cursor.as_deref(), Some("311298"));
     }
 
     #[test]
     fn test_parse_removed_change() {
-        // 删除事件：removed 标志 + fileId
+        // 删除事件（校准自真机）：changeType=="trashDone"，file 字段仍带完整文件（recycled:true）
         let json = serde_json::json!({
-            "changes": [{ "removed": true, "fileId": "f9" }]
+            "category": "drive#changeList",
+            "changes": [{
+                "category": "drive#change",
+                "changeType": "trashDone",
+                "deleted": false,
+                "file": { "id": "f9", "fileName": "del.txt", "mimeType": "text/plain", "size": 10, "recycled": true },
+                "fileId": "f9",
+                "type": "File"
+            }],
+            "newStartCursor": "311299"
         });
         let r = ChangeListResult::from_json(&json);
         assert_eq!(r.changes.len(), 1);
         assert_eq!(r.changes[0].kind, ChangeKind::Removed);
         assert_eq!(r.changes[0].file.id, "f9");
-        assert!(r.next_cursor.is_none());
+        assert_eq!(r.changes[0].file.name, "del.txt");
+        assert_eq!(r.next_cursor.as_deref(), Some("311299"));
     }
 
     #[test]
     fn test_parse_empty() {
-        let json = serde_json::json!({ "changes": [] });
+        // 空变更（校准自真机）：changes 空数组 + newStartCursor 与请求 cursor 相同
+        let json = serde_json::json!({
+            "category": "drive#changeList",
+            "changes": [],
+            "newStartCursor": "311296"
+        });
         let r = ChangeListResult::from_json(&json);
         assert!(r.changes.is_empty());
-        assert!(r.next_cursor.is_none());
+        assert_eq!(r.next_cursor.as_deref(), Some("311296"));
     }
 }

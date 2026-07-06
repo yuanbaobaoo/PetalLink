@@ -200,7 +200,11 @@ run_auto_cloud_refresh_impl:
   - 分页游标字段：**`newStartCursor`**（**非** GDrive 的 `nextCursor`）
   - 顶层 category：`drive#changeList`
   - 空变更响应示例：`{"category":"drive#changeList","changes":[],"newStartCursor":"311296"}`
-- [ ] **变更类型判定（removed 标志）**：**待确认**——从 startCursor 往后无变更（空数组），历史 cursor（如 cursor=1）已过期（410）。需触发一次真实文件变更（新建/删除）后再探查。当前代码用 `removed`/`fileDeleted` 双键探测作防御。
+- [x] **变更类型判定（removed 标志）**：已校准。华为用 **`changeType`** 字段区分，**非** GDrive 的 `removed` 布尔：
+  - 删除（移入回收站）：`changeType == "trashDone"`（真机确认）
+  - 增/改：`changeType` 为其他值（如 `update`/`create`，非 trashDone 即按 Modified 处理）
+  - 关键差异：删除事件 `deleted` 恒为 `false`（华为用 changeType 而非 deleted）；且删除事件**仍带完整 file**（`file.recycled == true`），fileId 在顶层也有。
+  - 代码判定：`changeType == "trashDone"` 为主，`file.recycled == true` 兜底。
 - [x] **cursor 持久性**：**会过期**。`cursor=1` → 410 Gone "Cursor has expired"（errorCode `21084100`，reason `CURSOR_EXPIRED`）。代码已处理：过期的 cursor 调用会返回 Err → 引擎自动回退全量 BFS + 清 cursor 重建基线。
 - [x] **最终一致性表现**：cursor 过期机制即是一致性保证（与 files/list 的最终一致性不同，changes 靠 cursor 时效）。
 
