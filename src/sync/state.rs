@@ -66,6 +66,12 @@ pub struct SyncGlobalState {
     pub indexing_discovered_items: u64,
     /// 是否有目录结构变更（触发前端目录重拉）
     pub content_changed: bool,
+    /// 当前同步阶段（供前端状态条精确显示）。None = 空闲。
+    /// 值：indexing-startup / indexing-manual / indexing-auto-full /
+    ///     querying-changes / syncing-auto-incremental /
+    ///     syncing-local / syncing-manual / syncing-retry
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub sync_phase: Option<String>,
 }
 
 /// 失败项详情（前端失败项弹窗用）

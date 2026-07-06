@@ -22,6 +22,8 @@ export const useSyncStore = defineStore("sync", () => {
   const editing = ref(0);
   const isRunning = ref(false);
   const isIndexing = ref(false);
+  // 当前同步阶段（精确显示：indexing-startup / querying-changes / syncing-local 等）
+  const syncPhase = ref<string | null>(null);
   const lastSyncTime = ref<number | null>(null);
   const contentChanged = ref(false);
   // 侧边栏刷新计数器（folder_content_changed 事件每触一次 +1，布尔值无法重复触发 watch）
@@ -55,6 +57,7 @@ export const useSyncStore = defineStore("sync", () => {
     isRunning.value = s.is_running ?? false;
     lastSyncTime.value = s.last_sync_time ?? null;
     isIndexing.value = s.is_indexing ?? false;
+    syncPhase.value = s.sync_phase ?? null;
     if (s.content_changed) {
       contentChanged.value = true;
       sidebarRefresh.value++;
@@ -109,7 +112,7 @@ export const useSyncStore = defineStore("sync", () => {
 
   return {
     total, completed, uploading, downloading, failed, failedItems, conflict, editing,
-    isRunning, isIndexing, lastSyncTime, contentChanged,
+    isRunning, isIndexing, syncPhase, lastSyncTime, contentChanged,
     mountConfigured, setupPhase, mountDir, progress, hasActiveTransfer,
     init, applyState, triggerManualRefresh, retryFailed,
     sidebarRefresh,

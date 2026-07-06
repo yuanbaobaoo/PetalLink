@@ -19,6 +19,8 @@ export interface SyncGlobalState {
   indexing_scanned_folders: number;
   indexing_discovered_items: number;
   content_changed: boolean;
+  // 当前同步阶段（供状态条精确显示场景）；null/undefined = 空闲
+  sync_phase?: string | null;
 }
 
 /** 失败项详情（供 SyncStatusBar 失败项弹窗） */

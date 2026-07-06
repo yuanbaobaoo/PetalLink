@@ -6,10 +6,22 @@ import { MateIcon, MateDialog, MateButton } from "@/components/mate";
 
 const sync = useSyncStore();
 
+// 状态文案：根据 sync_phase 精确显示当前操作场景
 const statusText = computed(() => {
-  if (sync.isIndexing) return "正在读取云端索引…";
-  if (sync.isRunning || sync.hasActiveTransfer) return "同步中";
-  return "同步完成";
+  switch (sync.syncPhase) {
+    case "indexing-startup": return "正在读取云端索引（首次）…";
+    case "indexing-manual": return "正在读取云端索引…";
+    case "indexing-auto-full": return "正在读取云端索引（全量纠偏）…";
+    case "querying-changes": return "正在查询云端变更…";
+    case "syncing-auto-incremental": return "正在同步云端变更…";
+    case "syncing-local": return "正在同步本地变更…";
+    case "syncing-manual": return "正在同步…";
+    case "syncing-retry": return "正在重试失败项…";
+    default:
+      // 有传输进行中但无 sync cycle（如手动下载）
+      if (sync.hasActiveTransfer) return "同步中";
+      return "同步完成";
+  }
 });
 
 const lastSyncFormatted = computed(() => {

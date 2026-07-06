@@ -26,7 +26,8 @@ use crate::sync::cloud_tree;
 
 /// 增量同步安全网：连续走 N 次增量后强制一次全量 BFS，纠正改名/移动/新建文件的累积偏差。
 /// 增量 merge 无法处理"已知 id 但 rel_path 变了"（改名/移动）和"全新文件"，需定期全量收敛。
-const INCREMENTAL_FORCED_FULL_THRESHOLD: u32 = 20;
+/// 配合自动刷新间隔（默认 60s）：300 次 × 60s = 5 小时强制一次全量纠偏。
+const INCREMENTAL_FORCED_FULL_THRESHOLD: u32 = 300;
 
 pub struct SyncEngine {
     files_api: Arc<FilesApi>,
@@ -244,6 +245,7 @@ impl SyncEngine {
             // 启动全程（BFS + 首次 cycle）已结束，确保 is_indexing 也复位，
             // 防止 BFS 设的 true 因后续交错未被清，卡住状态条。
             st.is_indexing = false;
+            st.sync_phase = None;
             *self.state.lock() = st.clone();
             let _ = self.state_tx.send(st);
         }
@@ -444,6 +446,7 @@ impl SyncEngine {
             {
                 let mut st = self.state.lock().clone();
                 st.is_indexing = true;
+                st.sync_phase = Some("indexing-startup".to_string());
                 *self.state.lock() = st.clone();
                 let _ = self.state_tx.send(st);
             }
@@ -455,6 +458,7 @@ impl SyncEngine {
             {
                 let mut st = self.state.lock().clone();
                 st.is_indexing = false;
+                st.sync_phase = None;
                 *self.state.lock() = st.clone();
                 let _ = self.state_tx.send(st);
             }
@@ -559,10 +563,19 @@ impl SyncEngine {
             return Ok(());
         }
         *self.syncing.lock() = true;
-        // ★ 周期开始 → 立即通知前端"同步中"
+        // ★ 周期开始 → 立即通知前端"同步中" + 设置 phase（auto-cloud-refresh / startup-resume
+        //   由上层调用方已设好 phase，此处不覆盖；其余按 triggered_by 设对应 phase）
         {
             let mut st = self.state.lock().clone();
             st.is_running = true;
+            if st.sync_phase.is_none() {
+                st.sync_phase = match triggered_by {
+                    "local-watcher" => Some("syncing-local".to_string()),
+                    "manual-refresh" => Some("syncing-manual".to_string()),
+                    "retry-failed" => Some("syncing-retry".to_string()),
+                    _ => None, // auto-cloud-refresh / startup-resume 由上层设好
+                };
+            }
             *self.state.lock() = st.clone();
             let _ = self.state_tx.send(st);
         }
@@ -574,6 +587,14 @@ impl SyncEngine {
     /// 当前是否处于索引中（cloud_tree BFS 重建）。读取 state 副本判断。
     fn is_indexing(&self) -> bool {
         self.state.lock().is_indexing
+    }
+
+    /// 设置当前同步阶段并广播（供前端状态条精确显示）。
+    fn set_phase(&self, phase: &str) {
+        let mut st = self.state.lock().clone();
+        st.sync_phase = Some(phase.to_string());
+        *self.state.lock() = st.clone();
+        let _ = self.state_tx.send(st);
     }
 
     async fn run_sync_cycle_inner(&self, triggered_by: &str) -> AppResult<()> {
@@ -619,6 +640,7 @@ impl SyncEngine {
             // 同步周期结束即非索引态：复位 is_indexing，防止此前某次 BFS/刷新
             // 的 is_indexing=true 因交错未被清，导致状态条永久卡在「正在读取云端索引」。
             st.is_indexing = false;
+            st.sync_phase = None;
             st.last_sync_time = Some(chrono::Utc::now().timestamp_millis());
             *self.state.lock() = st.clone();
             let _ = self.state_tx.send(st);
@@ -1093,6 +1115,7 @@ impl SyncEngine {
         st.last_sync_time = Some(chrono::Utc::now().timestamp_millis());
         st.is_running = false; // 周期结束，重置运行状态
         st.is_indexing = false; // 周期结束即非索引态（防 BFS 的 true 因交错残留）
+        st.sync_phase = None; // 周期结束回到空闲
         *self.state.lock() = st.clone();
         let _ = self.state_tx.send(st);
     }
@@ -1197,6 +1220,7 @@ impl SyncEngine {
         {
             let mut st = self.state.lock().clone();
             st.is_indexing = true;
+            st.sync_phase = Some("indexing-manual".to_string());
             *self.state.lock() = st.clone();
             let _ = self.state_tx.send(st);
         }
@@ -1205,6 +1229,7 @@ impl SyncEngine {
         {
             let mut st = self.state.lock().clone();
             st.is_indexing = false;
+            st.sync_phase = None;
             *self.state.lock() = st.clone();
             let _ = self.state_tx.send(st);
         }
@@ -1253,7 +1278,7 @@ impl SyncEngine {
         let mount_dir = self.mount_dir.lock().clone().unwrap_or_default();
         let abs_dir = mount_dir.replace("~/", &format!("{}/", std::env::var("HOME").unwrap_or_default()));
 
-        // 广播 is_indexing=true
+        // 广播 is_indexing=true（phase 由 try_incremental_or_full_refresh 内部按增量/全量设）
         {
             let mut st = self.state.lock().clone();
             st.is_indexing = true;
@@ -1264,15 +1289,19 @@ impl SyncEngine {
         // 尝试增量（有持久化 cursor）；失败/无 cursor 回退全量 BFS
         let refresh_result = self.try_incremental_or_full_refresh(&abs_dir).await;
 
-        // 无论成败复位 is_indexing
+        // 无论成败复位 is_indexing + phase
         {
             let mut st = self.state.lock().clone();
             st.is_indexing = false;
+            st.sync_phase = None;
             *self.state.lock() = st.clone();
             let _ = self.state_tx.send(st);
         }
 
         refresh_result?;
+        // 增量 merge 完成后，cycle 阶段显示"同步云端变更"（try_incremental 设了 querying，
+        // 此处 cycle 前覆盖为 syncing；run_sync_cycle 对 auto-cloud-refresh 不覆盖 phase）
+        self.set_phase("syncing-auto-incremental");
         self.run_sync_cycle("auto-cloud-refresh").await?;
         Ok(())
     }
@@ -1293,7 +1322,8 @@ impl SyncEngine {
 
         if !force_full {
             if let Some(ref cursor) = saved_cursor {
-                // 增量路径
+                // 增量路径：先查询云端变更，再 merge（phase 分两步：querying → syncing）
+                self.set_phase("querying-changes");
                 match self.changes_api.list_all_changes(Some(cursor)).await {
                     Ok((changes, new_cursor)) => {
                         tracing::info!(count = changes.len(), "增量 changes 拉取成功，merge 进 cloud_tree");
@@ -1314,6 +1344,7 @@ impl SyncEngine {
         }
 
         // 全量 BFS 路径（无 cursor / 增量失败 / 强制纠偏）
+        self.set_phase("indexing-auto-full");
         let (tree, p2i, root) = cloud_tree::refresh_cloud_tree(&self.files_api, &self.mount, abs_dir).await?;
         *self.cloud_tree.lock() = tree;
         *self.path_to_id.lock() = p2i;
