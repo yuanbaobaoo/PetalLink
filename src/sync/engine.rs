@@ -3,6 +3,7 @@
 //! 对齐 `legacy/lib/sync/sync_engine.dart`。
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use parking_lot::Mutex;
@@ -22,6 +23,10 @@ use crate::sync::planner::{DbSnapshotEntry, SyncPlanner, SyncSnapshot};
 use crate::sync::executor::SyncExecutor;
 use crate::sync::conflict::ConflictResolver;
 use crate::sync::cloud_tree;
+
+/// 增量同步安全网：连续走 N 次增量后强制一次全量 BFS，纠正改名/移动/新建文件的累积偏差。
+/// 增量 merge 无法处理"已知 id 但 rel_path 变了"（改名/移动）和"全新文件"，需定期全量收敛。
+const INCREMENTAL_FORCED_FULL_THRESHOLD: u32 = 20;
 
 pub struct SyncEngine {
     files_api: Arc<FilesApi>,
@@ -64,6 +69,9 @@ pub struct SyncEngine {
     /// 是否已 shutdown。detached watcher 任务每次 cycle 前检查此标志，
     /// 置位后退出循环，防止引擎被替换后旧 watcher 仍触发 sync cycle（误判上传）。
     shutdown: Mutex<bool>,
+    /// 连续增量刷新计数。达 INCREMENTAL_FORCED_FULL_THRESHOLD 后强制一次全量 BFS，
+    /// 纠正增量无法处理的改名/移动/新建文件累积偏差。全量后归零。
+    incremental_since_full: AtomicU32,
 }
 
 impl SyncEngine {
@@ -97,6 +105,7 @@ impl SyncEngine {
             is_first_time: Mutex::new(true),
             watcher: Mutex::new(None),
             shutdown: Mutex::new(false),
+            incremental_since_full: AtomicU32::new(0),
         }
     }
 
@@ -1272,58 +1281,86 @@ impl SyncEngine {
             .ok()
             .filter(|s| !s.trim().is_empty());
 
-        if let Some(ref cursor) = saved_cursor {
-            // 增量路径
-            match self.changes_api.list_all_changes(Some(cursor)).await {
-                Ok((changes, new_cursor)) => {
-                    tracing::info!(count = changes.len(), "增量 changes 拉取成功，merge 进 cloud_tree");
-                    self.merge_changes_into_cloud_tree(&changes);
-                    // 更新 cursor（new_cursor 为 None 表示已追平，保留旧 cursor 即可）
-                    let to_write = new_cursor.as_deref().unwrap_or(cursor);
-                    let _ = std::fs::write(&cursor_path, to_write);
-                    return Ok(());
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "增量 changes 失败，回退全量 BFS 并清 cursor");
-                    let _ = std::fs::remove_file(&cursor_path);
+        // 安全网：连续增量达阈值 → 强制全量，纠正改名/移动/新建文件的累积偏差
+        let consecutive = self.incremental_since_full.load(Ordering::Relaxed);
+        let force_full = consecutive >= INCREMENTAL_FORCED_FULL_THRESHOLD;
+        if force_full {
+            tracing::info!(consecutive, threshold = INCREMENTAL_FORCED_FULL_THRESHOLD, "连续增量达阈值，强制全量 BFS 纠偏");
+        }
+
+        if !force_full {
+            if let Some(ref cursor) = saved_cursor {
+                // 增量路径
+                match self.changes_api.list_all_changes(Some(cursor)).await {
+                    Ok((changes, new_cursor)) => {
+                        tracing::info!(count = changes.len(), "增量 changes 拉取成功，merge 进 cloud_tree");
+                        self.merge_changes_into_cloud_tree(&changes);
+                        // 更新 cursor（new_cursor 为 None 表示已追平，保留旧 cursor 即可）
+                        let to_write = new_cursor.as_deref().unwrap_or(cursor);
+                        let _ = std::fs::write(&cursor_path, to_write);
+                        // 计数 +1（下次达阈值会强制全量）
+                        self.incremental_since_full.fetch_add(1, Ordering::Relaxed);
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "增量 changes 失败，回退全量 BFS 并清 cursor");
+                        let _ = std::fs::remove_file(&cursor_path);
+                    }
                 }
             }
         }
 
-        // 全量 BFS 路径（无 cursor 或增量失败）
+        // 全量 BFS 路径（无 cursor / 增量失败 / 强制纠偏）
         let (tree, p2i, root) = cloud_tree::refresh_cloud_tree(&self.files_api, &self.mount, abs_dir).await?;
         *self.cloud_tree.lock() = tree;
         *self.path_to_id.lock() = p2i;
         *self.root_folder_id.lock() = root;
-        // 全量成功后清旧 cursor，下次自动重新建立增量基线
+        // 全量成功后：清旧 cursor（重建增量基线）+ 计数归零
         let _ = std::fs::remove_file(&cursor_path);
+        self.incremental_since_full.store(0, Ordering::Relaxed);
         Ok(())
     }
 
-    /// 把增量 changes merge 进内存 cloud_tree（按 fileId 反查 rel_path 增删改）。
-    /// 新建文件（无已知 rel_path）跳过，靠下次全量 BFS 兜底。
+    /// 把增量 changes merge 进内存 cloud_tree + path_to_id（按 fileId 反查 rel_path 增删改）。
+    ///
+    /// 已知局限（靠安全网定期全量纠偏，见 INCREMENTAL_FORCED_FULL_THRESHOLD）：
+    /// - 新建文件（无已知 rel_path）：跳过，等全量兜底
+    /// - 改名/移动（已知 id 但 rel_path 已变）：会按旧 rel_path 更新，与真实路径不一致，
+    ///   靠定期强制全量收敛
     fn merge_changes_into_cloud_tree(&self, changes: &[crate::drive::changes_api::Change]) {
         use crate::drive::changes_api::ChangeKind;
-        // 反查 path_to_id 找 rel_path（fileId → rel_path）
-        let p2i = self.path_to_id.lock();
-        let id_to_path: std::collections::HashMap<&String, &String> =
-            p2i.iter().map(|(p, id)| (id, p)).collect();
+        // 先读 path_to_id 建 fileId→rel_path 反查表，读完即释放锁（缩小持锁范围）
+        let id_to_path: std::collections::HashMap<String, String> = {
+            let p2i = self.path_to_id.lock();
+            p2i.iter().map(|(p, id)| (id.clone(), p.clone())).collect()
+        };
         let mut tree = self.cloud_tree.lock();
+        let mut p2i = self.path_to_id.lock();
+        let mut hit = 0u32;
+        let mut skip = 0u32;
         for c in changes {
             match c.kind {
                 ChangeKind::Removed => {
                     if let Some(rel) = id_to_path.get(&c.file.id) {
-                        tree.remove(*rel);
+                        tree.remove(rel);
+                        p2i.remove(rel);
+                        hit += 1;
+                    } else {
+                        skip += 1;
                     }
                 }
                 ChangeKind::Modified => {
-                    // 已知路径：更新；未知路径（新建）：跳过，等下次全量兜底
+                    // 已知路径：更新 cloud_tree（id 不变，path_to_id 无需改）；未知路径：跳过
                     if let Some(rel) = id_to_path.get(&c.file.id) {
-                        tree.insert((*rel).clone(), c.file.clone());
+                        tree.insert(rel.clone(), c.file.clone());
+                        hit += 1;
+                    } else {
+                        skip += 1;
                     }
                 }
             }
         }
+        tracing::debug!(total = changes.len(), hit, skip, "增量 merge 完成（hit=已知路径更新，skip=未知路径跳过）");
     }
     pub async fn retry_failed(&self) -> AppResult<()> {
         // 块作用域确保 MutexGuard 在 await 前释放
