@@ -19,8 +19,13 @@ async fn get_token() -> String {
             return t;
         }
     }
-    eprintln!("未找到 HWCLOUD_TEST_TOKEN，启动 OAuth 授权...");
+    // 优先复用已存的 token.bin（避免每次探查都重新 OAuth 授权）
     let auth = AuthService::new();
+    if let Ok(t) = auth.ensure_valid_access_token().await {
+        eprintln!("✓ 复用已存 token");
+        return t;
+    }
+    eprintln!("未找到有效 token，启动 OAuth 授权...");
     match auth.authorize(9999).await {
         Ok(token_pair) => token_pair.access_token,
         Err(e) => {
@@ -68,20 +73,24 @@ async fn main() {
         .build()
         .unwrap();
 
-    // 1) 不带 cursor，首次拉取（看是否返回初始 cursor / 或报错要 cursor）
-    probe(&client, &token, "1. 首次无 cursor", &format!("{DRIVE_API_BASE}/drive/v1/changes")).await;
+    // 已知：getStartCursor 端点 = /drive/v1/changes/getStartCursor，返回 {startCursor:"..."}
+    // 本次重点：用真实 startCursor 调 /changes，确认变更响应结构（数组名/变更字段/removed 标志）
 
-    // 2) 带 fields=*（华为 /about 接口要求 fields=*，看 changes 是否同理）
-    probe(&client, &token, "2. fields=* 无 cursor", &format!("{DRIVE_API_BASE}/drive/v1/changes?fields=*")).await;
+    // 1) 取 startCursor
+    let start_cursor: String = {
+        let resp = client.get(format!("{DRIVE_API_BASE}/drive/v1/changes/getStartCursor"))
+            .bearer_auth(&token).send().await.unwrap();
+        let v: serde_json::Value = resp.json().await.unwrap();
+        eprintln!("✓ startCursor = {}", v["startCursor"]);
+        v["startCursor"].as_str().unwrap().to_string()
+    };
 
-    // 3.1) GDrive 协议: getStartPageToken 取初始游标
-    probe(&client, &token, "3. getStartPageToken", &format!("{DRIVE_API_BASE}/drive/v1/changes/startPageToken")).await;
+    // 2) 用历史小 cursor（如 "1"）调 /changes，看真实变更记录的字段结构
+    //    startCursor=当前点，从更早的 cursor 能拿到历史变更记录
+    probe(&client, &token, "2. /changes with cursor=1（看历史变更结构）", &format!("{DRIVE_API_BASE}/drive/v1/changes?fields=*&pageSize=3&cursor=1")).await;
 
-    // 3.2) 带 pageSize 限制（看分页字段名）
-    probe(&client, &token, "4. pageSize=1", &format!("{DRIVE_API_BASE}/drive/v1/changes?fields=*&pageSize=1")).await;
+    // 3) 顺带确认 newStartCursor 与当前 startCursor 的关系
+    probe(&client, &token, "3. /changes with current startCursor", &format!("{DRIVE_API_BASE}/drive/v1/changes?fields=*&pageSize=1&cursor={start_cursor}")).await;
 
-    // 4) 带 cursor 重试（先用空字符串看报错信息，了解 cursor 参数名）
-    probe(&client, &token, "5. cursor=空", &format!("{DRIVE_API_BASE}/drive/v1/changes?fields=*&cursor=")).await;
-
-    eprintln!("\n✓ 探查完成。请把以上响应贴入设计文档第 6 节，用于阶段三字段映射。");
+    eprintln!("\n✓ 探查完成。请把 #2 的响应贴给我，确认单条变更的字段结构（removed 标志 / file 字段）。");
 }

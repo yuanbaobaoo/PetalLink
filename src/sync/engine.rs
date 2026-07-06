@@ -1340,18 +1340,14 @@ impl SyncEngine {
         };
         // 已有 cursor 则不重复初始化
         if cursor_path.exists() { return; }
-        // 取首页游标：list_changes(None) 返回的 next_cursor 作基线
-        // （华为具体取法以阶段二验证为准；不支持则返回 None，本函数无副作用）
-        match self.changes_api.list_changes(None).await {
-            Ok(r) => {
-                if let Some(c) = r.next_cursor {
-                    let _ = std::fs::write(&cursor_path, &c);
-                    tracing::info!("已建立 changes 增量基线 cursor");
-                } else {
-                    tracing::debug!("changes 首页无 next_cursor，暂不建基线（首次自动刷新走全量）");
-                }
+        // 取初始游标：华为 /changes 强制要求 cursor，初始 cursor 必须先调 getStartCursor 获取。
+        // 失败（如接口不可用）静默，首次自动刷新会因无 cursor 走全量回退，不报错。
+        match self.changes_api.get_start_cursor().await {
+            Ok(c) => {
+                let _ = std::fs::write(&cursor_path, &c);
+                tracing::info!(cursor = %c, "已建立 changes 增量基线 cursor");
             }
-            Err(e) => tracing::debug!(error = %e, "取 changes 首页游标失败（忽略，首次自动刷新会全量回退）"),
+            Err(e) => tracing::debug!(error = %e, "取 changes startCursor 失败（忽略，首次自动刷新会全量回退）"),
         }
     }
 

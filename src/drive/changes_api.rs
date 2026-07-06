@@ -37,20 +37,20 @@ pub struct ChangeListResult {
 }
 
 impl ChangeListResult {
-    /// 从 JSON 解析。键名容错：nextCursor 优先，回退 cursor（对齐 FileListResult 惯例）。
-    /// ⚠️ 字段名以阶段二验证报告为准，必要时调整。
+    /// 从 JSON 解析。已校准（阶段二真机验证）：
+    /// - 数组字段：`changes`（华为确认）
+    /// - 分页游标字段：`newStartCursor`（华为确认，**非** GDrive 的 nextCursor）
     pub fn from_json(json: &serde_json::Value) -> Self {
         let changes = json
             .get("changes")
-            .or_else(|| json.get("items")) // 回退名
             .and_then(|v| v.as_array())
             .map(|arr| arr.iter().filter_map(Change::from_json).collect())
             .unwrap_or_default();
 
+        // 华为用 newStartCursor；保留 nextCursor 回退以防接口变体
         let next_cursor = json
-            .get("nextCursor")
-            .or_else(|| json.get("newStartCursor"))
-            .or_else(|| json.get("cursor"))
+            .get("newStartCursor")
+            .or_else(|| json.get("nextCursor"))
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string());
@@ -61,7 +61,10 @@ impl ChangeListResult {
 
 impl Change {
     /// 从单条 change JSON 解析。
-    /// ⚠️ removed 判定以阶段二验证为准：GDrive 用 removed:true，华为可能用 fileDeleted 或其他。
+    ///
+    /// 删除判定：华为删除事件的字段名需触发真实删除才能 100% 确认，当前用防御性多键探测
+    /// （removed / fileDeleted），命中任一即为删除；删除事件只带 fileId，构造最小 DriveFile。
+    /// 增/改事件：file 字段内是完整 DriveFile。
     pub fn from_json(v: &serde_json::Value) -> Option<Self> {
         // 删除判定：优先看显式标志，再看是否缺 file 元数据
         let is_removed = v
@@ -109,6 +112,25 @@ pub struct ChangesApi {
 impl ChangesApi {
     pub fn new(client: Arc<DriveClient>) -> Self {
         Self { client }
+    }
+
+    /// 获取初始游标（startCursor）。GET /changes/getStartCursor。
+    ///
+    /// 华为的 /changes 接口强制要求 cursor，无 cursor 直接 400；初始 cursor 必须先通过本端点获取。
+    /// 响应：`{"category":"drive#startCursor","startCursor":"311296"}`
+    pub async fn get_start_cursor(&self) -> AppResult<String> {
+        let resp = self.client.get("/changes/getStartCursor").await?;
+        if !resp.status().is_success() {
+            return Err(handle_error_response(resp).await);
+        }
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| AppError::generic(format!("解析 startCursor 响应失败：{e}")))?;
+        body.get("startCursor")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| AppError::generic("startCursor 响应缺少 startCursor 字段".to_string()))
     }
 
     /// 拉取一页增量变更（pageSize 默认 100）。

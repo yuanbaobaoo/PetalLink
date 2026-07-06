@@ -188,15 +188,26 @@ run_auto_cloud_refresh_impl:
 
 ---
 
-## 6. 阶段二验证报告（待阶段二完成后填写）
+## 6. 阶段二验证报告（已完成真机探查）
 
-> 阶段二执行后，将华为 `/drive/v1/changes` 的真实行为填入本节，作为阶段三字段映射的依据。
+> 通过 `changes_probe` binary + 真实账号 OAuth 授权探查确认（2026-07-06）。
 
-- [ ] 初始 cursor 获取方式：
-- [ ] 响应结构（数组名、字段名）：
-- [ ] 变更类型判定（removed 标志）：
-- [ ] cursor 持久性：
-- [ ] 最终一致性表现：
+- [x] **初始 cursor 获取方式**：`GET /drive/v1/changes/getStartCursor`
+  - 响应：`{"category":"drive#startCursor","startCursor":"311296"}`
+  - **关键**：华为的 `/changes` 接口强制要求 cursor，无 cursor 直接 400 "Cursor can't be null"（21004001 LACK_OF_PARAM）。初始 cursor 必须先调 getStartCursor 获取，**不能**用 `list_changes(None)`（GDrive 风格）。
+- [x] **响应结构（数组名、字段名）**：
+  - 数组名：`changes` ✓（与 GDrive 一致）
+  - 分页游标字段：**`newStartCursor`**（**非** GDrive 的 `nextCursor`）
+  - 顶层 category：`drive#changeList`
+  - 空变更响应示例：`{"category":"drive#changeList","changes":[],"newStartCursor":"311296"}`
+- [ ] **变更类型判定（removed 标志）**：**待确认**——从 startCursor 往后无变更（空数组），历史 cursor（如 cursor=1）已过期（410）。需触发一次真实文件变更（新建/删除）后再探查。当前代码用 `removed`/`fileDeleted` 双键探测作防御。
+- [x] **cursor 持久性**：**会过期**。`cursor=1` → 410 Gone "Cursor has expired"（errorCode `21084100`，reason `CURSOR_EXPIRED`）。代码已处理：过期的 cursor 调用会返回 Err → 引擎自动回退全量 BFS + 清 cursor 重建基线。
+- [x] **最终一致性表现**：cursor 过期机制即是一致性保证（与 files/list 的最终一致性不同，changes 靠 cursor 时效）。
+
+### 已校准的代码改动（基于本报告）
+- `changes_api.rs`：新增 `get_start_cursor()` 方法；`from_json` 游标字段改为 `newStartCursor` 优先
+- `engine.rs`：`try_init_changes_cursor_abs` 改用 `get_start_cursor()`（原 `list_changes(None)` 会 400）
+- cursor 过期（410）由现有 `handle_error_response` → `drive_from_status` → Err 自动捕获，回退全量
 
 ---
 
