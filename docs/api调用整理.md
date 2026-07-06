@@ -226,8 +226,11 @@
 | **可选参数** | `fields=*`、`pageSize`（分页大小） |
 | **调用场景** | 自动云端刷新的增量路径：用持久化 cursor 拉取自上次以来的文件变更，merge 进内存 cloud_tree |
 | **分页** | 响应的 `newStartCursor` 作为下一次请求的 cursor；无更多变更时与请求 cursor 相同 |
+| **追平判定** | **`page_count == 0`**（本页 0 条变更）即视为已追平最新状态。仅靠 `next_cursor.is_none()` 不可靠——华为 API 即使无更多变更也返回非空 `newStartCursor`（本质是下次轮询起点） |
+| **自动分页** | `list_all_changes()` 自动翻页追平全部变更，无页数限制 |
+| **全量回退** | 若增量 merge 后全部变更 skip（如从回收站恢复后 `parent_folder` 缺失无法解析路径），自动回退全量 BFS 确保 cloud_tree 完整 |
 | **错误处理** | cursor 无效 → 400 "Cursor is invalid"（`21004002`）；cursor 过期 → 410 "Cursor has expired"（`21084100` CURSOR_EXPIRED）。两种错误都由调用方回退全量 BFS + 清 cursor 重建基线 |
-| **代码位置** | `src/drive/changes_api.rs:list_changes()` / `list_all_changes()`（自动分页） |
+| **代码位置** | `src/drive/changes_api.rs:list_changes()` / `list_all_changes()`（自动分页）；`src/sync/engine.rs:merge_changes_into_cloud_tree()`（merge + 不动点路径解析） |
 | **官方文档** | https://developer.huawei.com/consumer/cn/doc/HMSCore-References-V5/server-api-changeslist-0000001050151710-V5 |
 
 **响应示例（含一条删除变更）：**
