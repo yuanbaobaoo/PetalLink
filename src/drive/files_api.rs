@@ -14,7 +14,7 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use crate::drive::ascii_json::ascii_json_encode;
-use crate::drive::client::{classify_error, handle_error_response};
+use crate::drive::client::parse_json_response;
 use crate::drive::models::{DriveFile, FileListResult};
 use crate::error::{AppError, AppResult};
 
@@ -58,10 +58,7 @@ impl FilesApi {
         }
 
         let resp = self.send_get(&url).await?;
-        let body: Value = resp
-            .json()
-            .await
-            .map_err(|e| AppError::generic(format!("解析 list 响应失败：{e}")))?;
+        let body: Value = parse_json_response(resp, "list").await?;
         Ok(FileListResult::from_json(&body))
     }
 
@@ -88,10 +85,7 @@ impl FilesApi {
     pub async fn get(&self, id: &str) -> AppResult<DriveFile> {
         let url = format!("{}/files/{id}?fields=*", crate::constants::DRIVE_API_BASE);
         let resp = self.send_get(&url).await?;
-        let body: Value = resp
-            .json()
-            .await
-            .map_err(|e| AppError::generic(format!("解析 get 响应失败：{e}")))?;
+        let body: Value = parse_json_response(resp, "get").await?;
         DriveFile::from_json(&body).ok_or_else(|| AppError::generic("文件元数据格式异常"))
     }
 
@@ -103,10 +97,7 @@ impl FilesApi {
         let encoded = ascii_json_encode(&body);
         let url = format!("{}/files?fields=*", crate::constants::DRIVE_API_BASE);
         let resp = self.send_post(&url, encoded.into_bytes(), "application/json").await?;
-        let body_json: Value = resp
-            .json()
-            .await
-            .map_err(|e| AppError::generic(format!("解析 createFolder 响应失败：{e}")))?;
+        let body_json: Value = parse_json_response(resp, "createFolder").await?;
         DriveFile::from_json(&body_json).ok_or_else(|| AppError::generic("创建文件夹响应异常"))
     }
 
@@ -153,10 +144,7 @@ impl FilesApi {
         let encoded = ascii_json_encode(&Value::Object(body));
         let url = format!("{}/files/{id}", crate::constants::DRIVE_API_BASE);
         let resp = self.send_patch(&url, encoded.into_bytes(), "application/json").await?;
-        let body_json: Value = resp
-            .json()
-            .await
-            .map_err(|e| AppError::generic(format!("解析 update 响应失败：{e}")))?;
+        let body_json: Value = parse_json_response(resp, "update").await?;
         DriveFile::from_json(&body_json).ok_or_else(|| AppError::generic("更新响应异常"))
     }
 
@@ -182,108 +170,25 @@ impl FilesApi {
             urlencoding(&query)
         );
         let resp = self.send_get(&url).await?;
-        let body: Value = resp
-            .json()
-            .await
-            .map_err(|e| AppError::generic(format!("解析 search 响应失败：{e}")))?;
+        let body: Value = parse_json_response(resp, "search").await?;
         Ok(FileListResult::from_json(&body))
     }
 
-    // ===== 内部：带 auth + 401 重放的请求发送 =====
+    // ===== 内部：委托 DriveClient 统一的 auth + 401 重放逻辑 =====
 
-    /// 发送 GET（注入 token + 401 重放）
+    /// 发送 GET（完整 URL，注入 token + 401 重放）
     async fn send_get(&self, url: &str) -> AppResult<reqwest::Response> {
-        let token = self.client.auth().ensure_valid_access_token().await?;
-        let resp = self
-            .client
-            .raw_http()
-            .get(url)
-            .bearer_auth(&token)
-            .send()
-            .await
-            .map_err(|e| classify_error(&e))?;
-        self.handle_401_retry(reqwest::Method::GET, url, resp, None, "").await
+        self.client.get_full(url).await
     }
 
     /// 发送 POST（带 body）
     async fn send_post(&self, url: &str, body: Vec<u8>, content_type: &str) -> AppResult<reqwest::Response> {
-        let token = self.client.auth().ensure_valid_access_token().await?;
-        let resp = self
-            .client
-            .raw_http()
-            .post(url)
-            .bearer_auth(&token)
-            .header("Content-Type", content_type)
-            .body(body.clone())
-            .send()
-            .await
-            .map_err(|e| classify_error(&e))?;
-        self.handle_401_retry(reqwest::Method::POST, url, resp, Some(body), content_type).await
+        self.client.post_full(url, Some(body), content_type).await
     }
 
     /// 发送 PATCH
     async fn send_patch(&self, url: &str, body: Vec<u8>, content_type: &str) -> AppResult<reqwest::Response> {
-        let token = self.client.auth().ensure_valid_access_token().await?;
-        let resp = self
-            .client
-            .raw_http()
-            .request(reqwest::Method::PATCH, url)
-            .bearer_auth(&token)
-            .header("Content-Type", content_type)
-            .body(body.clone())
-            .send()
-            .await
-            .map_err(|e| classify_error(&e))?;
-        self.handle_401_retry(reqwest::Method::PATCH, url, resp, Some(body), content_type).await
-    }
-
-    /// 发送 DELETE
-    async fn send_delete(&self, url: &str) -> AppResult<reqwest::Response> {
-        let token = self.client.auth().ensure_valid_access_token().await?;
-        let resp = self
-            .client
-            .raw_http()
-            .delete(url)
-            .bearer_auth(&token)
-            .send()
-            .await
-            .map_err(|e| classify_error(&e))?;
-        self.handle_401_retry(reqwest::Method::DELETE, url, resp, None, "").await
-    }
-
-    /// 401 重放：若响应为 401，刷新 token 后重放一次。
-    async fn handle_401_retry(
-        &self,
-        method: reqwest::Method,
-        url: &str,
-        resp: reqwest::Response,
-        body: Option<Vec<u8>>,
-        content_type: &str,
-    ) -> AppResult<reqwest::Response> {
-        if resp.status() != reqwest::StatusCode::UNAUTHORIZED {
-            if !resp.status().is_success() {
-                return Err(handle_error_response(resp).await);
-            }
-            return Ok(resp);
-        }
-        tracing::warn!("Files API 收到 401，刷新 token 后重放");
-        let new_token = self.client.auth().refresher().refresh().await?;
-        let mut req = self
-            .client
-            .raw_http()
-            .request(method, url)
-            .bearer_auth(new_token.access_token);
-        if !content_type.is_empty() {
-            req = req.header("Content-Type", content_type);
-        }
-        if let Some(b) = body {
-            req = req.body(b);
-        }
-        let resp = req.send().await.map_err(|e| classify_error(&e))?;
-        if !resp.status().is_success() {
-            return Err(handle_error_response(resp).await);
-        }
-        Ok(resp)
+        self.client.patch_full(url, body, content_type).await
     }
 }
 

@@ -7,3 +7,4 @@ pub mod config;
 pub mod config_store;
 pub mod env_loader;
 pub mod logging;
+pub mod paths;

@@ -2,11 +2,8 @@
 //!
 //! 对齐 `legacy/lib/drive/` 的模块划分。
 //!
-//! # TODO（阶段二：增量同步优化）
-//! 当前自动云端→本地同步走 `sync::engine::run_auto_cloud_refresh` 的全量 BFS（定时重拉整棵云端树）。
-//! 后续若接入华为 `/drive/v1/changes?cursor=...` 增量接口，建议新增 `changes_api.rs`
-//! （仿 `about_api.rs`，用 `DriveClient::get`），在 `run_auto_cloud_refresh_impl` 内改为
-//! 「有持久化 cursor → 增量拉取变更；无 cursor/失效 → 回退全量 BFS」。定时任务框架已为此预留。
+//! 增量同步已实现（`changes_api.rs`）：自动云端刷新优先走 `/drive/v1/changes` 增量路径
+//! （cursor 持久化），失败/cursor 过期/连续达阈值自动回退全量 BFS。
 
 pub mod about_api;
 pub mod changes_api;

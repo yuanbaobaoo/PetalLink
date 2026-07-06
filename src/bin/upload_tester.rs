@@ -37,7 +37,7 @@ async fn get_token() -> String {
         Ok(token_pair) => {
             eprintln!();
             eprintln!("✓ OAuth 授权成功！");
-            eprintln!("  token 已保存到 ~/Library/Application Support/io.github.yuanbaobaoo.PetalLink/token.json");
+            eprintln!("  token 已保存到 ~/Library/Application Support/io.github.yuanbaobaoo.PetalLink/token.bin");
             token_pair.access_token
         }
         Err(e) => {

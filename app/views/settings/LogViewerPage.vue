@@ -7,6 +7,7 @@ import { showToast } from "@/components/mate";
 import { useAsyncAction } from "@/composables/useAsyncAction";
 import * as logsApi from "@/api/logs";
 import type { LogRecord } from "@/api/logs";
+import { formatDateTime } from "@/utils/format";
 
 withDefaults(defineProps<{
   /** 内嵌模式：不渲染顶部 AppBar，由父组件提供导航 */
@@ -86,9 +87,7 @@ function tagTheme(level: string): "error" | "warning" | "primary" | "default" {
  * @param ms - 毫秒时间戳
  */
 function fmtTime(ms: number): string {
-  const d = new Date(ms);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  return formatDateTime(ms, true);
 }
 
 async function handleClearLogs(): Promise<void> {

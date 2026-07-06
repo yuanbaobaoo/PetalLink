@@ -9,6 +9,7 @@ import { useUpdaterStore } from "@/stores/updater";
 import * as authApi from "@/api/auth";
 import * as driveApi from "@/api/drive";
 import type { DriveAbout } from "@/api/drive";
+import { formatFileSize } from "@/utils/format";
 
 // 账号加载中的占位文本
 const LOADING_LABEL = "加载账号中…";
@@ -37,10 +38,9 @@ onMounted(async () => {
 });
 
 function fmtSize(bytes: number): string {
+  // 配额场景：0 字节显示 "0 B" 而非 "—"（与原行为一致，表示已用 0 字节）
   if (!bytes) return "0 B";
-  const u = ["B", "KB", "MB", "GB", "TB"];
-  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), u.length - 1);
-  return `${(bytes / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 1)} ${u[i]}`;
+  return formatFileSize(bytes);
 }
 </script>
 

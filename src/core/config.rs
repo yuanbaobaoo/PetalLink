@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::constants::DEFAULT_CALLBACK_PORT;
 use crate::error::{AppError, AppResult};
 
 /// 同步状态展示排序字段
@@ -31,9 +32,6 @@ pub enum SortOrder {
     Descending,
 }
 
-
-/// 默认 OAuth 回调端口
-pub const DEFAULT_CALLBACK_PORT: u16 = 9999;
 
 /// 默认 OAuth 回调 URI（必须与 AGC 后台配置一致）
 pub const DEFAULT_REDIRECT_URI: &str = "http://127.0.0.1:9999/oauth/callback";

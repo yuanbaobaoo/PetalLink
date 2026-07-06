@@ -12,6 +12,9 @@ import {
 } from "@/components/mate";
 import { confirmDialog, showToast } from "@/components/mate";
 import { useAsyncAction } from "@/composables/useAsyncAction";
+import { useFileOperation } from "@/composables/useFileOperation";
+import { formatFileSize, formatDateTime } from "@/utils/format";
+import { extractErrorMessage } from "@/utils/error";
 
 // 同步状态文案：仅云端（未同步到本地）
 const SYNC_STATUS_CLOUD_ONLY = "仅云端（未同步到本地）";
@@ -49,6 +52,14 @@ const { loading: bulkDownloadLoading, run: runBulkDownload } = useAsyncAction();
 const { loading: bulkFreeUpLoading, run: runBulkFreeUp } = useAsyncAction();
 // 右键「同步」非 MateButton，仅用 run 做防重复（不绑 loading 显示）
 const { run: runSyncItem } = useAsyncAction();
+
+// 文件操作统一封装：守卫 + 错误归一 + 统一通知
+const fileOp = useFileOperation({
+  isIndexing: () => sync.isIndexing,
+  mountConfigured: () => sync.mountConfigured,
+  refresh: () => browser.refresh(),
+  clearSelection: () => { checked.value.clear(); showCheckboxes.value = false; },
+});
 
 // 排序字段
 const sortField = ref<"name" | "size" | "modifiedTime">("name");
@@ -233,24 +244,14 @@ function handleToggleFile(id: string): void {
  *
  * @param bytes - 字节数
  */
-function formatSize(bytes: number): string {
-  if (!bytes) return "—";
-  const u = ["B", "KB", "MB", "GB", "TB"];
-  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), u.length - 1);
-  return `${(bytes / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 1)} ${u[i]}`;
-}
+const formatSize = formatFileSize;
 
 /**
  * 格式化时间显示
  *
  * @param iso - ISO 时间字符串
  */
-function formatTime(iso?: string): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
+const formatTime = (iso?: string): string => formatDateTime(iso);
 
 /**
  * 相对路径（跳过根节点名）
@@ -315,18 +316,6 @@ function handleDoubleClick(f: DriveFile): void {
 }
 
 /**
- * 全局索引读取期间禁止选择目录/文件同步：cloud_tree 正在 BFS 重建，
- * 此时选择同步会基于不完整数据，且与全局拉取并发易冲突。
- */
-function assertSyncAllowed(): boolean {
-  if (sync.isIndexing) {
-    showToast("正在读取云端索引，请稍后再试", { variant: "warning" });
-    return false;
-  }
-  return true;
-}
-
-/**
  * 同步该目录/文件：文件夹→递归同步子树，文件→downloadOnDemand
  *
  * @param f - 文件对象
@@ -334,11 +323,7 @@ function assertSyncAllowed(): boolean {
 async function handleSyncItem(f: DriveFile): Promise<void> {
   await runSyncItem(async () => {
     closeMenu();
-    if (!assertSyncAllowed()) return;
-    if (!sync.mountConfigured) {
-      showToast("请先在设置中配置同步目录", { variant: "warning" });
-      return;
-    }
+    if (!fileOp.guard({ requireMount: true })) return;
     if (driveApi.isFolder(f)) {
       // 文件夹：递归同步子树（下载缺失 + 上传本地独有 + 建目录），进度弹窗
       await doSyncFolder(f);
@@ -362,7 +347,7 @@ async function doSyncFolder(f: DriveFile): Promise<void> {
   showToast(`开始双向对齐「${f.name}」，进度见传输队列`);
   // 后台执行：不 await（命令立即返回），失败仅告警
   syncApi.syncFolderRecursive(f.id, rel).catch((e) => {
-    showToast("同步失败：" + ((e as { message?: string }).message ?? String(e)), { variant: "error" });
+    showToast("同步失败：" + extractErrorMessage(e), { variant: "error" });
   });
 }
 
@@ -373,12 +358,7 @@ async function doSyncFolder(f: DriveFile): Promise<void> {
  */
 async function handleSyncFile(f: DriveFile): Promise<void> {
   if (driveApi.isFolder(f)) return;
-  if (!assertSyncAllowed()) return;
-  // 未配置同步目录：不执行同步
-  if (!sync.mountConfigured) {
-    showToast("请先在设置中配置同步目录", { variant: "warning" });
-    return;
-  }
+  if (!fileOp.guard({ requireMount: true })) return;
   const dest = `${mountDir.value}/${relPathOf(f)}`;
   downloading.value = { open: true, name: f.name };
   try {
@@ -387,7 +367,7 @@ async function handleSyncFile(f: DriveFile): Promise<void> {
     // 下载完成后磁盘 xattr 已变（state=downloaded），重新拉批量状态刷新图标（云端→已同步）
     refreshBatchStatus();
   } catch (e) {
-    showToast("同步失败：" + ((e as { message?: string }).message ?? String(e)), { variant: "error" });
+    showToast("同步失败：" + extractErrorMessage(e), { variant: "error" });
   } finally {
     downloading.value.open = false;
   }
@@ -451,12 +431,15 @@ function handleRename(f: DriveFile): void {
  */
 async function handleConfirmRename(): Promise<void> {
   if (!renameTarget.value) return;
-  if (!assertSyncAllowed()) return;
+  if (!fileOp.guard()) return;
   const newName = renameValue.value.trim();
   if (!newName || newName === renameTarget.value.name) { showRenameDialog.value = false; return; }
   showRenameDialog.value = false;
-  try { await driveApi.renameFile(renameTarget.value.id, newName); await browser.refresh(); showToast("已重命名"); }
-  catch (e) { showToast("重命名失败：" + ((e as { message?: string }).message ?? String(e)), { variant: "error" }); }
+  const target = renameTarget.value;
+  await fileOp.runAction(
+    { errorPrefix: "重命名", successToast: "已重命名" },
+    async () => { await driveApi.renameFile(target.id, newName); },
+  );
 }
 
 /**
@@ -475,7 +458,7 @@ function handleShowProps(f: DriveFile): void {
  */
 async function handleDelete(f: DriveFile): Promise<void> {
   closeMenu();
-  if (!assertSyncAllowed()) return;
+  if (!fileOp.guard()) return;
   // ★ 检查本地同步状态，决定删除确认文案
   let localStatus = "not_synced";
   if (sync.mountConfigured) {
@@ -495,8 +478,10 @@ async function handleDelete(f: DriveFile): Promise<void> {
     content,
   });
   if (!ok) return;
-  try { await driveApi.deleteFile(f.id); await browser.refresh(); showToast("已删除"); }
-  catch (e) { showToast("删除失败：" + ((e as { message?: string }).message ?? String(e)), { variant: "error" }); }
+  await fileOp.runAction(
+    { errorPrefix: "删除", successToast: "已删除" },
+    () => driveApi.deleteFile(f.id),
+  );
 }
 
 /**
@@ -506,6 +491,7 @@ async function handleDelete(f: DriveFile): Promise<void> {
  */
 async function handleFreeUpSpace(f: DriveFile): Promise<void> {
   closeMenu();
+  if (!fileOp.guard()) return;
   const result = await syncApi.checkSafeFreeUp(relPathOf(f), f.id);
   if (result === "not_in_cloud") {
     showToast("云端不存在此文件，已阻止释放", { variant: "error" }); return;
@@ -518,8 +504,10 @@ async function handleFreeUpSpace(f: DriveFile): Promise<void> {
     content: `确定释放「${f.name}」的本地空间吗？文件内容将从本地删除，仅保留云端占位。`,
   });
   if (!ok) return;
-  try { await syncApi.freeUpSpace(f.id, relPathOf(f), `${mountDir.value}/${relPathOf(f)}`, f.name, f.size); await browser.refresh(); showToast("已释放空间"); }
-  catch (e) { showToast("释放空间失败：" + ((e as { message?: string }).message ?? String(e)), { variant: "error" }); }
+  await fileOp.runAction(
+    { errorPrefix: "释放空间", successToast: "已释放空间" },
+    () => syncApi.freeUpSpace(f.id, relPathOf(f), `${mountDir.value}/${relPathOf(f)}`, f.name, f.size),
+  );
 }
 
 /**
@@ -528,7 +516,7 @@ async function handleFreeUpSpace(f: DriveFile): Promise<void> {
 async function handleBulkDelete(): Promise<void> {
   await runBulkDelete(async () => {
     if (checked.value.size === 0) return;
-    if (!assertSyncAllowed()) return;
+    if (!fileOp.guard()) return;
     // ★ 检查选中项中是否有本地已同步的文件
     let syncedCount = 0;
     if (sync.mountConfigured) {
@@ -548,10 +536,15 @@ async function handleBulkDelete(): Promise<void> {
       content,
     });
     if (!ok) return;
+    // 批量循环：逐项删除，统计成功数（失败项静默跳过）
     let n = 0;
-    for (const id of checked.value) { try { await driveApi.deleteFile(id); n++; } catch {} }
-    checked.value.clear(); showCheckboxes.value = false;
-    await browser.refresh();
+    const ok2 = await fileOp.runAction(
+      { errorPrefix: "批量删除", refreshAfter: true, clearSelectionAfter: true },
+      async () => {
+        for (const id of checked.value) { try { await driveApi.deleteFile(id); n++; } catch { /* 部分失败静默 */ } }
+      },
+    );
+    void ok2;
     showToast(`已删除 ${n} 项`);
   });
 }
@@ -562,13 +555,17 @@ async function handleBulkDelete(): Promise<void> {
 async function handleBulkDownload(): Promise<void> {
   await runBulkDownload(async () => {
     if (checked.value.size === 0) return;
-    if (!assertSyncAllowed()) return;
-    if (!mountDir.value) { showToast("请先配置同步目录", { variant: "warning" }); return; }
+    if (!fileOp.guard({ requireMount: true })) return;
     let n = 0;
-    for (const f of sortedFiles.value) {
-      if (!checked.value.has(f.id) || driveApi.isFolder(f)) continue;
-      try { await syncApi.downloadOnDemand(f.id, `${mountDir.value}/${relPathOf(f)}`); n++; } catch {}
-    }
+    await fileOp.runAction(
+      { errorPrefix: "批量下载", refreshAfter: false, clearSelectionAfter: true },
+      async () => {
+        for (const f of sortedFiles.value) {
+          if (!checked.value.has(f.id) || driveApi.isFolder(f)) continue;
+          try { await syncApi.downloadOnDemand(f.id, `${mountDir.value}/${relPathOf(f)}`); n++; } catch { /* 部分失败静默 */ }
+        }
+      },
+    );
     showToast(`已下载 ${n} 项`);
   });
 }
@@ -579,22 +576,27 @@ async function handleBulkDownload(): Promise<void> {
 async function handleBulkFreeUp(): Promise<void> {
   await runBulkFreeUp(async () => {
     if (checked.value.size === 0) return;
+    if (!fileOp.guard()) return;
     const ok = await confirmDialog({
       title: "批量释放空间", titleIcon: "cloud", danger: true, confirmText: "释放",
       content: `确定释放选中的 ${checked.value.size} 项的本地空间吗？（未同步到本地的将自动跳过）`,
     });
     if (!ok) return;
     let freed = 0, skipped = 0;
-    for (const f of sortedFiles.value) {
-      if (!checked.value.has(f.id) || driveApi.isFolder(f)) continue;
-      try {
-        // 仅释放已同步到本地（safe）的文件，占位/未下载自动跳过
-        if (await syncApi.checkSafeFreeUp(relPathOf(f), f.id) !== "safe") { skipped++; continue; }
-        await syncApi.freeUpSpace(f.id, relPathOf(f), `${mountDir.value}/${relPathOf(f)}`, f.name, f.size);
-        freed++;
-      } catch { skipped++; }
-    }
-    await browser.refresh();
+    await fileOp.runAction(
+      { errorPrefix: "批量释放空间", refreshAfter: true, clearSelectionAfter: true },
+      async () => {
+        for (const f of sortedFiles.value) {
+          if (!checked.value.has(f.id) || driveApi.isFolder(f)) continue;
+          try {
+            // 仅释放已同步到本地（safe）的文件，占位/未下载自动跳过
+            if (await syncApi.checkSafeFreeUp(relPathOf(f), f.id) !== "safe") { skipped++; continue; }
+            await syncApi.freeUpSpace(f.id, relPathOf(f), `${mountDir.value}/${relPathOf(f)}`, f.name, f.size);
+            freed++;
+          } catch { skipped++; }
+        }
+      },
+    );
     showToast(
       freed > 0
         ? `已释放 ${freed} 项${skipped ? `，跳过 ${skipped} 项（未同步到本地）` : ""}`

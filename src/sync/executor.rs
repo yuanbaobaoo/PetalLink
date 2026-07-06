@@ -339,6 +339,18 @@ impl SyncExecutor {
 
     // ===== 各动作实现 =====
 
+    /// 统一记录动作执行结果日志（成功 info / 失败 warn）。
+    ///
+    /// 替代各 do_* 方法中重复的 `if result.success { info } else { warn }` 模式。
+    /// - `deferred` 为 true 时跳过失败日志（仅 do_upload/do_download 的延迟场景用）
+    fn log_action_result(rel: &str, verb_success: &str, verb_fail: &str, result: &ActionResult) {
+        if result.success {
+            tracing::info!(rel, "{verb_success}");
+        } else if !result.deferred {
+            tracing::warn!(rel, error = result.error_message.as_deref().unwrap_or("?"), "{verb_fail}");
+        }
+    }
+
     async fn do_upload(&self, action: &SyncAction) -> ActionResult {
         let path = match &action.local_path {
             Some(p) => PathBuf::from(p),
@@ -469,11 +481,7 @@ impl SyncExecutor {
                 ActionResult { success: false, error_message: Some(e.to_string()), deferred: false, cloud_file: None }
             }
         };
-        if result.success {
-            tracing::info!(rel, "下载成功");
-        } else {
-            tracing::warn!(rel, error = result.error_message.as_deref().unwrap_or("?"), "下载失败");
-        }
+        Self::log_action_result(rel, "下载成功", "下载失败", &result);
         result
     }
 
@@ -580,11 +588,7 @@ impl SyncExecutor {
                 Err(e) => ActionResult { success: false, error_message: Some(e.to_string()), deferred: false, cloud_file: None },
             }
         };
-        if result.success {
-            tracing::info!(rel, "创建目录成功");
-        } else {
-            tracing::warn!(rel, error = result.error_message.as_deref().unwrap_or("?"), "创建目录失败");
-        }
+        Self::log_action_result(rel, "创建目录成功", "创建目录失败", &result);
         result
     }
 
@@ -609,11 +613,7 @@ impl SyncExecutor {
                 }
             }
         };
-        if result.success {
-            tracing::info!(rel, "删除云端文件成功");
-        } else {
-            tracing::warn!(rel, error = result.error_message.as_deref().unwrap_or("?"), "删除云端文件失败");
-        }
+        Self::log_action_result(rel, "删除云端文件成功", "删除云端文件失败", &result);
         result
     }
 
@@ -631,11 +631,7 @@ impl SyncExecutor {
         } else {
             ActionResult { success: true, error_message: None, deferred: false, cloud_file: None }
         };
-        if result.success {
-            tracing::info!(rel, "删除本地文件成功");
-        } else {
-            tracing::warn!(rel, error = result.error_message.as_deref().unwrap_or("?"), "删除本地文件失败");
-        }
+        Self::log_action_result(rel, "删除本地文件成功", "删除本地文件失败", &result);
         result
     }
 
@@ -715,11 +711,7 @@ impl SyncExecutor {
                 }
             }
         };
-        if result.success {
-            tracing::info!(rel, "冲突处理完成");
-        } else {
-            tracing::warn!(rel, error = result.error_message.as_deref().unwrap_or("?"), "冲突处理失败");
-        }
+        Self::log_action_result(rel, "冲突处理完成", "冲突处理失败", &result);
         result
     }
 

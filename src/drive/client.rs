@@ -132,6 +132,39 @@ impl DriveClient {
         let url = format!("{}{}", self.base_url, path);
         self.execute_with_retry(Method::DELETE, &url, |r| r).await
     }
+
+    /// GET 请求（完整 URL，不拼接 base_url）。
+    /// 供 FilesApi 等已自行构造完整 URL 的调用方使用，复用统一的 auth + 401 重放逻辑。
+    pub async fn get_full(&self, url: &str) -> AppResult<reqwest::Response> {
+        self.execute_with_retry(Method::GET, url, |r| r).await
+    }
+
+    /// POST 请求（完整 URL）。
+    pub async fn post_full(&self, url: &str, body: Option<Vec<u8>>, content_type: &str) -> AppResult<reqwest::Response> {
+        let ct = content_type.to_string();
+        self.execute_with_retry(Method::POST, url, move |r| {
+            let mut r = r.header("Content-Type", &ct);
+            if let Some(b) = &body {
+                r = r.body(b.clone());
+            }
+            r
+        })
+        .await
+    }
+
+    /// PATCH 请求（完整 URL）。
+    pub async fn patch_full(&self, url: &str, body: Vec<u8>, content_type: &str) -> AppResult<reqwest::Response> {
+        let ct = content_type.to_string();
+        self.execute_with_retry(Method::PATCH, url, move |r| {
+            r.header("Content-Type", &ct).body(body.clone())
+        })
+        .await
+    }
+
+    /// DELETE 请求（完整 URL）。
+    pub async fn delete_full(&self, url: &str) -> AppResult<reqwest::Response> {
+        self.execute_with_retry(Method::DELETE, url, |r| r).await
+    }
 }
 
 /// 归一化 HTTP 错误为 AppError。
@@ -150,4 +183,23 @@ pub async fn handle_error_response(resp: reqwest::Response) -> AppError {
     let body = resp.text().await.unwrap_or_default();
     tracing::warn!(status, body = %body, "Drive API 错误响应");
     AppError::drive_from_status(status, &body)
+}
+
+/// 统一「检查状态码 → 解析 JSON」两步模式。
+///
+/// 替代散布在 about_api / changes_api / files_api 等处的重复代码：
+/// ```ignore
+/// if !resp.status().is_success() { return Err(handle_error_response(resp).await); }
+/// let body: Value = resp.json().await.map_err(|e| AppError::generic(format!("解析XX响应失败：{e}")))?;
+/// ```
+///
+/// - 非 2xx → `handle_error_response` 归一化为 AppError
+/// - JSON 解析失败 → `AppError::generic("解析{ctx}响应失败：{e}")`
+pub async fn parse_json_response(resp: reqwest::Response, ctx: &str) -> AppResult<serde_json::Value> {
+    if !resp.status().is_success() {
+        return Err(handle_error_response(resp).await);
+    }
+    resp.json()
+        .await
+        .map_err(|e| AppError::generic(format!("解析{ctx}响应失败：{e}")))
 }

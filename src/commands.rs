@@ -232,10 +232,8 @@ pub fn ensure_engine_started(app: &AppHandle) -> AppResult<()> {
             loop {
                 match transfer_update_rx.recv().await {
                     Ok(()) => {
-                        // emit_transfer_update 内部已统一刷新传输面板 + 状态条计数
-                        emit_transfer_update(&app_for_transfer);
-                        // 同步刷新托盘菜单的「正在传输」段（入队/进度/结算）
-                        crate::platform::tray::refresh_menu(&app_for_transfer);
+                        // 刷新传输面板 + 状态条计数 + 托盘菜单「正在传输」段
+                        notify_transfer(&app_for_transfer);
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -444,9 +442,7 @@ pub async fn drive_create_folder(name: String, parent_id: Option<String>) -> App
 pub async fn drive_delete_file(app: AppHandle, id: String) -> AppResult<()> {
     // 索引中（云端树 BFS 重建）：删除会与索引并发改云端，且 cloud_tree 不完整
     // 无法正确反映删除后的状态 → 拒绝，等索引完成。
-    if sync_engine().ok().map(|e| e.current_state().is_indexing).unwrap_or(false) {
-        return Err(AppError::generic("正在读取云端索引，请稍后再试".to_string()));
-    }
+    ensure_not_indexing()?;
     // ★ 查询 DB 中是否有本地同步记录（用于同步删除本地文件）
     let local_info: Option<(String, bool)> = {
         let conn = DB.lock();
@@ -514,9 +510,7 @@ pub async fn drive_delete_file(app: AppHandle, id: String) -> AppResult<()> {
 #[tauri::command]
 pub async fn drive_rename_file(id: String, new_name: String) -> AppResult<DriveFile> {
     // 索引中拒绝：同 drive_delete_file，避免与重建中的 cloud_tree 冲突。
-    if sync_engine().ok().map(|e| e.current_state().is_indexing).unwrap_or(false) {
-        return Err(AppError::generic("正在读取云端索引，请稍后再试".to_string()));
-    }
+    ensure_not_indexing()?;
     match FILES_API.update(&id, Some(&new_name), None, None).await {
         Ok(f) => { tracing::info!(file_id = %id, new_name = %new_name, "重命名成功"); Ok(f) }
         Err(e) => { tracing::warn!(file_id = %id, new_name = %new_name, error = %e, "重命名失败"); Err(e) }
@@ -526,9 +520,7 @@ pub async fn drive_rename_file(id: String, new_name: String) -> AppResult<DriveF
 #[tauri::command]
 pub async fn drive_move_file(id: String, new_parent_folder: String) -> AppResult<DriveFile> {
     // 索引中拒绝：移动改 parentFolder，与重建中的 path_to_id/cloud_tree 冲突。
-    if sync_engine().ok().map(|e| e.current_state().is_indexing).unwrap_or(false) {
-        return Err(AppError::generic("正在读取云端索引，请稍后再试".to_string()));
-    }
+    ensure_not_indexing()?;
     match FILES_API.update(&id, None, Some(&new_parent_folder), None).await {
         Ok(f) => { tracing::info!(file_id = %id, target_folder = %new_parent_folder, "移动成功"); Ok(f) }
         Err(e) => { tracing::warn!(file_id = %id, target_folder = %new_parent_folder, error = %e, "移动失败"); Err(e) }
@@ -812,20 +804,11 @@ pub async fn sync_download_on_demand(app: AppHandle, file_id: String, dest_path:
     // 结算传输记录（成功 transferred=total_size，失败保持）
     {
         let conn = DB.lock();
-        let (state, transferred_sql) = if result.is_ok() {
-            (repository::transfer_state::COMPLETED, "transferred = total_size")
-        } else {
-            (repository::transfer_state::FAILED, "transferred = transferred")
-        };
-        let sql = format!(
-            "UPDATE transfer_queue SET state=?1, error_message=?2, finished_at=?3, {transferred_sql} WHERE id=?4"
-        );
-        let _ = conn.execute(
-            &sql,
-            rusqlite::params![state,
-                result.as_ref().err().map(|e| e.to_string()).as_deref(),
-                chrono::Utc::now().timestamp_millis(),
-                task_id],
+        repository::settle_transfer_by_id(
+            &conn,
+            task_id,
+            result.is_ok(),
+            result.as_ref().err().map(|e| e.to_string()).as_deref(),
         );
     }
     emit_transfer_update(&app); // 结算后通知：传输面板 + 状态条刷新
@@ -1106,8 +1089,7 @@ async fn sync_folder_recursive_impl(
             }).unwrap_or(0)
         };
         // 入队即通知：前端传输面板 + 托盘菜单立即显示新下载项
-        emit_transfer_update(app);
-        crate::platform::tray::refresh_menu(app);
+        notify_transfer(app);
         let download_result = download_to_dest(
             &f.id, &dest, &f.name, f.size,
             f.edited_time.map(|t| t.timestamp_millis()),
@@ -1115,25 +1097,15 @@ async fn sync_folder_recursive_impl(
         // 结算传输记录（成功时 transferred=total_size，失败时保持原值）
         {
             let conn = DB.lock();
-            let (state, transferred_sql) = if download_result.is_ok() {
-                (repository::transfer_state::COMPLETED, "transferred = total_size")
-            } else {
-                (repository::transfer_state::FAILED, "transferred = transferred")
-            };
-            let sql = format!(
-                "UPDATE transfer_queue SET state=?1, error_message=?2, finished_at=?3, {transferred_sql} WHERE id=?4"
-            );
-            let _ = conn.execute(
-                &sql,
-                rusqlite::params![state,
-                    download_result.as_ref().err().map(|e| e.to_string()).as_deref(),
-                    chrono::Utc::now().timestamp_millis(),
-                    task_id],
+            repository::settle_transfer_by_id(
+                &conn,
+                task_id,
+                download_result.is_ok(),
+                download_result.as_ref().err().map(|e| e.to_string()).as_deref(),
             );
         }
         // 结算后通知：传输面板 + 托盘菜单刷新（状态变化/消失）
-        emit_transfer_update(app);
-        crate::platform::tray::refresh_menu(app);
+        notify_transfer(app);
         if let Err(e) = download_result {
             tracing::warn!(subrel = %subrel, error = %e, "sync_folder_recursive: 下载失败");
         }
@@ -1171,8 +1143,7 @@ async fn sync_folder_recursive_impl(
             }).unwrap_or(0)
         };
         // 入队即通知：前端传输面板 + 托盘菜单立即显示新上传项
-        emit_transfer_update(app);
-        crate::platform::tray::refresh_menu(app);
+        notify_transfer(app);
         // 进度回调：节流写 transferred + 通知刷新（按 task_id 更新，500ms 节流）
         let prog_db = DB.clone();
         let prog_task_id = task_id;
@@ -1184,25 +1155,15 @@ async fn sync_folder_recursive_impl(
         // 结算传输记录（成功时 transferred=total_size，失败时保持原值）
         {
             let conn = DB.lock();
-            let (state, transferred_sql) = if upload_result.is_ok() {
-                (repository::transfer_state::COMPLETED, "transferred = total_size")
-            } else {
-                (repository::transfer_state::FAILED, "transferred = transferred")
-            };
-            let sql = format!(
-                "UPDATE transfer_queue SET state=?1, error_message=?2, finished_at=?3, {transferred_sql} WHERE id=?4"
-            );
-            let _ = conn.execute(
-                &sql,
-                rusqlite::params![state,
-                    upload_result.as_ref().err().map(|e| e.to_string()).as_deref(),
-                    chrono::Utc::now().timestamp_millis(),
-                    task_id],
+            repository::settle_transfer_by_id(
+                &conn,
+                task_id,
+                upload_result.is_ok(),
+                upload_result.as_ref().err().map(|e| e.to_string()).as_deref(),
             );
         }
         // 结算后通知：传输面板 + 托盘菜单刷新（状态变化/消失）
-        emit_transfer_update(app);
-        crate::platform::tray::refresh_menu(app);
+        notify_transfer(app);
         match upload_result {
             Ok(uploaded) => {
                 eng.cloud_tree_insert(full_rel.clone(), uploaded.clone());
@@ -1657,4 +1618,24 @@ pub fn emit_transfer_update(app: &AppHandle) {
     if let Some(e) = try_sync_engine() {
         e.push_live_transfer_state();
     }
+}
+
+/// 索引守卫：cloud_tree BFS 重建中时拒绝文件操作（基于不完整数据会误判）。
+///
+/// 替代散布在 drive_delete/rename/move、sync_download_on_demand、sync_folder_recursive 等
+/// 处的重复 `is_indexing` 检查 + 返回错误模式。
+fn ensure_not_indexing() -> AppResult<()> {
+    if sync_engine().ok().map(|e| e.current_state().is_indexing).unwrap_or(false) {
+        return Err(AppError::generic("正在读取云端索引，请稍后再试".to_string()));
+    }
+    Ok(())
+}
+
+/// 通知传输面板 + 托盘菜单同时刷新。
+///
+/// `emit_transfer_update` + `tray::refresh_menu` 在 commands.rs 中成对出现，
+/// 统一封装避免遗漏其一。
+fn notify_transfer(app: &AppHandle) {
+    emit_transfer_update(app);
+    crate::platform::tray::refresh_menu(app);
 }

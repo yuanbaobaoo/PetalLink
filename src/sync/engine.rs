@@ -10,7 +10,7 @@ use parking_lot::Mutex;
 use tokio::sync::broadcast;
 use rusqlite::{Connection, params};
 
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::sync::state::{FailedItem, FreeUpCheckResult, SyncGlobalState};
 use crate::data::repository;
 use crate::drive::files_api::FilesApi;
@@ -434,7 +434,7 @@ impl SyncEngine {
     }
 
     async fn load_or_refresh_cloud_tree(&self, mount_dir: &str) -> AppResult<()> {
-        let abs_dir = mount_dir.replace("~/", &format!("{}/", std::env::var("HOME").unwrap_or_default()));
+        let abs_dir = crate::core::paths::expand_tilde(mount_dir);
         let loaded = cloud_tree::load_persisted_cloud_tree(&abs_dir).map(|cache| {
             *self.cloud_tree.lock() = cache.tree;
             *self.path_to_id.lock() = cache.path_to_id;
@@ -471,10 +471,10 @@ impl SyncEngine {
             let to_purge: Vec<String> = {
                 let mut stmt = conn.prepare(
                     "SELECT local_path FROM sync_items WHERE status=?1"
-                ).unwrap();
-                stmt.query_map(rusqlite::params![repository::sync_status::DELETED], |r| r.get::<_, String>(0))
-                    .unwrap()
-                    .filter_map(|r| r.ok())
+                ).map_err(|e| AppError::generic(format!("查询失败：{e}")))?;
+                let rows = stmt.query_map(rusqlite::params![repository::sync_status::DELETED], |r| r.get::<_, String>(0))
+                    .map_err(|e| AppError::generic(format!("查询失败：{e}")))?;
+                rows.filter_map(|r| r.ok())
                     .filter(|p| !ct.contains_key(p))
                     .collect()
             };
@@ -1087,8 +1087,7 @@ impl SyncEngine {
         drop(db);
 
         let ct = self.cloud_tree.lock();
-        let mount_dir = self.mount_dir.lock().clone().unwrap_or_default()
-            .replace("~/", &format!("{}/", std::env::var("HOME").unwrap_or_default()));
+        let mount_dir = crate::core::paths::expand_tilde(&self.mount_dir.lock().clone().unwrap_or_default());
         for action in actions.iter_mut() {
             if action.action_type != crate::sync::state::SyncActionType::Upload || action.file_id.is_some() {
                 continue;
@@ -1288,7 +1287,7 @@ impl SyncEngine {
     async fn trigger_manual_sync_impl(&self) -> AppResult<()> {
         // 对齐 dart triggerManualSync：先刷新云端树获取最新状态，再跑同步周期
         let mount_dir = self.mount_dir.lock().clone().unwrap_or_default();
-        let abs_dir = mount_dir.replace("~/", &format!("{}/", std::env::var("HOME").unwrap_or_default()));
+        let abs_dir = crate::core::paths::expand_tilde(&mount_dir);
 
         // 广播 is_indexing=true（对齐 dart _refreshCloudTree 的 isIndexing 广播）。
         // trigger_manual_sync 直接调 refresh_cloud_tree，需在此补 is_indexing 广播，
@@ -1352,7 +1351,7 @@ impl SyncEngine {
     /// 自动云端刷新实现：有 cursor 走增量 changes，无/失效走全量 BFS（持有 manual_syncing 锁时调用）。
     async fn run_auto_cloud_refresh_impl(&self) -> AppResult<()> {
         let mount_dir = self.mount_dir.lock().clone().unwrap_or_default();
-        let abs_dir = mount_dir.replace("~/", &format!("{}/", std::env::var("HOME").unwrap_or_default()));
+        let abs_dir = crate::core::paths::expand_tilde(&mount_dir);
 
         // 广播 is_indexing=true（phase 由 try_incremental_or_full_refresh 内部按增量/全量设）
         {
@@ -1449,7 +1448,7 @@ impl SyncEngine {
     /// 全量 BFS 后尝试取 changes 首页游标建立增量基线。失败静默。
     /// 已有 cursor 则不重复初始化；不支持时退化为「首次自动刷新走全量」，不报错。
     async fn try_init_changes_cursor(&self, mount_dir: &str) {
-        let abs_dir = mount_dir.replace("~/", &format!("{}/", std::env::var("HOME").unwrap_or_default()));
+        let abs_dir = crate::core::paths::expand_tilde(mount_dir);
         self.try_init_changes_cursor_abs(&abs_dir).await;
     }
 
@@ -1573,10 +1572,7 @@ impl SyncEngine {
     /// watcher 周期删云端 → 下一轮本地文件又被 Upload → 传输队列出现多余的"删除+上传"。
     fn validate_delete_from_cloud(&self, actions: &mut [crate::sync::state::SyncAction]) {
         let mount_dir = match self.mount_dir.lock().clone() {
-            Some(d) => {
-                let home = std::env::var("HOME").unwrap_or_default();
-                std::path::PathBuf::from(d.replace("~/", &format!("{}/", home)))
-            }
+            Some(d) => std::path::PathBuf::from(crate::core::paths::expand_tilde(&d)),
             None => return,
         };
         for a in actions.iter_mut() {
@@ -1619,12 +1615,15 @@ impl SyncEngine {
         let conn = self.db.lock();
         // 收集 local 和 cloud 都缺失但 DB 有的路径
         let stale: Vec<String> = {
-            let mut stmt = conn
-                .prepare("SELECT local_path FROM sync_items")
-                .unwrap();
-            stmt.query_map([], |r| r.get::<_, String>(0))
-                .unwrap()
-                .filter_map(|r| r.ok())
+            let Ok(mut stmt) = conn.prepare("SELECT local_path FROM sync_items") else {
+                tracing::warn!("purge_stale_db_records: prepare 失败，跳过本轮清理");
+                return;
+            };
+            let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) else {
+                tracing::warn!("purge_stale_db_records: query_map 失败，跳过本轮清理");
+                return;
+            };
+            rows.filter_map(|r| r.ok())
                 .filter(|p| !local.contains_key(p) && !cloud.contains_key(p))
                 .collect()
         };

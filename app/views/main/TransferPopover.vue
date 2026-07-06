@@ -5,6 +5,7 @@ import { useTransferStore } from "@/stores/transfer";
 import { TRANSFER_DIR, TRANSFER_STATE, DIR_LABEL } from "@/api/transfer";
 import { MateIcon, MateButton, MateLinearProgress, MateEmpty, MatePopupMenu } from "@/components/mate";
 import type { PopupItem } from "@/components/mate";
+import { formatFileSize } from "@/utils/format";
 
 const transfer = useTransferStore();
 
@@ -49,10 +50,7 @@ function progressColor(state: number): string {
 }
 
 function fmtSize(bytes: number): string {
-  if (!bytes) return "—";
-  const u = ["B", "KB", "MB", "GB", "TB"];
-  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), u.length - 1);
-  return `${(bytes / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 1)} ${u[i]}`;
+  return formatFileSize(bytes);
 }
 function pct(t: { total_size: number; transferred: number }): number {
   return t.total_size > 0 ? Math.round((t.transferred / t.total_size) * 100) : 0;

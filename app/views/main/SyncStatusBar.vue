@@ -3,6 +3,7 @@
 import { computed, ref } from "vue";
 import { useSyncStore } from "@/stores/sync";
 import { MateIcon, MateDialog, MateButton } from "@/components/mate";
+import { pad2 } from "@/utils/format";
 
 const sync = useSyncStore();
 
@@ -28,8 +29,7 @@ const statusText = computed(() => {
 const lastSyncFormatted = computed(() => {
   if (!sync.lastSyncTime) return "";
   const d = new Date(sync.lastSyncTime);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 });
 
 const isIdle = computed(() => !sync.hasActiveTransfer && !sync.isIndexing && !sync.isRunning);

@@ -6,31 +6,12 @@ import { useFileBrowserStore } from "@/stores/fileBrowser";
 import { MateInfoBanner, MateButton } from "@/components/mate";
 import * as configApi from "@/api/config";
 import { open } from "@tauri-apps/plugin-dialog";
-import { readDir } from "@tauri-apps/plugin-fs";
+import { extractErrorMessage } from "@/utils/error";
+import { isEmptyDir } from "@/utils/fs";
 
 const sync = useSyncStore();
 const browser = useFileBrowserStore();
 const errorMessage = ref("");
-
-/**
- * 检查目录是否为空（过滤隐藏文件 + skipPatterns）
- */
-async function isEmptyDir(dir: string): Promise<boolean> {
-  const entries = await readDir(dir);
-  const skipPatterns = [".DS_Store", ".tmp", "~$*", ".Trash"];
-  const visible = entries.filter((e) => {
-    const name = e.name ?? "";
-    if (!name) return false;
-    if (name.startsWith(".")) return false; // 隐藏文件
-    for (const p of skipPatterns) {
-      if (p.includes("*")) {
-        if (new RegExp("^" + p.replace(/\./g, "\\.").replace(/\*/g, ".*")).test(name)) return false;
-      } else if (name === p) return false;
-    }
-    return true;
-  });
-  return visible.length === 0;
-}
 
 /**
  * 选择同步目录：原生目录选择器 → 校验空目录 → 保存配置 → 重新评估阶段
@@ -46,7 +27,7 @@ async function handleSelectDir(): Promise<void> {
       return;
     }
   } catch (e) {
-    errorMessage.value = "检查目录失败：" + ((e as { message?: string }).message ?? String(e));
+    errorMessage.value = "检查目录失败：" + extractErrorMessage(e);
     return;
   }
 
@@ -60,7 +41,7 @@ async function handleSelectDir(): Promise<void> {
     await browser.loadRoot();
     errorMessage.value = "";
   } catch (e) {
-    errorMessage.value = "配置同步目录失败：" + ((e as { message?: string }).message ?? String(e));
+    errorMessage.value = "配置同步目录失败：" + extractErrorMessage(e);
   }
 }
 
@@ -69,7 +50,7 @@ async function handleFirstSync(): Promise<void> {
     await sync.triggerManualRefresh();
     errorMessage.value = "";
   } catch (e) {
-    errorMessage.value = "首次同步失败：" + ((e as { message?: string }).message ?? String(e));
+    errorMessage.value = "首次同步失败：" + extractErrorMessage(e);
   }
 }
 

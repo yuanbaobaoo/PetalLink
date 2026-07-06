@@ -6,6 +6,7 @@ import { defineStore } from "pinia";
 import { ref, computed } from "vue";
 import * as driveApi from "@/api/drive";
 import type { DriveFile } from "@/api/drive";
+import { extractErrorMessage } from "@/utils/error";
 
 /** 文件夹位置 */
 export interface FolderLocation {
@@ -36,7 +37,7 @@ export const useFileBrowserStore = defineStore("fileBrowser", () => {
     try {
       files.value = await driveApi.listFiles(current.value.id || undefined);
     } catch (e) {
-      errorMessage.value = (e as { message?: string }).message ?? String(e);
+      errorMessage.value = extractErrorMessage(e);
       files.value = [];
     } finally {
       loading.value = false;

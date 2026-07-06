@@ -12,7 +12,8 @@ import { useAuthStore } from "@/stores/auth";
 import { useUpdaterStore } from "@/stores/updater";
 import { useAsyncAction } from "@/composables/useAsyncAction";
 import { open } from "@tauri-apps/plugin-dialog";
-import { readDir } from "@tauri-apps/plugin-fs";
+import { formatFileSize } from "@/utils/format";
+import { isEmptyDir } from "@/utils/fs";
 
 const auth = useAuthStore();
 const updater = useUpdaterStore();
@@ -174,19 +175,8 @@ async function handleSelectDir(): Promise<void> {
       const selected = await open({ directory: true, multiple: false, title: "选择同步目录" });
       if (selected && typeof selected === "string") {
         // 校验：必须空目录（过滤隐藏文件 + skipPatterns）
-        const entries = await readDir(selected);
-        const skipPatterns = [".DS_Store", ".tmp", "~$*", ".Trash"];
-        const visible = entries.filter((e) => {
-          const name = e.name ?? "";
-          if (!name || name.startsWith(".")) return false;
-          for (const p of skipPatterns) {
-            if (p.includes("*")) {
-              if (new RegExp("^" + p.replace(/\./g, "\\.").replace(/\*/g, ".*")).test(name)) return false;
-            } else if (name === p) return false;
-          }
-          return true;
-        });
-        if (visible.length > 0) {
+        const isEmpty = await isEmptyDir(selected).catch(() => false);
+        if (!isEmpty) {
           showToast("所选目录不为空，请选择一个空目录", { variant: "warning" });
           return;
         }
@@ -202,10 +192,7 @@ async function handleSelectDir(): Promise<void> {
  * @param bytes - 字节数
  */
 function fmtSize(bytes: number): string {
-  if (!bytes) return "—";
-  const u = ["B", "KB", "MB", "GB", "TB"];
-  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), u.length - 1);
-  return `${(bytes / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 1)} ${u[i]}`;
+  return formatFileSize(bytes);
 }
 </script>
 

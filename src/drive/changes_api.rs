@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use crate::drive::client::{handle_error_response, DriveClient};
+use crate::drive::client::{parse_json_response, DriveClient};
 use crate::drive::models::DriveFile;
 use crate::error::{AppError, AppResult};
 
@@ -119,13 +119,7 @@ impl ChangesApi {
     /// 响应：`{"category":"drive#startCursor","startCursor":"311296"}`
     pub async fn get_start_cursor(&self) -> AppResult<String> {
         let resp = self.client.get("/changes/getStartCursor").await?;
-        if !resp.status().is_success() {
-            return Err(handle_error_response(resp).await);
-        }
-        let body: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| AppError::generic(format!("解析 startCursor 响应失败：{e}")))?;
+        let body: serde_json::Value = parse_json_response(resp, "startCursor").await?;
         body.get("startCursor")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
@@ -142,13 +136,7 @@ impl ChangesApi {
             }
         }
         let resp = self.client.get(&url).await?;
-        if !resp.status().is_success() {
-            return Err(handle_error_response(resp).await);
-        }
-        let body: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| AppError::generic(format!("解析 changes 响应失败：{e}")))?;
+        let body: serde_json::Value = parse_json_response(resp, "changes").await?;
         Ok(ChangeListResult::from_json(&body))
     }
 

@@ -7,6 +7,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, AppResult};
 
+/// 统一 DB 操作错误映射：`db_err!("查询", expr)` 等价于
+/// `expr.map_err(|e| AppError::generic(format!("查询失败：{e}")))?`。
+///
+/// 替代散布在仓储层的重复 `.map_err(|e| AppError::generic(format!("XX失败：{e}")))?` 模式。
+macro_rules! db_err {
+    ($op:literal, $expr:expr) => {
+        $expr.map_err(|e| AppError::generic(format!("{}失败：{e}", $op)))?
+    };
+}
+
 // ===== 同步状态常量（对齐 dart SyncStatusType） =====
 /// 0=已同步 1=仅云端 2=仅本地 3=同步中 4=失败 5=冲突
 pub mod sync_status {
@@ -139,12 +149,11 @@ impl SyncItem {
 
 /// 按 fileId 查询单条同步记录。
 pub fn find_by_file_id(conn: &Connection, file_id: &str) -> AppResult<Option<SyncItem>> {
-    let mut stmt = conn
-        .prepare("SELECT * FROM sync_items WHERE file_id = ?1 LIMIT 1")
-        .map_err(|e| AppError::generic(format!("查询失败：{e}")))?;
-    let mut rows = stmt
-        .query_map(params![file_id], SyncItem::from_row)
-        .map_err(|e| AppError::generic(format!("查询失败：{e}")))?;
+    let mut stmt = db_err!(
+        "查询",
+        conn.prepare("SELECT * FROM sync_items WHERE file_id = ?1 LIMIT 1")
+    );
+    let mut rows = db_err!("查询", stmt.query_map(params![file_id], SyncItem::from_row));
     match rows.next() {
         Some(Ok(item)) => Ok(Some(item)),
         Some(Err(_)) => Ok(None),
@@ -155,12 +164,8 @@ pub fn find_by_file_id(conn: &Connection, file_id: &str) -> AppResult<Option<Syn
 /// 加载全部同步记录（按 local_path 索引）。对齐 dart `_loadDbRecords`。
 /// 过滤 basename 以 `.hwcloud_` 开头的内部文件记录。
 pub fn load_all(conn: &Connection) -> AppResult<Vec<SyncItem>> {
-    let mut stmt = conn
-        .prepare("SELECT * FROM sync_items")
-        .map_err(|e| AppError::generic(format!("查询失败：{e}")))?;
-    let rows = stmt
-        .query_map([], SyncItem::from_row)
-        .map_err(|e| AppError::generic(format!("查询失败：{e}")))?;
+    let mut stmt = db_err!("查询", conn.prepare("SELECT * FROM sync_items"));
+    let rows = db_err!("查询", stmt.query_map([], SyncItem::from_row));
     let mut items = Vec::new();
     for item in rows.flatten() {
         // 过滤内部文件（对齐 _loadDbRecords 跳过 .hwcloud_ 前缀）
@@ -177,46 +182,49 @@ pub fn load_all(conn: &Connection) -> AppResult<Vec<SyncItem>> {
 
 /// 插入或更新（冲突时替换）。对齐 dart `insertOnConflictUpdate`。
 pub fn upsert(conn: &Connection, item: &SyncItem) -> AppResult<()> {
-    conn.execute(
-        "INSERT OR REPLACE INTO sync_items
-            (file_id, local_path, parent_folder_id, name, is_folder, size, local_size,
-             sha256, local_mtime, cloud_edited_time, last_sync_time, status, error_message)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
-        params![
-            item.file_id,
-            item.local_path,
-            item.parent_folder_id,
-            item.name,
-            item.is_folder as i64,
-            item.size,
-            item.local_size,
-            item.sha256,
-            item.local_mtime,
-            item.cloud_edited_time,
-            item.last_sync_time,
-            item.status,
-            item.error_message,
-        ],
-    )
-    .map_err(|e| AppError::generic(format!("写入失败：{e}")))?;
+    db_err!(
+        "写入",
+        conn.execute(
+            "INSERT OR REPLACE INTO sync_items
+                (file_id, local_path, parent_folder_id, name, is_folder, size, local_size,
+                 sha256, local_mtime, cloud_edited_time, last_sync_time, status, error_message)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+            params![
+                item.file_id,
+                item.local_path,
+                item.parent_folder_id,
+                item.name,
+                item.is_folder as i64,
+                item.size,
+                item.local_size,
+                item.sha256,
+                item.local_mtime,
+                item.cloud_edited_time,
+                item.last_sync_time,
+                item.status,
+                item.error_message,
+            ],
+        )
+    );
     Ok(())
 }
 
 /// 按 local_path 删除记录。
 #[allow(dead_code)]
 pub fn delete_by_local_path(conn: &Connection, local_path: &str) -> AppResult<()> {
-    conn.execute(
-        "DELETE FROM sync_items WHERE local_path = ?1",
-        params![local_path],
-    )
-    .map_err(|e| AppError::generic(format!("删除失败：{e}")))?;
+    db_err!(
+        "删除",
+        conn.execute(
+            "DELETE FROM sync_items WHERE local_path = ?1",
+            params![local_path],
+        )
+    );
     Ok(())
 }
 
 /// 清空全部同步记录（退出登录/清空缓存用）。
 pub fn delete_all(conn: &Connection) -> AppResult<()> {
-    conn.execute("DELETE FROM sync_items", [])
-        .map_err(|e| AppError::generic(format!("清空失败：{e}")))?;
+    db_err!("清空", conn.execute("DELETE FROM sync_items", []));
     Ok(())
 }
 
@@ -226,11 +234,13 @@ pub fn delete_all(conn: &Connection) -> AppResult<()> {
 pub fn reset_stale_statuses(conn: &Connection) -> AppResult<()> {
     // 简化实现：syncing→synced，failed→保留（需用户重试）。
     // 完整逻辑在 sync_engine 启动时根据本地文件存在性细化。
-    conn.execute(
-        "UPDATE sync_items SET status = ?1 WHERE status = ?2",
-        params![sync_status::SYNCED, sync_status::SYNCING],
-    )
-    .map_err(|e| AppError::generic(format!("重置状态失败：{e}")))?;
+    db_err!(
+        "重置状态",
+        conn.execute(
+            "UPDATE sync_items SET status = ?1 WHERE status = ?2",
+            params![sync_status::SYNCED, sync_status::SYNCING],
+        )
+    );
     Ok(())
 }
 
@@ -260,28 +270,30 @@ impl TransferTask {
 
 /// 插入传输任务，返回自增 id。
 pub fn insert_transfer(conn: &Connection, task: &TransferTask) -> AppResult<i64> {
-    conn.execute(
-        "INSERT INTO transfer_queue
-            (direction, file_id, local_path, name, total_size, transferred, state,
-             error_message, created_at, finished_at, server_id, upload_id, resume_offset)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
-        params![
-            task.direction,
-            task.file_id,
-            task.local_path,
-            task.name,
-            task.total_size,
-            task.transferred,
-            task.state,
-            task.error_message,
-            task.created_at,
-            task.finished_at,
-            task.server_id,
-            task.upload_id,
-            task.resume_offset,
-        ],
-    )
-    .map_err(|e| AppError::generic(format!("插入传输任务失败：{e}")))?;
+    db_err!(
+        "插入传输任务",
+        conn.execute(
+            "INSERT INTO transfer_queue
+                (direction, file_id, local_path, name, total_size, transferred, state,
+                 error_message, created_at, finished_at, server_id, upload_id, resume_offset)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+            params![
+                task.direction,
+                task.file_id,
+                task.local_path,
+                task.name,
+                task.total_size,
+                task.transferred,
+                task.state,
+                task.error_message,
+                task.created_at,
+                task.finished_at,
+                task.server_id,
+                task.upload_id,
+                task.resume_offset,
+            ],
+        )
+    );
     Ok(conn.last_insert_rowid())
 }
 
@@ -294,11 +306,12 @@ pub fn list_transfers(
 ) -> AppResult<Vec<TransferTask>> {
     match (direction, state_filter) {
         (Some(d), Some(s)) => {
-            let mut stmt = conn
-                .prepare(
+            let mut stmt = db_err!(
+                "查询",
+                conn.prepare(
                     "SELECT * FROM transfer_queue WHERE direction = ?1 AND state = ?2 ORDER BY created_at DESC",
                 )
-                .map_err(|e| AppError::generic(format!("查询失败：{e}")))?;
+            );
             collect_tasks(stmt.query_map(params![d, s], TransferTask::from_row))
         }
         (Some(d), None) => list_transfers_with_dir(conn, d),
@@ -313,7 +326,7 @@ fn collect_tasks<I>(rows_result: rusqlite::Result<I>) -> AppResult<Vec<TransferT
 where
     I: Iterator<Item = rusqlite::Result<TransferTask>>,
 {
-    let rows = rows_result.map_err(|e| AppError::generic(format!("查询失败：{e}")))?;
+    let rows = db_err!("查询", rows_result);
     let mut tasks = Vec::new();
     for t in rows.flatten() {
         tasks.push(t);
@@ -323,25 +336,28 @@ where
 
 #[allow(dead_code)]
 fn list_transfers_with_dir(conn: &Connection, d: i32) -> AppResult<Vec<TransferTask>> {
-    let mut stmt = conn
-        .prepare("SELECT * FROM transfer_queue WHERE direction = ?1 ORDER BY created_at DESC")
-        .map_err(|e| AppError::generic(format!("查询失败：{e}")))?;
+    let mut stmt = db_err!(
+        "查询",
+        conn.prepare("SELECT * FROM transfer_queue WHERE direction = ?1 ORDER BY created_at DESC")
+    );
     collect_tasks(stmt.query_map(params![d], TransferTask::from_row))
 }
 
 #[allow(dead_code)]
 fn list_transfers_with_state(conn: &Connection, s: i32) -> AppResult<Vec<TransferTask>> {
-    let mut stmt = conn
-        .prepare("SELECT * FROM transfer_queue WHERE state = ?1 ORDER BY created_at DESC")
-        .map_err(|e| AppError::generic(format!("查询失败：{e}")))?;
+    let mut stmt = db_err!(
+        "查询",
+        conn.prepare("SELECT * FROM transfer_queue WHERE state = ?1 ORDER BY created_at DESC")
+    );
     collect_tasks(stmt.query_map(params![s], TransferTask::from_row))
 }
 
 /// 查询所有传输任务（created_at 倒序）。
 pub fn list_all_transfers(conn: &Connection) -> AppResult<Vec<TransferTask>> {
-    let mut stmt = conn
-        .prepare("SELECT * FROM transfer_queue ORDER BY created_at DESC")
-        .map_err(|e| AppError::generic(format!("查询失败：{e}")))?;
+    let mut stmt = db_err!(
+        "查询",
+        conn.prepare("SELECT * FROM transfer_queue ORDER BY created_at DESC")
+    );
     collect_tasks(stmt.query_map([], TransferTask::from_row))
 }
 
@@ -355,40 +371,62 @@ pub fn update_transfer_state(
     finished_at: Option<i64>,
     error_message: Option<&str>,
 ) -> AppResult<()> {
-    conn.execute(
-        "UPDATE transfer_queue SET state = ?1, transferred = ?2, finished_at = ?3, error_message = ?4 WHERE id = ?5",
-        params![state, transferred, finished_at, error_message, id],
-    )
-    .map_err(|e| AppError::generic(format!("更新传输任务失败：{e}")))?;
+    db_err!(
+        "更新传输任务",
+        conn.execute(
+            "UPDATE transfer_queue SET state = ?1, transferred = ?2, finished_at = ?3, error_message = ?4 WHERE id = ?5",
+            params![state, transferred, finished_at, error_message, id],
+        )
+    );
     Ok(())
 }
 
 /// 清空传输队列表。
 pub fn delete_all_transfers(conn: &Connection) -> AppResult<()> {
-    conn.execute("DELETE FROM transfer_queue", [])
-        .map_err(|e| AppError::generic(format!("清空失败：{e}")))?;
+    db_err!("清空", conn.execute("DELETE FROM transfer_queue", []));
     Ok(())
+}
+
+/// 结算传输任务：成功 → COMPLETED + transferred=total_size；失败 → FAILED + transferred 保持。
+///
+/// 替代 commands.rs 中 3 处重复的结算 SQL（download_on_demand / folder_recursive 下载循环 / 上传循环）。
+/// 错误仅忽略（与原内联实现一致——结算失败不应阻断主流程）。
+pub fn settle_transfer_by_id(conn: &Connection, task_id: i64, success: bool, error_message: Option<&str>) {
+    let (state, transferred_sql) = if success {
+        (transfer_state::COMPLETED, "transferred = total_size")
+    } else {
+        (transfer_state::FAILED, "transferred = transferred")
+    };
+    let sql = format!(
+        "UPDATE transfer_queue SET state=?1, error_message=?2, finished_at=?3, {transferred_sql} WHERE id=?4"
+    );
+    let _ = conn.execute(
+        &sql,
+        params![state, error_message, chrono::Utc::now().timestamp_millis(), task_id],
+    );
 }
 
 /// 修剪传输历史：保留最近 N 条已结束任务（completed/failed/canceled）。
 /// 对齐 dart `_pruneTransferHistory`（保留最近 100 条）。
 pub fn prune_transfer_history(conn: &Connection, keep: usize) -> AppResult<()> {
-    conn.execute(
-        "DELETE FROM transfer_queue
-         WHERE id IN (
-            SELECT id FROM transfer_queue
-            WHERE state IN (?1, ?2, ?3)
-            ORDER BY id DESC
-            LIMIT -1 OFFSET ?4
-         )",
-        params![
-            transfer_state::COMPLETED,
-            transfer_state::FAILED,
-            transfer_state::CANCELED,
-            keep as i64,
-        ],
-    )
-    .map_err(|e| AppError::generic(format!("修剪历史失败：{e}")))?;
+    db_err!(
+        "修剪历史",
+        conn.execute(
+            "DELETE FROM transfer_queue
+             WHERE id IN (
+                SELECT id FROM transfer_queue
+                WHERE state IN (?1, ?2, ?3)
+                ORDER BY id DESC
+                LIMIT -1 OFFSET ?4
+             )",
+            params![
+                transfer_state::COMPLETED,
+                transfer_state::FAILED,
+                transfer_state::CANCELED,
+                keep as i64,
+            ],
+        )
+    );
     Ok(())
 }
 

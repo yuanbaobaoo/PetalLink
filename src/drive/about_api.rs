@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 
-use crate::drive::client::DriveClient;
+use crate::drive::client::{parse_json_response, DriveClient};
 use crate::drive::models::DriveAbout;
 use crate::error::{AppError, AppResult};
 
@@ -24,13 +24,7 @@ impl AboutApi {
     /// GET /about?fields=*
     pub async fn get(&self) -> AppResult<DriveAbout> {
         let resp = self.client.get("/about?fields=*").await?;
-        if !resp.status().is_success() {
-            return Err(crate::drive::client::handle_error_response(resp).await);
-        }
-        let body: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| AppError::generic(format!("解析 about 响应失败：{e}")))?;
+        let body: serde_json::Value = parse_json_response(resp, "about").await?;
         Ok(DriveAbout::from_json(&body))
     }
 
