@@ -35,7 +35,7 @@ const tabs: { key: TabKey; icon: string; label: string }[] = [
 const concurrency = ref(6);
 const debounceSec = ref(3);
 // 云端定时刷新间隔（秒）：0=关闭，默认 900（15 分钟）
-const pollIntervalSec = ref(900);
+const pollIntervalSec = ref(60);
 const skipPatterns = ref(".DS_Store, .tmp, ~$*, .Trash");
 // 同步目录设置
 const mountDir = ref("");

@@ -232,24 +232,24 @@ mod tests {
 
     #[test]
     fn test_migration_legacy_small_poll_to_new_default() {
-        // 旧配置 poll=30 debounce=30 应迁移为新默认 900/3
+        // 旧配置 poll=30 debounce=30 应迁移为新默认 60/3
         let json = json!({
             "pollIntervalSec": 30,
             "debounceSec": 30,
             "concurrency": 6,
         });
         let config = from_json(&json).0;
-        assert_eq!(config.poll_interval_sec, 900);
+        assert_eq!(config.poll_interval_sec, 60);
         assert_eq!(config.debounce_sec, 3);
     }
 
     #[test]
     fn test_migration_legacy_small_poll_variants() {
-        // 旧版秒级小值（10/45）一律迁移到 900；0（关闭）与 ≥60 的值保留
+        // 旧版秒级小值（10/45）一律迁移到 60；0（关闭）与 ≥60 的值保留
         for &old_poll in &[10u32, 30, 45] {
             let json = json!({ "pollIntervalSec": old_poll });
             let config = from_json(&json).0;
-            assert_eq!(config.poll_interval_sec, 900, "poll={old_poll} 应迁移到 900");
+            assert_eq!(config.poll_interval_sec, 60, "poll={old_poll} 应迁移到 60");
         }
         // 0 = 关闭，保留
         assert_eq!(from_json(&json!({ "pollIntervalSec": 0 })).0.poll_interval_sec, 0);

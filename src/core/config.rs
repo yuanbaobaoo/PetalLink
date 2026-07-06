@@ -85,7 +85,7 @@ impl Default for AppConfig {
             mount_dir: String::new(),
             mount_configured: false,
             concurrency: 6,
-            poll_interval_sec: 900,
+            poll_interval_sec: 60,
             debounce_sec: 3,
             skip_patterns: DEFAULT_SKIP_PATTERNS.iter().map(|s| s.to_string()).collect(),
             sort_field: SortField::Name,
@@ -172,7 +172,7 @@ mod tests {
         let c = AppConfig::default();
         assert_eq!(c.concurrency, 6);
         assert_eq!(c.debounce_sec, 3);
-        assert_eq!(c.poll_interval_sec, 900);
+        assert_eq!(c.poll_interval_sec, 60);
         assert!(!c.mount_configured);
         assert_eq!(c.mount_dir, "");
         assert!(c.validate().is_ok());
