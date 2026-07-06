@@ -282,7 +282,9 @@ impl FilesApi {
 
 /// URL 编码（query 参数用），对齐 dart `Uri.encodeQueryComponent`。
 /// 仅不编码 RFC 3986 unreserved 字符：A-Za-z0-9-_.~
-fn urlencoding(s: &str) -> String {
+///
+/// `pub` 以便 `changes_api` 等同模块复用（cursor 同为 query 参数）。
+pub fn urlencoding(s: &str) -> String {
     percent_encoding::utf8_percent_encode(s, &URL_QUERY_ENCODE_SET).to_string()
 }
 

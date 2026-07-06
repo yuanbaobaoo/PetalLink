@@ -9,6 +9,7 @@
 //! 「有持久化 cursor → 增量拉取变更；无 cursor/失效 → 回退全量 BFS」。定时任务框架已为此预留。
 
 pub mod about_api;
+pub mod changes_api;
 pub mod ascii_json;
 pub mod client;
 pub mod download_api;
