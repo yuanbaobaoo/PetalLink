@@ -262,6 +262,12 @@ impl MountManager {
         let meta = tokio::fs::metadata(local_path)
             .await
             .map_err(|e| AppError::generic(format!("读取文件元数据失败：{e}")))?;
+        if meta.is_dir() {
+            tokio::fs::remove_dir_all(local_path)
+                .await
+                .map_err(|e| AppError::generic(format!("删除目录失败：{e}")))?;
+            return Ok(());
+        }
         // 0 字节文件：必须是占位符才删；否则保留（用户文件如 .gitkeep）——返回 Ok 表示「已处理」
         if meta.len() == 0 {
             let is_pl = self.get_xattr_state(local_path).ok().map(|s| s == STATE_PLACEHOLDER).unwrap_or(false);

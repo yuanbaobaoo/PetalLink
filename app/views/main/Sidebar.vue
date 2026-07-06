@@ -85,13 +85,13 @@ function fmtSize(bytes: number): string {
     <div
       v-if="updater.updateAvailable && !updater.dismissed"
       class="sidebar__update-banner"
-      @click="updater.showDialog()"
     >
       <svg class="update-banner__icon" viewBox="0 0 16 16" width="14" height="14" fill="none">
         <path d="M8 1.5a5.5 5.5 0 0 0-1 10.91v1.34a.5.5 0 0 0 .8.4L9.75 12.5h.17A5.5 5.5 0 0 0 8 1.5Z" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
         <circle cx="8" cy="8" r="1.25" fill="currentColor"/>
       </svg>
       <span class="update-banner__text">新版本 {{ updater.newVersion }}</span>
+      <button class="update-banner__changelog" @click.stop="updater.showDialog()" title="查看更新日志">日志</button>
       <button class="update-banner__close" @click.stop="updater.dismissUpdate" title="关闭">×</button>
     </div>
   </aside>
@@ -137,16 +137,29 @@ function fmtSize(bytes: number): string {
 }
 .sidebar__update-banner:hover { opacity: 0.9; }
 .update-banner__icon { color: #fff; flex-shrink: 0; }
-.update-banner__text {
-  flex: 1;
-  font-size: var(--font-caption);
-  font-weight: var(--fw-medium);
-  color: #fff;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.update-banner__close {
+	.update-banner__text {
+	  flex: 1;
+	  font-size: var(--font-caption);
+	  font-weight: var(--fw-medium);
+	  color: #fff;
+	  overflow: hidden;
+	  text-overflow: ellipsis;
+	  white-space: nowrap;
+	}
+	.update-banner__changelog {
+	  flex-shrink: 0;
+	  padding: 1px 6px;
+	  border: 0.5px solid rgba(255,255,255,0.5);
+	  border-radius: var(--radius-sm);
+	  background: rgba(255,255,255,0.15);
+	  color: #fff;
+	  font-size: 11px;
+	  line-height: 16px;
+	  cursor: pointer;
+	  transition: background 0.15s;
+	}
+	.update-banner__changelog:hover { background: rgba(255,255,255,0.3); }
+	.update-banner__close {
   flex-shrink: 0;
   width: 18px;
   height: 18px;

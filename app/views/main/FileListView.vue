@@ -58,8 +58,14 @@ const sortAsc = ref(true);
 // 当前文件夹文件列表
 const files = computed(() => browser.files);
 
-// 排序后的文件列表
+// 排序后的文件列表（文件夹优先，同类型内按选定字段排序）
 const sortedFiles = computed(() => [...files.value].sort((a, b) => {
+  // 文件夹优先排在前面
+  const aIsFolder = driveApi.isFolder(a);
+  const bIsFolder = driveApi.isFolder(b);
+  if (aIsFolder && !bIsFolder) return -1;
+  if (!aIsFolder && bIsFolder) return 1;
+  // 同类型内按选定字段排序
   let cmp: number;
   if (sortField.value === "name") cmp = a.name.localeCompare(b.name);
   else if (sortField.value === "size") cmp = a.size - b.size;

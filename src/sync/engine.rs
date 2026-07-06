@@ -563,7 +563,7 @@ impl SyncEngine {
             return Ok(());
         }
         *self.syncing.lock() = true;
-        // ★ 周期开始 → 立即通知前端"同步中" + 设置 phase（auto-cloud-refresh / startup-resume
+        // ★ 周期开始 → 立即通知前端"同步中" + 设置 phase（auto-cloud-refresh
         //   由上层调用方已设好 phase，此处不覆盖；其余按 triggered_by 设对应 phase）
         {
             let mut st = self.state.lock().clone();
@@ -573,7 +573,8 @@ impl SyncEngine {
                     "local-watcher" => Some("syncing-local".to_string()),
                     "manual-refresh" => Some("syncing-manual".to_string()),
                     "retry-failed" => Some("syncing-retry".to_string()),
-                    _ => None, // auto-cloud-refresh / startup-resume 由上层设好
+                    "startup-resume" => Some("syncing-startup".to_string()),
+                    _ => None, // auto-cloud-refresh 由上层设好
                 };
             }
             *self.state.lock() = st.clone();
@@ -620,7 +621,7 @@ impl SyncEngine {
         // 本地有内容无 DB → 补 synced；本地占位符无 DB → 补 cloudOnly
         self.reconcile_db_records(&local, &db);
 
-        let snapshot = SyncSnapshot { local, cloud, db, is_startup_resume: triggered_by == "startup-resume" };
+        let snapshot = SyncSnapshot { local: local.clone(), cloud: cloud.clone(), db, is_startup_resume: triggered_by == "startup-resume" };
         let mut actions = self.planner.plan(&snapshot);
         // §2.8 改名检测：在本地新文件上检查 xattr fileId，匹配 → 改名而非 upload+delete
         self.detect_renames(&mut actions);
@@ -628,6 +629,21 @@ impl SyncEngine {
         fill_parent_file_ids(&mut actions, &self.path_to_id.lock());
         // 为"云端已删目录下有内容需救援"补建目录链（跳过用户主动删除的目录）
         add_rescue_folder_recreations(&mut actions, &snapshot, &self.recently_deleted_paths.lock());
+
+        // §2.11 防误删校验：planner 判定 !local_exists 时可能因 scan_local 漏扫
+        // （如下载刚完成、xattr 延迟）误生成 DeleteFromCloud。在 mount_dir 下实际
+        // stat 文件，若文件存在 → 改为 Skip，防止"删了又删"振荡（288→删除→上传）。
+        self.validate_delete_from_cloud(&mut actions);
+
+        // §2.12 目录级联删除去重：删除一个目录时，华为 API 对目录设置 recycled=true
+        // 会级联将整个子树移入回收站（保留目录层级）。若同时为目录和其子文件分别生成
+        // DeleteFromCloud，子文件会作为独立条目进入回收站 → 目录层级丢失、用户只能逐个恢复。
+        // 本过滤：检测到目录 DeleteFromCloud 时，移除其所有子孙的 DeleteFromCloud。
+        dedupe_directory_deletes(&mut actions, &self.cloud_tree.lock(), &self.db);
+
+        // §2.13 目录删除保护：若目录下有文件被 BackupBeforeCloudDelete（本地改过需备份），
+        // 则保留该目录的 DeleteFromLocal，确保备份副本有栖身目录。其余目录正常删除。
+        preserve_dirs_with_pending_backups(&mut actions);
 
         // #8 空操作短路（对齐 dart：无 action → 清零计数 + contentChanged=false → return）
         if actions.is_empty() {
@@ -662,6 +678,10 @@ impl SyncEngine {
 
         // 执行后回写：cloud_tree/path_to_id + DB（对齐 dart _updateDbFromResults + syncFolderRecursive）
         self.apply_results(&actions, &results);
+
+        // ★ 清理残余 DB 记录：planner 不再为"双方都删了"生成 DeleteFromCloud（避免
+        // 无意义的 404 API 调用），改为此处直接清理 local 和 cloud 都不存在的 DB 行。
+        self.purge_stale_db_records(&local, &cloud);
 
         // #7 contentChanged 逻辑（对齐 dart：仅结构性操作成功才 true）
         let content_changed = actions.iter().zip(results.iter()).any(|(a, r)| {
@@ -841,6 +861,38 @@ impl SyncEngine {
                     "DELETE FROM sync_items WHERE local_path=?1 AND (?2='' OR file_id=?2)",
                     rusqlite::params![rel, fid],
                 );
+                // ★ 若删除的是目录，级联清理所有子孙的 DB 记录。
+                // dedupe_directory_deletes 将子文件删除合并为目录删除后，子文件的 DB 记录
+                // 不会被执行器结算（动作已移除），导致残留。用户从回收站恢复目录后，
+                // planner 看到"云端有 + DB有 + 本地无"→ 误删已恢复的文件。
+                // 此处在目录删除成功后，按 local_path 前缀清理所有子孙。
+                {
+                    let mut ct = self.cloud_tree.lock();
+                    if ct.get(rel).map(|f| f.is_folder()).unwrap_or(false) {
+                        let prefix = format!("{}/", rel);
+                        let _ = conn.execute(
+                            "DELETE FROM sync_items WHERE local_path=?1 OR local_path LIKE ?2",
+                            rusqlite::params![rel, format!("{}%", prefix)],
+                        );
+                        // 从 cloud_tree / path_to_id 移除整个子树
+                        let to_remove: Vec<String> = ct.keys()
+                            .filter(|k| *k == rel || k.starts_with(&prefix))
+                            .cloned()
+                            .collect();
+                        let mut p2i = self.path_to_id.lock();
+                        for k in &to_remove {
+                            ct.remove(k);
+                            p2i.remove(k);
+                        }
+                        // 同时清理防振荡集
+                        self.recently_deleted_paths.lock().insert(rel.clone());
+                        tracing::info!(
+                            rel = %rel,
+                            descendants = to_remove.len().saturating_sub(1),
+                            "目录删除：级联清理子树 DB / cloud_tree / path_to_id"
+                        );
+                    }
+                }
                 continue;
             }
 
@@ -938,12 +990,17 @@ impl SyncEngine {
     /// 本地有内容（非占位符）无 DB → upsert synced；
     /// 本地占位符无 DB → upsert cloudOnly。
     /// 防止孤儿记录导致 planner 误判。
+    ///
+    /// **安全阀**：仅当 xattr fileId 在 cloud_tree 中存在且路径一致时才创建 DB 记录。
+    /// 若 fileId 存在但路径不同（用户复制了带 xattr 的已同步文件到新位置），
+    /// 跳过——避免 planner 误判为"云端已删除"而触发 DeleteFromLocal（数据丢失）。
     fn reconcile_db_records(
         &self,
         local: &HashMap<String, LocalFileEntry>,
         db: &HashMap<String, DbSnapshotEntry>,
     ) {
         let conn = self.db.lock();
+        let ct = self.cloud_tree.lock();
         for (rel, entry) in local {
             if let Some(db_entry) = db.get(rel) {
                 // 若 DB 记录标记为 DELETED 但用户重新粘贴了文件 → 复活为正常状态
@@ -976,6 +1033,21 @@ impl SyncEngine {
                 .unwrap_or_default();
             if file_id.is_empty() {
                 continue; // 无 fileId 无法 upsert（本地新增文件由 planner Upload 处理）
+            }
+            // ★ 安全阀：xattr fileId 必须在 cloud_tree 中存在且路径一致，才创建 DB 记录。
+            // 若 fileId 存在但路径不同 → 说明用户复制了带 xattr 的已同步文件到新位置，
+            // 不能创建 DB 记录，否则 planner 会误判为 "云端已删除" → DeleteFromLocal（数据丢失）。
+            // 新路径的文件应由 planner 的 Upload 分支处理（local_exists, !cloud_exists, !db_exists）。
+            if let Some(cloud_file) = ct.get(rel) {
+                if cloud_file.id != file_id {
+                    tracing::info!(
+                        rel = %rel,
+                        xattr_fid = %file_id,
+                        cloud_fid = %cloud_file.id,
+                        "reconcile 跳过：xattr fileId 与 cloud_tree 不一致（可能为复制文件），由 planner 正常处理"
+                    );
+                    continue;
+                }
             }
             let _ = repository::upsert(&conn, &repository::SyncItem {
                 file_id,
@@ -1385,21 +1457,29 @@ impl SyncEngine {
 
     /// 把增量 changes merge 进内存 cloud_tree + path_to_id（按 fileId 反查 rel_path 增删改）。
     ///
-    /// 已知局限（靠安全网定期全量纠偏，见 INCREMENTAL_FORCED_FULL_THRESHOLD）：
-    /// - 新建文件（无已知 rel_path）：跳过，等全量兜底
+    /// 对于新建文件/文件夹（rel_path 未知），利用 Change.file.parent_folder 反向解析路径：
+    /// 通过父目录 ID 在 path_to_id 中查找父路径，拼接 `parent_rel + "/" + file.name`。
+    /// 使用不动点循环处理嵌套新建目录（如一次性新建 A/B/C/file.txt），每轮能解析的
+    /// 立即插入，使后续项可找到父目录。仍无法解析的跳过，靠定期全量 BFS 兜底。
+    ///
+    /// 已知局限：
     /// - 改名/移动（已知 id 但 rel_path 已变）：会按旧 rel_path 更新，与真实路径不一致，
-    ///   靠定期强制全量收敛
+    ///   靠定期强制全量收敛（INCREMENTAL_FORCED_FULL_THRESHOLD）
     fn merge_changes_into_cloud_tree(&self, changes: &[crate::drive::changes_api::Change]) {
         use crate::drive::changes_api::ChangeKind;
-        // 先读 path_to_id 建 fileId→rel_path 反查表，读完即释放锁（缩小持锁范围）
-        let id_to_path: std::collections::HashMap<String, String> = {
+        // 先读 path_to_id 建 fileId→rel_path 反查表
+        let mut id_to_path: std::collections::HashMap<String, String> = {
             let p2i = self.path_to_id.lock();
             p2i.iter().map(|(p, id)| (id.clone(), p.clone())).collect()
         };
         let mut tree = self.cloud_tree.lock();
         let mut p2i = self.path_to_id.lock();
         let mut hit = 0u32;
+        let mut resolved_new = 0u32;
         let mut skip = 0u32;
+
+        // 第一遍：处理已知路径的变更 + 收集未知路径的新文件
+        let mut unknowns: Vec<&crate::drive::changes_api::Change> = Vec::new();
         for c in changes {
             match c.kind {
                 ChangeKind::Removed => {
@@ -1412,18 +1492,135 @@ impl SyncEngine {
                     }
                 }
                 ChangeKind::Modified => {
-                    // 已知路径：更新 cloud_tree（id 不变，path_to_id 无需改）；未知路径：跳过
                     if let Some(rel) = id_to_path.get(&c.file.id) {
+                        // 已知路径：更新 cloud_tree
                         tree.insert(rel.clone(), c.file.clone());
                         hit += 1;
                     } else {
-                        skip += 1;
+                        // 未知路径：收集待解析
+                        unknowns.push(c);
                     }
                 }
             }
         }
-        tracing::debug!(total = changes.len(), hit, skip, "增量 merge 完成（hit=已知路径更新，skip=未知路径跳过）");
+
+        // 不动点循环：反复尝试解析未知文件的路径，每轮能解析的立即插入 id_to_path/p2i/tree
+        // 以支持嵌套新建目录（如 A/ → A/B/ → A/B/file.txt）
+        if !unknowns.is_empty() {
+            loop {
+                let mut progress = false;
+                let mut still_unknown: Vec<&crate::drive::changes_api::Change> = Vec::new();
+                for c in unknowns {
+                    // 从 parent_folder[0] 查找父目录路径
+                    let parent_id = c.file.parent_folder.as_ref()
+                        .and_then(|v| v.first())
+                        .filter(|s| !s.is_empty());
+                    let Some(parent_rel) = parent_id.and_then(|pid| id_to_path.get(pid)) else {
+                        still_unknown.push(c);
+                        continue;
+                    };
+                    // 构造相对路径：parent_rel + "/" + name（根目录下不加前缀 "/"）
+                    let rel = if parent_rel.is_empty() {
+                        c.file.name.clone()
+                    } else {
+                        format!("{}/{}", parent_rel, c.file.name)
+                    };
+                    // 插入云端树 + 路径映射
+                    tree.insert(rel.clone(), c.file.clone());
+                    p2i.insert(rel.clone(), c.file.id.clone());
+                    id_to_path.insert(c.file.id.clone(), rel);
+                    resolved_new += 1;
+                    progress = true;
+                }
+                unknowns = still_unknown;
+                if !progress {
+                    break;
+                }
+            }
+            skip += unknowns.len() as u32;
+        }
+
+        tracing::info!(
+            total = changes.len(), hit, resolved_new, skip,
+            "增量 merge 完成（hit=已知更新, resolved=新文件路径解析, skip=仍未知跳过）"
+        );
     }
+
+    /// §2.11 防误删校验：对 DeleteFromCloud 动作，实际 stat 本地文件是否真的不存在。
+    ///
+    /// planner 的 `!local_exists && cloud_exists && db_exists` 分支在 watcher 周期
+    /// 中可能因 scan_local 漏扫（下载刚完成、xattr 延迟等）而误生成 DeleteFromCloud。
+    /// 本方法在 mount_dir 下拼接绝对路径并 stat，若文件存在则改为 Skip，防止振荡：
+    /// watcher 周期删云端 → 下一轮本地文件又被 Upload → 传输队列出现多余的"删除+上传"。
+    fn validate_delete_from_cloud(&self, actions: &mut [crate::sync::state::SyncAction]) {
+        let mount_dir = match self.mount_dir.lock().clone() {
+            Some(d) => {
+                let home = std::env::var("HOME").unwrap_or_default();
+                std::path::PathBuf::from(d.replace("~/", &format!("{}/", home)))
+            }
+            None => return,
+        };
+        for a in actions.iter_mut() {
+            if a.action_type != crate::sync::state::SyncActionType::DeleteFromCloud {
+                continue;
+            }
+            let Some(rel) = &a.relative_path else { continue };
+            let abs = mount_dir.join(rel);
+            if abs.exists() {
+                let meta = std::fs::metadata(&abs).ok();
+                let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+                // 占位符（0 字节 + xattr state=placeholder）→ 仍执行删除（无实际内容）
+                // 其余（size>0 或无 xattr）→ 本地文件实际存在，跳过删除
+                if size == 0 && crate::mount::manager::is_placeholder_file(&abs) {
+                    continue; // 空占位符，可安全删除
+                }
+                tracing::info!(
+                    rel = %rel,
+                    size,
+                    reason = a.reason.as_deref().unwrap_or("?"),
+                    "DeleteFromCloud 防误删：本地文件实际存在，改为 Skip"
+                );
+                a.action_type = crate::sync::state::SyncActionType::Skip;
+                a.reason = Some(format!(
+                    "防误删：本地文件实际存在（{} 字节），scan_local 漏扫 → 跳过 DeleteFromCloud",
+                    size,
+                ));
+            }
+        }
+    }
+
+    /// 清理残余 DB 记录：删除 local 和 cloud 都不再存在的 DB 行。
+    /// planner 不再为"双方都删了"生成 DeleteFromCloud（避免无意义的 404 API 调用），
+    /// 改为每轮 sync cycle 末尾统一在此清理。
+    fn purge_stale_db_records(
+        &self,
+        local: &HashMap<String, crate::mount::manager::LocalFileEntry>,
+        cloud: &HashMap<String, crate::drive::models::DriveFile>,
+    ) {
+        let conn = self.db.lock();
+        // 收集 local 和 cloud 都缺失但 DB 有的路径
+        let stale: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT local_path FROM sync_items")
+                .unwrap();
+            stmt.query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .filter_map(|r| r.ok())
+                .filter(|p| !local.contains_key(p) && !cloud.contains_key(p))
+                .collect()
+        };
+        if stale.is_empty() {
+            return;
+        }
+        for path in &stale {
+            let _ = conn.execute(
+                "DELETE FROM sync_items WHERE local_path=?1",
+                rusqlite::params![path],
+            );
+        }
+        tracing::info!(count = stale.len(), "清理残余 DB 记录（双方都已不存在）");
+    }
+
     pub async fn retry_failed(&self) -> AppResult<()> {
         // 块作用域确保 MutexGuard 在 await 前释放
         {
@@ -1535,6 +1732,230 @@ fn add_rescue_folder_recreations(
             reason: Some("云端已删除但内有内容需救援 → 重建目录到云端".to_string()),
         });
         tracing::info!(rel = %rel, "为救援内容补建云端目录");
+    }
+}
+
+/// §2.12 目录级联删除去重：若 DeleteFromCloud 目标的某个祖先目录也在本次删除列表中，
+/// 则跳过该条删除（目录级 API 调用会自动级联处理整个子树）。
+///
+/// 此外，若某个云端目录下的**全部文件**都在删除列表中（但目录自身不在），
+/// 则补建目录的 DeleteFromCloud 并移除所有子文件删除——避免回收站文件被打平。
+///
+/// 华为 API 对目录设置 `recycled: true` 会将整个子树移入回收站（保留目录层级）。
+fn dedupe_directory_deletes(
+    actions: &mut Vec<crate::sync::state::SyncAction>,
+    cloud_tree: &std::collections::HashMap<String, crate::drive::models::DriveFile>,
+    db: &std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+) {
+    use crate::sync::state::{SyncAction, SyncActionType};
+
+    // ── 第一遍：收集所有 DeleteFromCloud 的路径，按深度升序排列 ──
+    let mut delete_paths: Vec<String> = actions
+        .iter()
+        .filter(|a| a.action_type == SyncActionType::DeleteFromCloud)
+        .filter_map(|a| a.relative_path.clone())
+        .collect();
+    delete_paths.sort_by_key(|p| p.matches('/').count()); // 浅路径在前（祖先优先）
+
+    if delete_paths.is_empty() {
+        return;
+    }
+
+    // ── 第二遍：祖先前缀过滤 ──
+    // 若路径 X 的某个祖先也在删除列表中 → X 被祖先的级联删除覆盖 → 移除
+    let ancestor_set: std::collections::HashSet<&str> =
+        delete_paths.iter().map(|s| s.as_str()).collect();
+    // 收集被跳过的路径，用于立即清理 DB 记录
+    let mut skipped_rel_paths: Vec<String> = Vec::new();
+    actions.retain(|a| {
+        if a.action_type != SyncActionType::DeleteFromCloud {
+            return true;
+        }
+        let Some(rel) = &a.relative_path else { return true };
+        // 检查是否有祖先目录也在删除列表中
+        let has_ancestor = (0..rel.len()).any(|i| {
+            rel.as_bytes().get(i) == Some(&b'/') && ancestor_set.contains(&rel[..i])
+        });
+        if has_ancestor {
+            skipped_rel_paths.push(rel.clone());
+            return false;
+        }
+        true
+    });
+
+    // ★ 立即清理被跳过文件的 DB 记录：虽然跳过了 API 调用（由目录级联覆盖），
+    // 但 DB 记录必须同步清除，否则之后 planner 会误认为文件仍在云端。
+    if !skipped_rel_paths.is_empty() {
+        let conn = db.lock();
+        for rel in &skipped_rel_paths {
+            let _ = conn.execute(
+                "DELETE FROM sync_items WHERE local_path=?1",
+                rusqlite::params![rel],
+            );
+        }
+        tracing::info!(
+            count = skipped_rel_paths.len(),
+            "目录级联删除：跳过 {} 个子条目的 API 调用，同步清除 DB 记录",
+            skipped_rel_paths.len(),
+        );
+    }
+
+    // ── 第三遍：收集剩余的文件删除，按云端父目录分组 ──
+    // 若一个云端目录下所有文件都要被删除（但目录本身不在删除列表），则补建目录删除
+    let remaining_deletes: Vec<&SyncAction> = actions
+        .iter()
+        .filter(|a| a.action_type == SyncActionType::DeleteFromCloud)
+        .collect();
+
+    // 按最近云端父目录分组
+    let mut dir_files: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for a in &remaining_deletes {
+        let Some(rel) = &a.relative_path else { continue };
+        // 跳过已经是目录的删除（在上一步已保留）
+        if let Some(entry) = cloud_tree.get(rel.as_str()) {
+            if entry.is_folder() {
+                continue;
+            }
+        }
+        // 找最近云端父目录
+        let mut parent = rel.as_str();
+        while let Some(pos) = parent.rfind('/') {
+            parent = &parent[..pos];
+            if let Some(entry) = cloud_tree.get(parent) {
+                if entry.is_folder() {
+                    dir_files.entry(parent.to_string()).or_default().push(rel.clone());
+                    break;
+                }
+            }
+        }
+    }
+
+    // 对每组，检查是否该目录下所有云端文件都在删除列表中
+    let mut merged = 0usize;
+    for (dir, deleting) in &dir_files {
+        // 统计 cloud_tree 中该目录下的文件总数（不含子目录）
+        let total_in_cloud = cloud_tree.keys()
+            .filter(|k| {
+                k.starts_with(&format!("{}/", dir))
+                    && !k[dir.len() + 1..].contains('/') // 仅直接子项
+                    && cloud_tree.get(*k).map(|f| !f.is_folder()).unwrap_or(false)
+            })
+            .count();
+        // 只有目录下**全部**文件都要删除时，才合并为目录删除
+        if total_in_cloud == 0 || deleting.len() < total_in_cloud {
+            continue;
+        }
+        // 移除所有子文件删除
+        let before = actions.len();
+        let mut removed_paths: Vec<String> = Vec::new();
+        actions.retain(|a| {
+            if a.action_type != SyncActionType::DeleteFromCloud {
+                return true;
+            }
+            let Some(rel) = &a.relative_path else { return true };
+            if rel == dir {
+                return true; // 保留目录自身
+            }
+            if deleting.contains(rel) {
+                removed_paths.push(rel.clone());
+                return false;
+            }
+            true
+        });
+        let removed = before - actions.len();
+        merged += removed;
+
+        // ★ 同步清理被合并文件的 DB 记录
+        if !removed_paths.is_empty() {
+            let conn = db.lock();
+            for rel in &removed_paths {
+                let _ = conn.execute(
+                    "DELETE FROM sync_items WHERE local_path=?1",
+                    rusqlite::params![rel],
+                );
+            }
+        }
+
+        // 补建目录 DeleteFromCloud（如果还没有）
+        let has_dir = actions.iter().any(|a| {
+            a.action_type == SyncActionType::DeleteFromCloud
+                && a.relative_path.as_deref() == Some(dir.as_str())
+        });
+        if !has_dir {
+            if let Some(dir_entry) = cloud_tree.get(dir.as_str()) {
+                actions.push(SyncAction {
+                    action_type: SyncActionType::DeleteFromCloud,
+                    relative_path: Some(dir.clone()),
+                    file_id: Some(dir_entry.id.clone()),
+                    parent_file_id: dir_entry.parent_folder.as_ref().and_then(|v| v.first().cloned()),
+                    local_path: None,
+                    cloud_file: None,
+                    reason: Some(format!(
+                        "合并 {} 个子文件为目录级删除（目录共 {} 文件，全部删除）",
+                        deleting.len(),
+                        total_in_cloud,
+                    )),
+                });
+            }
+        }
+        tracing::info!(
+            dir = %dir,
+            files = deleting.len(),
+            cloud_total = total_in_cloud,
+            "目录级联删除：{} 个文件合并为目录删除",
+            deleting.len(),
+        );
+    }
+
+    if !skipped_rel_paths.is_empty() || merged > 0 {
+        tracing::info!(
+            skipped_by_ancestor = skipped_rel_paths.len(),
+            merged_files_to_dirs = merged,
+            "目录级联删除去重完成"
+        );
+    }
+}
+
+/// §2.13 目录删除保护：若云端目录下有文件被 BackupBeforeCloudDelete（本地修改过
+/// 需要备份保存），则移除该目录的 DeleteFromLocal，保留目录作为备份副本的栖身之所。
+/// 其余无本地修改的目录正常删除。
+fn preserve_dirs_with_pending_backups(
+    actions: &mut Vec<crate::sync::state::SyncAction>,
+) {
+    use crate::sync::state::SyncActionType;
+    // 收集所有 BackupBeforeCloudDelete 的目标路径（owned，避免 borrow 冲突）
+    let backup_paths: std::collections::HashSet<String> = actions
+        .iter()
+        .filter(|a| a.action_type == SyncActionType::BackupBeforeCloudDelete)
+        .filter_map(|a| a.relative_path.clone())
+        .collect();
+    if backup_paths.is_empty() {
+        return;
+    }
+    // 找出哪些 DeleteFromLocal 目标是目录，且其下有文件需要备份
+    let mut preserved = 0usize;
+    actions.retain(|a| {
+        if a.action_type != SyncActionType::DeleteFromLocal {
+            return true;
+        }
+        let Some(rel) = &a.relative_path else { return true };
+        // 检查是否有 BackupBeforeCloudDelete 的文件在此目录下
+        let has_backup_child = backup_paths.iter().any(|bp| {
+            bp.starts_with(&format!("{}/", rel))
+        });
+        if has_backup_child {
+            tracing::info!(
+                dir = %rel,
+                "保留本地目录：目录下有文件需 BackupBeforeCloudDelete（备份副本需要栖身目录）"
+            );
+            preserved += 1;
+            return false; // 移除 DeleteFromLocal
+        }
+        true
+    });
+    if preserved > 0 {
+        tracing::info!(preserved, "目录删除保护：保留 {} 个有备份子文件的目录", preserved);
     }
 }
 

@@ -290,9 +290,11 @@ impl SyncExecutor {
                 );
             } else if let Some(ref lp) = action.local_path {
                 let size = if result.success { std::fs::metadata(lp).ok().map(|m| m.len() as i64).unwrap_or(0) } else { 0 };
+                // 结算传输：transferred 设为实际文件大小；若 total_size 为 0（入队时 cloud_file 缺失），
+                // 同步修正为实际大小，确保前端进度百分比正确显示（避免 0/0 → 0%）
                 let _ = conn.execute(
-                    "UPDATE transfer_queue SET state=?1, error_message=?2, finished_at=?3, transferred=?4 WHERE local_path=?5 AND state=?6",
-                    rusqlite::params![state, result.error_message.as_deref(), chrono::Utc::now().timestamp_millis(), size, lp.as_str(), transfer_state::RUNNING],
+                    "UPDATE transfer_queue SET state=?1, error_message=?2, finished_at=?3, transferred=?4, total_size=CASE WHEN total_size=0 AND ?5!=0 THEN ?5 ELSE total_size END WHERE local_path=?6 AND state=?7",
+                    rusqlite::params![state, result.error_message.as_deref(), chrono::Utc::now().timestamp_millis(), size, size, lp.as_str(), transfer_state::RUNNING],
                 );
             }
             // 触发前端传输面板刷新
@@ -530,6 +532,32 @@ impl SyncExecutor {
             // 取 rel.rsplit('/').next() 保持一致。
             let full = action.relative_path.as_deref().unwrap_or("新建文件夹");
             let name = full.rsplit('/').next().unwrap_or(full);
+
+            // ★ 创建前先检查云端是否已存在同名目录。
+            // 场景：目录被删除（cloud_tree 已清）→ 用户从回收站恢复 → watcher 先于
+            // 云端刷新触发 → planner 生成 CreateFolder → 若不检查，华为 API 会创建
+            // "name(1)" 后缀副本，而非复用已有目录。
+            // parent_file_id 为 None 表示根目录，同样需要检查。
+            {
+                let pid = action.parent_file_id.as_deref();
+                if let Ok(list) = self.files_api.list_all(pid).await {
+                    if let Some(existing) = list.iter().find(|f| f.is_folder() && f.name == name) {
+                        tracing::info!(
+                            rel,
+                            existing_id = %existing.id,
+                            parent = pid.unwrap_or("root"),
+                            "CreateFolder 跳过：云端已存在同名文件夹，复用已有 ID"
+                        );
+                        return ActionResult {
+                            success: true,
+                            error_message: None,
+                            deferred: false,
+                            cloud_file: Some(existing.clone()),
+                        };
+                    }
+                }
+            }
+
             match self.files_api.create_folder(name, action.parent_file_id.as_deref()).await {
                 Ok(f) => ActionResult { success: true, error_message: None, deferred: false, cloud_file: Some(f) },
                 // 对齐 dart：400/409 时查同名已存在文件夹，存在则视为成功

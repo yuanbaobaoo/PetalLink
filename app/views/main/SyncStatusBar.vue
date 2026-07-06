@@ -17,6 +17,7 @@ const statusText = computed(() => {
     case "syncing-local": return "正在同步本地变更…";
     case "syncing-manual": return "正在同步…";
     case "syncing-retry": return "正在重试失败项…";
+    case "syncing-startup": return "正在同步（启动恢复）…";
     default:
       // 有传输进行中但无 sync cycle（如手动下载）
       if (sync.hasActiveTransfer) return "同步中";
@@ -39,14 +40,6 @@ function handleShowFailed(): void { showFailedDialog.value = true; }
 
 <template>
   <div class="sync-bar" v-if="sync.mountConfigured">
-    <!-- 全局进度条 -->
-    <div class="sync-progress" v-if="sync.total > 0 && sync.completed < sync.total">
-      <div class="sync-progress__bar">
-        <div class="sync-progress__fill" :style="{ '--progress-pct': (sync.progress * 100) + '%' }" />
-      </div>
-      <span class="sync-progress__text">{{ Math.round(sync.progress * 100) }}%</span>
-    </div>
-
     <div class="sync-bar__left">
       <MateIcon
         :name="isIdle ? 'check' : 'sync'"
@@ -106,11 +99,6 @@ function handleShowFailed(): void { showFailedDialog.value = true; }
 .tag--primary { background-color: var(--color-brand-lighter); color: var(--color-brand); }
 .tag--warning { background-color: var(--color-warning-bg); color: var(--color-warning); }
 .tag--error { background-color: var(--color-error-bg); color: var(--color-error); cursor: pointer; }
-
-.sync-progress { display: flex; align-items: center; gap: var(--space-sm); flex: 1; max-width: 200px; margin-right: var(--space-lg); }
-.sync-progress__bar { flex: 1; height: 4px; background-color: var(--bg-active); border-radius: 2px; overflow: hidden; }
-.sync-progress__fill { height: 100%; width: var(--progress-pct, 0%); background-color: var(--color-brand); border-radius: 2px; transition: width 0.3s ease; }
-.sync-progress__text { font-size: var(--font-caption); color: var(--text-secondary); min-width: 36px; text-align: right; }
 
 .failed-empty { color: var(--text-secondary); }
 .failed-list { display: flex; flex-direction: column; gap: var(--space-sm); max-height: 320px; overflow-y: auto; }

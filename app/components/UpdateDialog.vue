@@ -90,7 +90,7 @@ function handleClose(): void {
               <div class="update-dialog__notes-label">更新内容</div>
               <pre class="update-dialog__notes-text">{{ releaseNotes }}</pre>
             </div>
-            <p v-else class="update-dialog__hint">是否下载并安装此更新？</p>
+            <p v-else class="update-dialog__hint">暂无更新日志。是否下载并安装此更新？</p>
           </template>
 
           <!-- 下载中 -->

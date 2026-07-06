@@ -161,16 +161,17 @@
 | **代码位置** | `src/backend/src/drive/files_api.rs:update()` |
 | **官方文档** | https://developer.huawei.com/consumer/en/doc/HMSCore-References/server-api-filesupdate-0000001050153633 |
 
-### 13. 删除文件
+### 13. 删除文件（移入回收站）
 
 | 项目 | 内容 |
 |------|------|
 | **API 端点** | `https://driveapis.cloud.huawei.com.cn/drive/v1/files/{fileId}` |
-| **方法** | `DELETE` |
+| **方法** | `PATCH` |
+| **请求体** | `{"recycled": true}` |
 | **调用场景** | 用户删除文件；同步引擎发现本地已删且云端存在 → 双向删除 |
-| **关键细节** | 华为 API 是**软删除**（进回收站），非硬删除；DELETE 返回 204 后 LIST 仍可能返回旧数据（最终一致性），由防振荡守卫 `_recentlyDeletedPaths` 处理 |
-| **代码位置** | `src/backend/src/drive/files_api.rs:delete()` |
-| **官方文档** | https://developer.huawei.com/consumer/en/doc/HMSCore-References/server-api-filesdelete-0000001050153625 |
+| **关键细节** | ⚠️ `DELETE` 方法是**永久删除**（不可恢复），不进回收站。移入回收站（"最近删除"）必须用 `PATCH` 设置 `recycled: true`。回收站文件可通过 `PATCH` 设置 `recycled: false` 恢复。清空回收站用 `DELETE /drive/v1/files/recycle` |
+| **代码位置** | `src/drive/files_api.rs:delete()` |
+| **官方文档** | https://developer.huawei.com/consumer/en/doc/HMS-References/drivekit-server-api-filesupdate |
 
 ### 14. 搜索文件
 
@@ -428,7 +429,7 @@ FSEvents 变更 / 手动刷新 / 启动恢复
        ├── do_download  ──→ GET /drive/v1/files/{id}?form=content
        ├── do_create_placeholder ──→ mountManager.createPlaceholder
        ├── do_create_folder      ──→ POST /drive/v1/files
-       ├── do_delete_from_cloud  ──→ DELETE /drive/v1/files/{id}
+       ├── do_delete_from_cloud  ──→ PATCH /drive/v1/files/{id} {"recycled":true}
        ├── do_delete_from_local  ──→ mountManager.deleteLocal
        └── do_conflict   ──→ ConflictResolver.resolve
                             ├── Cloud wins: download + rename

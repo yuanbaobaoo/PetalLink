@@ -202,11 +202,18 @@ impl SyncPlanner {
                         reason: Some("pending 占位项（上传待重试）→ 重新上传".to_string()),
                     });
                 }
-                // 文件夹：云端删除也不删本地（双向删除禁用 + 保目录结构）。
-                // 关键：若云端删了整个目录但本地改了其内某文件，该文件会走 BackupBeforeCloudDelete
-                // 改名备份，此时父目录链必须存在——否则副本无家可归。目录不删即保留栖身之所。
+                // 文件夹：同样生成 DeleteFromLocal，由 engine 层判断是否需要保留
+                //（若目录内有文件被 BackupBeforeCloudDelete 需要栖身之所，engine 会过滤）
                 if local.unwrap().is_folder {
-                    return None; // skip — 不传播云端文件夹删除
+                    return Some(SyncAction {
+                        action_type: SyncActionType::DeleteFromLocal,
+                        relative_path: Some(rel_path.to_string()),
+                        file_id: db.unwrap().file_id.clone().into(),
+                        parent_file_id: None,
+                        local_path: Some(local.unwrap().absolute_path.to_string_lossy().to_string()),
+                        cloud_file: None,
+                        reason: Some("云端已删除文件夹 → 同步删除本地".to_string()),
+                    });
                 }
                 // 文件：本地有未上传的真实修改 → 改名备份副本（冲突保护），原路径腾空即满足云端删除
                 if local_has_content && is_local_changed(local.unwrap(), db.unwrap()) {
@@ -312,17 +319,9 @@ impl SyncPlanner {
         }
 
         // === 本地无 + 云端无 + DB 有（双方都删了，或云端树缓存滞后）===
-        // 优先尝试 DeleteFromCloud（用 DB 中的 fileId），404 即视为已删除；清理 DB。
+        // 不发 API（云端大概率已 404），由 engine 在周期末尾统一清 DB 残余。
         if !local_exists && !cloud_exists && db_exists {
-            return Some(SyncAction {
-                action_type: SyncActionType::DeleteFromCloud,
-                relative_path: Some(rel_path.to_string()),
-                file_id: Some(db.unwrap().file_id.clone()),
-                parent_file_id: None,
-                local_path: None,
-                cloud_file: None,
-                reason: Some("本地已删除（云端树缓存可能滞后）→ 尝试删云端".to_string()),
-            });
+            return None;
         }
 
         None
@@ -560,7 +559,10 @@ mod tests {
         );
         let snapshot = SyncSnapshot { local, cloud: HashMap::new(), db, is_startup_resume: false };
         let actions = SyncPlanner.plan(&snapshot);
-        assert!(actions.is_empty(), "云端删除的目录不应产生删除动作（保目录结构）");
+        assert!(
+            actions.iter().any(|a| a.action_type == SyncActionType::DeleteFromLocal && a.relative_path.as_deref() == Some("B")),
+            "云端删除的目录应产生 DeleteFromLocal（目录内无修改文件时同步删除本地）"
+        );
     }
 
     /// 云端删除文件 + 本地有未上传修改 → 备份副本（不直接删，保内容）。
@@ -704,11 +706,7 @@ mod tests {
         let snapshot = SyncSnapshot { local, cloud: HashMap::new(), db, is_startup_resume: false };
         let actions = SyncPlanner.plan(&snapshot);
 
-        // 目录 B、B/sub → 不删（保栖身之所）
-        assert!(!actions.iter().any(|a| a.relative_path.as_deref() == Some("B")
-            && a.action_type == SyncActionType::DeleteFromLocal));
-        assert!(!actions.iter().any(|a| a.relative_path.as_deref() == Some("B/sub")
-            && a.action_type == SyncActionType::DeleteFromLocal));
+        // 目录 B、B/sub → planner 生成 DeleteFromLocal（引擎层 preserve_dirs_with_pending_backups 负责保留有备份的目录）
         // 改过的 f2.txt → 备份；未改的 f1.txt → 删除
         assert!(actions.iter().any(|a| a.relative_path.as_deref() == Some("B/sub/f2.txt")
             && a.action_type == SyncActionType::BackupBeforeCloudDelete));

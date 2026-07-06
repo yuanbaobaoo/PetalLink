@@ -152,21 +152,28 @@ impl ChangesApi {
         Ok(ChangeListResult::from_json(&body))
     }
 
-    /// 拉取全部增量变更（自动分页至 next_cursor 为空）。最多 100 页兜底。
+    /// 拉取全部增量变更（自动分页至追平最新状态）。
+    ///
+    /// 华为 API 的 newStartCursor 字段即使已追平也会返回非空值（类似 GDrive 的
+    /// nextPageToken——是"下次轮询的起点"而非"还有更多数据"的标记）。
+    /// 因此不能仅靠 cursor.is_none() 判断结束，需结合页内条目数：返回 0 条即已追平。
     pub async fn list_all_changes(&self, start_cursor: Option<&str>) -> AppResult<(Vec<Change>, Option<String>)> {
-        const MAX_PAGES: usize = 100;
         let mut all = Vec::new();
         let mut cursor: Option<String> = start_cursor.map(|s| s.to_string());
-        for _ in 0..MAX_PAGES {
+        let mut pages = 0u32;
+        loop {
             let result = self.list_changes(cursor.as_deref()).await?;
+            let page_count = result.changes.len();
             all.extend(result.changes);
             cursor = result.next_cursor;
-            if cursor.is_none() {
+            pages += 1;
+            // 追平判定：若无新条目，或 cursor 为空，视为已追上
+            if page_count == 0 || cursor.is_none() {
+                tracing::info!(total = all.len(), pages, "list_all_changes 已追平最新状态");
                 return Ok((all, None));
             }
+            tracing::debug!(page_total = all.len(), last_page = page_count, pages, "list_all_changes 继续翻页…");
         }
-        tracing::warn!("list_all_changes 超过 {MAX_PAGES} 页，截断；返回最后 cursor");
-        Ok((all, cursor))
     }
 }
 

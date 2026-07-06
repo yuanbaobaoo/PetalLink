@@ -340,6 +340,13 @@ function fmtSize(bytes: number): string {
               </MateButton>
               <span v-if="updater.phase === 'upToDate'" class="about-update-hint">已是最新版本</span>
               <span v-else-if="updater.phase === 'error'" class="about-update-hint about-update-hint--error">检查失败</span>
+              <span v-else-if="updater.phase === 'available'" class="about-update-hint about-update-hint--available">
+                新版本 v{{ updater.newVersion }}
+              </span>
+            </div>
+            <!-- 有可用更新时显示"查看更新日志"按钮 -->
+            <div v-if="updater.phase === 'available'" class="about-update-action">
+              <MateButton variant="text" icon="info" @click="updater.showDialog()">查看更新日志</MateButton>
             </div>
             <div class="about-tagline">一款开源免费的华为云盘客户端</div>
             <!-- 更新包下载进度：正在下载时展示进度条，点击重新打开弹窗 -->
@@ -418,6 +425,8 @@ function fmtSize(bytes: number): string {
 .about-tagline { font-size: var(--font-caption); color: var(--text-secondary); }
 .about-update-hint { font-size: var(--font-caption); color: var(--color-success); }
 .about-update-hint--error { color: var(--color-error); }
+.about-update-hint--available { color: var(--color-brand); font-weight: var(--fw-medium); }
+.about-update-action { margin-top: var(--space-sm); }
 /* 更新包下载进度（关于页） */
 .about-update-progress { width: 100%; margin-top: var(--space-md); cursor: pointer; padding: var(--space-sm) 0; }
 .about-update-progress__head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }

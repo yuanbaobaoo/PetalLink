@@ -110,10 +110,17 @@ impl FilesApi {
         DriveFile::from_json(&body_json).ok_or_else(|| AppError::generic("创建文件夹响应异常"))
     }
 
-    /// 删除文件（软删除，进回收站）。对齐 dart `FilesApi.delete(id)`。
+    /// 删除文件（软删除，移入回收站"最近删除"）。
+    ///
+    /// **重要**：华为 Drive API 的 `DELETE /drive/v1/files/{id}` 是**永久删除**，不进回收站。
+    /// 要实现软删除（进"最近删除"），必须用 PATCH 更新 `recycled: true`。
+    /// 对齐华为官方文档 Files:update → recycled 字段。
     pub async fn delete(&self, id: &str) -> AppResult<()> {
         let url = format!("{}/files/{id}", crate::constants::DRIVE_API_BASE);
-        let resp = self.send_delete(&url).await?;
+        let mut body = serde_json::Map::new();
+        body.insert("recycled".into(), Value::Bool(true));
+        let encoded = ascii_json_encode(&Value::Object(body));
+        let resp = self.send_patch(&url, encoded.into_bytes(), "application/json").await?;
         // 消费 body
         let _ = resp.text().await;
         Ok(())
