@@ -223,10 +223,13 @@ impl SyncEngine {
         // 启动云端定时刷新任务（poll_interval_secs=0 时内部不启动）
         self.start_cloud_refresh_timer().await;
 
-        // 启动完成，复位运行状态
+        // 启动完成，复位运行/索引状态
         {
             let mut st = self.state.lock().clone();
             st.is_running = false;
+            // 启动全程（BFS + 首次 cycle）已结束，确保 is_indexing 也复位，
+            // 防止 BFS 设的 true 因后续交错未被清，卡住状态条。
+            st.is_indexing = false;
             *self.state.lock() = st.clone();
             let _ = self.state_tx.send(st);
         }
@@ -599,6 +602,9 @@ impl SyncEngine {
             st.editing = 0;
             st.content_changed = false;
             st.is_running = false;
+            // 同步周期结束即非索引态：复位 is_indexing，防止此前某次 BFS/刷新
+            // 的 is_indexing=true 因交错未被清，导致状态条永久卡在「正在读取云端索引」。
+            st.is_indexing = false;
             st.last_sync_time = Some(chrono::Utc::now().timestamp_millis());
             *self.state.lock() = st.clone();
             let _ = self.state_tx.send(st);
@@ -1072,6 +1078,7 @@ impl SyncEngine {
         st.failed_items = failed_items;
         st.last_sync_time = Some(chrono::Utc::now().timestamp_millis());
         st.is_running = false; // 周期结束，重置运行状态
+        st.is_indexing = false; // 周期结束即非索引态（防 BFS 的 true 因交错残留）
         *self.state.lock() = st.clone();
         let _ = self.state_tx.send(st);
     }
