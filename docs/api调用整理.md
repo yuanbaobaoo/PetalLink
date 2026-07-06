@@ -194,11 +194,80 @@
 | **代码位置** | `src/backend/src/drive/thumbnail_api.rs:get()` |
 | **官方文档** | https://developer.huawei.com/consumer/en/doc/HMSCore-References/server-api-thumbnails-0000001050153621 |
 
+### 16. 增量变更 —— 获取初始游标（getStartCursor）
+
+| 项目 | 内容 |
+|------|------|
+| **API 端点** | `https://driveapis.cloud.huawei.com.cn/drive/v1/changes/getStartCursor` |
+| **方法** | `GET` |
+| **调用场景** | 自动云端刷新建立增量基线（全量 BFS 后调用一次，持久化 cursor 供后续增量拉取） |
+| **关键细节** | 华为 `/changes` 接口强制要求 cursor，无 cursor 直接 400 "Cursor can't be null"（errorCode `21004001`）。初始 cursor **必须**先通过本端点获取，不能用 `list_changes(None)`（GDrive 风格，华为不支持） |
+| **响应字段** | `category`（"drive#startCursor"）、`startCursor`（纯数字字符串，如 "311296"） |
+| **cursor 形态** | 递增数字字符串，非 GDrive 的长 token |
+| **代码位置** | `src/drive/changes_api.rs:get_start_cursor()` |
+| **官方文档** | https://developer.huawei.com/consumer/cn/doc/HMSCore-References-V5/server-api-changesgetstartcursor-0000001050153659-V5 |
+
+**响应示例：**
+```json
+{
+  "category": "drive#startCursor",
+  "startCursor": "311296"
+}
+```
+
+### 17. 增量变更 —— 拉取变更列表（Changes:list）
+
+| 项目 | 内容 |
+|------|------|
+| **API 端点** | `https://driveapis.cloud.huawei.com.cn/drive/v1/changes?fields=*&pageSize={n}&cursor={cursor}` |
+| **方法** | `GET` |
+| **必选参数** | `cursor`（**必填且不能为空**，由 getStartCursor 或上一次响应的 newStartCursor 提供） |
+| **可选参数** | `fields=*`、`pageSize`（分页大小） |
+| **调用场景** | 自动云端刷新的增量路径：用持久化 cursor 拉取自上次以来的文件变更，merge 进内存 cloud_tree |
+| **分页** | 响应的 `newStartCursor` 作为下一次请求的 cursor；无更多变更时与请求 cursor 相同 |
+| **错误处理** | cursor 无效 → 400 "Cursor is invalid"（`21004002`）；cursor 过期 → 410 "Cursor has expired"（`21084100` CURSOR_EXPIRED）。两种错误都由调用方回退全量 BFS + 清 cursor 重建基线 |
+| **代码位置** | `src/drive/changes_api.rs:list_changes()` / `list_all_changes()`（自动分页） |
+| **官方文档** | https://developer.huawei.com/consumer/cn/doc/HMSCore-References-V5/server-api-changeslist-0000001050151710-V5 |
+
+**响应示例（含一条删除变更）：**
+```json
+{
+  "category": "drive#changeList",
+  "changes": [
+    {
+      "category": "drive#change",
+      "changeType": "trashDone",
+      "deleted": false,
+      "file": { /* 完整 DriveFile，删除事件也带（recycled: true） */ },
+      "fileId": "ADz3nes6G34...",
+      "time": "2026-07-06T05:51:13.053Z",
+      "type": "File"
+    }
+  ],
+  "newStartCursor": "311298"
+}
+```
+
+**⚠️ 与 GDrive 协议的关键差异（真机验证，2026-07-06）：**
+
+| 字段/行为 | GDrive 协议 | 华为实际 |
+|---|---|---|
+| 分页游标字段 | `nextCursor` | **`newStartCursor`** |
+| 删除判定 | `removed: true` | **`changeType == "trashDone"`** |
+| `deleted` 字段 | 无 | 恒为 `false`（华为用 changeType 区分，不看 deleted） |
+| 删除事件 file | 只带 fileId | **带完整 file**（`recycled: true`） |
+| 初始 cursor | `changes/getStartPageToken` | **`changes/getStartCursor`** |
+| 无 cursor 调用 | 返回首页 | **直接 400**（cursor 必填） |
+
+> **变更类型判定（代码实现，`src/drive/changes_api.rs:Change::from_json`）：**
+> - 删除（移入回收站）：`changeType == "trashDone"` 为主判定，`file.recycled == true` 兜底
+> - 增/改：`changeType` 非 trashDone（如 update/create，具体值未全部探查，非 trashDone 即按 Modified 处理）
+
 ---
 
 ## 三、上传 API
 
-### 16. 小文件上传（≤20MB）
+### 18. 小文件上传（≤20MB）
 
 | 项目 | 内容 |
 |------|------|
@@ -211,7 +280,7 @@
 | **代码位置** | `src/backend/src/drive/upload_api.rs:upload_small()` |
 | **官方文档** | https://developer.huawei.com/consumer/en/doc/HMSCore-References/server-api-filescreate-0000001050153629 |
 
-### 17. 大文件分片上传 —— 初始化会话
+### 19. 大文件分片上传 —— 初始化会话
 
 | 项目 | 内容 |
 |------|------|
@@ -224,7 +293,7 @@
 | **★ 响应头 Location** | 会话 URL，格式 `https://driveapis.cloud.huawei.com.cn/upload/drive/v1/{token}/files?uploadType=resume&uploadId={id}`。**后续所有分片 PUT 必须直接使用此 URL**，不能用 `serverId`/`uploadId` 拼接 |
 | **代码位置** | `src/drive/upload_api.rs:init_resume_session()` |
 
-### 18. 大文件分片上传 —— 上传分片
+### 20. 大文件分片上传 —— 上传分片
 
 | 项目 | 内容 |
 |------|------|
@@ -239,7 +308,7 @@
 | **重试策略** | 每片 3 次重试（退避 1s/2s/3s），仅在 4xx/5xx 时重试，308 直接前进 |
 | **代码位置** | `src/drive/upload_api.rs:put_chunk()` |
 
-### 19. 大文件分片上传 —— 查询最终状态
+### 21. 大文件分片上传 —— 查询最终状态
 
 | 项目 | 内容 |
 |------|------|
@@ -251,7 +320,7 @@
 | **关键细节** | `bytes */total` 是 Google Drive 协议的标准上传状态查询方式；需在分片循环结束后调用 |
 | **代码位置** | `src/drive/upload_api.rs:upload_resume()` / `upload_resume_with_token()` |
 
-### 20. 上传覆盖已有文件（PATCH）
+### 22. 上传覆盖已有文件（PATCH）
 
 | 项目 | 内容 |
 |------|------|
@@ -326,6 +395,9 @@ Token 端点（`/oauth2/v3/token`）除外——不注入 auth，否则导致循
 | 10 | `serverId` ≠ `fileId`（resume 会话标识 ≠ 文件标识） | Upload Resume | 尾部兜底用 `createdFileId` 查 `/files/{fid}`，不能用 `sid` |
 | 11 | 刷新 token 可能不含新 `refresh_token` | Token Refresh | 沿用旧 `refresh_token` |
 | 12 | Resume init 仅返回 `{"sliceSize":...}`，不含 `serverId`/`uploadId` | Upload Resume | **从 HTTP `Location` 响应头提取会话 URL**，后续 PUT 直接用该 URL |
+| 13 | `/changes` 强制要求 cursor，无 cursor 直接 400；初始 cursor 必须先调 `/changes/getStartCursor`（非 GDrive 的 `list(None)`） | Changes | `get_start_cursor()` 建立基线；cursor 失效（410 CURSOR_EXPIRED）回退全量 BFS |
+| 14 | 删除判定用 `changeType == "trashDone"`，**非** GDrive 的 `removed:true`；`deleted` 字段恒 false | Changes | `Change::from_json` 用 changeType 判定 + file.recycled 兜底 |
+| 15 | changes 分页游标字段是 `newStartCursor`，**非** GDrive 的 `nextCursor` | Changes | `ChangeListResult::from_json` 优先取 newStartCursor |
 | 13 | 分片 PUT 返回 **HTTP 308**（非 200），body 含 `rangeList` | Upload Resume | 308 是正常中间响应（表示分片已接收），解析 `rangeList` 末尾 +1 作为下一 offset，**不重试** |
 | 14 | 全部 308 后无文件元数据 | Upload Resume | 向会话 URL 发 `PUT bytes */{total}` 查询最终状态 → 200 + 文件 JSON |
 | 12 | OIDC userinfo 常 404 | UserInfo | 静默跳过，不报错 |
