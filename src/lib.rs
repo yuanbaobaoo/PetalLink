@@ -97,11 +97,15 @@ pub fn run() {
             // 第二实例尝试启动。
             // 若新实例带 --hidden（LaunchAgent 重复触发），不显示窗口；
             // 否则是用户手动打开 → 聚焦已运行实例的主窗口。
+            // 关键：若 app 此前因关窗拦截进入 accessory 模式，必须切回 regular 才能响应用户输入，
+            // 否则窗口虽 show 但所有按钮点不动（accessory app 不接收鼠标事件）。
             let is_hidden = argv.iter().any(|a| a == "--hidden");
             if let Some(w) = app.get_webview_window("main") {
                 if !is_hidden {
                     let _ = w.show();
                     let _ = w.set_focus();
+                    #[cfg(target_os = "macos")]
+                    crate::platform::activation::set_regular();
                 }
             }
         }))
@@ -168,13 +172,23 @@ pub fn run() {
         ])
         // 关窗拦截：关闭按钮/Cmd+W → 隐藏到后台 accessory（不退出），仅 tray 退出放行
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                if !platform::activation::should_real_quit() {
-                    api.prevent_close();
-                    let _ = window.hide();
-                    #[cfg(target_os = "macos")]
-                    platform::activation::set_accessory();
+            match event {
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    if !platform::activation::should_real_quit() {
+                        api.prevent_close();
+                        let _ = window.hide();
+                        #[cfg(target_os = "macos")]
+                        platform::activation::set_accessory();
+                    }
                 }
+                // 窗口获焦：若此前因关窗/Cmd+Q 拦截进入 accessory 模式，切回 regular 恢复可交互。
+                // 覆盖所有恢复路径（最小化恢复、Dock 点击、单实例 show、托盘点击等），
+                // 确保 accessory 模式下窗口恢复后能正常接收输入。
+                tauri::WindowEvent::Focused(true) => {
+                    #[cfg(target_os = "macos")]
+                    platform::activation::ensure_regular_if_was_accessory();
+                }
+                _ => {}
             }
         })
         .setup(|app| {

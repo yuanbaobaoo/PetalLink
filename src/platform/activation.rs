@@ -26,10 +26,25 @@ use objc2::runtime::Imp;
 static REAL_QUIT: AtomicBool = AtomicBool::new(false);
 /// relaunch 场景置 true，跳过关机 flush（缓存已清）。
 static RESTARTING: AtomicBool = AtomicBool::new(false);
+/// 当前是否处于 accessory 模式（关窗/Cmd+Q 拦截后）。供窗口获焦时判断是否需切回 regular。
+static IS_ACCESSORY: AtomicBool = AtomicBool::new(false);
 
 pub fn mark_real_quit() { REAL_QUIT.store(true, Ordering::SeqCst); }
 pub fn should_real_quit() -> bool { REAL_QUIT.load(Ordering::SeqCst) }
 pub fn mark_restarting() { RESTARTING.store(true, Ordering::SeqCst); REAL_QUIT.store(true, Ordering::SeqCst); }
+
+/// 窗口获焦时调用：若当前处于 accessory 模式（关窗/Cmd+Q 后台），切回 regular 恢复可交互。
+/// 不在 accessory 模式时 no-op，避免正常前台获焦重复调用。
+#[cfg(target_os = "macos")]
+pub fn ensure_regular_if_was_accessory() {
+    if IS_ACCESSORY.swap(false, Ordering::SeqCst) {
+        set_regular();
+        tracing::info!("窗口获焦：从 accessory 切回 regular（恢复可交互）");
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn ensure_regular_if_was_accessory() {}
 pub fn is_restarting() -> bool { RESTARTING.load(Ordering::SeqCst) }
 
 pub fn is_launched_manually() -> bool {
@@ -45,6 +60,7 @@ pub fn set_regular() {
     let app: Retained<AnyObject> = unsafe { msg_send![cls, sharedApplication] };
     let _: () = unsafe { msg_send![&app, setActivationPolicy: 0i32] };
     let _: () = unsafe { msg_send![&app, activateIgnoringOtherApps: true] };
+    IS_ACCESSORY.store(false, Ordering::SeqCst);
     tracing::info!("已设 .regular policy");
 }
 
@@ -59,6 +75,7 @@ pub fn set_accessory() {
     let cls = objc2::class!(NSApplication);
     let app: Retained<AnyObject> = unsafe { msg_send![cls, sharedApplication] };
     let _: () = unsafe { msg_send![&app, setActivationPolicy: 1i32] };
+    IS_ACCESSORY.store(true, Ordering::SeqCst);
     tracing::info!("已设 .accessory policy");
 }
 
