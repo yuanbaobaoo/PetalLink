@@ -112,8 +112,9 @@ impl ChangesApi {
     }
 
     /// 拉取一页增量变更（pageSize 默认 100）。
+    /// 路径相对 base_url（base_url 已含 /drive/v1），对齐 about_api 的 /about 写法。
     pub async fn list_changes(&self, cursor: Option<&str>) -> AppResult<ChangeListResult> {
-        let mut url = format!("/drive/v1/changes?fields=*&pageSize=100");
+        let mut url = format!("/changes?fields=*&pageSize=100");
         if let Some(c) = cursor {
             if !c.is_empty() {
                 url.push_str(&format!("&cursor={}", crate::drive::files_api::urlencoding(c)));

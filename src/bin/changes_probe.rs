@@ -9,7 +9,8 @@
 
 use petal_link_lib::auth::service::AuthService;
 
-const DRIVE_API_BASE: &str = "https://drive.cloud.huawei.com.cn";
+// 对齐主程序 constants::DRIVE_API_BASE 的 host（driveapis 复数）
+const DRIVE_API_BASE: &str = "https://driveapis.cloud.huawei.com.cn";
 
 async fn get_token() -> String {
     if let Ok(t) = std::env::var("HWCLOUD_TEST_TOKEN") {
