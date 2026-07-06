@@ -278,8 +278,12 @@ pub fn ensure_engine_started(app: &AppHandle) -> AppResult<()> {
                 match rx.recv().await {
                     Ok(state) => {
                         emit_sync_state(&bridge_app, &state);
-                        emit_transfer_update(&bridge_app);
-                        // 同步刷新托盘菜单的「正在传输」段（引擎状态推送）
+                        // 注意：此处不再调 emit_transfer_update。
+                        // emit_transfer_update 内部会调 push_live_transfer_state（广播 sync_state），
+                        // 而本桥接监听 sync_state → 会形成无限循环（emit_transfer_update →
+                        // push_live_transfer_state → sync_state 广播 → 本桥接 → emit_transfer_update …），
+                        // 导致 CPU 满载 + UI 卡死。sync_state 已携带传输计数，无需反向触发。
+                        // 同步刷新托盘菜单的「正在传输」段（refresh_menu 不触发 sync_state 广播，安全）
                         crate::platform::tray::refresh_menu(&bridge_app);
                         if state.content_changed {
                             emit_folder_content_changed(&bridge_app);
