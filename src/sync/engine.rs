@@ -1213,6 +1213,11 @@ impl SyncEngine {
     ///   `folder_content_changed` 事件驱动前端刷新，避免每 15 分钟无谓全量重拉 UI）；
     /// - 失败仅 `warn` 不传播，后台任务不应因单次失败终止循环。
     async fn run_auto_cloud_refresh(self: &Arc<Self>) {
+        // 索引中（含手动刷新/启动 BFS/其他自动刷新的 BFS 阶段）→ 跳过本次，等下次定时
+        if self.is_indexing() {
+            tracing::info!("自动云端刷新：索引进行中，跳过本次");
+            return;
+        }
         // 与手动刷新互斥：若手动刷新进行中，跳过本次自动刷新
         {
             let mut guard = self.manual_syncing.lock();
