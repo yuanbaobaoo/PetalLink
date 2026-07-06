@@ -641,6 +641,10 @@ impl SyncEngine {
         // 本过滤：检测到目录 DeleteFromCloud 时，移除其所有子孙的 DeleteFromCloud。
         dedupe_directory_deletes(&mut actions, &self.cloud_tree.lock(), &self.db);
 
+        // DeleteFromLocal 同样需要祖先去重：删除目录时其子文件会被级联清掉，
+        // 无需（也不应）单独执行文件删除——否则并发执行时文件删除报 No such file。
+        dedupe_local_descendants(&mut actions);
+
         // §2.13 目录删除保护：若目录下有文件被 BackupBeforeCloudDelete（本地改过需备份），
         // 则保留该目录的 DeleteFromLocal，确保备份副本有栖身目录。其余目录正常删除。
         preserve_dirs_with_pending_backups(&mut actions);
@@ -1366,6 +1370,9 @@ impl SyncEngine {
             let mut st = self.state.lock().clone();
             st.is_indexing = false;
             st.sync_phase = None;
+            // ★ 云端刷新（增量或全量）可能引入了新文件/恢复文件，强制 contentChanged
+            // 通知前端刷新文件列表，否则 BFS 回退路径下 sync cycle 无 action 时前端不更新
+            st.content_changed = true;
             *self.state.lock() = st.clone();
             let _ = self.state_tx.send(st);
         }
@@ -1399,13 +1406,24 @@ impl SyncEngine {
                 match self.changes_api.list_all_changes(Some(cursor)).await {
                     Ok((changes, new_cursor)) => {
                         tracing::info!(count = changes.len(), "增量 changes 拉取成功，merge 进 cloud_tree");
-                        self.merge_changes_into_cloud_tree(&changes);
-                        // 更新 cursor（new_cursor 为 None 表示已追平，保留旧 cursor 即可）
-                        let to_write = new_cursor.as_deref().unwrap_or(cursor);
-                        let _ = std::fs::write(&cursor_path, to_write);
-                        // 计数 +1（下次达阈值会强制全量）
-                        self.incremental_since_full.fetch_add(1, Ordering::Relaxed);
-                        return Ok(());
+                        let (hit, resolved, skipped) = self.merge_changes_into_cloud_tree(&changes);
+                        // 若全部变更都无法解析（如从回收站恢复后 parent_folder 缺失），
+                        // 增量 merge 完全无效 → 回退全量 BFS，确保 cloud_tree 正确更新。
+                        if hit == 0 && resolved == 0 && skipped > 0 {
+                            tracing::info!(
+                                skipped,
+                                "增量 merge 全部 skip（可能为恢复操作），回退全量 BFS"
+                            );
+                            let _ = std::fs::remove_file(&cursor_path);
+                            // fall through to full BFS below
+                        } else {
+                            // 更新 cursor（new_cursor 为 None 表示已追平，保留旧 cursor 即可）
+                            let to_write = new_cursor.as_deref().unwrap_or(cursor);
+                            let _ = std::fs::write(&cursor_path, to_write);
+                            // 计数 +1（下次达阈值会强制全量）
+                            self.incremental_since_full.fetch_add(1, Ordering::Relaxed);
+                            return Ok(());
+                        }
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "增量 changes 失败，回退全量 BFS 并清 cursor");
@@ -1465,7 +1483,7 @@ impl SyncEngine {
     /// 已知局限：
     /// - 改名/移动（已知 id 但 rel_path 已变）：会按旧 rel_path 更新，与真实路径不一致，
     ///   靠定期强制全量收敛（INCREMENTAL_FORCED_FULL_THRESHOLD）
-    fn merge_changes_into_cloud_tree(&self, changes: &[crate::drive::changes_api::Change]) {
+    fn merge_changes_into_cloud_tree(&self, changes: &[crate::drive::changes_api::Change]) -> (u32, u32, u32) {
         use crate::drive::changes_api::ChangeKind;
         // 先读 path_to_id 建 fileId→rel_path 反查表
         let mut id_to_path: std::collections::HashMap<String, String> = {
@@ -1544,6 +1562,7 @@ impl SyncEngine {
             total = changes.len(), hit, resolved_new, skip,
             "增量 merge 完成（hit=已知更新, resolved=新文件路径解析, skip=仍未知跳过）"
         );
+        (hit, resolved_new, skip)
     }
 
     /// §2.11 防误删校验：对 DeleteFromCloud 动作，实际 stat 本地文件是否真的不存在。
@@ -1956,6 +1975,40 @@ fn preserve_dirs_with_pending_backups(
     });
     if preserved > 0 {
         tracing::info!(preserved, "目录删除保护：保留 {} 个有备份子文件的目录", preserved);
+    }
+}
+
+/// DeleteFromLocal 祖先去重：若目录自身已在 DeleteFromLocal 列表中，
+/// 则其子孙的文件删除动作是多余的（目录 delete 会级联清空）。移除它们，
+/// 避免并发执行时报 "No such file or directory"。
+fn dedupe_local_descendants(
+    actions: &mut Vec<crate::sync::state::SyncAction>,
+) {
+    use crate::sync::state::SyncActionType;
+    // 收集所有 DeleteFromLocal 的路径（owned，避免 borrow 冲突）
+    let delete_paths: Vec<String> = actions
+        .iter()
+        .filter(|a| a.action_type == SyncActionType::DeleteFromLocal)
+        .filter_map(|a| a.relative_path.clone())
+        .collect();
+    let ancestor_set: std::collections::HashSet<&str> = delete_paths.iter().map(|s| s.as_str()).collect();
+    let mut skipped = 0usize;
+    actions.retain(|a| {
+        if a.action_type != SyncActionType::DeleteFromLocal {
+            return true;
+        }
+        let Some(rel) = &a.relative_path else { return true };
+        let has_ancestor = (0..rel.len()).any(|i| {
+            rel.as_bytes().get(i) == Some(&b'/') && ancestor_set.contains(&rel[..i])
+        });
+        if has_ancestor {
+            skipped += 1;
+            return false;
+        }
+        true
+    });
+    if skipped > 0 {
+        tracing::info!(skipped, "DeleteFromLocal 祖先去重：跳过 {} 个被子目录删除覆盖的文件", skipped);
     }
 }
 
