@@ -216,6 +216,9 @@ impl SyncEngine {
             return Ok(());
         }
 
+        // 全量 BFS 后尝试建立 changes 增量基线 cursor（失败静默，不影响启动）
+        let _ = self.try_init_changes_cursor(&mount_dir).await;
+
         // 重置过期状态
         {
             let conn = self.db.lock();
@@ -1319,6 +1322,31 @@ impl SyncEngine {
         let _ = std::fs::remove_file(&cursor_path);
         self.incremental_since_full.store(0, Ordering::Relaxed);
         Ok(())
+    }
+
+    /// 全量 BFS 后尝试取 changes 首页游标建立增量基线。失败静默。
+    /// 已有 cursor 则不重复初始化；不支持时退化为「首次自动刷新走全量」，不报错。
+    async fn try_init_changes_cursor(&self, mount_dir: &str) {
+        let abs_dir = mount_dir.replace("~/", &format!("{}/", std::env::var("HOME").unwrap_or_default()));
+        let cursor_path = match crate::core::cache_paths::changes_cursor_file(&abs_dir) {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        // 已有 cursor 则不重复初始化
+        if cursor_path.exists() { return; }
+        // 取首页游标：list_changes(None) 返回的 next_cursor 作基线
+        // （华为具体取法以阶段二验证为准；不支持则返回 None，本函数无副作用）
+        match self.changes_api.list_changes(None).await {
+            Ok(r) => {
+                if let Some(c) = r.next_cursor {
+                    let _ = std::fs::write(&cursor_path, &c);
+                    tracing::info!("已建立 changes 增量基线 cursor");
+                } else {
+                    tracing::debug!("changes 首页无 next_cursor，暂不建基线（首次自动刷新走全量）");
+                }
+            }
+            Err(e) => tracing::debug!(error = %e, "取 changes 首页游标失败（忽略，首次自动刷新会全量回退）"),
+        }
     }
 
     /// 把增量 changes merge 进内存 cloud_tree + path_to_id（按 fileId 反查 rel_path 增删改）。
