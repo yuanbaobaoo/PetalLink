@@ -766,14 +766,23 @@ pub async fn sync_download_on_demand(app: AppHandle, file_id: String, dest_path:
     }
     let dest = PathBuf::from(&dest_path);
     let name = dest.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-    // 保留既有 cloud_edited_time（避免覆盖成 None 致下轮重复下载）；无记录则 None
-    let existing_cet = {
-        let conn = DB.lock();
-        repository::find_by_file_id(&conn, &file_id)
-            .ok()
-            .flatten()
-            .and_then(|r| r.cloud_edited_time)
-    };
+    // 查云端真实元数据（editedTime + size）：
+    // - editedTime 必须写真实值，写 None 会让 is_cloud_changed 永远判"云端已变"
+    //   → watcher 触发的 cycle 重复下载 → 同步循环（恶性 bug 根因）
+    // - size 用于传输队列进度条显示（避免 0/0 显示 0%）
+    // 云端查询失败时回退查库既有 editedTime；size 缺失则 0（进度条不显示）
+    let cloud_file = FILES_API.get(&file_id).await.ok();
+    let cloud_edited_time = cloud_file
+        .as_ref()
+        .and_then(|f| f.edited_time.map(|t| t.timestamp_millis()))
+        .or_else(|| {
+            let conn = DB.lock();
+            repository::find_by_file_id(&conn, &file_id)
+                .ok()
+                .flatten()
+                .and_then(|r| r.cloud_edited_time)
+        });
+    let cloud_size = cloud_file.as_ref().map(|f| f.size).unwrap_or(0);
     // 入队传输记录（按需下载也纳入传输队列 + 状态条「同步中」）
     let task_id = {
         let conn = DB.lock();
@@ -783,7 +792,7 @@ pub async fn sync_download_on_demand(app: AppHandle, file_id: String, dest_path:
             file_id: Some(file_id.clone()),
             local_path: Some(dest_path.clone()),
             name: name.clone(),
-            total_size: 0, // 按需下载无 DriveFile 元数据，size 未知
+            total_size: cloud_size, // 云端真实大小（用于进度条）；查询失败则 0
             transferred: 0,
             state: repository::transfer_state::RUNNING,
             error_message: None,
@@ -795,7 +804,7 @@ pub async fn sync_download_on_demand(app: AppHandle, file_id: String, dest_path:
         }).unwrap_or(0)
     };
     emit_transfer_update(&app); // 入队即通知：传输面板 + 状态条变「同步中」
-    let result = download_to_dest(&file_id, &dest, &name, 0, existing_cet).await;
+    let result = download_to_dest(&file_id, &dest, &name, cloud_size, cloud_edited_time).await;
     // 结算传输记录（成功 transferred=total_size，失败保持）
     {
         let conn = DB.lock();
