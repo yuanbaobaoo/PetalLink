@@ -50,6 +50,18 @@ pub fn cloud_tree_cache_file(abs_mount_dir: &str) -> AppResult<PathBuf> {
     )))
 }
 
+/// changes 增量游标缓存文件：`<base>/changes_cursor_<escaped>.txt`
+///
+/// 存放华为 /drive/v1/changes 的分页游标，跨重启复用以走增量路径。
+/// cursor 失效或文件缺失 → 调用方回退全量 BFS。
+#[allow(dead_code)] // Task 5 接入后移除
+pub fn changes_cursor_file(abs_mount_dir: &str) -> AppResult<PathBuf> {
+    Ok(cache_base_dir()?.join(format!(
+        "changes_cursor_{}.txt",
+        escape_mount_path(abs_mount_dir)
+    )))
+}
+
 /// 删除指定同步目录对应的两个缓存文件（快照 + 云端树）。
 /// 供 CacheService.clearAll / 更换目录重置复用。错误仅忽略。
 pub fn clear_cache_files(abs_mount_dir: &str) {
@@ -70,7 +82,7 @@ pub fn clear_all_cache_files() {
     for entry in entries.flatten() {
         let path = entry.path();
         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            if name.starts_with("syncstate_") || name.starts_with("cloudtree_") {
+            if name.starts_with("syncstate_") || name.starts_with("cloudtree_") || name.starts_with("changes_cursor_") {
                 let _ = fs::remove_file(&path);
             }
         }
