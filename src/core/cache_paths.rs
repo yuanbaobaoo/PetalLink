@@ -54,7 +54,6 @@ pub fn cloud_tree_cache_file(abs_mount_dir: &str) -> AppResult<PathBuf> {
 ///
 /// 存放华为 /drive/v1/changes 的分页游标，跨重启复用以走增量路径。
 /// cursor 失效或文件缺失 → 调用方回退全量 BFS。
-#[allow(dead_code)] // Task 5 接入后移除
 pub fn changes_cursor_file(abs_mount_dir: &str) -> AppResult<PathBuf> {
     Ok(cache_base_dir()?.join(format!(
         "changes_cursor_{}.txt",

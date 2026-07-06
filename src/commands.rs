@@ -19,6 +19,7 @@ use crate::core::config::AppConfig;
 use crate::core::config_store::ConfigStore;
 use crate::data::repository;
 use crate::drive::about_api::AboutApi;
+use crate::drive::changes_api::ChangesApi;
 use crate::drive::client::DriveClient;
 use crate::drive::download_api::DownloadApi;
 use crate::drive::files_api::FilesApi;
@@ -42,6 +43,10 @@ pub static DRIVE_CLIENT: Lazy<Arc<DriveClient>> =
 
 /// 全局 FilesApi
 pub static FILES_API: Lazy<Arc<FilesApi>> = Lazy::new(|| Arc::new(FilesApi::new(DRIVE_CLIENT.clone())));
+
+/// 全局 ChangesApi（增量变更接口）
+pub static CHANGES_API: Lazy<Arc<ChangesApi>> =
+    Lazy::new(|| Arc::new(ChangesApi::new(DRIVE_CLIENT.clone())));
 
 /// 全局 DownloadApi
 pub static DOWNLOAD_API: Lazy<Arc<DownloadApi>> =
@@ -242,6 +247,7 @@ pub fn ensure_engine_started(app: &AppHandle) -> AppResult<()> {
     // 构造 SyncEngine（set_mount/set_executor 必须在 Arc::new 之前）
     let mut engine = SyncEngine::new(
         FILES_API.clone(),
+        CHANGES_API.clone(),
         DOWNLOAD_API.clone(),
         UPLOAD_API.clone(),
         DB.clone(),

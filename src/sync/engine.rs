@@ -25,6 +25,7 @@ use crate::sync::cloud_tree;
 
 pub struct SyncEngine {
     files_api: Arc<FilesApi>,
+    changes_api: Arc<crate::drive::changes_api::ChangesApi>,
     #[allow(dead_code)]
     download_api: Arc<DownloadApi>,
     #[allow(dead_code)]
@@ -68,6 +69,7 @@ pub struct SyncEngine {
 impl SyncEngine {
     pub fn new(
         files_api: Arc<FilesApi>,
+        changes_api: Arc<crate::drive::changes_api::ChangesApi>,
         download_api: Arc<DownloadApi>,
         upload_api: Arc<UploadApi>,
         db: Arc<Mutex<Connection>>,
@@ -77,7 +79,7 @@ impl SyncEngine {
     ) -> Self {
         let (state_tx, _) = broadcast::channel(256);
         Self {
-            files_api, download_api, upload_api, mount: None, db,
+            files_api, changes_api, download_api, upload_api, mount: None, db,
             planner: SyncPlanner,
             conflict: Arc::new(Mutex::new(ConflictResolver::new())),
             executor: None,
@@ -1234,33 +1236,94 @@ impl SyncEngine {
         }
     }
 
-    /// 自动云端刷新实现：刷新云端树 + 置换缓存 + 跑同步周期（持有 manual_syncing 锁时调用）。
+    /// 自动云端刷新实现：有 cursor 走增量 changes，无/失效走全量 BFS（持有 manual_syncing 锁时调用）。
     async fn run_auto_cloud_refresh_impl(&self) -> AppResult<()> {
         let mount_dir = self.mount_dir.lock().clone().unwrap_or_default();
         let abs_dir = mount_dir.replace("~/", &format!("{}/", std::env::var("HOME").unwrap_or_default()));
 
-        // 广播 is_indexing=true：与手动刷新一致，BFS 期间 watcher 事件被丢弃，避免脏 diff
+        // 广播 is_indexing=true
         {
             let mut st = self.state.lock().clone();
             st.is_indexing = true;
             *self.state.lock() = st.clone();
             let _ = self.state_tx.send(st);
         }
-        // 无论成败都要复位 is_indexing，避免状态条卡在索引态
-        let refresh_result = cloud_tree::refresh_cloud_tree(&self.files_api, &self.mount, &abs_dir).await;
+
+        // 尝试增量（有持久化 cursor）；失败/无 cursor 回退全量 BFS
+        let refresh_result = self.try_incremental_or_full_refresh(&abs_dir).await;
+
+        // 无论成败复位 is_indexing
         {
             let mut st = self.state.lock().clone();
             st.is_indexing = false;
             *self.state.lock() = st.clone();
             let _ = self.state_tx.send(st);
         }
-        let (tree, p2i, root) = refresh_result?;
+
+        refresh_result?;
+        self.run_sync_cycle("auto-cloud-refresh").await?;
+        Ok(())
+    }
+
+    /// 增量优先：有 cursor → changes API merge；失败/无 cursor → 全量 BFS。
+    async fn try_incremental_or_full_refresh(&self, abs_dir: &str) -> AppResult<()> {
+        let cursor_path = crate::core::cache_paths::changes_cursor_file(abs_dir)?;
+        let saved_cursor = std::fs::read_to_string(&cursor_path)
+            .ok()
+            .filter(|s| !s.trim().is_empty());
+
+        if let Some(ref cursor) = saved_cursor {
+            // 增量路径
+            match self.changes_api.list_all_changes(Some(cursor)).await {
+                Ok((changes, new_cursor)) => {
+                    tracing::info!(count = changes.len(), "增量 changes 拉取成功，merge 进 cloud_tree");
+                    self.merge_changes_into_cloud_tree(&changes);
+                    // 更新 cursor（new_cursor 为 None 表示已追平，保留旧 cursor 即可）
+                    let to_write = new_cursor.as_deref().unwrap_or(cursor);
+                    let _ = std::fs::write(&cursor_path, to_write);
+                    return Ok(());
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "增量 changes 失败，回退全量 BFS 并清 cursor");
+                    let _ = std::fs::remove_file(&cursor_path);
+                }
+            }
+        }
+
+        // 全量 BFS 路径（无 cursor 或增量失败）
+        let (tree, p2i, root) = cloud_tree::refresh_cloud_tree(&self.files_api, &self.mount, abs_dir).await?;
         *self.cloud_tree.lock() = tree;
         *self.path_to_id.lock() = p2i;
         *self.root_folder_id.lock() = root;
-        // is_indexing 已复位为 false，run_sync_cycle 守卫放行，正常进入 cycle
-        self.run_sync_cycle("auto-cloud-refresh").await?;
+        // 全量成功后清旧 cursor，下次自动重新建立增量基线
+        let _ = std::fs::remove_file(&cursor_path);
         Ok(())
+    }
+
+    /// 把增量 changes merge 进内存 cloud_tree（按 fileId 反查 rel_path 增删改）。
+    /// 新建文件（无已知 rel_path）跳过，靠下次全量 BFS 兜底。
+    fn merge_changes_into_cloud_tree(&self, changes: &[crate::drive::changes_api::Change]) {
+        use crate::drive::changes_api::ChangeKind;
+        // 反查 path_to_id 找 rel_path（fileId → rel_path）
+        let p2i = self.path_to_id.lock();
+        let id_to_path: std::collections::HashMap<&String, &String> =
+            p2i.iter().map(|(p, id)| (id, p)).collect();
+        let mut tree = self.cloud_tree.lock();
+        for c in changes {
+            match c.kind {
+                ChangeKind::Removed => {
+                    if let Some(rel) = id_to_path.get(&c.file.id) {
+                        tree.remove(*rel);
+                    }
+                }
+                ChangeKind::Modified => {
+                    // 已知路径：更新；未知路径（新建）：跳过，等下次全量兜底
+                    if let Some(rel) = id_to_path.get(&c.file.id) {
+                        tree.insert((*rel).clone(), c.file.clone());
+                    }
+                }
+            }
+        }
     }
     pub async fn retry_failed(&self) -> AppResult<()> {
         // 块作用域确保 MutexGuard 在 await 前释放
@@ -1408,9 +1471,19 @@ mod tests {
         let auth = std::sync::Arc::new(AuthService::new());
         let client = std::sync::Arc::new(DriveClient::new(auth));
         let files_api = std::sync::Arc::new(FilesApi::new(client.clone()));
+        let changes_api = std::sync::Arc::new(crate::drive::changes_api::ChangesApi::new(client.clone()));
         let download_api = std::sync::Arc::new(DownloadApi::new(client.clone()));
         let upload_api = std::sync::Arc::new(UploadApi::new(client));
-        let eng = SyncEngine::new(files_api, download_api, upload_api, db.clone(), vec![], 3, 0);
+        let eng = SyncEngine::new(
+            files_api,
+            changes_api,
+            download_api,
+            upload_api,
+            db.clone(),
+            vec![],
+            3,
+            0,
+        );
         (eng, db)
     }
 
