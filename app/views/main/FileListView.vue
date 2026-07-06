@@ -378,6 +378,8 @@ async function handleSyncFile(f: DriveFile): Promise<void> {
   try {
     await syncApi.downloadOnDemand(f.id, dest);
     showToast(`已同步「${f.name}」`);
+    // 下载完成后磁盘 xattr 已变（state=downloaded），重新拉批量状态刷新图标（云端→已同步）
+    refreshBatchStatus();
   } catch (e) {
     showToast("同步失败：" + ((e as { message?: string }).message ?? String(e)), { variant: "error" });
   } finally {
