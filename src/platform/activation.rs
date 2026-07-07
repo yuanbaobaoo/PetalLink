@@ -12,7 +12,7 @@
 //! 我们 swizzle `-[NSApplication terminate:]`，在原始方法之前检查：
 //! 1. `should_real_quit()` → 托盘「退出 PetalLink」
 //! 2. 当前 Apple Event 是否为 kAEQuitApplication → 系统关机/登出
-//! 若都非 → 拦截退出，隐藏窗口 + accessory 模式，保持后台运行。
+//!    若都非 → 拦截退出，隐藏窗口 + accessory 模式，保持后台运行。
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -29,9 +29,16 @@ static RESTARTING: AtomicBool = AtomicBool::new(false);
 /// 当前是否处于 accessory 模式（关窗/Cmd+Q 拦截后）。供窗口获焦时判断是否需切回 regular。
 static IS_ACCESSORY: AtomicBool = AtomicBool::new(false);
 
-pub fn mark_real_quit() { REAL_QUIT.store(true, Ordering::SeqCst); }
-pub fn should_real_quit() -> bool { REAL_QUIT.load(Ordering::SeqCst) }
-pub fn mark_restarting() { RESTARTING.store(true, Ordering::SeqCst); REAL_QUIT.store(true, Ordering::SeqCst); }
+pub fn mark_real_quit() {
+    REAL_QUIT.store(true, Ordering::SeqCst);
+}
+pub fn should_real_quit() -> bool {
+    REAL_QUIT.load(Ordering::SeqCst)
+}
+pub fn mark_restarting() {
+    RESTARTING.store(true, Ordering::SeqCst);
+    REAL_QUIT.store(true, Ordering::SeqCst);
+}
 
 /// 窗口获焦时调用：若当前处于 accessory 模式（关窗/Cmd+Q 后台），切回 regular 恢复可交互。
 /// 不在 accessory 模式时 no-op，避免正常前台获焦重复调用。
@@ -45,7 +52,9 @@ pub fn ensure_regular_if_was_accessory() {
 
 #[cfg(not(target_os = "macos"))]
 pub fn ensure_regular_if_was_accessory() {}
-pub fn is_restarting() -> bool { RESTARTING.load(Ordering::SeqCst) }
+pub fn is_restarting() -> bool {
+    RESTARTING.load(Ordering::SeqCst)
+}
 
 pub fn is_launched_manually() -> bool {
     !std::env::args().any(|a| a == "--hidden")
@@ -54,8 +63,8 @@ pub fn is_launched_manually() -> bool {
 #[cfg(target_os = "macos")]
 pub fn set_regular() {
     use objc2::msg_send;
-    use objc2::runtime::AnyObject;
     use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
     let cls = objc2::class!(NSApplication);
     let app: Retained<AnyObject> = unsafe { msg_send![cls, sharedApplication] };
     let _: () = unsafe { msg_send![&app, setActivationPolicy: 0i32] };
@@ -70,8 +79,8 @@ pub fn set_regular() {}
 #[cfg(target_os = "macos")]
 pub fn set_accessory() {
     use objc2::msg_send;
-    use objc2::runtime::AnyObject;
     use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
     let cls = objc2::class!(NSApplication);
     let app: Retained<AnyObject> = unsafe { msg_send![cls, sharedApplication] };
     let _: () = unsafe { msg_send![&app, setActivationPolicy: 1i32] };
@@ -83,8 +92,11 @@ pub fn set_accessory() {
 pub fn set_accessory() {}
 
 pub fn init_activation_policy() {
-    if is_launched_manually() { set_regular(); }
-    else { set_accessory(); }
+    if is_launched_manually() {
+        set_regular();
+    } else {
+        set_accessory();
+    }
 }
 
 // ──  退出拦截  ──────────────────────────────────────────────
@@ -112,8 +124,8 @@ static ORIGINAL_TERMINATE: Mutex<Option<Imp>> = Mutex::new(None);
 #[cfg(target_os = "macos")]
 fn is_apple_event_system_quit() -> bool {
     use objc2::msg_send;
-    use objc2::runtime::AnyObject;
     use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
 
     // NSAppleEventManager 是 Foundation 的一部分，通过 msg_send! 调用
     let mgr_cls = objc2::class!(NSAppleEventManager);
@@ -137,8 +149,8 @@ fn is_apple_event_system_quit() -> bool {
 #[cfg(target_os = "macos")]
 fn hide_windows_and_go_accessory() {
     use objc2::msg_send;
-    use objc2::runtime::AnyObject;
     use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
 
     let cls = objc2::class!(NSApplication);
     let app: Retained<AnyObject> = unsafe { msg_send![cls, sharedApplication] };
@@ -175,7 +187,9 @@ extern "C-unwind" fn terminate_override(
                 objc2::runtime::Sel,
                 *mut objc2::runtime::AnyObject,
             ) = unsafe { std::mem::transmute(orig) };
-            unsafe { orig_fn(this, _cmd, _sender); }
+            unsafe {
+                orig_fn(this, _cmd, _sender);
+            }
         }
     } else {
         tracing::info!("Dock/Cmd+Q 退出已拦截：隐藏窗口，保持后台运行");
@@ -193,7 +207,8 @@ extern "C-unwind" fn terminate_override(
 pub fn install_terminate_interceptor() {
     let cls = objc2::class!(NSApplication);
     let sel = objc2::sel!(terminate:);
-    let method = cls.instance_method(sel)
+    let method = cls
+        .instance_method(sel)
         .expect("NSApplication must respond to terminate:");
 
     let original = unsafe {
@@ -218,9 +233,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_manual_launch_detection() { assert!(is_launched_manually()); }
+    fn test_manual_launch_detection() {
+        assert!(is_launched_manually());
+    }
     #[test]
-    fn test_real_quit_default() { assert!(!should_real_quit()); }
+    fn test_real_quit_default() {
+        assert!(!should_real_quit());
+    }
     #[test]
-    fn test_restarting_default() { assert!(!is_restarting()); }
+    fn test_restarting_default() {
+        assert!(!is_restarting());
+    }
 }

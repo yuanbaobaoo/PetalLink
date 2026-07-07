@@ -80,11 +80,16 @@ pub fn clear_cache_files(abs_mount_dir: &str) {
 /// 否则历史遗留的旧挂载目录（如临时目录 /var/folders/.../T/.tmpXXX）缓存不会被清。
 pub fn clear_all_cache_files() {
     let Ok(dir) = support_dir() else { return };
-    let Ok(entries) = fs::read_dir(&dir) else { return };
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            if name.starts_with("syncstate_") || name.starts_with("cloudtree_") || name.starts_with("changes_cursor_") {
+            if name.starts_with("syncstate_")
+                || name.starts_with("cloudtree_")
+                || name.starts_with("changes_cursor_")
+            {
                 let _ = fs::remove_file(&path);
             }
         }
@@ -102,7 +107,9 @@ pub fn migrate_legacy_cache(abs_mount_dir: &str) {
     // 同步状态快照
     if let (Ok(new_file), Ok(old_file)) = (
         sync_state_cache_file(abs_mount_dir),
-        std::result::Result::<PathBuf, ()>::Ok(Path::new(abs_mount_dir).join(LEGACY_SYNC_STATE_NAME)),
+        std::result::Result::<PathBuf, ()>::Ok(
+            Path::new(abs_mount_dir).join(LEGACY_SYNC_STATE_NAME),
+        ),
     ) {
         if !new_file.exists() && old_file.exists() {
             if let Some(parent) = new_file.parent() {
@@ -115,7 +122,9 @@ pub fn migrate_legacy_cache(abs_mount_dir: &str) {
     // 云端树缓存
     if let (Ok(new_file), Ok(old_file)) = (
         cloud_tree_cache_file(abs_mount_dir),
-        std::result::Result::<PathBuf, ()>::Ok(Path::new(abs_mount_dir).join(LEGACY_CLOUD_TREE_NAME)),
+        std::result::Result::<PathBuf, ()>::Ok(
+            Path::new(abs_mount_dir).join(LEGACY_CLOUD_TREE_NAME),
+        ),
     ) {
         if !new_file.exists() && old_file.exists() {
             if let Some(parent) = new_file.parent() {

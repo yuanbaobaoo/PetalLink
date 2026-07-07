@@ -31,8 +31,8 @@ use crate::drive::models::DriveFile;
 use crate::error::AppResult;
 use crate::mount::manager::MountManager;
 
-    /// BFS 并发数
-    const INDEXING_CONCURRENCY: usize = 8;
+/// BFS 并发数
+const INDEXING_CONCURRENCY: usize = 8;
 
 /// 缓存 JSON 结构
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,7 +52,11 @@ pub async fn refresh_cloud_tree(
     files_api: &Arc<FilesApi>,
     mount: &Option<Arc<MountManager>>,
     abs_mount_dir: &str,
-) -> AppResult<(HashMap<String, DriveFile>, HashMap<String, String>, Option<String>)> {
+) -> AppResult<(
+    HashMap<String, DriveFile>,
+    HashMap<String, String>,
+    Option<String>,
+)> {
     let mut tree: HashMap<String, DriveFile> = HashMap::new();
     let mut path_to_id: HashMap<String, String> = HashMap::new();
     let mut root_folder_id: Option<String> = None;
@@ -70,7 +74,13 @@ pub async fn refresh_cloud_tree(
     // 若本次 BFS 中途被强退，哨兵留在盘上 → 下次 startup load 见 complete:false
     // → 视为不可用 → 强制全量重跑，绝不拿残缺缓存去触发文件同步/上传。
     // （complete:true 的完整缓存由 BFS 成功结尾覆盖写入。）
-    let _ = persist_cloud_tree_internal(abs_mount_dir, &HashMap::new(), &HashMap::new(), &None, false);
+    let _ = persist_cloud_tree_internal(
+        abs_mount_dir,
+        &HashMap::new(),
+        &HashMap::new(),
+        &None,
+        false,
+    );
 
     let mut processed_folders: usize = 0;
 
@@ -85,7 +95,11 @@ pub async fn refresh_cloud_tree(
                 let api = files_api.clone();
                 let node = node.clone();
                 async move {
-                    let parent_id = if node.path.is_empty() { None } else { node.folder_id.as_deref() };
+                    let parent_id = if node.path.is_empty() {
+                        None
+                    } else {
+                        node.folder_id.as_deref()
+                    };
                     match api.list_all(parent_id).await {
                         Ok(files) => Ok((node, files)),
                         Err(e) => Err((node, e)),
@@ -109,6 +123,7 @@ pub async fn refresh_cloud_tree(
                         if f.name.starts_with(crate::constants::INTERNAL_FILE_PREFIX) {
                             continue;
                         }
+                        crate::core::paths::validate_path_segment(&f.name)?;
                         let rel_path = if node.path.is_empty() {
                             f.name.clone()
                         } else {
@@ -132,9 +147,9 @@ pub async fn refresh_cloud_tree(
                                     }
                                 }
                             } else {
-                                let _ = m.create_placeholder_if_needed(
-                                    &rel_path, &f.id, f.size,
-                                ).await;
+                                let _ = m
+                                    .create_placeholder_if_needed(&rel_path, &f.id, f.size)
+                                    .await;
                             }
                         }
 
@@ -151,7 +166,10 @@ pub async fn refresh_cloud_tree(
                 Err((node, e)) => {
                     if node.retries < 2 {
                         tracing::warn!(path = %node.path, retries = node.retries, "BFS 单文件夹失败，重试");
-                        queue.push_back(BfsNode { retries: node.retries + 1, ..node });
+                        queue.push_back(BfsNode {
+                            retries: node.retries + 1,
+                            ..node
+                        });
                     } else {
                         tracing::error!(path = %node.path, error = %e, "BFS 文件夹永久失败（子树将缺失）");
                     }
@@ -305,9 +323,13 @@ fn persist_cloud_tree_internal(
 /// 这样不会破坏已经写下的哨兵，也避免在根本没有缓存的场景下凭空创建空文件。
 pub fn mark_cache_incomplete_if_exists() {
     // 读当前配置得到挂载目录；配置缺失则无操作（无挂载目录 = 无缓存可标记）
-    let Ok(config) = crate::core::config_store::ConfigStore::load() else { return };
+    let Ok(config) = crate::core::config_store::ConfigStore::load() else {
+        return;
+    };
     let abs_dir = config.expanded_mount_dir().to_string_lossy().to_string();
-    let Ok(cache_file) = cache_paths::cloud_tree_cache_file(&abs_dir) else { return };
+    let Ok(cache_file) = cache_paths::cloud_tree_cache_file(&abs_dir) else {
+        return;
+    };
     if !cache_file.exists() {
         return;
     }
@@ -330,10 +352,35 @@ pub fn mark_cache_incomplete_if_exists() {
     };
     // 原子写覆盖（tmp → fsync → rename）
     let tmp_file = cache_file.with_extension("json.tmp");
-    if std::fs::write(&tmp_file, &json).is_err() { return; }
-    if std::fs::File::open(&tmp_file).and_then(|f| f.sync_all()).is_err() { return; }
+    if std::fs::write(&tmp_file, &json).is_err() {
+        return;
+    }
+    if std::fs::File::open(&tmp_file)
+        .and_then(|f| f.sync_all())
+        .is_err()
+    {
+        return;
+    }
     let _ = std::fs::rename(&tmp_file, &cache_file);
     tracing::info!("退出标记：云端树缓存置为未完成（下次启动将全量重跑 BFS）");
+}
+
+impl Default for DriveFile {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            category: crate::drive::models::FileCategory::None,
+            size: 0,
+            parent_folder: None,
+            description: None,
+            created_time: None,
+            edited_time: None,
+            mime_type: None,
+            content_hash: None,
+            thumbnail_link: None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -374,8 +421,10 @@ mod tests {
             complete: false,
         };
         write_cache_raw(&abs, &serde_json::to_string_pretty(&cache).unwrap());
-        assert!(load_persisted_cloud_tree(&abs).is_none(),
-            "complete=false 的缓存必须被拒绝，否则 startup 会拿残缺缓存触发文件同步");
+        assert!(
+            load_persisted_cloud_tree(&abs).is_none(),
+            "complete=false 的缓存必须被拒绝，否则 startup 会拿残缺缓存触发文件同步"
+        );
     }
 
     /// complete=true 但 tree 空 → load 应返回 None
@@ -390,8 +439,10 @@ mod tests {
             complete: true,
         };
         write_cache_raw(&abs, &serde_json::to_string_pretty(&cache).unwrap());
-        assert!(load_persisted_cloud_tree(&abs).is_none(),
-            "complete=true 但空 tree 不应被信任");
+        assert!(
+            load_persisted_cloud_tree(&abs).is_none(),
+            "complete=true 但空 tree 不应被信任"
+        );
     }
 
     /// complete=true 且 tree 非空 → load 应返回 Some
@@ -426,8 +477,10 @@ mod tests {
             "path_to_id": {"学习": "f1"}
         }"#;
         write_cache_raw(&abs, old_json);
-        assert!(load_persisted_cloud_tree(&abs).is_none(),
-            "旧格式缓存（无 complete 字段）应被视为不完整，强制重跑 BFS");
+        assert!(
+            load_persisted_cloud_tree(&abs).is_none(),
+            "旧格式缓存（无 complete 字段）应被视为不完整，强制重跑 BFS"
+        );
     }
 
     /// persist_cloud_tree_internal 原子写：写入后文件存在且可被 load 正确读回，
@@ -458,17 +511,26 @@ mod tests {
         use crate::drive::models::FileCategory;
         let files = vec![
             DriveFile {
-                id: "f1".into(), name: "a".into(), category: FileCategory::Folder, size: 0,
+                id: "f1".into(),
+                name: "a".into(),
+                category: FileCategory::Folder,
+                size: 0,
                 parent_folder: Some(vec!["root-real-123".into()]),
                 ..Default::default()
             },
             DriveFile {
-                id: "f2".into(), name: "b".into(), category: FileCategory::None, size: 100,
+                id: "f2".into(),
+                name: "b".into(),
+                category: FileCategory::None,
+                size: 100,
                 parent_folder: Some(vec!["root-real-123".into()]),
                 ..Default::default()
             },
             DriveFile {
-                id: "f3".into(), name: "c".into(), category: FileCategory::None, size: 50,
+                id: "f3".into(),
+                name: "c".into(),
+                category: FileCategory::None,
+                size: 50,
                 parent_folder: Some(vec!["other-id".into()]),
                 ..Default::default()
             },
@@ -483,12 +545,18 @@ mod tests {
         use crate::drive::models::FileCategory;
         let files = vec![
             DriveFile {
-                id: "f1".into(), name: "a".into(), category: FileCategory::None, size: 0,
+                id: "f1".into(),
+                name: "a".into(),
+                category: FileCategory::None,
+                size: 0,
                 parent_folder: Some(vec!["id-a".into()]),
                 ..Default::default()
             },
             DriveFile {
-                id: "f2".into(), name: "b".into(), category: FileCategory::None, size: 0,
+                id: "f2".into(),
+                name: "b".into(),
+                category: FileCategory::None,
+                size: 0,
                 parent_folder: Some(vec!["id-b".into()]),
                 ..Default::default()
             },
@@ -496,23 +564,5 @@ mod tests {
         let root = detect_root_folder_id(&files);
         // 都只出现 1 次 → None
         assert!(root.is_none());
-    }
-}
-
-impl Default for DriveFile {
-    fn default() -> Self {
-        Self {
-            id: String::new(),
-            name: String::new(),
-            category: crate::drive::models::FileCategory::None,
-            size: 0,
-            parent_folder: None,
-            description: None,
-            created_time: None,
-            edited_time: None,
-            mime_type: None,
-            content_hash: None,
-            thumbnail_link: None,
-        }
     }
 }

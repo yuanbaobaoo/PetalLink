@@ -169,9 +169,7 @@ async fn is_file_busy(path: &Path) -> bool {
         .collect();
 
     // 若只有白名单内的只读进程 → 不判定为 busy
-    if !commands.is_empty()
-        && commands.iter().all(|cmd| READONLY_PROCESSES.contains(cmd))
-    {
+    if !commands.is_empty() && commands.iter().all(|cmd| READONLY_PROCESSES.contains(cmd)) {
         return false;
     }
     !commands.is_empty()

@@ -11,7 +11,7 @@ use std::time::Duration;
 use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
@@ -45,11 +45,23 @@ impl OauthCallbackResult {
 /// 使用 tokio TcpListener 监听 127.0.0.1，手工解析 HTTP 请求行（足够覆盖 OAuth 回调）。
 pub struct OauthServer {
     /// 停止句柄（发送信号让监听任务退出）
-    stop_tx: Option<oneshot::Sender<()>>,
+    stop_handle: OauthServerStopHandle,
     /// 监听任务句柄
     listen_task: Option<JoinHandle<()>>,
     /// 回调结果接收端
     result_rx: Option<oneshot::Receiver<OauthCallbackResult>>,
+}
+
+#[derive(Clone)]
+pub struct OauthServerStopHandle {
+    stop_tx: watch::Sender<bool>,
+}
+
+impl OauthServerStopHandle {
+    /// 通知 OAuth server 停止等待回调。
+    pub fn stop(&self) {
+        let _ = self.stop_tx.send(true);
+    }
 }
 
 impl OauthServer {
@@ -63,14 +75,17 @@ impl OauthServer {
             .map_err(|e| AppError::generic(format!("绑定回调端口失败：{e}")))?;
 
         let (result_tx, result_rx) = oneshot::channel::<OauthCallbackResult>();
-        let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
+        let (stop_tx, mut stop_rx) = watch::channel(false);
+        let stop_handle = OauthServerStopHandle { stop_tx };
 
         let listen_task = tokio::spawn(async move {
             loop {
                 tokio::select! {
                     biased;
-                    _ = &mut stop_rx => {
-                        break;
+                    changed = stop_rx.changed() => {
+                        if changed.is_ok() && *stop_rx.borrow() {
+                            break;
+                        }
                     }
                     accept = listener.accept() => {
                         match accept {
@@ -95,10 +110,15 @@ impl OauthServer {
         });
 
         Ok(Self {
-            stop_tx: Some(stop_tx),
+            stop_handle,
             listen_task: Some(listen_task),
             result_rx: Some(result_rx),
         })
+    }
+
+    /// 获取可克隆停止句柄，供取消授权从外部关闭监听。
+    pub fn stop_handle(&self) -> OauthServerStopHandle {
+        self.stop_handle.clone()
     }
 
     /// 等待授权码（带超时）。超时返回 [`AppError::auth_timeout`]。
@@ -132,9 +152,7 @@ impl OauthServer {
 
     /// 关闭 server，释放端口。
     pub async fn stop(mut self) {
-        if let Some(tx) = self.stop_tx.take() {
-            let _ = tx.send(());
-        }
+        self.stop_handle.stop();
         if let Some(handle) = self.listen_task.take() {
             let _ = handle.await;
         }
@@ -279,5 +297,20 @@ mod tests {
         assert!(html.contains("授权失败"));
         assert!(html.contains("1101"));
         assert!(html.contains("#d73a49"));
+    }
+
+    #[tokio::test]
+    async fn test_stop_handle_closes_wait_for_callback() {
+        let server = OauthServer::start(0).await.expect("启动 OAuth 测试 server");
+        let stop = server.stop_handle();
+        let waiter = tokio::spawn(server.wait_for_callback());
+
+        stop.stop();
+
+        let result = waiter.await.expect("等待任务应结束");
+        assert!(
+            result.is_err(),
+            "stop 后 wait_for_callback 不应继续等到超时"
+        );
     }
 }

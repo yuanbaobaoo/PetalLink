@@ -54,16 +54,17 @@ fn resolve_paths() -> (Option<PathBuf>, PathBuf) {
 
     // .app bundle 路径：binary 往上三级（如 /Applications/PetalLink.app/Contents/MacOS/PetalLink）
     let bundle = exe
-        .parent()  // Contents/MacOS
-        .and_then(|p| p.parent())  // Contents
-        .and_then(|p| p.parent())  // .app
+        .parent() // Contents/MacOS
+        .and_then(|p| p.parent()) // Contents
+        .and_then(|p| p.parent()) // .app
         .filter(|b| b.extension().map(|e| e == "app").unwrap_or(false));
 
     match bundle {
         Some(b) => {
             // bundle 内运行：ProgramArguments 写成 bundle 路径（LaunchAgent 用 open 或直接调 binary）
             let binary_in_bundle = PathBuf::from("Contents/MacOS").join(
-                exe.file_name().unwrap_or_else(|| std::ffi::OsStr::new(EXECUTABLE_NAME)),
+                exe.file_name()
+                    .unwrap_or_else(|| std::ffi::OsStr::new(EXECUTABLE_NAME)),
             );
             (Some(b.to_path_buf()), binary_in_bundle)
         }
@@ -210,7 +211,8 @@ pub fn set_enabled(enabled: bool) -> std::io::Result<()> {
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
             // bootstrap 报 "already bootstrapped" 也视为成功（旧实例未清理干净）
-            if stderr.contains("already bootstrapped") || stderr.contains("service already loaded") {
+            if stderr.contains("already bootstrapped") || stderr.contains("service already loaded")
+            {
                 tracing::info!(label, "开机自启已启用（LaunchAgent 此前已 bootstrap）");
             } else {
                 tracing::warn!(label, stderr = %stderr.trim(), "bootstrap 返回非零，plist 已写入但可能未立即生效（下次登录生效）");
@@ -237,11 +239,13 @@ mod tests {
     fn test_resolve_paths_returns_exe() {
         let (bundle, binary) = resolve_paths();
         // binary 路径应非空且至少包含可执行文件名
-        assert!(binary.to_string_lossy().len() > 0);
+        assert!(!binary.to_string_lossy().is_empty());
         // 测试环境通常不在 .app bundle 内
         if let Some(b) = bundle {
-            assert!(b.extension().map(|e| e == "app").unwrap_or(false),
-                "若检测到 bundle，其扩展名应为 .app");
+            assert!(
+                b.extension().map(|e| e == "app").unwrap_or(false),
+                "若检测到 bundle，其扩展名应为 .app"
+            );
         }
     }
 

@@ -56,14 +56,16 @@ impl SyncStateStore {
             Ok(s) => s,
             Err(_) => return HashMap::new(),
         };
-        let files: HashMap<String, SnapshotEntry> =
-            serde_json::from_str(&raw).unwrap_or_default();
+        let files: HashMap<String, SnapshotEntry> = serde_json::from_str(&raw).unwrap_or_default();
         tracing::info!(count = files.len(), "已加载同步状态快照");
         files
     }
 
     /// 保存快照（扫描本地文件并持久化）。
-    pub async fn save(&self, local_files: &HashMap<String, LocalFileSnapshotEntry>) -> AppResult<()> {
+    pub async fn save(
+        &self,
+        local_files: &HashMap<String, LocalFileSnapshotEntry>,
+    ) -> AppResult<()> {
         let cache_file = cache_paths::sync_state_cache_file(&self.mount_dir)?;
         if let Some(parent) = cache_file.parent() {
             std::fs::create_dir_all(parent)?;
@@ -142,10 +144,13 @@ mod tests {
                 )
             })
             .collect();
-        let cache_file =
-            crate::core::cache_paths::sync_state_cache_file(&dir_str).unwrap();
+        let cache_file = crate::core::cache_paths::sync_state_cache_file(&dir_str).unwrap();
         std::fs::create_dir_all(cache_file.parent().unwrap()).unwrap();
-        std::fs::write(&cache_file, serde_json::to_string_pretty(&snapshot).unwrap()).unwrap();
+        std::fs::write(
+            &cache_file,
+            serde_json::to_string_pretty(&snapshot).unwrap(),
+        )
+        .unwrap();
 
         // 加载验证
         let loaded = store.load();

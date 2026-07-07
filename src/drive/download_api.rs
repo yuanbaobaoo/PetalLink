@@ -95,12 +95,10 @@ impl DownloadApi {
         if dest_path.exists() {
             let _ = std::fs::remove_file(dest_path);
         }
-        tokio::fs::rename(&tmp_path, dest_path)
-            .await
-            .map_err(|e| {
-                let _ = std::fs::remove_file(&tmp_path);
-                AppError::generic(format!("重命名失败：{e}"))
-            })?;
+        tokio::fs::rename(&tmp_path, dest_path).await.map_err(|e| {
+            let _ = std::fs::remove_file(&tmp_path);
+            AppError::generic(format!("重命名失败：{e}"))
+        })?;
 
         Ok(())
     }

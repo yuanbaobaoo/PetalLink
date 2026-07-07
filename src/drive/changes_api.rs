@@ -56,7 +56,10 @@ impl ChangeListResult {
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string());
 
-        Self { changes, next_cursor }
+        Self {
+            changes,
+            next_cursor,
+        }
     }
 }
 
@@ -75,14 +78,17 @@ impl Change {
     pub fn from_json(v: &serde_json::Value) -> Option<Self> {
         // 删除判定：changeType == "trashDone" 为主，file.recycled 兜底
         let is_removed = v.get("changeType").and_then(|v| v.as_str()) == Some("trashDone")
-            || v.get("file").and_then(|f| f.get("recycled")).and_then(|v| v.as_bool()).unwrap_or(false);
+            || v.get("file")
+                .and_then(|f| f.get("recycled"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
 
         // file 字段：所有事件都带完整 file；解析失败则用 fileId 构造最小 DriveFile 兜底
-        let file = v.get("file")
-            .and_then(DriveFile::from_json)
-            .or_else(|| {
-                // 极端兜底：file 缺失或解析失败，用顶层 fileId 构造最小 DriveFile
-                v.get("fileId").and_then(|v| v.as_str()).map(|id| DriveFile {
+        let file = v.get("file").and_then(DriveFile::from_json).or_else(|| {
+            // 极端兜底：file 缺失或解析失败，用顶层 fileId 构造最小 DriveFile
+            v.get("fileId")
+                .and_then(|v| v.as_str())
+                .map(|id| DriveFile {
                     id: id.to_string(),
                     name: String::new(),
                     category: crate::drive::models::FileCategory::None,
@@ -95,10 +101,14 @@ impl Change {
                     content_hash: None,
                     thumbnail_link: None,
                 })
-            })?;
+        })?;
 
         Some(Self {
-            kind: if is_removed { ChangeKind::Removed } else { ChangeKind::Modified },
+            kind: if is_removed {
+                ChangeKind::Removed
+            } else {
+                ChangeKind::Modified
+            },
             file,
         })
     }
@@ -129,10 +139,13 @@ impl ChangesApi {
     /// 拉取一页增量变更（pageSize 默认 100）。
     /// 路径相对 base_url（base_url 已含 /drive/v1），对齐 about_api 的 /about 写法。
     pub async fn list_changes(&self, cursor: Option<&str>) -> AppResult<ChangeListResult> {
-        let mut url = format!("/changes?fields=*&pageSize=100");
+        let mut url = "/changes?fields=*&pageSize=100".to_string();
         if let Some(c) = cursor {
             if !c.is_empty() {
-                url.push_str(&format!("&cursor={}", crate::drive::files_api::urlencoding(c)));
+                url.push_str(&format!(
+                    "&cursor={}",
+                    crate::drive::files_api::urlencoding(c)
+                ));
             }
         }
         let resp = self.client.get(&url).await?;
@@ -145,7 +158,10 @@ impl ChangesApi {
     /// 华为 API 的 newStartCursor 字段即使已追平也会返回非空值（类似 GDrive 的
     /// nextPageToken——是"下次轮询的起点"而非"还有更多数据"的标记）。
     /// 因此不能仅靠 cursor.is_none() 判断结束，需结合页内条目数：返回 0 条即已追平。
-    pub async fn list_all_changes(&self, start_cursor: Option<&str>) -> AppResult<(Vec<Change>, Option<String>)> {
+    pub async fn list_all_changes(
+        &self,
+        start_cursor: Option<&str>,
+    ) -> AppResult<(Vec<Change>, Option<String>)> {
         let mut all = Vec::new();
         let mut cursor: Option<String> = start_cursor.map(|s| s.to_string());
         let mut pages = 0u32;
@@ -160,7 +176,12 @@ impl ChangesApi {
                 tracing::info!(total = all.len(), pages, "list_all_changes 已追平最新状态");
                 return Ok((all, None));
             }
-            tracing::debug!(page_total = all.len(), last_page = page_count, pages, "list_all_changes 继续翻页…");
+            tracing::debug!(
+                page_total = all.len(),
+                last_page = page_count,
+                pages,
+                "list_all_changes 继续翻页…"
+            );
         }
     }
 }

@@ -139,9 +139,24 @@ mod tests {
     fn test_merge_priority_phone_wins() {
         // 模拟合并：oidc < info < phone，phone 最优先
         let mut merged = serde_json::Map::new();
-        merged.extend(serde_json::json!({"mobile": "匿名脱敏", "sub": "oidc-sub"}).as_object().unwrap().clone());
-        merged.extend(serde_json::json!({"displayName": "昵称", "mobile": "info-phone"}).as_object().unwrap().clone());
-        merged.extend(serde_json::json!({"mobile": "13800000000"}).as_object().unwrap().clone());
+        merged.extend(
+            serde_json::json!({"mobile": "匿名脱敏", "sub": "oidc-sub"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+        merged.extend(
+            serde_json::json!({"displayName": "昵称", "mobile": "info-phone"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+        merged.extend(
+            serde_json::json!({"mobile": "13800000000"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
 
         let user = UserInfo::from_json(&Value::Object(merged));
         // phone 最后覆盖

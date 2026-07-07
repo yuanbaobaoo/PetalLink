@@ -28,9 +28,9 @@ use crate::drive::thumbnail_api::ThumbnailApi;
 use crate::drive::upload_api::UploadApi;
 use crate::error::{AppError, AppResult};
 use crate::mount::manager::MountManager;
-use crate::sync::state::{FailedItem, FreeUpCheckResult, SyncGlobalState};
 use crate::sync::engine::SyncEngine;
 use crate::sync::executor::SyncExecutor;
+use crate::sync::state::{FailedItem, FreeUpCheckResult, SyncGlobalState};
 
 // ===== 全局单例 =====
 
@@ -42,7 +42,8 @@ pub static DRIVE_CLIENT: Lazy<Arc<DriveClient>> =
     Lazy::new(|| Arc::new(DriveClient::new(AUTH_SERVICE.clone())));
 
 /// 全局 FilesApi
-pub static FILES_API: Lazy<Arc<FilesApi>> = Lazy::new(|| Arc::new(FilesApi::new(DRIVE_CLIENT.clone())));
+pub static FILES_API: Lazy<Arc<FilesApi>> =
+    Lazy::new(|| Arc::new(FilesApi::new(DRIVE_CLIENT.clone())));
 
 /// 全局 ChangesApi（增量变更接口）
 pub static CHANGES_API: Lazy<Arc<ChangesApi>> =
@@ -53,7 +54,8 @@ pub static DOWNLOAD_API: Lazy<Arc<DownloadApi>> =
     Lazy::new(|| Arc::new(DownloadApi::new(DRIVE_CLIENT.clone())));
 
 /// 全局 UploadApi
-pub static UPLOAD_API: Lazy<Arc<UploadApi>> = Lazy::new(|| Arc::new(UploadApi::new(DRIVE_CLIENT.clone())));
+pub static UPLOAD_API: Lazy<Arc<UploadApi>> =
+    Lazy::new(|| Arc::new(UploadApi::new(DRIVE_CLIENT.clone())));
 
 /// 全局 ThumbnailApi
 pub static THUMBNAIL_API: Lazy<Arc<ThumbnailApi>> =
@@ -140,7 +142,16 @@ pub fn cleanup_orphan_state() {
     crate::core::cache_paths::clear_all_cache_files();
     // config 挂载字段重置（其余设置保留）
     let reset = config.with(
-        None, None, Some(String::new()), Some(false), None, None, None, None, None, None,
+        None,
+        None,
+        Some(String::new()),
+        Some(false),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
     );
     let _ = ConfigStore::save(&reset);
     tracing::info!("孤儿状态已清理（DB/cloudtree/syncstate/mount_configured）");
@@ -333,7 +344,8 @@ pub async fn auth_restore() -> AppResult<AuthState> {
     let logged_in = AUTH_SERVICE.restore().await?;
     Ok(AuthState {
         logged_in,
-        secret_configured: crate::constants::client_id_configured() && crate::constants::client_secret_configured(),
+        secret_configured: crate::constants::client_id_configured()
+            && crate::constants::client_secret_configured(),
         callback_port: crate::constants::DEFAULT_CALLBACK_PORT,
     })
 }
@@ -370,7 +382,16 @@ fn reset_account_config() -> AppResult<()> {
         return Ok(()); // 已是初始态，无需重置
     }
     let reset = config.with(
-        None, None, Some(String::new()), Some(false), None, None, None, None, None, None,
+        None,
+        None,
+        Some(String::new()),
+        Some(false),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
     );
     ConfigStore::save(&reset)
 }
@@ -419,7 +440,11 @@ pub async fn drive_list(
     page_size: Option<u32>,
 ) -> AppResult<FileListResult> {
     FILES_API
-        .list(parent_id.as_deref(), cursor.as_deref(), page_size.unwrap_or(100))
+        .list(
+            parent_id.as_deref(),
+            cursor.as_deref(),
+            page_size.unwrap_or(100),
+        )
         .await
 }
 
@@ -456,7 +481,8 @@ pub async fn drive_delete_file(app: AppHandle, id: String) -> AppResult<()> {
             tracing::info!(file_id = %id, "删除云端文件成功");
             if let Some((local_path, is_folder)) = local_info {
                 if let Ok(m) = mount() {
-                    let abs_path = m.mount_dir().join(&local_path);
+                    let abs_path =
+                        crate::core::paths::safe_join_under(m.mount_dir(), &local_path, false)?;
                     if abs_path.exists() && !is_folder {
                         // ★ 文件：删除本地副本 + 标记 DB 为 DELETED（tombstone 防云端重建）
                         if let Err(e) = m.delete_local(&abs_path).await {
@@ -489,8 +515,12 @@ pub async fn drive_delete_file(app: AppHandle, id: String) -> AppResult<()> {
                         if let Some(eng) = try_sync_engine() {
                             let mut ct = eng.cloud_tree_lock();
                             let mut p2i = eng.path_to_id_lock();
-                            ct.retain(|k, _| k != &local_path && !k.starts_with(&format!("{local_path}/")));
-                            p2i.retain(|k, _| k != &local_path && !k.starts_with(&format!("{local_path}/")));
+                            ct.retain(|k, _| {
+                                k != &local_path && !k.starts_with(&format!("{local_path}/"))
+                            });
+                            p2i.retain(|k, _| {
+                                k != &local_path && !k.starts_with(&format!("{local_path}/"))
+                            });
                             drop(ct);
                             drop(p2i);
                             eng.add_recently_deleted(&local_path);
@@ -503,7 +533,10 @@ pub async fn drive_delete_file(app: AppHandle, id: String) -> AppResult<()> {
             emit_folder_content_changed(&app);
             Ok(())
         }
-        Err(e) => { tracing::warn!(file_id = %id, error = %e, "删除云端文件失败"); Err(e) }
+        Err(e) => {
+            tracing::warn!(file_id = %id, error = %e, "删除云端文件失败");
+            Err(e)
+        }
     }
 }
 
@@ -512,8 +545,14 @@ pub async fn drive_rename_file(id: String, new_name: String) -> AppResult<DriveF
     // 索引中拒绝：同 drive_delete_file，避免与重建中的 cloud_tree 冲突。
     ensure_not_indexing()?;
     match FILES_API.update(&id, Some(&new_name), None, None).await {
-        Ok(f) => { tracing::info!(file_id = %id, new_name = %new_name, "重命名成功"); Ok(f) }
-        Err(e) => { tracing::warn!(file_id = %id, new_name = %new_name, error = %e, "重命名失败"); Err(e) }
+        Ok(f) => {
+            tracing::info!(file_id = %id, new_name = %new_name, "重命名成功");
+            Ok(f)
+        }
+        Err(e) => {
+            tracing::warn!(file_id = %id, new_name = %new_name, error = %e, "重命名失败");
+            Err(e)
+        }
     }
 }
 
@@ -521,9 +560,18 @@ pub async fn drive_rename_file(id: String, new_name: String) -> AppResult<DriveF
 pub async fn drive_move_file(id: String, new_parent_folder: String) -> AppResult<DriveFile> {
     // 索引中拒绝：移动改 parentFolder，与重建中的 path_to_id/cloud_tree 冲突。
     ensure_not_indexing()?;
-    match FILES_API.update(&id, None, Some(&new_parent_folder), None).await {
-        Ok(f) => { tracing::info!(file_id = %id, target_folder = %new_parent_folder, "移动成功"); Ok(f) }
-        Err(e) => { tracing::warn!(file_id = %id, target_folder = %new_parent_folder, error = %e, "移动失败"); Err(e) }
+    match FILES_API
+        .update(&id, None, Some(&new_parent_folder), None)
+        .await
+    {
+        Ok(f) => {
+            tracing::info!(file_id = %id, target_folder = %new_parent_folder, "移动成功");
+            Ok(f)
+        }
+        Err(e) => {
+            tracing::warn!(file_id = %id, target_folder = %new_parent_folder, error = %e, "移动失败");
+            Err(e)
+        }
     }
 }
 
@@ -550,9 +598,14 @@ pub async fn drive_get_about() -> AppResult<DriveAbout> {
 
 #[tauri::command]
 pub async fn drive_download_file(file_id: String, dest_path: String) -> AppResult<()> {
+    let m = mount()?;
     let dest = std::path::PathBuf::from(&dest_path);
+    let rel = crate::core::paths::relative_path_from_mount(m.mount_dir(), &dest)?;
+    let dest = crate::core::paths::safe_join_under(m.mount_dir(), &rel, false)?;
     let progress: crate::drive::download_api::ProgressFn = Box::new(|_, _| {});
-    DOWNLOAD_API.download(&file_id, &dest, Some(&progress)).await
+    DOWNLOAD_API
+        .download(&file_id, &dest, Some(&progress))
+        .await
 }
 
 #[tauri::command]
@@ -560,9 +613,14 @@ pub async fn drive_upload_file(
     local_path: String,
     parent_id: Option<String>,
 ) -> AppResult<DriveFile> {
+    let m = mount()?;
     let path = std::path::PathBuf::from(&local_path);
+    let rel = crate::core::paths::relative_path_from_mount(m.mount_dir(), &path)?;
+    let path = crate::core::paths::safe_join_under(m.mount_dir(), &rel, false)?;
     let progress: crate::drive::upload_api::ProgressFn = Box::new(|_| {});
-    UPLOAD_API.upload(&path, parent_id.as_deref(), Some(&progress), None).await
+    UPLOAD_API
+        .upload(&path, parent_id.as_deref(), Some(&progress), None)
+        .await
 }
 
 // ========================================================================
@@ -596,9 +654,7 @@ pub async fn sync_manual_refresh(app: AppHandle) -> AppResult<()> {
 #[tauri::command]
 pub fn sync_check_file_local_status(file_id: String) -> AppResult<String> {
     let conn = DB.lock();
-    let record = repository::find_by_file_id(&conn, &file_id)
-        .ok()
-        .flatten();
+    let record = repository::find_by_file_id(&conn, &file_id).ok().flatten();
     let Some(record) = record else {
         return Ok("not_synced".to_string());
     };
@@ -612,10 +668,12 @@ pub fn sync_check_file_local_status(file_id: String) -> AppResult<String> {
             if let Ok(meta) = std::fs::metadata(&abs_path) {
                 if meta.len() > 0 {
                     // 进一步确认不是占位符（占位符 0 字节已过滤，但检查 xattr 更严谨）
-                let is_placeholder = xattr::get(&abs_path, crate::mount::manager::XATTR_STATE)
-                    .ok()
-                    .flatten()
-                    .map(|b| String::from_utf8_lossy(&b) == crate::mount::manager::STATE_PLACEHOLDER)
+                    let is_placeholder = xattr::get(&abs_path, crate::mount::manager::XATTR_STATE)
+                        .ok()
+                        .flatten()
+                        .map(|b| {
+                            String::from_utf8_lossy(&b) == crate::mount::manager::STATE_PLACEHOLDER
+                        })
                         .unwrap_or(false);
                     if !is_placeholder {
                         return Ok("synced".to_string());
@@ -638,10 +696,7 @@ pub fn sync_batch_file_status(file_ids: Vec<String>) -> AppResult<HashMap<String
     let mut result: HashMap<String, String> = HashMap::with_capacity(file_ids.len());
 
     for file_id in &file_ids {
-        let status = match repository::find_by_file_id(&conn, file_id)
-            .ok()
-            .flatten()
-        {
+        let status = match repository::find_by_file_id(&conn, file_id).ok().flatten() {
             None => "not_synced",
             Some(record) => {
                 if record.is_folder {
@@ -699,7 +754,8 @@ pub async fn sync_check_safe_free_up(rel_path: String, file_id: String) -> AppRe
             FreeUpCheckResult::Safe => "safe",
             FreeUpCheckResult::NotInCloud => "not_in_cloud",
             FreeUpCheckResult::NotSynced => "not_synced",
-        }.to_string());
+        }
+        .to_string());
     }
     // 引擎未启动：DB 兜底
     let conn = DB.lock();
@@ -732,7 +788,16 @@ pub async fn sync_free_up_space(
     size: i64,
 ) -> AppResult<()> {
     let m = mount()?;
-    let lp = std::path::PathBuf::from(&local_path);
+    let frontend_rel = crate::core::paths::relative_path_from_mount(
+        m.mount_dir(),
+        &std::path::PathBuf::from(&local_path),
+    )?;
+    if frontend_rel != rel_path {
+        return Err(AppError::config(format!(
+            "释放空间路径不一致：rel_path={rel_path}, local_path={local_path}"
+        )));
+    }
+    let lp = crate::core::paths::safe_join_under(m.mount_dir(), &rel_path, false)?;
 
     // 删除本地文件
     if lp.exists() {
@@ -740,7 +805,8 @@ pub async fn sync_free_up_space(
     }
 
     // 创建占位符
-    m.create_placeholder_if_needed(&rel_path, &file_id, size).await?;
+    m.create_placeholder_if_needed(&rel_path, &file_id, size)
+        .await?;
 
     // 更新 DB
     let conn = DB.lock();
@@ -753,15 +819,46 @@ pub async fn sync_free_up_space(
 }
 
 #[tauri::command]
-pub async fn sync_download_on_demand(app: AppHandle, file_id: String, dest_path: String) -> AppResult<bool> {
+pub async fn sync_download_on_demand(
+    app: AppHandle,
+    file_id: String,
+    dest_path: String,
+) -> AppResult<bool> {
     // 全局索引读取中：禁止按需下载（同 sync_folder_recursive，cloud_tree 构建中）
     if let Some(e) = try_sync_engine() {
         if e.current_state().is_indexing {
-            return Err(AppError::generic("正在读取云端索引，请稍后再试".to_string()));
+            return Err(AppError::generic(
+                "正在读取云端索引，请稍后再试".to_string(),
+            ));
         }
     }
-    let dest = PathBuf::from(&dest_path);
-    let name = dest.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let m = mount()?;
+    let frontend_dest = PathBuf::from(&dest_path);
+    let frontend_rel = crate::core::paths::relative_path_from_mount(m.mount_dir(), &frontend_dest)?;
+    let record_rel = {
+        let conn = DB.lock();
+        repository::find_by_file_id(&conn, &file_id)
+            .ok()
+            .flatten()
+            .map(|r| r.local_path)
+    };
+    let dest_rel = match record_rel {
+        Some(rel) => {
+            crate::core::paths::validate_relative_path(&rel, false)?;
+            if rel != frontend_rel {
+                return Err(AppError::config(format!(
+                    "下载路径不一致：file_id={file_id}, rel_path={rel}, dest_path={dest_path}"
+                )));
+            }
+            rel
+        }
+        None => frontend_rel,
+    };
+    let dest = crate::core::paths::safe_join_under(m.mount_dir(), &dest_rel, false)?;
+    let name = dest
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
     // 查云端真实元数据（editedTime + size）：
     // - editedTime 必须写真实值，写 None 会让 is_cloud_changed 永远判"云端已变"
     //   → watcher 触发的 cycle 重复下载 → 同步循环（恶性 bug 根因）
@@ -782,22 +879,26 @@ pub async fn sync_download_on_demand(app: AppHandle, file_id: String, dest_path:
     // 入队传输记录（按需下载也纳入传输队列 + 状态条「同步中」）
     let task_id = {
         let conn = DB.lock();
-        repository::insert_transfer(&conn, &repository::TransferTask {
-            id: 0,
-            direction: repository::transfer_direction::DOWNLOAD,
-            file_id: Some(file_id.clone()),
-            local_path: Some(dest_path.clone()),
-            name: name.clone(),
-            total_size: cloud_size, // 云端真实大小（用于进度条）；查询失败则 0
-            transferred: 0,
-            state: repository::transfer_state::RUNNING,
-            error_message: None,
-            created_at: chrono::Utc::now().timestamp_millis(),
-            finished_at: None,
-            server_id: None,
-            upload_id: None,
-            resume_offset: 0,
-        }).unwrap_or(0)
+        repository::insert_transfer(
+            &conn,
+            &repository::TransferTask {
+                id: 0,
+                direction: repository::transfer_direction::DOWNLOAD,
+                file_id: Some(file_id.clone()),
+                local_path: Some(dest.to_string_lossy().to_string()),
+                name: name.clone(),
+                total_size: cloud_size, // 云端真实大小（用于进度条）；查询失败则 0
+                transferred: 0,
+                state: repository::transfer_state::RUNNING,
+                error_message: None,
+                created_at: chrono::Utc::now().timestamp_millis(),
+                finished_at: None,
+                server_id: None,
+                upload_id: None,
+                resume_offset: 0,
+            },
+        )
+        .unwrap_or(0)
     };
     emit_transfer_update(&app); // 入队即通知：传输面板 + 状态条变「同步中」
     let result = download_to_dest(&file_id, &dest, &name, cloud_size, cloud_edited_time).await;
@@ -840,10 +941,7 @@ async fn download_to_dest(
     // 相对挂载根的路径：DB/cloud_tree/scan_local 全用相对路径，绝对路径会与
     // 占位时写入的相对路径记录共存（主键 file_id+local_path），形成孤儿记录
     // 导致 planner 每轮误判（288 振荡根因）。
-    let rel = dest
-        .strip_prefix(m.mount_dir())
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| dest.to_string_lossy().to_string());
+    let rel = crate::core::paths::relative_path_from_mount(m.mount_dir(), dest)?;
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent).await.ok();
     }
@@ -854,7 +952,9 @@ async fn download_to_dest(
         let _ = tokio::fs::remove_file(dest).await;
     }
     let progress: crate::drive::download_api::ProgressFn = Box::new(|_, _| {});
-    DOWNLOAD_API.download(file_id, dest, Some(&progress)).await?;
+    DOWNLOAD_API
+        .download(file_id, dest, Some(&progress))
+        .await?;
     // mark_downloaded（xattr state=downloaded + 清灰标）
     let _ = m.mark_downloaded(dest).await;
     // 补写 fileId xattr：删占位再下载产生新 inode，占位时的 fileId xattr 丢失，
@@ -863,25 +963,29 @@ async fn download_to_dest(
     // upsert DB（status=synced，相对路径，覆盖旧 cloudOnly 记录）
     let conn = DB.lock();
     let local_size = std::fs::metadata(dest).ok().map(|m| m.len() as i64);
-    let local_mtime = std::fs::metadata(dest).ok()
+    let local_mtime = std::fs::metadata(dest)
+        .ok()
         .and_then(|m| m.modified().ok())
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_millis() as i64);
-    let _ = repository::upsert(&conn, &repository::SyncItem {
-        file_id: file_id.to_string(),
-        local_path: rel,
-        parent_folder_id: None,
-        name: name.to_string(),
-        is_folder: false,
-        size,
-        local_size,
-        sha256: None,
-        local_mtime,
-        cloud_edited_time,
-        last_sync_time: Some(chrono::Utc::now().timestamp_millis()),
-        status: repository::sync_status::SYNCED,
-        error_message: None,
-    });
+    let _ = repository::upsert(
+        &conn,
+        &repository::SyncItem {
+            file_id: file_id.to_string(),
+            local_path: rel,
+            parent_folder_id: None,
+            name: name.to_string(),
+            is_folder: false,
+            size,
+            local_size,
+            sha256: None,
+            local_mtime,
+            cloud_edited_time,
+            last_sync_time: Some(chrono::Utc::now().timestamp_millis()),
+            status: repository::sync_status::SYNCED,
+            error_message: None,
+        },
+    );
     Ok(())
 }
 
@@ -895,12 +999,18 @@ pub struct FolderSyncProgress {
 /// 递归同步云端目录子树到本地（下载缺失 + 上传本地独有 + 建目录），对齐 dart syncFolderRecursive。
 /// folder_id：云端目录 id；rel_path：该目录相对挂载根的路径（定位本地 dest + cloud_tree 全路径）。
 #[tauri::command]
-pub async fn sync_folder_recursive(app: AppHandle, folder_id: String, rel_path: String) -> AppResult<i64> {
+pub async fn sync_folder_recursive(
+    app: AppHandle,
+    folder_id: String,
+    rel_path: String,
+) -> AppResult<i64> {
     let eng = sync_engine()?;
     // 全局索引读取中（云端树 BFS 重建中）：选择目录同步会基于不完整的 cloud_tree/path_to_id，
     // 且与全局 BFS 并发拉取易冲突 → 拒绝，等索引完成。
     if eng.current_state().is_indexing {
-        return Err(AppError::generic("正在读取云端索引，请稍后再试".to_string()));
+        return Err(AppError::generic(
+            "正在读取云端索引，请稍后再试".to_string(),
+        ));
     }
     if !eng.try_begin_folder_sync() {
         tracing::info!("sync_folder_recursive: 已有目录同步进行中，跳过");
@@ -911,7 +1021,8 @@ pub async fn sync_folder_recursive(app: AppHandle, folder_id: String, rel_path: 
     let eng_clone = eng.clone();
     let app_clone = app.clone();
     tauri::async_runtime::spawn(async move {
-        let result = sync_folder_recursive_impl(&app_clone, &eng_clone, &folder_id, &rel_path).await;
+        let result =
+            sync_folder_recursive_impl(&app_clone, &eng_clone, &folder_id, &rel_path).await;
         // 无论成功失败都释放锁（防 panic 泄漏 → 放在 spawn 任务收尾，确定性释放）
         eng_clone.end_folder_sync();
         // 完成后广播 contentChanged 让前端目录刷新
@@ -923,7 +1034,9 @@ pub async fn sync_folder_recursive(app: AppHandle, folder_id: String, rel_path: 
         }
         match &result {
             Ok(done) => tracing::info!(done, rel = %rel_path, "sync_folder_recursive（后台）完成"),
-            Err(e) => tracing::warn!(error = %e, rel = %rel_path, "sync_folder_recursive（后台）失败"),
+            Err(e) => {
+                tracing::warn!(error = %e, rel = %rel_path, "sync_folder_recursive（后台）失败")
+            }
         }
     });
     Ok(0)
@@ -936,7 +1049,8 @@ async fn sync_folder_recursive_impl(
     rel_path: &str,
 ) -> AppResult<i64> {
     let m = mount()?;
-    let dest_dir = m.mount_dir().join(rel_path);
+    crate::core::paths::validate_relative_path(rel_path, true)?;
+    let dest_dir = crate::core::paths::safe_join_under(m.mount_dir(), rel_path, true)?;
     tracing::info!(folder_id, rel = %rel_path, "sync_folder_recursive: 开始递归同步");
 
     // 1. BFS 子树：listAll 递归
@@ -952,7 +1066,12 @@ async fn sync_folder_recursive_impl(
             if f.name.starts_with(crate::constants::INTERNAL_FILE_PREFIX) {
                 continue;
             }
-            let subrel = if path.is_empty() { f.name.clone() } else { format!("{path}/{}", f.name) };
+            crate::core::paths::validate_path_segment(&f.name)?;
+            let subrel = if path.is_empty() {
+                f.name.clone()
+            } else {
+                format!("{path}/{}", f.name)
+            };
             if f.is_folder() {
                 cloud_folders.push(subrel.clone());
                 folder_rel_to_id.insert(subrel.clone(), f.id.clone());
@@ -971,7 +1090,8 @@ async fn sync_folder_recursive_impl(
     // 2. 本地目录
     tokio::fs::create_dir_all(&dest_dir).await.ok();
     for sub in &cloud_folders {
-        let _ = tokio::fs::create_dir_all(dest_dir.join(sub)).await;
+        let path = crate::core::paths::safe_join_under(&dest_dir, sub, false)?;
+        let _ = tokio::fs::create_dir_all(path).await;
     }
 
     // 3. 扫描本地真实文件（spawn_blocking，排除 .tmp/.hwcloud_/0 字节占位）
@@ -985,8 +1105,10 @@ async fn sync_folder_recursive_impl(
     .unwrap_or_default();
 
     // 4. to_download（云端有、本地无或仅占位）+ to_upload（本地有、云端无）
-    let cloud_map: HashMap<String, DriveFile> =
-        cloud_files.iter().map(|(r, f)| (r.clone(), f.clone())).collect();
+    let cloud_map: HashMap<String, DriveFile> = cloud_files
+        .iter()
+        .map(|(r, f)| (r.clone(), f.clone()))
+        .collect();
     let to_download: Vec<(String, DriveFile)> = cloud_files
         .into_iter()
         .filter(|(r, _)| !local_files.contains_key(r))
@@ -1010,7 +1132,8 @@ async fn sync_folder_recursive_impl(
     //    所有文件都被平铺到 A 下。必须在文件上传前先建好目录链。
     {
         // 收集所有需要上传的文件的祖先目录路径
-        let mut missing_dirs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut missing_dirs: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
         for (subrel, _) in &to_upload {
             let parts: Vec<&str> = subrel.split('/').collect();
             // parts 的最后一段是文件名，之前的是目录层级
@@ -1045,7 +1168,9 @@ async fn sync_folder_recursive_impl(
                     if msg.contains("400") || msg.contains("409") {
                         if let Some(pid) = parent_id {
                             if let Ok(list) = FILES_API.list_all(Some(pid)).await {
-                                if let Some(existing) = list.iter().find(|c| c.is_folder() && c.name == dir_name) {
+                                if let Some(existing) =
+                                    list.iter().find(|c| c.is_folder() && c.name == dir_name)
+                                {
                                     folder_rel_to_id.insert(dir_rel.clone(), existing.id.clone());
                                     let _ = tokio::fs::create_dir_all(dest_dir.join(dir_rel)).await;
                                     tracing::info!(dir = %dir_rel, cloud_id = %existing.id, "sync_folder_recursive: 父目录已存在（409容错）");
@@ -1062,7 +1187,7 @@ async fn sync_folder_recursive_impl(
 
     // 6. 下载
     for (subrel, f) in &to_download {
-        let dest = dest_dir.join(subrel);
+        let dest = crate::core::paths::safe_join_under(&dest_dir, subrel, false)?;
         let full_rel = if rel_path.is_empty() {
             subrel.clone()
         } else {
@@ -1071,29 +1196,37 @@ async fn sync_folder_recursive_impl(
         // 入队传输记录（双端对齐要求所有文件操作出现在传输队列）
         let task_id = {
             let conn = DB.lock();
-            repository::insert_transfer(&conn, &repository::TransferTask {
-                id: 0,
-                direction: repository::transfer_direction::DOWNLOAD,
-                file_id: Some(f.id.clone()),
-                local_path: Some(dest.to_string_lossy().to_string()),
-                name: full_rel.clone(),
-                total_size: f.size,
-                transferred: 0,
-                state: repository::transfer_state::RUNNING,
-                error_message: None,
-                created_at: chrono::Utc::now().timestamp_millis(),
-                finished_at: None,
-                server_id: None,
-                upload_id: None,
-                resume_offset: 0,
-            }).unwrap_or(0)
+            repository::insert_transfer(
+                &conn,
+                &repository::TransferTask {
+                    id: 0,
+                    direction: repository::transfer_direction::DOWNLOAD,
+                    file_id: Some(f.id.clone()),
+                    local_path: Some(dest.to_string_lossy().to_string()),
+                    name: full_rel.clone(),
+                    total_size: f.size,
+                    transferred: 0,
+                    state: repository::transfer_state::RUNNING,
+                    error_message: None,
+                    created_at: chrono::Utc::now().timestamp_millis(),
+                    finished_at: None,
+                    server_id: None,
+                    upload_id: None,
+                    resume_offset: 0,
+                },
+            )
+            .unwrap_or(0)
         };
         // 入队即通知：前端传输面板 + 托盘菜单立即显示新下载项
         notify_transfer(app);
         let download_result = download_to_dest(
-            &f.id, &dest, &f.name, f.size,
+            &f.id,
+            &dest,
+            &f.name,
+            f.size,
             f.edited_time.map(|t| t.timestamp_millis()),
-        ).await;
+        )
+        .await;
         // 结算传输记录（成功时 transferred=total_size，失败时保持原值）
         {
             let conn = DB.lock();
@@ -1101,7 +1234,11 @@ async fn sync_folder_recursive_impl(
                 &conn,
                 task_id,
                 download_result.is_ok(),
-                download_result.as_ref().err().map(|e| e.to_string()).as_deref(),
+                download_result
+                    .as_ref()
+                    .err()
+                    .map(|e| e.to_string())
+                    .as_deref(),
             );
         }
         // 结算后通知：传输面板 + 托盘菜单刷新（状态变化/消失）
@@ -1110,12 +1247,21 @@ async fn sync_folder_recursive_impl(
             tracing::warn!(subrel = %subrel, error = %e, "sync_folder_recursive: 下载失败");
         }
         done += 1;
-        let _ = app.emit("folder_sync_progress", FolderSyncProgress { done: done as usize, total });
+        let _ = app.emit(
+            "folder_sync_progress",
+            FolderSyncProgress {
+                done: done as usize,
+                total,
+            },
+        );
     }
     // 7. 上传
     for (subrel, local_path) in &to_upload {
         let parent_subrel = parent_subrel_of(subrel);
-        let parent_id = folder_rel_to_id.get(&parent_subrel).map(|s| s.as_str()).unwrap_or(folder_id);
+        let parent_id = folder_rel_to_id
+            .get(&parent_subrel)
+            .map(|s| s.as_str())
+            .unwrap_or(folder_id);
         let full_rel = if rel_path.is_empty() {
             subrel.clone()
         } else {
@@ -1125,22 +1271,26 @@ async fn sync_folder_recursive_impl(
         // 入队传输记录
         let task_id = {
             let conn = DB.lock();
-            repository::insert_transfer(&conn, &repository::TransferTask {
-                id: 0,
-                direction: repository::transfer_direction::UPLOAD,
-                file_id: None,
-                local_path: Some(local_path.to_string_lossy().to_string()),
-                name: full_rel.clone(),
-                total_size: file_size,
-                transferred: 0,
-                state: repository::transfer_state::RUNNING,
-                error_message: None,
-                created_at: chrono::Utc::now().timestamp_millis(),
-                finished_at: None,
-                server_id: None,
-                upload_id: None,
-                resume_offset: 0,
-            }).unwrap_or(0)
+            repository::insert_transfer(
+                &conn,
+                &repository::TransferTask {
+                    id: 0,
+                    direction: repository::transfer_direction::UPLOAD,
+                    file_id: None,
+                    local_path: Some(local_path.to_string_lossy().to_string()),
+                    name: full_rel.clone(),
+                    total_size: file_size,
+                    transferred: 0,
+                    state: repository::transfer_state::RUNNING,
+                    error_message: None,
+                    created_at: chrono::Utc::now().timestamp_millis(),
+                    finished_at: None,
+                    server_id: None,
+                    upload_id: None,
+                    resume_offset: 0,
+                },
+            )
+            .unwrap_or(0)
         };
         // 入队即通知：前端传输面板 + 托盘菜单立即显示新上传项
         notify_transfer(app);
@@ -1151,7 +1301,9 @@ async fn sync_folder_recursive_impl(
         let on_progress: crate::drive::upload_api::ProgressFn = Box::new(move |ratio: f64| {
             emit_transfer_progress(&prog_db, prog_task_id, ratio, &prog_throttle);
         });
-        let upload_result = UPLOAD_API.upload(local_path, Some(parent_id), Some(&on_progress), None).await;
+        let upload_result = UPLOAD_API
+            .upload(local_path, Some(parent_id), Some(&on_progress), None)
+            .await;
         // 结算传输记录（成功时 transferred=total_size，失败时保持原值）
         {
             let conn = DB.lock();
@@ -1159,7 +1311,11 @@ async fn sync_folder_recursive_impl(
                 &conn,
                 task_id,
                 upload_result.is_ok(),
-                upload_result.as_ref().err().map(|e| e.to_string()).as_deref(),
+                upload_result
+                    .as_ref()
+                    .err()
+                    .map(|e| e.to_string())
+                    .as_deref(),
             );
         }
         // 结算后通知：传输面板 + 托盘菜单刷新（状态变化/消失）
@@ -1178,26 +1334,37 @@ async fn sync_folder_recursive_impl(
                     .map(|d| d.as_millis() as i64);
                 // DB local_path 用相对路径 full_rel（与 cloud_tree/path_to_id 一致），
                 // 绝对路径会与占位记录共存成孤儿（288 振荡根因）。
-                let _ = repository::upsert(&conn, &repository::SyncItem {
-                    file_id: uploaded.id,
-                    local_path: full_rel,
-                    parent_folder_id: Some(parent_id.to_string()),
-                    name: uploaded.name,
-                    is_folder: false,
-                    size: uploaded.size,
-                    local_size,
-                    sha256: None,
-                    local_mtime,
-                    cloud_edited_time: uploaded.edited_time.map(|t| t.timestamp_millis()),
-                    last_sync_time: Some(chrono::Utc::now().timestamp_millis()),
-                    status: repository::sync_status::SYNCED,
-                    error_message: None,
-                });
+                let _ = repository::upsert(
+                    &conn,
+                    &repository::SyncItem {
+                        file_id: uploaded.id,
+                        local_path: full_rel,
+                        parent_folder_id: Some(parent_id.to_string()),
+                        name: uploaded.name,
+                        is_folder: false,
+                        size: uploaded.size,
+                        local_size,
+                        sha256: None,
+                        local_mtime,
+                        cloud_edited_time: uploaded.edited_time.map(|t| t.timestamp_millis()),
+                        last_sync_time: Some(chrono::Utc::now().timestamp_millis()),
+                        status: repository::sync_status::SYNCED,
+                        error_message: None,
+                    },
+                );
             }
-            Err(e) => tracing::warn!(subrel = %subrel, error = %e, "sync_folder_recursive: 上传失败"),
+            Err(e) => {
+                tracing::warn!(subrel = %subrel, error = %e, "sync_folder_recursive: 上传失败")
+            }
         }
         done += 1;
-        let _ = app.emit("folder_sync_progress", FolderSyncProgress { done: done as usize, total });
+        let _ = app.emit(
+            "folder_sync_progress",
+            FolderSyncProgress {
+                done: done as usize,
+                total,
+            },
+        );
     }
 
     tracing::info!(done, total, "sync_folder_recursive: 完成");
@@ -1226,7 +1393,11 @@ fn scan_dir_for_real_files(
             if meta.len() == 0 && crate::mount::manager::is_placeholder_file(&path) {
                 continue;
             }
-            let rel = path.strip_prefix(base).unwrap_or(&path).to_string_lossy().to_string();
+            let rel = path
+                .strip_prefix(base)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .to_string();
             out.insert(rel, path);
         }
     }
@@ -1256,13 +1427,23 @@ pub async fn sync_state() -> AppResult<SyncGlobalState> {
     // 引擎未启动：DB 兜底
     let conn = DB.lock();
     let total: u64 = conn
-        .query_row("SELECT COUNT(*) FROM sync_items", [], |r| r.get::<_, i64>(0))
+        .query_row("SELECT COUNT(*) FROM sync_items", [], |r| {
+            r.get::<_, i64>(0)
+        })
         .unwrap_or(0) as u64;
     let failed: u64 = conn
-        .query_row("SELECT COUNT(*) FROM sync_items WHERE status = 4", [], |r| r.get::<_, i64>(0))
+        .query_row(
+            "SELECT COUNT(*) FROM sync_items WHERE status = 4",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
         .unwrap_or(0) as u64;
     let conflict: u64 = conn
-        .query_row("SELECT COUNT(*) FROM sync_items WHERE status = 5", [], |r| r.get::<_, i64>(0))
+        .query_row(
+            "SELECT COUNT(*) FROM sync_items WHERE status = 5",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
         .unwrap_or(0) as u64;
 
     // 失败项详情（最多 20 条，供 SyncStatusBar 失败项弹窗）
@@ -1307,7 +1488,8 @@ pub async fn config_save(app: AppHandle, config: AppConfig) -> AppResult<()> {
     let old_configured = old.as_ref().map(|c| c.mount_configured).unwrap_or(false);
     let old_abs = old.as_ref().map(|c| c.expanded_mount_dir());
     let new_abs = config.expanded_mount_dir();
-    let dir_changed = old_configured && config.mount_configured && old_abs.as_ref() != Some(&new_abs);
+    let dir_changed =
+        old_configured && config.mount_configured && old_abs.as_ref() != Some(&new_abs);
 
     ConfigStore::save(&config)?;
 
@@ -1625,8 +1807,14 @@ pub fn emit_transfer_update(app: &AppHandle) {
 /// 替代散布在 drive_delete/rename/move、sync_download_on_demand、sync_folder_recursive 等
 /// 处的重复 `is_indexing` 检查 + 返回错误模式。
 fn ensure_not_indexing() -> AppResult<()> {
-    if sync_engine().ok().map(|e| e.current_state().is_indexing).unwrap_or(false) {
-        return Err(AppError::generic("正在读取云端索引，请稍后再试".to_string()));
+    if sync_engine()
+        .ok()
+        .map(|e| e.current_state().is_indexing)
+        .unwrap_or(false)
+    {
+        return Err(AppError::generic(
+            "正在读取云端索引，请稍后再试".to_string(),
+        ));
     }
     Ok(())
 }

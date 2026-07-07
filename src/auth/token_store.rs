@@ -127,7 +127,10 @@ fn machine_uuid() -> AppResult<String> {
         .lines()
         .find(|line| line.contains("IOPlatformUUID"))
         .and_then(|line| line.split_once('='))
-        .and_then(|(_, rest)| rest.split_once('"').and_then(|(_, after)| after.split_once('"')))
+        .and_then(|(_, rest)| {
+            rest.split_once('"')
+                .and_then(|(_, after)| after.split_once('"'))
+        })
         .map(|(uuid, _)| uuid.trim().to_string())
         .ok_or_else(|| AppError::generic("ioreg 输出未找到 IOPlatformUUID"))?;
     if uuid.is_empty() {

@@ -54,7 +54,7 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 
 use crate::auth::models::TokenPair;
-use crate::auth::oauth_server::{OauthCallbackResult, OauthServer};
+use crate::auth::oauth_server::{OauthCallbackResult, OauthServer, OauthServerStopHandle};
 use crate::auth::pkce::{generate_pkce, generate_state};
 use crate::auth::token_refresher::TokenRefresher;
 use crate::auth::token_store::{global_store, TokenStore};
@@ -71,7 +71,25 @@ pub struct AuthService {
     current_verifier: Mutex<Option<String>>,
     /// 是否被用户取消授权
     cancelled: Mutex<bool>,
+    /// 当前 OAuth 回调 server 停止句柄
+    current_oauth_stop: Mutex<Option<OauthServerStopHandle>>,
     http: reqwest::Client,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RestoreRefreshFailureAction {
+    ReturnError,
+    ClearLogin,
+}
+
+fn restore_refresh_failure_action(error: &AppError) -> RestoreRefreshFailureAction {
+    match error {
+        AppError::DriveApi {
+            code: crate::error::DriveApiErrorCode::Network,
+            ..
+        } => RestoreRefreshFailureAction::ReturnError,
+        _ => RestoreRefreshFailureAction::ClearLogin,
+    }
 }
 
 impl AuthService {
@@ -84,6 +102,7 @@ impl AuthService {
             refresher,
             current_verifier: Mutex::new(None),
             cancelled: Mutex::new(false),
+            current_oauth_stop: Mutex::new(None),
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(30))
                 .build()
@@ -100,11 +119,17 @@ impl AuthService {
                 if token.will_expire_within(constants::TOKEN_EXPIRY_BUFFER_SECS) {
                     match self.refresher.refresh().await {
                         Ok(_) => Ok(true),
-                        Err(e) => {
-                            tracing::warn!(error = %e, "恢复登录态时刷新失败，登出");
-                            self.logout().await?;
-                            Ok(false)
-                        }
+                        Err(e) => match restore_refresh_failure_action(&e) {
+                            RestoreRefreshFailureAction::ReturnError => {
+                                tracing::warn!(error = %e, "恢复登录态时刷新失败，保留本地 token 并返回错误");
+                                Err(e)
+                            }
+                            RestoreRefreshFailureAction::ClearLogin => {
+                                tracing::warn!(error = %e, "恢复登录态时 token 被拒绝，登出");
+                                self.logout().await?;
+                                Ok(false)
+                            }
+                        },
                     }
                 } else {
                     Ok(true)
@@ -127,18 +152,21 @@ impl AuthService {
 
         // 1. 启动 loopback 监听
         let server = OauthServer::start(port).await?;
+        *self.current_oauth_stop.lock().await = Some(server.stop_handle());
 
         // 2. 构造授权 URL 并打开浏览器
         let auth_url = build_authorize_url(&redirect_uri, &state, &pkce);
         tracing::info!("打开授权页：{auth_url}");
         let launched = open_browser(&auth_url);
         if !launched {
+            *self.current_oauth_stop.lock().await = None;
             server.stop().await;
             return Err(AppError::auth_browser_launch_failed());
         }
 
         // 3. 等待回调
         let callback_result = server.wait_for_callback().await;
+        *self.current_oauth_stop.lock().await = None;
         // finally：server 已在 wait_for_callback 内 stop
 
         // 4. 用户取消检测
@@ -155,7 +183,11 @@ impl AuthService {
         tracing::info!("收到授权码，换取 token...");
         let verifier = self.current_verifier.lock().await.clone();
         let token = self
-            .exchange_code_for_token(&callback.code.clone().unwrap(), &redirect_uri, verifier.as_deref())
+            .exchange_code_for_token(
+                &callback.code.clone().unwrap(),
+                &redirect_uri,
+                verifier.as_deref(),
+            )
             .await?;
 
         // 7. 持久化
@@ -168,12 +200,16 @@ impl AuthService {
     /// 取消正在进行的授权流程。对齐 dart `cancelAuthorize()`。
     pub async fn cancel_authorize(&self) {
         *self.cancelled.lock().await = true;
+        if let Some(stop) = self.current_oauth_stop.lock().await.take() {
+            stop.stop();
+        }
         tracing::info!("用户取消授权");
     }
 
     /// 退出登录：清空存储 + 内存（F-AUTH-05）。对齐 dart `logout()`。
     pub async fn logout(&self) -> AppResult<()> {
         self.token_store.clear()?;
+        self.refresher.clear_current();
         tracing::info!("已退出登录");
         Ok(())
     }
@@ -191,7 +227,11 @@ impl AuthService {
     }
 
     /// 校验回调结果。对齐 dart authorize() 第 5 步。
-    fn validate_callback(&self, callback: &OauthCallbackResult, expected_state: &str) -> AppResult<()> {
+    fn validate_callback(
+        &self,
+        callback: &OauthCallbackResult,
+        expected_state: &str,
+    ) -> AppResult<()> {
         if let Some(error) = &callback.error {
             // 华为 OAuth 错误码识别（1101 + invalid scope → 明确指引）
             if error == "1101" {
@@ -216,10 +256,7 @@ impl AuthService {
                 }
             }
             return Err(AppError::auth_denied(
-                callback
-                    .error_description
-                    .as_deref()
-                    .or(Some(error)),
+                callback.error_description.as_deref().or(Some(error)),
             ));
         }
         if callback.code.is_none() {
@@ -250,7 +287,10 @@ impl AuthService {
             format!("grant_type={}", enc("authorization_code")),
             format!("code={}", enc(code)),
             format!("client_id={}", enc(constants::resolved_client_id())),
-            format!("client_secret={}", enc(&constants::resolved_client_secret())),
+            format!(
+                "client_secret={}",
+                enc(&constants::resolved_client_secret())
+            ),
             format!("redirect_uri={}", enc(redirect_uri)),
         ];
         if let Some(verifier) = code_verifier {
@@ -272,8 +312,8 @@ impl AuthService {
             .text()
             .await
             .map_err(|e| AppError::generic(format!("换 token 失败：{e}")))?;
-        let data: Value = serde_json::from_str(&text)
-            .map_err(|_| AppError::auth_token_response_invalid())?;
+        let data: Value =
+            serde_json::from_str(&text).map_err(|_| AppError::auth_token_response_invalid())?;
 
         if data.get("access_token").is_none() {
             let desc = data
@@ -285,8 +325,7 @@ impl AuthService {
             return Err(AppError::generic(format!("换 token 失败：{desc}")));
         }
 
-        TokenPair::from_token_response(&data)
-            .ok_or_else(AppError::auth_token_response_invalid)
+        TokenPair::from_token_response(&data).ok_or_else(AppError::auth_token_response_invalid)
     }
 
     /// 获取 token refresher 引用（供 DriveClient 401 重放用）。
@@ -316,7 +355,11 @@ fn build_redirect_uri(port: u16) -> String {
 ///
 /// 关键：scope 用空格分隔，空格替换为 `%20`（不整体编码，`/` 保留）。
 /// 对齐 dart `_buildAuthorizeUrl`。
-pub fn build_authorize_url(redirect_uri: &str, state: &str, pkce: &crate::auth::pkce::PkcePair) -> String {
+pub fn build_authorize_url(
+    redirect_uri: &str,
+    state: &str,
+    pkce: &crate::auth::pkce::PkcePair,
+) -> String {
     let scope_raw = constants::SCOPES.join(" ");
     // 其余参数用 enc（dart Uri.encodeComponent 等价）编码
     let query = [
@@ -338,10 +381,7 @@ pub fn build_authorize_url(redirect_uri: &str, state: &str, pkce: &crate::auth::
 fn open_browser(url: &str) -> bool {
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("open")
-            .arg(url)
-            .spawn()
-            .is_ok()
+        std::process::Command::new("open").arg(url).spawn().is_ok()
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -421,7 +461,9 @@ mod tests {
             ..Default::default()
         };
         let err = svc.validate_callback(&cb, "st").unwrap_err();
-        assert!(matches!(err, AppError::Auth { code, .. } if code == crate::error::AuthErrorCode::StateMismatch));
+        assert!(
+            matches!(err, AppError::Auth { code, .. } if code == crate::error::AuthErrorCode::StateMismatch)
+        );
     }
 
     #[test]
@@ -452,6 +494,26 @@ mod tests {
             ..Default::default()
         };
         let err = svc.validate_callback(&cb, "st").unwrap_err();
-        assert!(matches!(err, AppError::Auth { code, .. } if code == crate::error::AuthErrorCode::InvalidCode));
+        assert!(
+            matches!(err, AppError::Auth { code, .. } if code == crate::error::AuthErrorCode::InvalidCode)
+        );
+    }
+
+    #[test]
+    fn test_restore_refresh_failure_action_keeps_token_on_network_error() {
+        let err = AppError::drive_network(Some("timeout"));
+        assert_eq!(
+            restore_refresh_failure_action(&err),
+            RestoreRefreshFailureAction::ReturnError
+        );
+    }
+
+    #[test]
+    fn test_restore_refresh_failure_action_clears_token_on_refresh_failure() {
+        let err = AppError::token_refresh_failed(Some("invalid_grant"));
+        assert_eq!(
+            restore_refresh_failure_action(&err),
+            RestoreRefreshFailureAction::ClearLogin
+        );
     }
 }

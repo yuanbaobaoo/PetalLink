@@ -251,7 +251,7 @@ mod tests {
     #[test]
     fn test_filter_by_level() {
         // filter 是纯读取函数，无需全局状态
-        let mut buf = vec![rec("err", 1), rec("info", 2)];
+        let mut buf = [rec("err", 1), rec("info", 2)];
         buf[0].level = LogLevel::Error;
         let errs: Vec<LogRecord> = buf
             .iter()

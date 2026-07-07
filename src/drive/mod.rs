@@ -6,8 +6,8 @@
 //! （cursor 持久化），失败/cursor 过期/连续达阈值自动回退全量 BFS。
 
 pub mod about_api;
-pub mod changes_api;
 pub mod ascii_json;
+pub mod changes_api;
 pub mod client;
 pub mod download_api;
 pub mod files_api;

@@ -169,15 +169,14 @@ impl UserInfo {
 
 /// 取首个非空 trim 后的字符串
 fn non_empty_trimmed(s: &Option<String>) -> Option<String> {
-    s.as_ref()
-        .and_then(|v| {
-            let t = v.trim();
-            if t.is_empty() {
-                None
-            } else {
-                Some(t.to_string())
-            }
-        })
+    s.as_ref().and_then(|v| {
+        let t = v.trim();
+        if t.is_empty() {
+            None
+        } else {
+            Some(t.to_string())
+        }
+    })
 }
 
 /// 从 JSON 按 keys 顺序取首个非空字符串

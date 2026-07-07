@@ -4,7 +4,7 @@
 //!
 //! # 小文件（≤ 20MB）：multipart/related（Google Drive 风格）
 //! # 大文件（> 20MB）：resume 分片（F-FILE-02）
-//! # uploadUpdate：PATCH 覆盖已有文件（冲突解决），失败回退 delete+POST
+//! # uploadUpdate：PATCH 覆盖已有文件（冲突解决），失败时保留旧文件并返回错误
 //!
 //! ## 断点续传流程（Google Drive 风格）
 //! 1. POST 初始化会话 → 从 `Location` 响应头获取 session URI
@@ -94,50 +94,84 @@ impl UploadApi {
             .timeout(Duration::from_secs(120))
             .build()
             .expect("构建 reqwest client 失败");
-        Self { client, http, upload_base, drive_base }
+        Self {
+            client,
+            http,
+            upload_base,
+            drive_base,
+        }
     }
 
     /// 直接传入 token 进行 resume 分片上传（绕过 AuthService，供测试/调试用）。
     pub async fn upload_resume_with_token(
-        &self, file_path: &std::path::Path, parent_id: Option<&str>, token: &str,
+        &self,
+        file_path: &std::path::Path,
+        parent_id: Option<&str>,
+        token: &str,
     ) -> AppResult<DriveFile> {
-        let total_size = file_path.metadata()
-            .map_err(|e| AppError::generic(format!("读取文件元数据失败：{e}")))?.len();
+        let total_size = file_path
+            .metadata()
+            .map_err(|e| AppError::generic(format!("读取文件元数据失败：{e}")))?
+            .len();
         // 跳过 ensure_capacity_for（其内部依赖 AuthService，测试用 token 无法通过）
-        let file_name = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_string();
+        let file_name = file_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file")
+            .to_string();
 
-        let session = self.init_resume_session(&file_name, parent_id, total_size, token).await?;
-        let chunk_size = if session.chunk_size > 0 { session.chunk_size } else { DEFAULT_CHUNK_SIZE };
+        let session = self
+            .init_resume_session(&file_name, parent_id, total_size, token)
+            .await?;
+        let chunk_size = if session.chunk_size > 0 {
+            session.chunk_size
+        } else {
+            DEFAULT_CHUNK_SIZE
+        };
 
-        let mut file = File::open(file_path).await
+        let mut file = File::open(file_path)
+            .await
             .map_err(|e| AppError::generic(format!("打开文件失败：{e}")))?;
         let mut offset: u64 = 0;
         let mut created_file_id: Option<String> = None;
 
         while offset < total_size {
             let chunk_len = std::cmp::min(chunk_size, total_size - offset);
-            file.seek(SeekFrom::Start(offset)).await
+            file.seek(SeekFrom::Start(offset))
+                .await
                 .map_err(|e| AppError::generic(format!("文件定位失败：{e}")))?;
             let mut chunk = vec![0u8; chunk_len as usize];
-            file.read_exact(&mut chunk).await
+            file.read_exact(&mut chunk)
+                .await
                 .map_err(|e| AppError::generic(format!("读取分片失败：{e}")))?;
 
             let mut last_err: Option<AppError> = None;
             let mut chunk_result: Option<ChunkResult> = None;
             for attempt in 1..=CHUNK_RETRIES {
-                match self.put_chunk(&session, token, &chunk, offset, chunk_len, total_size).await {
-                    Ok(r) => { chunk_result = Some(r); break; }
+                match self
+                    .put_chunk(&session, token, &chunk, offset, chunk_len, total_size)
+                    .await
+                {
+                    Ok(r) => {
+                        chunk_result = Some(r);
+                        break;
+                    }
                     Err(e) => {
                         last_err = Some(e);
                         tokio::time::sleep(Duration::from_secs(attempt as u64)).await;
                     }
                 }
             }
-            let cr = chunk_result.ok_or_else(|| last_err.unwrap_or_else(|| AppError::generic("分片上传失败")))?;
+            let cr = chunk_result
+                .ok_or_else(|| last_err.unwrap_or_else(|| AppError::generic("分片上传失败")))?;
 
-            if let Some(ref fid) = cr.created_file_id { created_file_id = Some(fid.clone()); }
+            if let Some(ref fid) = cr.created_file_id {
+                created_file_id = Some(fid.clone());
+            }
             if cr.is_final {
-                if let Some(f) = cr.final_file { return Ok(f); }
+                if let Some(f) = cr.final_file {
+                    return Ok(f);
+                }
             }
             offset = if cr.uploaded > offset && cr.uploaded <= total_size {
                 cr.uploaded
@@ -147,12 +181,18 @@ impl UploadApi {
         }
 
         if let Some(fid) = created_file_id {
-            let resp = self.http.get(format!("{}/files/{fid}", self.drive_base))
-                .bearer_auth(token).send().await
+            let resp = self
+                .http
+                .get(format!("{}/files/{fid}", self.drive_base))
+                .bearer_auth(token)
+                .send()
+                .await
                 .map_err(|e| AppError::generic(format!("兜底查询文件失败：{e}")))?;
             if resp.status().is_success() {
                 if let Ok(body) = resp.json::<Value>().await {
-                    if let Some(f) = DriveFile::from_json(&body) { return Ok(f); }
+                    if let Some(f) = DriveFile::from_json(&body) {
+                        return Ok(f);
+                    }
                 }
             }
         }
@@ -160,101 +200,179 @@ impl UploadApi {
         // 所有分片已发送但未拿到文件元数据 → 轮询查询上传状态（华为异步合并，详见 query_final_status）。
         if !session.session_url.is_empty() {
             tracing::info!(session_url = %session.session_url, "所有分片已发送，查询上传状态...");
-            return self.query_final_status(&session.session_url, token, total_size).await;
+            return self
+                .query_final_status(&session.session_url, token, total_size)
+                .await;
         }
 
-        Err(AppError::generic("分片上传完成但未拿到最终文件元数据，请等待下一轮云端轮询自动发现"))
+        Err(AppError::generic(
+            "分片上传完成但未拿到最终文件元数据，请等待下一轮云端轮询自动发现",
+        ))
     }
 
     /// 路由：≤ 20MB → 小文件上传，否则分片续传。
     /// `on_resume_progress`：分片续传进度回调（serverId, uploadId, offset），供断点续传持久化。
     pub async fn upload(
-        &self, file_path: &std::path::Path, parent_id: Option<&str>,
+        &self,
+        file_path: &std::path::Path,
+        parent_id: Option<&str>,
         on_progress: Option<&ProgressFn>,
         on_resume_progress: Option<&ResumeProgressFn>,
     ) -> AppResult<DriveFile> {
-        let size = file_path.metadata().map_err(|e| AppError::generic(format!("读取文件元数据失败：{e}")))?.len();
+        let size = file_path
+            .metadata()
+            .map_err(|e| AppError::generic(format!("读取文件元数据失败：{e}")))?
+            .len();
         if size <= SMALL_LARGE_THRESHOLD {
             self.upload_small(file_path, parent_id, on_progress).await
         } else {
-            self.upload_resume(file_path, parent_id, None, on_progress, on_resume_progress).await
+            self.upload_resume(file_path, parent_id, None, on_progress, on_resume_progress)
+                .await
         }
     }
 
     /// 更新云端已有文件（PATCH multipart/related，用于冲突解决）。
-    /// 对齐 dart `uploadUpdate`：失败则 delete 旧文件 + POST 新建。
+    /// PATCH 失败必须保留旧文件，并把错误返回给用户处理。
     pub async fn upload_update(
-        &self, file_id: &str, file_path: &std::path::Path, parent_id: Option<&str>,
+        &self,
+        file_id: &str,
+        file_path: &std::path::Path,
+        parent_id: Option<&str>,
         on_progress: Option<&ProgressFn>,
     ) -> AppResult<DriveFile> {
         self.ensure_capacity_for(file_path).await?;
-        let file_name = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_string();
+        let token = self.client.auth().ensure_valid_access_token().await?;
+        self.upload_update_with_token(file_id, file_path, parent_id, on_progress, &token)
+            .await
+    }
+
+    async fn upload_update_with_token(
+        &self,
+        file_id: &str,
+        file_path: &std::path::Path,
+        parent_id: Option<&str>,
+        on_progress: Option<&ProgressFn>,
+        token: &str,
+    ) -> AppResult<DriveFile> {
+        let file_name = file_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file")
+            .to_string();
         let boundary = format!("hwcloud_{}", chrono::Utc::now().timestamp_micros());
         let metadata = build_metadata_json(&file_name, parent_id);
-        let file_bytes = tokio::fs::read(file_path).await.map_err(|e| AppError::generic(format!("读取文件失败：{e}")))?;
+        let file_bytes = tokio::fs::read(file_path)
+            .await
+            .map_err(|e| AppError::generic(format!("读取文件失败：{e}")))?;
         let body = build_multipart_related(&boundary, metadata.as_bytes(), &file_bytes);
-        let token = self.client.auth().ensure_valid_access_token().await?;
         let url = format!("{}/files/{file_id}?uploadType=multipart", self.upload_base);
 
-        // 尝试 PATCH
-        let resp = self.http.request(reqwest::Method::PATCH, &url)
-            .header(CONTENT_TYPE, format!("multipart/related; boundary={boundary}"))
+        let resp = self
+            .http
+            .request(reqwest::Method::PATCH, &url)
+            .header(
+                CONTENT_TYPE,
+                format!("multipart/related; boundary={boundary}"),
+            )
             .header(CONTENT_LENGTH, body.len().to_string())
-            .bearer_auth(&token).body(body).send().await;
-        match resp {
-            Ok(r) if r.status().is_success() => {
-                let json: Value = r.json().await.map_err(|e| AppError::generic(format!("解析 PATCH 响应失败：{e}")))?;
-                return DriveFile::from_json(&json).ok_or_else(|| AppError::generic("PATCH 响应异常"));
-            }
-            _ => {
-                tracing::warn!("PATCH 更新失败（fileId={file_id}），回退为 delete + POST");
-                // 删除旧文件
-                let del_url = format!("{}/files/{file_id}", self.drive_base);
-                let _ = self.http.delete(&del_url).bearer_auth(&token).send().await;
-            }
+            .bearer_auth(token)
+            .body(body)
+            .send()
+            .await
+            .map_err(|e| crate::drive::client::classify_error(&e))?;
+        if !resp.status().is_success() {
+            tracing::warn!(
+                file_id,
+                status = resp.status().as_u16(),
+                "PATCH 更新失败，保留云端旧文件"
+            );
+            return Err(crate::drive::client::handle_error_response(resp).await);
         }
-        // 回退 POST 新建
-        self.upload(file_path, parent_id, on_progress, None).await
+        let json: Value = resp
+            .json()
+            .await
+            .map_err(|e| AppError::generic(format!("解析 PATCH 响应失败：{e}")))?;
+        if let Some(cb) = on_progress {
+            cb(1.0);
+        }
+        DriveFile::from_json(&json).ok_or_else(|| AppError::generic("PATCH 响应异常"))
     }
 
     /// 小文件 multipart/related 上传。
     pub async fn upload_small(
-        &self, file_path: &std::path::Path, parent_id: Option<&str>,
+        &self,
+        file_path: &std::path::Path,
+        parent_id: Option<&str>,
         on_progress: Option<&ProgressFn>,
     ) -> AppResult<DriveFile> {
         self.ensure_capacity_for(file_path).await?;
-        let file_name = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_string();
+        let file_name = file_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file")
+            .to_string();
         let boundary = format!("hwcloud_{}", chrono::Utc::now().timestamp_micros());
         let metadata = build_metadata_json(&file_name, parent_id);
-        let file_bytes = tokio::fs::read(file_path).await.map_err(|e| AppError::generic(format!("读取文件失败：{e}")))?;
+        let file_bytes = tokio::fs::read(file_path)
+            .await
+            .map_err(|e| AppError::generic(format!("读取文件失败：{e}")))?;
         let body = build_multipart_related(&boundary, metadata.as_bytes(), &file_bytes);
         let token = self.client.auth().ensure_valid_access_token().await?;
         let url = format!("{}/files?uploadType=multipart", self.upload_base);
-        let resp = self.http.post(&url)
-            .header(CONTENT_TYPE, format!("multipart/related; boundary={boundary}"))
-            .header(CONTENT_LENGTH, body.len().to_string()).bearer_auth(token).body(body)
-            .send().await.map_err(|e| AppError::generic(format!("上传请求失败：{e}")))?;
-        if !resp.status().is_success() { return Err(crate::drive::client::handle_error_response(resp).await); }
-        if let Some(cb) = on_progress { cb(1.0); }
-        let body_json: Value = resp.json().await.map_err(|e| AppError::generic(format!("解析上传响应失败：{e}")))?;
+        let resp = self
+            .http
+            .post(&url)
+            .header(
+                CONTENT_TYPE,
+                format!("multipart/related; boundary={boundary}"),
+            )
+            .header(CONTENT_LENGTH, body.len().to_string())
+            .bearer_auth(token)
+            .body(body)
+            .send()
+            .await
+            .map_err(|e| AppError::generic(format!("上传请求失败：{e}")))?;
+        if !resp.status().is_success() {
+            return Err(crate::drive::client::handle_error_response(resp).await);
+        }
+        if let Some(cb) = on_progress {
+            cb(1.0);
+        }
+        let body_json: Value = resp
+            .json()
+            .await
+            .map_err(|e| AppError::generic(format!("解析上传响应失败：{e}")))?;
         DriveFile::from_json(&body_json).ok_or_else(|| AppError::generic("上传响应异常"))
     }
 
     /// 大文件 resume 分片上传。
     pub async fn upload_resume(
-        &self, file_path: &std::path::Path, parent_id: Option<&str>,
-        resume: Option<&ResumeSession>, on_progress: Option<&ProgressFn>,
+        &self,
+        file_path: &std::path::Path,
+        parent_id: Option<&str>,
+        resume: Option<&ResumeSession>,
+        on_progress: Option<&ProgressFn>,
         on_resume_progress: Option<&ResumeProgressFn>,
     ) -> AppResult<DriveFile> {
-        let total_size = file_path.metadata().map_err(|e| AppError::generic(format!("读取文件元数据失败：{e}")))?.len();
+        let total_size = file_path
+            .metadata()
+            .map_err(|e| AppError::generic(format!("读取文件元数据失败：{e}")))?
+            .len();
         self.ensure_capacity_for(file_path).await?;
-        let file_name = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_string();
+        let file_name = file_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file")
+            .to_string();
         let token = self.client.auth().ensure_valid_access_token().await?;
 
         // 1. 初始化 resume 会话
         let session = match resume {
             Some(s) => s.clone(),
-            None => match self.init_resume_session(&file_name, parent_id, total_size, &token).await {
+            None => match self
+                .init_resume_session(&file_name, parent_id, total_size, &token)
+                .await
+            {
                 Ok(s) => {
                     // 通知调用方持久化会话信息
                     if let Some(cb) = on_resume_progress {
@@ -272,25 +390,38 @@ impl UploadApi {
         };
 
         // 使用 API 返回的 sliceSize，否则用默认 5MB
-        let chunk_size = if session.chunk_size > 0 { session.chunk_size } else { DEFAULT_CHUNK_SIZE };
+        let chunk_size = if session.chunk_size > 0 {
+            session.chunk_size
+        } else {
+            DEFAULT_CHUNK_SIZE
+        };
 
         // 2. 分片循环
-        let mut file = File::open(file_path).await.map_err(|e| AppError::generic(format!("打开文件失败：{e}")))?;
+        let mut file = File::open(file_path)
+            .await
+            .map_err(|e| AppError::generic(format!("打开文件失败：{e}")))?;
         let mut offset: u64 = 0;
         let mut created_file_id: Option<String> = None;
 
         while offset < total_size {
             let chunk_len = std::cmp::min(chunk_size, total_size - offset);
-            file.seek(SeekFrom::Start(offset)).await.map_err(|e| AppError::generic(format!("文件定位失败：{e}")))?;
+            file.seek(SeekFrom::Start(offset))
+                .await
+                .map_err(|e| AppError::generic(format!("文件定位失败：{e}")))?;
             let mut chunk = vec![0u8; chunk_len as usize];
             // 用 read_exact 安全：chunk_len 保证 ≤ 剩余字节
-            file.read_exact(&mut chunk).await.map_err(|e| AppError::generic(format!("读取分片失败：{e}")))?;
+            file.read_exact(&mut chunk)
+                .await
+                .map_err(|e| AppError::generic(format!("读取分片失败：{e}")))?;
 
             // 3 次重试
             let mut last_err: Option<AppError> = None;
             let mut chunk_result: Option<ChunkResult> = None;
             for attempt in 1..=CHUNK_RETRIES {
-                match self.put_chunk(&session, &token, &chunk, offset, chunk_len, total_size).await {
+                match self
+                    .put_chunk(&session, &token, &chunk, offset, chunk_len, total_size)
+                    .await
+                {
                     Ok(r) => {
                         chunk_result = Some(r);
                         break;
@@ -301,10 +432,13 @@ impl UploadApi {
                     }
                 }
             }
-            let cr = chunk_result.ok_or_else(|| last_err.unwrap_or_else(|| AppError::generic("分片上传失败")))?;
+            let cr = chunk_result
+                .ok_or_else(|| last_err.unwrap_or_else(|| AppError::generic("分片上传失败")))?;
 
             // 捕获兜底查询用的 createdFileId
-            if let Some(ref fid) = cr.created_file_id { created_file_id = Some(fid.clone()); }
+            if let Some(ref fid) = cr.created_file_id {
+                created_file_id = Some(fid.clone());
+            }
 
             // 若为最终响应 → 直接返回文件
             if cr.is_final {
@@ -331,11 +465,18 @@ impl UploadApi {
         // 3. 尾部兜底：用抓到的 fileId 查询元数据。sid 是 resume 会话标识，未必等于 fileId，
         // 因此不能 GET /files/{sid}（可能 404）。没有 fileId 则查询上传状态。
         if let Some(fid) = created_file_id {
-            let resp = self.http.get(format!("{}/files/{fid}", self.drive_base))
-                .bearer_auth(&token).send().await.map_err(|e| AppError::generic(format!("兜底查询文件失败：{e}")))?;
+            let resp = self
+                .http
+                .get(format!("{}/files/{fid}", self.drive_base))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .map_err(|e| AppError::generic(format!("兜底查询文件失败：{e}")))?;
             if resp.status().is_success() {
                 if let Ok(body) = resp.json::<Value>().await {
-                    if let Some(f) = DriveFile::from_json(&body) { return Ok(f); }
+                    if let Some(f) = DriveFile::from_json(&body) {
+                        return Ok(f);
+                    }
                 }
             }
         }
@@ -343,58 +484,84 @@ impl UploadApi {
         // 所有分片已发送但未拿到文件元数据 → 轮询查询上传状态（华为异步合并，详见 query_final_status）。
         if !session.session_url.is_empty() {
             tracing::info!(session_url = %session.session_url, "所有分片已发送，查询上传状态...");
-            return self.query_final_status(&session.session_url, &token, total_size).await;
+            return self
+                .query_final_status(&session.session_url, &token, total_size)
+                .await;
         }
 
         Err(AppError::generic(
-            "分片上传完成但未拿到最终文件元数据，请等待下一轮云端轮询自动发现"
+            "分片上传完成但未拿到最终文件元数据，请等待下一轮云端轮询自动发现",
         ))
     }
 
     async fn init_resume_session(
-        &self, file_name: &str, parent_id: Option<&str>, total_size: u64, token: &str,
+        &self,
+        file_name: &str,
+        parent_id: Option<&str>,
+        total_size: u64,
+        token: &str,
     ) -> AppResult<ResumeSession> {
         let metadata = build_metadata_json(file_name, parent_id);
-        let resp = self.http.post(format!("{}/files?uploadType=resume", self.upload_base))
+        let resp = self
+            .http
+            .post(format!("{}/files?uploadType=resume", self.upload_base))
             .header("X-Upload-Content-Length", total_size.to_string())
-            .header(CONTENT_TYPE, "application/json").bearer_auth(token).body(metadata)
-            .send().await.map_err(|e| AppError::generic(format!("初始化上传会话失败：{e}")))?;
-        if !resp.status().is_success() { return Err(crate::drive::client::handle_error_response(resp).await); }
+            .header(CONTENT_TYPE, "application/json")
+            .bearer_auth(token)
+            .body(metadata)
+            .send()
+            .await
+            .map_err(|e| AppError::generic(format!("初始化上传会话失败：{e}")))?;
+        if !resp.status().is_success() {
+            return Err(crate::drive::client::handle_error_response(resp).await);
+        }
         let status_code = resp.status().as_u16();
 
         // ★ 关键：从 Location 响应头获取会话 URL（Google Drive 风格断点续传）。
         // 华为 API 变更后 body 仅含 {"sliceSize":...}，不含 serverId/uploadId，
         // 后续分片 PUT 必须直接用 Location 头返回的 URL。
-        let session_url = resp.headers()
+        let session_url = resp
+            .headers()
             .get(LOCATION)
             .and_then(|v| v.to_str().ok())
             .map(String::from)
             .unwrap_or_default();
 
-        let init: Value = resp.json().await.map_err(|e| AppError::generic(format!("解析上传会话响应失败：{e}")))?;
+        let init: Value = resp
+            .json()
+            .await
+            .map_err(|e| AppError::generic(format!("解析上传会话响应失败：{e}")))?;
         tracing::info!(status = status_code, has_location = !session_url.is_empty(), response = %init, file = %file_name, size = total_size, "resume 会话初始化响应");
 
         // 解析 body 中的标识字段（旧 API 兼容）
-        let server_id = init.get("serverId")
+        let server_id = init
+            .get("serverId")
             .or_else(|| init.get("id"))
             .or_else(|| init.get("fileId"))
             .and_then(Value::as_str)
             .map(String::from);
 
-        let upload_id = init.get("uploadId").and_then(Value::as_str).unwrap_or("").to_string();
+        let upload_id = init
+            .get("uploadId")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
 
         // API 建议的分片大小（新 API 仅返回 sliceSize，如 10485760 = 10MB）
-        let chunk_size = init.get("sliceSize")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
+        let chunk_size = init.get("sliceSize").and_then(|v| v.as_u64()).unwrap_or(0);
 
         // 有 session_url（Location 头）→ 后续 PUT 直接用它；没有 → 用 serverId/uploadId 拼接
         let server_id = match server_id {
             Some(sid) => sid,
             None if session_url.is_empty() => {
-                let keys: Vec<&str> = init.as_object().map(|o| o.keys().map(|s| s.as_str()).collect()).unwrap_or_default();
+                let keys: Vec<&str> = init
+                    .as_object()
+                    .map(|o| o.keys().map(|s| s.as_str()).collect())
+                    .unwrap_or_default();
                 tracing::error!(response = %init, keys = ?keys, "上传会话响应缺少 serverId 且无 Location 头");
-                return Err(AppError::generic(format!("上传会话响应缺少 serverId（可用字段: {keys:?}）")));
+                return Err(AppError::generic(format!(
+                    "上传会话响应缺少 serverId（可用字段: {keys:?}）"
+                )));
             }
             None => {
                 // 有 Location 头但没有 body serverId → 用空字符串（后续 PUT 走 session_url）
@@ -402,7 +569,12 @@ impl UploadApi {
             }
         };
 
-        Ok(ResumeSession { server_id, upload_id, session_url, chunk_size })
+        Ok(ResumeSession {
+            server_id,
+            upload_id,
+            session_url,
+            chunk_size,
+        })
     }
 
     /// PUT 单个分片。返回 ChunkResult：
@@ -417,8 +589,13 @@ impl UploadApi {
     /// - 200/201 → 可能为最终响应（含文件元数据）或中间响应（`{"size":...}`）
     /// - 308 Resume Incomplete → 中间响应，body 含 `rangeList` 标识已接收的字节范围
     async fn put_chunk(
-        &self, session: &ResumeSession, token: &str, chunk: &[u8],
-        offset: u64, chunk_len: u64, total_size: u64,
+        &self,
+        session: &ResumeSession,
+        token: &str,
+        chunk: &[u8],
+        offset: u64,
+        chunk_len: u64,
+        total_size: u64,
     ) -> AppResult<ChunkResult> {
         let url = if !session.session_url.is_empty() {
             // 华为 API 变更后：直接用 init 响应 Location 头返回的会话 URL
@@ -426,14 +603,24 @@ impl UploadApi {
         } else if session.server_id.is_empty() {
             format!("{}/files?uploadId={}", self.upload_base, session.upload_id)
         } else {
-            format!("{}/files/{}?uploadId={}", self.upload_base, session.server_id, session.upload_id)
+            format!(
+                "{}/files/{}?uploadId={}",
+                self.upload_base, session.server_id, session.upload_id
+            )
         };
         let end = offset + chunk_len - 1;
         let content_range = format!("bytes {offset}-{end}/{total_size}");
-        let resp = self.http.put(&url).header(CONTENT_RANGE, &content_range)
+        let resp = self
+            .http
+            .put(&url)
+            .header(CONTENT_RANGE, &content_range)
             .header(CONTENT_LENGTH, chunk_len.to_string())
-            .header(CONTENT_TYPE, "application/octet-stream").bearer_auth(token).body(chunk.to_vec())
-            .send().await.map_err(|e| AppError::generic(format!("分片 PUT 失败：{e}")))?;
+            .header(CONTENT_TYPE, "application/octet-stream")
+            .bearer_auth(token)
+            .body(chunk.to_vec())
+            .send()
+            .await
+            .map_err(|e| AppError::generic(format!("分片 PUT 失败：{e}")))?;
 
         let status = resp.status().as_u16();
 
@@ -441,21 +628,39 @@ impl UploadApi {
         // 华为 API 返回 body 含 rangeList（如 ["0-10485759"]），标识已确认接收的字节范围。
         // 客户端应从 rangeList 末尾 + 1 继续下一分片，而非重试同一分片。
         if status == 308 {
-            let body: Value = resp.json().await
+            let body: Value = resp
+                .json()
+                .await
                 .map_err(|e| AppError::generic(format!("解析 308 分片响应失败：{e}")))?;
             let uploaded = parse_uploaded_from_range_list(&body, offset + chunk_len);
             tracing::debug!(offset, chunk_len, uploaded, range_list = ?body.get("rangeList"), "分片已接收 (308)");
-            return Ok(ChunkResult { uploaded, created_file_id: None, is_final: false, final_file: None });
+            return Ok(ChunkResult {
+                uploaded,
+                created_file_id: None,
+                is_final: false,
+                final_file: None,
+            });
         }
 
-        if !resp.status().is_success() { return Err(crate::drive::client::handle_error_response(resp).await); }
-        let body: Value = resp.json().await.map_err(|e| AppError::generic(format!("解析分片响应失败：{e}")))?;
+        if !resp.status().is_success() {
+            return Err(crate::drive::client::handle_error_response(resp).await);
+        }
+        let body: Value = resp
+            .json()
+            .await
+            .map_err(|e| AppError::generic(format!("解析分片响应失败：{e}")))?;
 
         // 华为返回：中间片返回 {"size": <已上传字节数>}，最后一片返回完整文件元数据
-        let created_file_id = body.get("id").or_else(|| body.get("fileId")).and_then(Value::as_str).map(String::from);
+        let created_file_id = body
+            .get("id")
+            .or_else(|| body.get("fileId"))
+            .and_then(Value::as_str)
+            .map(String::from);
 
         // 判断是否为最终响应（含文件元数据，有 id 且 fileName 或 size）
-        if created_file_id.is_some() && (body.get("fileName").is_some() || body.get("size").is_some()) {
+        if created_file_id.is_some()
+            && (body.get("fileName").is_some() || body.get("size").is_some())
+        {
             if let Some(drive_file) = DriveFile::from_json(&body) {
                 return Ok(ChunkResult {
                     uploaded: total_size,
@@ -467,13 +672,26 @@ impl UploadApi {
         }
 
         // 中间分片：获取华为返回的已上传偏移，防御性校验在外层
-        let uploaded = body.get("size").and_then(|v| v.as_u64()).unwrap_or(offset + chunk_len);
-        Ok(ChunkResult { uploaded, created_file_id, is_final: false, final_file: None })
+        let uploaded = body
+            .get("size")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(offset + chunk_len);
+        Ok(ChunkResult {
+            uploaded,
+            created_file_id,
+            is_final: false,
+            final_file: None,
+        })
     }
 
     async fn ensure_capacity_for(&self, file_path: &std::path::Path) -> AppResult<()> {
-        let size = file_path.metadata().map_err(|e| AppError::generic(format!("读取文件元数据失败：{e}")))?.len() as i64;
-        crate::drive::about_api::AboutApi::new(self.client.clone()).ensure_capacity(size).await
+        let size = file_path
+            .metadata()
+            .map_err(|e| AppError::generic(format!("读取文件元数据失败：{e}")))?
+            .len() as i64;
+        crate::drive::about_api::AboutApi::new(self.client.clone())
+            .ensure_capacity(size)
+            .await
     }
 
     /// 所有分片发完后的最终状态查询（轮询重试）。
@@ -552,7 +770,8 @@ fn parse_uploaded_from_range_list(body: &Value, fallback: u64) -> u64 {
         .and_then(|r| r.as_str())
         .and_then(|s| {
             // 格式："0-10485759" → 取 `-` 右侧 + 1
-            s.split('-').nth(1)
+            s.split('-')
+                .nth(1)
                 .and_then(|end_str| end_str.parse::<u64>().ok())
                 .map(|end| end + 1)
         })
@@ -563,7 +782,14 @@ fn parse_uploaded_from_range_list(body: &Value, fallback: u64) -> u64 {
 fn build_metadata_json(file_name: &str, parent_id: Option<&str>) -> String {
     let mut meta = serde_json::Map::new();
     meta.insert("fileName".into(), Value::String(file_name.to_string()));
-    if let Some(pid) = parent_id { if !pid.is_empty() { meta.insert("parentFolder".into(), Value::Array(vec![Value::String(pid.to_string())])); } }
+    if let Some(pid) = parent_id {
+        if !pid.is_empty() {
+            meta.insert(
+                "parentFolder".into(),
+                Value::Array(vec![Value::String(pid.to_string())]),
+            );
+        }
+    }
     Value::Object(meta).to_string()
 }
 
@@ -618,6 +844,72 @@ mod tests {
         assert_eq!(CHUNK_RETRIES, 3);
     }
 
+    /// PATCH 覆盖失败必须保留云端旧文件，不能再 delete + POST。
+    #[tokio::test]
+    async fn test_upload_update_patch_failure_preserves_existing_file() {
+        let server = wiremock::MockServer::start().await;
+        let base = server.uri();
+
+        wiremock::Mock::given(wiremock::matchers::method("PATCH"))
+            .and(wiremock::matchers::path("/files/old-file"))
+            .and(wiremock::matchers::query_param("uploadType", "multipart"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(500)
+                    .set_body_json(serde_json::json!({"error": "patch failed"})),
+            )
+            .mount(&server)
+            .await;
+
+        wiremock::Mock::given(wiremock::matchers::method("DELETE"))
+            .and(wiremock::matchers::path("/files/old-file"))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/files"))
+            .and(wiremock::matchers::query_param("uploadType", "multipart"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "id": "replacement-file",
+                    "fileName": "replacement.txt",
+                    "size": 11
+                })),
+            )
+            .mount(&server)
+            .await;
+
+        let tmpdir = tempfile::tempdir().expect("创建临时目录失败");
+        let file_path = tmpdir.path().join("replacement.txt");
+        tokio::fs::write(&file_path, b"replacement")
+            .await
+            .expect("写测试文件失败");
+
+        let api = test_api(&base);
+        let result = api
+            .upload_update_with_token("old-file", &file_path, None, None, "fake-token")
+            .await;
+
+        assert!(
+            result.is_err(),
+            "PATCH 失败应返回错误，而不是静默重建新文件"
+        );
+        let requests = server
+            .received_requests()
+            .await
+            .expect("mock server 应记录请求");
+        let delete_count = requests
+            .iter()
+            .filter(|r| r.method.as_str() == "DELETE" && r.url.path() == "/files/old-file")
+            .count();
+        let post_count = requests
+            .iter()
+            .filter(|r| r.method.as_str() == "POST" && r.url.path() == "/files")
+            .count();
+        assert_eq!(delete_count, 0, "PATCH 失败不得删除旧云端文件");
+        assert_eq!(post_count, 0, "PATCH 失败不得回退 POST 新建文件");
+    }
+
     // ── wiremock 集成测试：验证 Location 头捕获与分片 PUT 流程 ──
 
     /// 构造一个用于测试的 UploadApi（指向 mock server，绕过真实 auth）。
@@ -640,28 +932,39 @@ mod tests {
             .and(wiremock::matchers::query_param("uploadType", "resume"))
             .respond_with(
                 wiremock::ResponseTemplate::new(200)
-                    .append_header("Location", format!("{base}/upload/drive/v1/files?uploadId=mock-session-1"))
-                    .set_body_json(serde_json::json!({"sliceSize": 10485760}))
+                    .append_header(
+                        "Location",
+                        format!("{base}/upload/drive/v1/files?uploadId=mock-session-1"),
+                    )
+                    .set_body_json(serde_json::json!({"sliceSize": 10485760})),
             )
             .mount(&server)
             .await;
 
         let api = test_api(&base);
-        let session = api.init_resume_session("large_file.bin", None, 30_000_000, "fake-token")
+        let session = api
+            .init_resume_session("large_file.bin", None, 30_000_000, "fake-token")
             .await
             .expect("init_resume_session 应成功");
 
         // ★ 核心断言：session_url 从 Location 头捕获
-        assert!(!session.session_url.is_empty(), "session_url 应从 Location 头捕获");
-        assert!(session.session_url.contains("uploadId=mock-session-1"),
-            "session_url 应包含 Location 头中的 uploadId");
+        assert!(
+            !session.session_url.is_empty(),
+            "session_url 应从 Location 头捕获"
+        );
+        assert!(
+            session.session_url.contains("uploadId=mock-session-1"),
+            "session_url 应包含 Location 头中的 uploadId"
+        );
 
         // sliceSize 从 body 提取
         assert_eq!(session.chunk_size, 10485760, "sliceSize 应从 body 提取");
 
         // body 无 serverId/id/fileId → server_id 为空（后续 PUT 走 session_url）
-        assert!(session.server_id.is_empty(),
-            "body 仅含 sliceSize 时 server_id 应为空");
+        assert!(
+            session.server_id.is_empty(),
+            "body 仅含 sliceSize 时 server_id 应为空"
+        );
     }
 
     /// 验证：init_resume_session 在没有 Location 头但有 serverId 时回退到旧逻辑。
@@ -675,23 +978,26 @@ mod tests {
             .and(wiremock::matchers::path("/files"))
             .and(wiremock::matchers::query_param("uploadType", "resume"))
             .respond_with(
-                wiremock::ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({
-                        "serverId": "old-server-123",
-                        "uploadId": "old-upload-456",
-                        "sliceSize": 5242880
-                    }))
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "serverId": "old-server-123",
+                    "uploadId": "old-upload-456",
+                    "sliceSize": 5242880
+                })),
             )
             .mount(&server)
             .await;
 
         let api = test_api(&base);
-        let session = api.init_resume_session("file.bin", None, 10_000_000, "fake-token")
+        let session = api
+            .init_resume_session("file.bin", None, 10_000_000, "fake-token")
             .await
             .expect("旧 API 格式也应成功");
 
         // 无 Location 头 → session_url 为空
-        assert!(session.session_url.is_empty(), "无 Location 头时 session_url 应为空");
+        assert!(
+            session.session_url.is_empty(),
+            "无 Location 头时 session_url 应为空"
+        );
         // serverId/uploadId 从 body 提取
         assert_eq!(session.server_id, "old-server-123");
         assert_eq!(session.upload_id, "old-upload-456");
@@ -708,11 +1014,17 @@ mod tests {
         // Mock: PUT 到 session URL → 200 + 中间分片响应
         wiremock::Mock::given(wiremock::matchers::method("PUT"))
             .and(wiremock::matchers::path("/upload/drive/v1/files"))
-            .and(wiremock::matchers::query_param("uploadId", "mock-session-put"))
-            .and(wiremock::matchers::header("Content-Range", "bytes 0-4999999/20000000"))
+            .and(wiremock::matchers::query_param(
+                "uploadId",
+                "mock-session-put",
+            ))
+            .and(wiremock::matchers::header(
+                "Content-Range",
+                "bytes 0-4999999/20000000",
+            ))
             .respond_with(
                 wiremock::ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({"size": 5000000}))
+                    .set_body_json(serde_json::json!({"size": 5000000})),
             )
             .mount(&server)
             .await;
@@ -721,12 +1033,13 @@ mod tests {
         let session = ResumeSession {
             server_id: String::new(),
             upload_id: String::new(),
-            session_url: session_url.clone(),  // ← 走 session_url 路径
+            session_url: session_url.clone(), // ← 走 session_url 路径
             chunk_size: 5_000_000,
         };
 
         let chunk = vec![0u8; 5_000_000];
-        let result = api.put_chunk(&session, "fake-token", &chunk, 0, 5_000_000, 20_000_000)
+        let result = api
+            .put_chunk(&session, "fake-token", &chunk, 0, 5_000_000, 20_000_000)
             .await
             .expect("put_chunk 应成功");
 
@@ -746,7 +1059,7 @@ mod tests {
             .and(wiremock::matchers::query_param("uploadId", "old-uid"))
             .respond_with(
                 wiremock::ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({"size": 3000000}))
+                    .set_body_json(serde_json::json!({"size": 3000000})),
             )
             .mount(&server)
             .await;
@@ -755,12 +1068,13 @@ mod tests {
         let session = ResumeSession {
             server_id: "old-sid".to_string(),
             upload_id: "old-uid".to_string(),
-            session_url: String::new(),  // ← 无 session_url，走旧路径
+            session_url: String::new(), // ← 无 session_url，走旧路径
             chunk_size: 3_000_000,
         };
 
         let chunk = vec![0u8; 3_000_000];
-        let result = api.put_chunk(&session, "fake-token", &chunk, 0, 3_000_000, 10_000_000)
+        let result = api
+            .put_chunk(&session, "fake-token", &chunk, 0, 3_000_000, 10_000_000)
             .await
             .expect("旧 URL 拼接 put_chunk 应成功");
 
@@ -777,13 +1091,12 @@ mod tests {
         wiremock::Mock::given(wiremock::matchers::method("PUT"))
             .and(wiremock::matchers::path("/files"))
             .respond_with(
-                wiremock::ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({
-                        "id": "final-file-id",
-                        "fileName": "uploaded.bin",
-                        "mimeType": "application/octet-stream",
-                        "size": 22000000
-                    }))
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "id": "final-file-id",
+                    "fileName": "uploaded.bin",
+                    "mimeType": "application/octet-stream",
+                    "size": 22000000
+                })),
             )
             .mount(&server)
             .await;
@@ -797,7 +1110,15 @@ mod tests {
         };
 
         let chunk = vec![0u8; 2_000_000];
-        let result = api.put_chunk(&session, "fake-token", &chunk, 20_000_000, 2_000_000, 22_000_000)
+        let result = api
+            .put_chunk(
+                &session,
+                "fake-token",
+                &chunk,
+                20_000_000,
+                2_000_000,
+                22_000_000,
+            )
             .await
             .expect("最终分片 put_chunk 应成功");
 
@@ -846,12 +1167,11 @@ mod tests {
             .and(wiremock::matchers::path("/upload/drive/v1/files"))
             .and(wiremock::matchers::query_param("uploadId", "mock-308"))
             .respond_with(
-                wiremock::ResponseTemplate::new(308)
-                    .set_body_json(serde_json::json!({
-                        "sliceSize": 10485760,
-                        "rangeList": ["0-10485759"],
-                        "processTime": 8000
-                    }))
+                wiremock::ResponseTemplate::new(308).set_body_json(serde_json::json!({
+                    "sliceSize": 10485760,
+                    "rangeList": ["0-10485759"],
+                    "processTime": 8000
+                })),
             )
             .mount(&server)
             .await;
@@ -866,14 +1186,18 @@ mod tests {
 
         // 发送第一个分片 bytes 0-10485759/30000000
         let chunk = vec![0u8; 10_485_760];
-        let result = api.put_chunk(&session, "fake-token", &chunk, 0, 10_485_760, 30_000_000)
+        let result = api
+            .put_chunk(&session, "fake-token", &chunk, 0, 10_485_760, 30_000_000)
             .await
             .expect("308 应被视为成功响应");
 
         // ★ 308 应返回 is_final=false，uploaded 应从 rangeList 解析（10485760）
         assert!(!result.is_final, "308 应非最终响应");
         assert!(result.final_file.is_none());
-        assert_eq!(result.uploaded, 10485760, "uploaded 应从 rangeList 解析: 10485759+1");
+        assert_eq!(
+            result.uploaded, 10485760,
+            "uploaded 应从 rangeList 解析: 10485759+1"
+        );
     }
 
     /// 端到端测试：>20MB 文件通过 resume 分片上传，模拟真实 308 流程。
@@ -889,14 +1213,13 @@ mod tests {
         wiremock::Mock::given(wiremock::matchers::method("GET"))
             .and(wiremock::matchers::path("/about"))
             .respond_with(
-                wiremock::ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({
-                        "storageQuota": {
-                            "userCapacity": "107374182400",
-                            "usedSpace": "0"
-                        },
-                        "user": { "displayName": "测试用户" }
-                    }))
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "storageQuota": {
+                        "userCapacity": "107374182400",
+                        "usedSpace": "0"
+                    },
+                    "user": { "displayName": "测试用户" }
+                })),
             )
             .mount(&server)
             .await;
@@ -908,7 +1231,7 @@ mod tests {
             .respond_with(
                 wiremock::ResponseTemplate::new(200)
                     .append_header("Location", &session_url)
-                    .set_body_json(serde_json::json!({"sliceSize": chunk_sz}))
+                    .set_body_json(serde_json::json!({"sliceSize": chunk_sz})),
             )
             .mount(&server)
             .await;
@@ -917,14 +1240,16 @@ mod tests {
         wiremock::Mock::given(wiremock::matchers::method("PUT"))
             .and(wiremock::matchers::path("/upload/drive/v1/files"))
             .and(wiremock::matchers::query_param("uploadId", "e2e-session"))
-            .and(wiremock::matchers::header("Content-Range", format!("bytes 0-{}/22000000", chunk_sz - 1).as_str()))
+            .and(wiremock::matchers::header(
+                "Content-Range",
+                format!("bytes 0-{}/22000000", chunk_sz - 1).as_str(),
+            ))
             .respond_with(
-                wiremock::ResponseTemplate::new(308)
-                    .set_body_json(serde_json::json!({
-                        "sliceSize": chunk_sz,
-                        "rangeList": [format!("0-{}", chunk_sz - 1)],
-                        "processTime": 8000
-                    }))
+                wiremock::ResponseTemplate::new(308).set_body_json(serde_json::json!({
+                    "sliceSize": chunk_sz,
+                    "rangeList": [format!("0-{}", chunk_sz - 1)],
+                    "processTime": 8000
+                })),
             )
             .mount(&server)
             .await;
@@ -933,14 +1258,16 @@ mod tests {
         wiremock::Mock::given(wiremock::matchers::method("PUT"))
             .and(wiremock::matchers::path("/upload/drive/v1/files"))
             .and(wiremock::matchers::query_param("uploadId", "e2e-session"))
-            .and(wiremock::matchers::header("Content-Range", format!("bytes {}-{}/22000000", chunk_sz, chunk_sz * 2 - 1).as_str()))
+            .and(wiremock::matchers::header(
+                "Content-Range",
+                format!("bytes {}-{}/22000000", chunk_sz, chunk_sz * 2 - 1).as_str(),
+            ))
             .respond_with(
-                wiremock::ResponseTemplate::new(308)
-                    .set_body_json(serde_json::json!({
-                        "sliceSize": chunk_sz,
-                        "rangeList": [format!("0-{}", chunk_sz * 2 - 1)],
-                        "processTime": 7000
-                    }))
+                wiremock::ResponseTemplate::new(308).set_body_json(serde_json::json!({
+                    "sliceSize": chunk_sz,
+                    "rangeList": [format!("0-{}", chunk_sz * 2 - 1)],
+                    "processTime": 7000
+                })),
             )
             .mount(&server)
             .await;
@@ -949,15 +1276,17 @@ mod tests {
         wiremock::Mock::given(wiremock::matchers::method("PUT"))
             .and(wiremock::matchers::path("/upload/drive/v1/files"))
             .and(wiremock::matchers::query_param("uploadId", "e2e-session"))
-            .and(wiremock::matchers::header("Content-Range", format!("bytes {}-21999999/22000000", chunk_sz * 2).as_str()))
+            .and(wiremock::matchers::header(
+                "Content-Range",
+                format!("bytes {}-21999999/22000000", chunk_sz * 2).as_str(),
+            ))
             .respond_with(
-                wiremock::ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({
-                        "id": "e2e-file-id",
-                        "fileName": "e2e_large_file.bin",
-                        "mimeType": "application/octet-stream",
-                        "size": 22000000
-                    }))
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "id": "e2e-file-id",
+                    "fileName": "e2e_large_file.bin",
+                    "mimeType": "application/octet-stream",
+                    "size": 22000000
+                })),
             )
             .mount(&server)
             .await;
@@ -975,7 +1304,8 @@ mod tests {
 
         // 手动走 upload_resume 流程（避免 AuthService 依赖）
         let total_size = 22_000_000u64;
-        let session = api.init_resume_session("e2e_large_file.bin", None, total_size, &token)
+        let session = api
+            .init_resume_session("e2e_large_file.bin", None, total_size, &token)
             .await
             .expect("init 应成功");
 
@@ -984,23 +1314,30 @@ mod tests {
         assert_eq!(session.session_url, session_url);
         assert_eq!(session.chunk_size, chunk_sz);
 
-        let chunk_size = if session.chunk_size > 0 { session.chunk_size } else { DEFAULT_CHUNK_SIZE };
+        let chunk_size = if session.chunk_size > 0 {
+            session.chunk_size
+        } else {
+            DEFAULT_CHUNK_SIZE
+        };
         assert_eq!(chunk_size, 10485760);
 
         // 模拟分片循环（3 片：10MB + 10MB + 2MB）
         let mut offset = 0u64;
         let mut final_file: Option<DriveFile> = None;
         // 跟踪每片的预期 308/200 状态
-        let expected_statuses = vec![(308, false), (308, false), (200, true)];
+        let expected_statuses = [(308, false), (308, false), (200, true)];
         for (i, (expected_status, expected_final)) in expected_statuses.iter().enumerate() {
             let cl = std::cmp::min(chunk_size, total_size - offset);
             let chunk = vec![0u8; cl as usize];
-            let result = api.put_chunk(&session, &token, &chunk, offset, cl, total_size)
+            let result = api
+                .put_chunk(&session, &token, &chunk, offset, cl, total_size)
                 .await
-                .expect(&format!("分片 {i} put_chunk 应成功"));
+                .unwrap_or_else(|_| panic!("分片 {i} put_chunk 应成功"));
 
-            assert_eq!(result.is_final, *expected_final,
-                "分片 {i}: is_final 应为 {expected_final}（预期 HTTP {expected_status}）");
+            assert_eq!(
+                result.is_final, *expected_final,
+                "分片 {i}: is_final 应为 {expected_final}（预期 HTTP {expected_status}）"
+            );
 
             if result.is_final {
                 final_file = result.final_file;

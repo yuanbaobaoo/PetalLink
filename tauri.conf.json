@@ -28,7 +28,7 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' https://*.huawei.com https://*.huawei.com.cn https://github.com https://objects.githubusercontent.com https://api.github.com"
     },
     "macOSPrivateApi": true
   },

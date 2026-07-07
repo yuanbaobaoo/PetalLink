@@ -75,7 +75,7 @@ impl MountManager {
 
     /// 确保文件夹存在（递归创建）。
     pub fn ensure_folder(&self, rel_path: &str) -> AppResult<PathBuf> {
-        let full = self.mount_dir.join(rel_path);
+        let full = crate::core::paths::safe_join_under(&self.mount_dir, rel_path, true)?;
         if !full.exists() {
             std::fs::create_dir_all(&full)
                 .map_err(|e| AppError::generic(format!("创建目录失败：{e}")))?;
@@ -99,7 +99,7 @@ impl MountManager {
         file_id: &str,
         size: i64,
     ) -> AppResult<()> {
-        let local_path = self.mount_dir.join(file_name);
+        let local_path = crate::core::paths::safe_join_under(&self.mount_dir, file_name, false)?;
         let fp = local_path.to_string_lossy().to_string();
         let file_id = file_id.to_string();
         let size_str = size.to_string();
@@ -158,12 +158,10 @@ impl MountManager {
     pub async fn set_file_id_xattr(&self, local_path: &Path, file_id: &str) -> AppResult<()> {
         let fp = local_path.to_string_lossy().to_string();
         let file_id = file_id.to_string();
-        tokio::task::spawn_blocking(move || {
-            set_xattr_sync(&fp, XATTR_FILE_ID, &file_id)
-        })
-        .await
-        .map_err(|e| AppError::generic(format!("fileId xattr 线程异常：{e}")))?
-        .map_err(|e| AppError::generic(format!("写 fileId xattr 失败：{e}")))
+        tokio::task::spawn_blocking(move || set_xattr_sync(&fp, XATTR_FILE_ID, &file_id))
+            .await
+            .map_err(|e| AppError::generic(format!("fileId xattr 线程异常：{e}")))?
+            .map_err(|e| AppError::generic(format!("写 fileId xattr 失败：{e}")))
     }
 
     /// 下载前处理可能被用户修改过的占位文件（对齐 dart `backupModifiedPlaceholderIfNeeded`）。
@@ -256,6 +254,7 @@ impl MountManager {
     /// 删除本地文件（安全：0 字节文件若非占位符则拒绝删除，返回 ok 但跳过）。
     /// 对齐 dart `deleteLocal`。
     pub async fn delete_local(&self, local_path: &Path) -> AppResult<()> {
+        crate::core::paths::relative_path_from_mount(&self.mount_dir, local_path)?;
         if !local_path.exists() {
             return Ok(());
         }
@@ -270,7 +269,11 @@ impl MountManager {
         }
         // 0 字节文件：必须是占位符才删；否则保留（用户文件如 .gitkeep）——返回 Ok 表示「已处理」
         if meta.len() == 0 {
-            let is_pl = self.get_xattr_state(local_path).ok().map(|s| s == STATE_PLACEHOLDER).unwrap_or(false);
+            let is_pl = self
+                .get_xattr_state(local_path)
+                .ok()
+                .map(|s| s == STATE_PLACEHOLDER)
+                .unwrap_or(false);
             if !is_pl {
                 tracing::debug!(path = %local_path.display(), "保留非占位 0 字节文件");
                 return Ok(());
@@ -300,7 +303,10 @@ fn get_xattr(path: &Path, key: &str) -> std::io::Result<String> {
 
 #[cfg(not(target_os = "macos"))]
 fn get_xattr(_path: &Path, _key: &str) -> std::io::Result<String> {
-    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "xattr not available"))
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "xattr not available",
+    ))
 }
 
 /// 异步写 xattr（在 tokio 线程池执行）。
@@ -320,7 +326,10 @@ fn set_xattr_sync(path: &str, key: &str, value: &str) -> std::io::Result<()> {
 
 #[cfg(not(target_os = "macos"))]
 fn set_xattr_sync(_path: &str, _key: &str, _value: &str) -> std::io::Result<()> {
-    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "xattr not available"))
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "xattr not available",
+    ))
 }
 
 /// Finder 灰标 xattr 键
@@ -370,10 +379,7 @@ async fn set_finder_label_async(path: String, gray: bool) -> std::io::Result<()>
 // ===== 同步扫描 =====
 
 /// 同步扫描目录（在 spawn_blocking 中执行）。
-fn scan_local_sync(
-    mount_dir: &Path,
-    skip_patterns: &[String],
-) -> AppResult<Vec<LocalFileEntry>> {
+fn scan_local_sync(mount_dir: &Path, skip_patterns: &[String]) -> AppResult<Vec<LocalFileEntry>> {
     let mut entries = Vec::new();
     scan_recursive(mount_dir, mount_dir, skip_patterns, &mut entries)
         .map_err(|e| AppError::generic(format!("扫描目录失败：{e}")))?;
@@ -502,9 +508,15 @@ mod tests {
     async fn test_scan_local_skips_internal_files() {
         let m = test_mount();
         // 创建普通文件 + 内部文件（应跳过）
-        tokio::fs::write(m.mount_dir().join("normal.txt"), b"hello").await.unwrap();
-        tokio::fs::write(m.mount_dir().join(".hwcloud_cache.json"), b"{}").await.unwrap();
-        tokio::fs::write(m.mount_dir().join("temp.tmp"), b"temp").await.unwrap();
+        tokio::fs::write(m.mount_dir().join("normal.txt"), b"hello")
+            .await
+            .unwrap();
+        tokio::fs::write(m.mount_dir().join(".hwcloud_cache.json"), b"{}")
+            .await
+            .unwrap();
+        tokio::fs::write(m.mount_dir().join("temp.tmp"), b"temp")
+            .await
+            .unwrap();
 
         let entries = m.scan_local(&[]).await.unwrap();
         let names: Vec<&str> = entries.iter().map(|e| e.relative_path.as_str()).collect();
@@ -516,9 +528,15 @@ mod tests {
     #[tokio::test]
     async fn test_scan_local_folders_and_files() {
         let m = test_mount();
-        tokio::fs::create_dir(m.mount_dir().join("sub")).await.unwrap();
-        tokio::fs::write(m.mount_dir().join("sub/file.txt"), b"data").await.unwrap();
-        tokio::fs::write(m.mount_dir().join("root.txt"), b"root").await.unwrap();
+        tokio::fs::create_dir(m.mount_dir().join("sub"))
+            .await
+            .unwrap();
+        tokio::fs::write(m.mount_dir().join("sub/file.txt"), b"data")
+            .await
+            .unwrap();
+        tokio::fs::write(m.mount_dir().join("root.txt"), b"root")
+            .await
+            .unwrap();
 
         let entries = m.scan_local(&[]).await.unwrap();
         assert!(entries.len() >= 3);
@@ -527,7 +545,10 @@ mod tests {
         assert!(sub.is_folder);
         assert_eq!(sub.size, 0);
         // 文件 is_placeholder 基于 size
-        let f = entries.iter().find(|e| e.relative_path == "root.txt").unwrap();
+        let f = entries
+            .iter()
+            .find(|e| e.relative_path == "root.txt")
+            .unwrap();
         assert!(!f.is_folder);
         assert!(!f.is_placeholder); // 4 字节，非占位
     }

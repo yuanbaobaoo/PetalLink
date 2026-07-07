@@ -49,6 +49,11 @@ impl TokenRefresher {
         *self.current.lock() = Some(token);
     }
 
+    /// 清空内存中的 token 缓存。
+    pub fn clear_current(&self) {
+        *self.current.lock() = None;
+    }
+
     /// 获取当前 token（优先内存缓存，回退存储）。
     pub async fn current_token(&self) -> AppResult<Option<TokenPair>> {
         if let Some(t) = self.current.lock().clone() {
@@ -93,10 +98,12 @@ impl TokenRefresher {
             .await
             // 区分网络错误 vs token 刷新失败：超时/连接失败 → 网络连接失败，
             // 其余（含真正的 token 拒绝）→ token 刷新失败。对齐 drive::client::classify_error
-            .map_err(|e| if e.is_timeout() || e.is_connect() {
-                AppError::drive_network(Some(&e.to_string()))
-            } else {
-                AppError::token_refresh_failed(Some(&e.to_string()))
+            .map_err(|e| {
+                if e.is_timeout() || e.is_connect() {
+                    AppError::drive_network(Some(&e.to_string()))
+                } else {
+                    AppError::token_refresh_failed(Some(&e.to_string()))
+                }
             })?;
 
         let status = resp.status();
@@ -159,6 +166,59 @@ impl TokenRefresher {
 mod tests {
     use super::*;
     use crate::auth::token_store::EncryptedFileStore;
+
+    #[derive(Default)]
+    struct MemoryTokenStore {
+        token: Mutex<Option<TokenPair>>,
+    }
+
+    impl TokenStore for MemoryTokenStore {
+        fn load(&self) -> AppResult<Option<TokenPair>> {
+            Ok(self.token.lock().clone())
+        }
+
+        fn save(&self, token: &TokenPair) -> AppResult<()> {
+            *self.token.lock() = Some(token.clone());
+            Ok(())
+        }
+
+        fn clear(&self) -> AppResult<()> {
+            *self.token.lock() = None;
+            Ok(())
+        }
+    }
+
+    fn sample_token() -> TokenPair {
+        TokenPair {
+            access_token: "access".to_string(),
+            refresh_token: "refresh".to_string(),
+            expires_at: now_ms() + 3_600_000,
+            token_type: "Bearer".to_string(),
+            scope: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_clear_current_removes_memory_token() {
+        let store = Arc::new(MemoryTokenStore::default());
+        let refresher = TokenRefresher::new(store.clone());
+        refresher.set_current(sample_token());
+        store.clear().expect("清理存储成功");
+
+        assert!(refresher
+            .current_token()
+            .await
+            .expect("读取 token 成功")
+            .is_some());
+
+        refresher.clear_current();
+
+        assert!(refresher
+            .current_token()
+            .await
+            .expect("读取 token 成功")
+            .is_none());
+    }
 
     #[tokio::test]
     async fn test_refresh_requires_logged_in() {

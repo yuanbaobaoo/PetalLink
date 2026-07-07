@@ -41,8 +41,7 @@ pub struct SyncAction {
 }
 
 /// 同步全局状态（对齐 dart SyncGlobalState，供 UI 透传）
-#[derive(Debug, Clone, Serialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct SyncGlobalState {
     pub total: u64,
     pub completed: u64,
@@ -82,7 +81,6 @@ pub struct FailedItem {
     /// 错误信息
     pub error_message: Option<String>,
 }
-
 
 impl SyncGlobalState {
     /// 同步完成度 0.0~1.0

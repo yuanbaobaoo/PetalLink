@@ -96,7 +96,9 @@ impl FilesApi {
         let body = build_create_folder_body(name, parent_id);
         let encoded = ascii_json_encode(&body);
         let url = format!("{}/files?fields=*", crate::constants::DRIVE_API_BASE);
-        let resp = self.send_post(&url, encoded.into_bytes(), "application/json").await?;
+        let resp = self
+            .send_post(&url, encoded.into_bytes(), "application/json")
+            .await?;
         let body_json: Value = parse_json_response(resp, "createFolder").await?;
         DriveFile::from_json(&body_json).ok_or_else(|| AppError::generic("创建文件夹响应异常"))
     }
@@ -111,7 +113,9 @@ impl FilesApi {
         let mut body = serde_json::Map::new();
         body.insert("recycled".into(), Value::Bool(true));
         let encoded = ascii_json_encode(&Value::Object(body));
-        let resp = self.send_patch(&url, encoded.into_bytes(), "application/json").await?;
+        let resp = self
+            .send_patch(&url, encoded.into_bytes(), "application/json")
+            .await?;
         // 消费 body
         let _ = resp.text().await;
         Ok(())
@@ -143,7 +147,9 @@ impl FilesApi {
         }
         let encoded = ascii_json_encode(&Value::Object(body));
         let url = format!("{}/files/{id}", crate::constants::DRIVE_API_BASE);
-        let resp = self.send_patch(&url, encoded.into_bytes(), "application/json").await?;
+        let resp = self
+            .send_patch(&url, encoded.into_bytes(), "application/json")
+            .await?;
         let body_json: Value = parse_json_response(resp, "update").await?;
         DriveFile::from_json(&body_json).ok_or_else(|| AppError::generic("更新响应异常"))
     }
@@ -182,12 +188,22 @@ impl FilesApi {
     }
 
     /// 发送 POST（带 body）
-    async fn send_post(&self, url: &str, body: Vec<u8>, content_type: &str) -> AppResult<reqwest::Response> {
+    async fn send_post(
+        &self,
+        url: &str,
+        body: Vec<u8>,
+        content_type: &str,
+    ) -> AppResult<reqwest::Response> {
         self.client.post_full(url, Some(body), content_type).await
     }
 
     /// 发送 PATCH
-    async fn send_patch(&self, url: &str, body: Vec<u8>, content_type: &str) -> AppResult<reqwest::Response> {
+    async fn send_patch(
+        &self,
+        url: &str,
+        body: Vec<u8>,
+        content_type: &str,
+    ) -> AppResult<reqwest::Response> {
         self.client.patch_full(url, body, content_type).await
     }
 }
@@ -240,7 +256,10 @@ static URL_QUERY_ENCODE_SET: once_cell::sync::Lazy<percent_encoding::AsciiSet> =
 pub fn build_create_folder_body(name: &str, parent_id: Option<&str>) -> Value {
     let mut body = serde_json::Map::new();
     body.insert("fileName".into(), Value::String(name.to_string()));
-    body.insert("mimeType".into(), Value::String(FOLDER_MIME_TYPE.to_string()));
+    body.insert(
+        "mimeType".into(),
+        Value::String(FOLDER_MIME_TYPE.to_string()),
+    );
     if let Some(pid) = parent_id {
         if !pid.is_empty() && pid != "root" {
             body.insert(

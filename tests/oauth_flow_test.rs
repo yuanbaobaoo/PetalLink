@@ -34,11 +34,34 @@ async fn test_code_exchange_preserves_plus_in_code() {
 
     /// dart Uri.encodeComponent 等价集（与 service.rs URI_ENCODE_COMPONENT 一致）
     const URI_ENC: &AsciiSet = &CONTROLS
-        .add(b' ').add(b'!').add(b'"').add(b'#').add(b'$').add(b'%')
-        .add(b'&').add(b'\'').add(b'(').add(b')').add(b'*').add(b'+')
-        .add(b',').add(b':').add(b';').add(b'<').add(b'=').add(b'>')
-        .add(b'?').add(b'@').add(b'[').add(b'\\').add(b']').add(b'^')
-        .add(b'`').add(b'{').add(b'|').add(b'}');
+        .add(b' ')
+        .add(b'!')
+        .add(b'"')
+        .add(b'#')
+        .add(b'$')
+        .add(b'%')
+        .add(b'&')
+        .add(b'\'')
+        .add(b'(')
+        .add(b')')
+        .add(b'*')
+        .add(b'+')
+        .add(b',')
+        .add(b':')
+        .add(b';')
+        .add(b'<')
+        .add(b'=')
+        .add(b'>')
+        .add(b'?')
+        .add(b'@')
+        .add(b'[')
+        .add(b'\\')
+        .add(b']')
+        .add(b'^')
+        .add(b'`')
+        .add(b'{')
+        .add(b'|')
+        .add(b'}');
 
     let code = "abc+def"; // 含 + 的授权码
     let enc = |s: &str| utf8_percent_encode(s, URI_ENC).to_string();
@@ -55,7 +78,9 @@ async fn test_refresh_returns_new_access_token() {
 
     Mock::given(method("POST"))
         .and(path("/oauth2/v3/token"))
-        .and(wiremock::matchers::body_string_contains("grant_type=refresh_token"))
+        .and(wiremock::matchers::body_string_contains(
+            "grant_type=refresh_token",
+        ))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "access_token": "refreshed-at",
             // 华为刷新响应可能不含新 refresh_token

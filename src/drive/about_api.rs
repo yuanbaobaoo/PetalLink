@@ -6,7 +6,6 @@
 
 use std::sync::Arc;
 
-
 use crate::drive::client::{parse_json_response, DriveClient};
 use crate::drive::models::DriveAbout;
 use crate::error::{AppError, AppResult};
@@ -33,7 +32,10 @@ impl AboutApi {
     pub async fn ensure_capacity(&self, required_bytes: i64) -> AppResult<()> {
         let about = self.get().await?;
         if !about.can_fit(required_bytes) {
-            return Err(AppError::quota_exceeded(required_bytes, about.remaining_space()));
+            return Err(AppError::quota_exceeded(
+                required_bytes,
+                about.remaining_space(),
+            ));
         }
         Ok(())
     }

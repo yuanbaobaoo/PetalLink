@@ -21,7 +21,6 @@ pub enum SortField {
     ModifiedTime,
 }
 
-
 /// 列表排序方向
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -31,7 +30,6 @@ pub enum SortOrder {
     Ascending,
     Descending,
 }
-
 
 /// 默认 OAuth 回调 URI（必须与 AGC 后台配置一致）
 pub const DEFAULT_REDIRECT_URI: &str = "http://127.0.0.1:9999/oauth/callback";
@@ -85,7 +83,10 @@ impl Default for AppConfig {
             concurrency: 6,
             poll_interval_sec: 60,
             debounce_sec: 3,
-            skip_patterns: DEFAULT_SKIP_PATTERNS.iter().map(|s| s.to_string()).collect(),
+            skip_patterns: DEFAULT_SKIP_PATTERNS
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
             sort_field: SortField::Name,
             sort_order: SortOrder::Ascending,
         }
@@ -118,6 +119,35 @@ impl AppConfig {
         if self.debounce_sec < 1 {
             return Err(AppError::config("debounce 时长必须 ≥ 1 秒".to_string()));
         }
+        if self.mount_configured {
+            if self.mount_dir.trim().is_empty() {
+                return Err(AppError::config("同步目录不能为空".to_string()));
+            }
+            let expanded = self.expanded_mount_dir();
+            if !expanded.is_absolute() {
+                return Err(AppError::config(format!(
+                    "同步目录必须是绝对路径：{}",
+                    self.mount_dir
+                )));
+            }
+            if expanded == Path::new("/") {
+                return Err(AppError::config("不能把系统根目录作为同步目录".to_string()));
+            }
+            if let Some(home) = dirs::home_dir() {
+                if expanded == home {
+                    return Err(AppError::config(
+                        "不能把用户 Home 目录作为同步目录".to_string(),
+                    ));
+                }
+            }
+            if let Some(data_dir) = dirs::data_dir() {
+                if expanded.starts_with(&data_dir) {
+                    return Err(AppError::config(
+                        "不能把 Application Support 目录作为同步目录".to_string(),
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -147,7 +177,8 @@ impl AppConfig {
         sort_order: Option<SortOrder>,
     ) -> Self {
         Self {
-            oauth_redirect_uri: oauth_redirect_uri.unwrap_or_else(|| self.oauth_redirect_uri.clone()),
+            oauth_redirect_uri: oauth_redirect_uri
+                .unwrap_or_else(|| self.oauth_redirect_uri.clone()),
             oauth_callback_port: oauth_callback_port.unwrap_or(self.oauth_callback_port),
             mount_dir: mount_dir.unwrap_or_else(|| self.mount_dir.clone()),
             mount_configured: mount_configured.unwrap_or(self.mount_configured),
@@ -178,36 +209,58 @@ mod tests {
 
     #[test]
     fn test_validate_concurrency_range() {
-        let mut c = AppConfig::default();
-        c.concurrency = 0;
+        let c = AppConfig {
+            concurrency: 0,
+            ..AppConfig::default()
+        };
         assert!(c.validate().is_err());
-        c.concurrency = 21;
+        let c = AppConfig {
+            concurrency: 21,
+            ..AppConfig::default()
+        };
         assert!(c.validate().is_err());
-        c.concurrency = 6;
+        let c = AppConfig {
+            concurrency: 6,
+            ..AppConfig::default()
+        };
         assert!(c.validate().is_ok());
     }
 
     #[test]
     fn test_validate_poll_interval_range() {
-        let mut c = AppConfig::default();
         // 0 = 关闭，合法
-        c.poll_interval_sec = 0;
+        let c = AppConfig {
+            poll_interval_sec: 0,
+            ..AppConfig::default()
+        };
         assert!(c.validate().is_ok());
         // 开启但 < 60 非法
-        c.poll_interval_sec = 30;
+        let c = AppConfig {
+            poll_interval_sec: 30,
+            ..AppConfig::default()
+        };
         assert!(c.validate().is_err());
         // 60 秒是开启下界，合法
-        c.poll_interval_sec = 60;
+        let c = AppConfig {
+            poll_interval_sec: 60,
+            ..AppConfig::default()
+        };
         assert!(c.validate().is_ok());
         // 默认值合法
-        c.poll_interval_sec = 900;
+        let c = AppConfig {
+            poll_interval_sec: 900,
+            ..AppConfig::default()
+        };
         assert!(c.validate().is_ok());
     }
 
     #[test]
     fn test_expanded_mount_dir() {
         // 显式构造含 ~ 的 mount_dir 测试展开（默认 mount_dir 已为空）
-        let c = AppConfig { mount_dir: "~/hwcloud-drive".to_string(), ..AppConfig::default() };
+        let c = AppConfig {
+            mount_dir: "~/hwcloud-drive".to_string(),
+            ..AppConfig::default()
+        };
         let expanded = c.expanded_mount_dir();
         // 应展开 ~ 为 $HOME
         let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
@@ -227,11 +280,50 @@ mod tests {
     fn test_with_chain() {
         let c = AppConfig::default();
         let c2 = c.with(
-            None, None, None, Some(true), Some(10), None, None, None, None, None,
+            None,
+            None,
+            None,
+            Some(true),
+            Some(10),
+            None,
+            None,
+            None,
+            None,
+            None,
         );
         assert!(c2.mount_configured);
         assert_eq!(c2.concurrency, 10);
         // 原对象不变
         assert!(!c.mount_configured);
+    }
+
+    #[test]
+    fn test_validate_rejects_empty_configured_mount_dir() {
+        let c = AppConfig {
+            mount_configured: true,
+            mount_dir: String::new(),
+            ..AppConfig::default()
+        };
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_relative_configured_mount_dir() {
+        let c = AppConfig {
+            mount_configured: true,
+            mount_dir: "relative/path".to_string(),
+            ..AppConfig::default()
+        };
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_root_mount_dir() {
+        let c = AppConfig {
+            mount_configured: true,
+            mount_dir: "/".to_string(),
+            ..AppConfig::default()
+        };
+        assert!(c.validate().is_err());
     }
 }

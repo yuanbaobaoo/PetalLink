@@ -10,7 +10,9 @@ use std::path::PathBuf;
 
 use serde_json::{json, Value};
 
-use crate::core::config::{AppConfig, SortField, SortOrder, DEFAULT_MOUNT_DIR, DEFAULT_REDIRECT_URI};
+use crate::core::config::{
+    AppConfig, SortField, SortOrder, DEFAULT_MOUNT_DIR, DEFAULT_REDIRECT_URI,
+};
 use crate::error::{AppError, AppResult};
 
 /// 配置文件名
@@ -35,7 +37,7 @@ pub fn config_file_path() -> AppResult<PathBuf> {
 pub struct ConfigStore;
 
 impl ConfigStore {
-    /// 读取配置；文件不存在或解析失败时返回默认配置。
+    /// 读取配置；文件不存在时返回默认配置，读取或解析失败时返回错误。
     /// 对齐 dart `ConfigStore.load()`。
     pub fn load() -> AppResult<AppConfig> {
         let path = config_file_path()?;
@@ -43,25 +45,12 @@ impl ConfigStore {
             tracing::info!("配置文件不存在，使用默认配置");
             return Ok(AppConfig::default());
         }
-        let raw = match fs::read_to_string(&path) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(error = %e, "配置读取失败，回退默认");
-                return Ok(AppConfig::default());
-            }
-        };
-        let json: Value = match serde_json::from_str(&raw) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(error = %e, "配置解析失败，回退默认");
-                return Ok(AppConfig::default());
-            }
-        };
-        let (config, dirty) = from_json(&json);
-        config.validate()?;
+        let raw = fs::read_to_string(&path)
+            .map_err(|e| AppError::config(format!("配置读取失败：{}：{e}", path.display())))?;
+        let (config, dirty) = parse_config_raw(&raw)?;
         // 迁移改了值 → 落盘（仅 load 走此路径；from_json 纯解析不落盘，避免测试污染真实配置）
         if dirty {
-            let _ = ConfigStore::save(&config);
+            ConfigStore::save(&config)?;
         }
         Ok(config)
     }
@@ -70,6 +59,7 @@ impl ConfigStore {
     /// 对齐 dart `ConfigStore.save()`。
     pub fn save(config: &AppConfig) -> AppResult<()> {
         config.validate()?;
+        validate_configured_mount_dir_access(config)?;
         let path = config_file_path()?;
         if let Some(parent) = path.parent() {
             if !parent.exists() {
@@ -90,12 +80,43 @@ impl ConfigStore {
 
     /// 从 JSON 字符串导入配置（F-CFG-04），校验并持久化。
     pub fn import_from_json(json_str: &str) -> AppResult<AppConfig> {
-        let json: Value = serde_json::from_str(json_str)?;
-        let (config, _dirty) = from_json(&json);
-        config.validate()?;
+        let (config, _dirty) = parse_config_raw(json_str)?;
         Self::save(&config)?;
         Ok(config)
     }
+}
+
+fn parse_config_raw(raw: &str) -> AppResult<(AppConfig, bool)> {
+    let json: Value =
+        serde_json::from_str(raw).map_err(|e| AppError::config(format!("配置解析失败：{e}")))?;
+    let (config, dirty) = from_json(&json);
+    config.validate()?;
+    Ok((config, dirty))
+}
+
+fn validate_configured_mount_dir_access(config: &AppConfig) -> AppResult<()> {
+    if !config.mount_configured {
+        return Ok(());
+    }
+    let dir = config.expanded_mount_dir();
+    if dir.exists() && !dir.is_dir() {
+        return Err(AppError::config(format!(
+            "同步目录不是文件夹：{}",
+            dir.display()
+        )));
+    }
+    fs::create_dir_all(&dir)
+        .map_err(|e| AppError::config(format!("同步目录创建失败：{}：{e}", dir.display())))?;
+    let probe = dir.join(format!(".petallink-write-test-{}", std::process::id()));
+    fs::write(&probe, b"ok")
+        .map_err(|e| AppError::config(format!("同步目录不可写：{}：{e}", dir.display())))?;
+    fs::remove_file(&probe).map_err(|e| {
+        AppError::config(format!(
+            "同步目录写入探测清理失败：{}：{e}",
+            probe.display()
+        ))
+    })?;
+    Ok(())
 }
 
 /// 序列化配置为 JSON。对齐 dart `_toJson`。
@@ -173,7 +194,8 @@ fn from_json(json: &Value) -> (AppConfig, bool) {
     // - poll_interval_sec：新版校验要求 0 或 ≥60。旧版可能存的是秒级小值（如 10/30），
     //   这些值在「定时全量刷新」语义下过激进，统一迁移到新默认 900；0（关闭）与 ≥60 的值保留。
     // - debounce_sec：旧版 hardcoded 30 → 新默认 3。
-    if (config.poll_interval_sec != 0 && config.poll_interval_sec < 60) || config.debounce_sec == 30 {
+    if (config.poll_interval_sec != 0 && config.poll_interval_sec < 60) || config.debounce_sec == 30
+    {
         if config.poll_interval_sec != 0 && config.poll_interval_sec < 60 {
             config.poll_interval_sec = default.poll_interval_sec;
         }
@@ -252,10 +274,25 @@ mod tests {
             assert_eq!(config.poll_interval_sec, 60, "poll={old_poll} 应迁移到 60");
         }
         // 0 = 关闭，保留
-        assert_eq!(from_json(&json!({ "pollIntervalSec": 0 })).0.poll_interval_sec, 0);
+        assert_eq!(
+            from_json(&json!({ "pollIntervalSec": 0 }))
+                .0
+                .poll_interval_sec,
+            0
+        );
         // ≥60 保留
-        assert_eq!(from_json(&json!({ "pollIntervalSec": 60 })).0.poll_interval_sec, 60);
-        assert_eq!(from_json(&json!({ "pollIntervalSec": 600 })).0.poll_interval_sec, 600);
+        assert_eq!(
+            from_json(&json!({ "pollIntervalSec": 60 }))
+                .0
+                .poll_interval_sec,
+            60
+        );
+        assert_eq!(
+            from_json(&json!({ "pollIntervalSec": 600 }))
+                .0
+                .poll_interval_sec,
+            600
+        );
     }
 
     #[test]
@@ -303,7 +340,7 @@ mod tests {
         };
         let json = to_json(&config);
         let restored = from_json(&json).0;
-        assert_eq!(restored.mount_configured, true);
+        assert!(restored.mount_configured);
         assert_eq!(restored.concurrency, 10);
     }
 
@@ -326,5 +363,11 @@ mod tests {
         let config = from_json(&json).0;
         assert_eq!(config.sort_field, SortField::Size);
         assert_eq!(config.sort_order, SortOrder::Descending);
+    }
+
+    #[test]
+    fn test_parse_config_raw_rejects_invalid_json() {
+        let err = parse_config_raw("{ invalid json").unwrap_err();
+        assert!(matches!(err, AppError::Config { .. }));
     }
 }

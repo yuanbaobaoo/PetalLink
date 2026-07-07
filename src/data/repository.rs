@@ -391,7 +391,12 @@ pub fn delete_all_transfers(conn: &Connection) -> AppResult<()> {
 ///
 /// 替代 commands.rs 中 3 处重复的结算 SQL（download_on_demand / folder_recursive 下载循环 / 上传循环）。
 /// 错误仅忽略（与原内联实现一致——结算失败不应阻断主流程）。
-pub fn settle_transfer_by_id(conn: &Connection, task_id: i64, success: bool, error_message: Option<&str>) {
+pub fn settle_transfer_by_id(
+    conn: &Connection,
+    task_id: i64,
+    success: bool,
+    error_message: Option<&str>,
+) {
     let (state, transferred_sql) = if success {
         (transfer_state::COMPLETED, "transferred = total_size")
     } else {
@@ -402,7 +407,12 @@ pub fn settle_transfer_by_id(conn: &Connection, task_id: i64, success: bool, err
     );
     let _ = conn.execute(
         &sql,
-        params![state, error_message, chrono::Utc::now().timestamp_millis(), task_id],
+        params![
+            state,
+            error_message,
+            chrono::Utc::now().timestamp_millis(),
+            task_id
+        ],
     );
 }
 
@@ -533,7 +543,8 @@ mod tests {
         };
         let id = insert_transfer(&conn, &task).unwrap();
         assert!(id > 0);
-        update_transfer_state(&conn, id, transfer_state::COMPLETED, 1000, Some(2000), None).unwrap();
+        update_transfer_state(&conn, id, transfer_state::COMPLETED, 1000, Some(2000), None)
+            .unwrap();
         let all = list_all_transfers(&conn).unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].state, transfer_state::COMPLETED);
@@ -568,8 +579,8 @@ mod tests {
         }
         // 保留最近 2 条已完成
         prune_transfer_history(&conn, 2).unwrap();
-        let completed: Vec<_> = list_transfers(&conn, None, Some(transfer_state::COMPLETED))
-            .unwrap();
+        let completed: Vec<_> =
+            list_transfers(&conn, None, Some(transfer_state::COMPLETED)).unwrap();
         assert_eq!(completed.len(), 2);
     }
 }

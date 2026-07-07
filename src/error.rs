@@ -19,11 +19,17 @@ use thiserror::Error;
 pub enum AppError {
     /// OAuth 流程相关（取消 / state 不匹配 / 超时 / 被拒绝 / 浏览器打不开）
     #[error("{message}")]
-    Auth { code: AuthErrorCode, message: String },
+    Auth {
+        code: AuthErrorCode,
+        message: String,
+    },
 
     /// Token 相关（未登录 / 刷新失败）
     #[error("{message}")]
-    Token { code: TokenErrorCode, message: String },
+    Token {
+        code: TokenErrorCode,
+        message: String,
+    },
 
     /// Drive API 调用异常（状态码 / 华为错误码 / 网络）
     #[error("{message}")]
@@ -79,7 +85,12 @@ impl Serialize for AppError {
                 s.serialize_field("error_code", &None::<String>)?;
                 s.end()
             }
-            AppError::DriveApi { code, message, status_code, error_code } => {
+            AppError::DriveApi {
+                code,
+                message,
+                status_code,
+                error_code,
+            } => {
                 let mut s = serializer.serialize_struct("AppError", 5)?;
                 s.serialize_field("kind", "DriveApi")?;
                 s.serialize_field("code", code)?;
@@ -97,7 +108,11 @@ impl Serialize for AppError {
                 s.serialize_field("error_code", &None::<String>)?;
                 s.end()
             }
-            AppError::QuotaExceeded { required, remaining, message } => {
+            AppError::QuotaExceeded {
+                required,
+                remaining,
+                message,
+            } => {
                 let mut s = serializer.serialize_struct("AppError", 5)?;
                 s.serialize_field("kind", "QuotaExceeded")?;
                 s.serialize_field("code", &None::<&str>)?;
@@ -326,7 +341,13 @@ mod tests {
     #[test]
     fn test_auth_cancelled_message() {
         let e = AppError::auth_cancelled();
-        assert!(matches!(e, AppError::Auth { code: AuthErrorCode::Cancelled, .. }));
+        assert!(matches!(
+            e,
+            AppError::Auth {
+                code: AuthErrorCode::Cancelled,
+                ..
+            }
+        ));
         assert_eq!(e.to_string(), "用户取消授权");
     }
 
@@ -347,7 +368,6 @@ mod tests {
             _ => panic!("应为 DriveApi"),
         }
     }
-
 
     #[test]
     fn test_serde_flat_structure() {

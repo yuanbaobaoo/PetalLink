@@ -177,7 +177,9 @@ mod tests {
 
         // 修改文件 + 等待足够时间确保 mtime 变化
         tokio::time::sleep(Duration::from_millis(10)).await;
-        tokio::fs::write(&path, b"content2-different-enough").await.unwrap();
+        tokio::fs::write(&path, b"content2-different-enough")
+            .await
+            .unwrap();
 
         let hash2 = hasher.hash_file(&path).await.unwrap();
         assert_ne!(hash1, hash2, "内容变更后哈希应不同");

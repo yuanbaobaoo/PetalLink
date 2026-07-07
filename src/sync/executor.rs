@@ -13,8 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Semaphore;
 
 use crate::data::repository::{
-    self, sync_status,
-    transfer_direction, transfer_state, SyncItem, TransferTask,
+    self, sync_status, transfer_direction, transfer_state, SyncItem, TransferTask,
 };
 use crate::drive::{
     download_api::{DownloadApi, ProgressFn as DownloadProgressFn},
@@ -196,7 +195,9 @@ impl SyncExecutor {
             SyncActionType::DeleteFromCloud => self.do_delete_from_cloud(action).await,
             SyncActionType::DeleteFromLocal => self.do_delete_from_local(action).await,
             SyncActionType::CreateConflictCopy => self.do_conflict(action).await,
-            SyncActionType::BackupBeforeCloudDelete => self.do_backup_before_cloud_delete(action).await,
+            SyncActionType::BackupBeforeCloudDelete => {
+                self.do_backup_before_cloud_delete(action).await
+            }
             SyncActionType::Skip => ActionResult {
                 success: true,
                 error_message: Some(action.reason.clone().unwrap_or_default()),
@@ -214,32 +215,36 @@ impl SyncExecutor {
     /// 公开供 sync_folder_recursive_impl 等直接调用下载/上传 API 的路径手动入队。
     pub fn enqueue_transfer(&self, action: &SyncAction) -> Option<i64> {
         let direction = match action.action_type {
-            SyncActionType::Upload | SyncActionType::CreateConflictCopy => transfer_direction::UPLOAD,
+            SyncActionType::Upload | SyncActionType::CreateConflictCopy => {
+                transfer_direction::UPLOAD
+            }
             SyncActionType::Download => {
                 // 区分「更新」与「下载」：planner 的 Download 动作仅在本地已有真实内容、
                 // 云端较新时产生（local_has_content = !placeholder）。此处用「本地已存在且 size>0」
                 // 判定 → 标记为 DOWNLOAD_UPDATE（UI 显示「更新」）；本地不存在/为占位符 → DOWNLOAD。
-                let local_has_content = action.local_path.as_ref()
+                let local_has_content = action
+                    .local_path
+                    .as_ref()
                     .and_then(|p| std::fs::metadata(p).ok())
                     .map(|m| m.len() > 0)
                     .unwrap_or(false);
-                if local_has_content { transfer_direction::DOWNLOAD_UPDATE } else { transfer_direction::DOWNLOAD }
+                if local_has_content {
+                    transfer_direction::DOWNLOAD_UPDATE
+                } else {
+                    transfer_direction::DOWNLOAD
+                }
             }
             _ => return None, // 建目录/占位符/删除不入队
         };
         if let Some(db) = &self.db {
             let total_size = match direction {
-                d if d == transfer_direction::UPLOAD => {
-                    action.local_path.as_ref()
-                        .and_then(|p| std::fs::metadata(p).ok())
-                        .map(|m| m.len() as i64)
-                        .unwrap_or(0)
-                }
-                _ => {
-                    action.cloud_file.as_ref()
-                        .map(|f| f.size)
-                        .unwrap_or(0)
-                }
+                d if d == transfer_direction::UPLOAD => action
+                    .local_path
+                    .as_ref()
+                    .and_then(|p| std::fs::metadata(p).ok())
+                    .map(|m| m.len() as i64)
+                    .unwrap_or(0),
+                _ => action.cloud_file.as_ref().map(|f| f.size).unwrap_or(0),
             };
             let conn = db.lock();
             let task = TransferTask {
@@ -247,7 +252,11 @@ impl SyncExecutor {
                 direction,
                 file_id: action.file_id.clone(),
                 local_path: action.local_path.clone(),
-                name: action.relative_path.as_deref().unwrap_or("unknown").to_string(),
+                name: action
+                    .relative_path
+                    .as_deref()
+                    .unwrap_or("unknown")
+                    .to_string(),
                 total_size,
                 transferred: 0,
                 state: transfer_state::RUNNING,
@@ -289,7 +298,14 @@ impl SyncExecutor {
                     rusqlite::params![state, result.error_message.as_deref(), chrono::Utc::now().timestamp_millis(), name, transfer_direction::DELETE, transfer_state::RUNNING],
                 );
             } else if let Some(ref lp) = action.local_path {
-                let size = if result.success { std::fs::metadata(lp).ok().map(|m| m.len() as i64).unwrap_or(0) } else { 0 };
+                let size = if result.success {
+                    std::fs::metadata(lp)
+                        .ok()
+                        .map(|m| m.len() as i64)
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
                 // 结算传输：transferred 设为实际文件大小；若 total_size 为 0（入队时 cloud_file 缺失），
                 // 同步修正为实际大小，确保前端进度百分比正确显示（避免 0/0 → 0%）
                 let _ = conn.execute(
@@ -313,7 +329,11 @@ impl SyncExecutor {
                 direction: transfer_direction::DELETE,
                 file_id: action.file_id.clone(),
                 local_path: action.local_path.clone(),
-                name: action.relative_path.as_deref().unwrap_or("unknown").to_string(),
+                name: action
+                    .relative_path
+                    .as_deref()
+                    .unwrap_or("unknown")
+                    .to_string(),
                 total_size: 0,
                 transferred: 0,
                 state: transfer_state::RUNNING,
@@ -331,7 +351,8 @@ impl SyncExecutor {
     /// 修剪传输历史（保留最近 100 条已结束任务）。
     fn prune_transfer_history(&self) {
         if let Some(db) = &self.db {
-            { let conn = db.lock();
+            {
+                let conn = db.lock();
                 let _ = repository::prune_transfer_history(&conn, 100);
             }
         }
@@ -347,17 +368,33 @@ impl SyncExecutor {
         if result.success {
             tracing::info!(rel, "{verb_success}");
         } else if !result.deferred {
-            tracing::warn!(rel, error = result.error_message.as_deref().unwrap_or("?"), "{verb_fail}");
+            tracing::warn!(
+                rel,
+                error = result.error_message.as_deref().unwrap_or("?"),
+                "{verb_fail}"
+            );
         }
     }
 
     async fn do_upload(&self, action: &SyncAction) -> ActionResult {
         let path = match &action.local_path {
             Some(p) => PathBuf::from(p),
-            None => return ActionResult { success: false, error_message: Some("上载缺少本地路径".into()), deferred: false, cloud_file: None },
+            None => {
+                return ActionResult {
+                    success: false,
+                    error_message: Some("上载缺少本地路径".into()),
+                    deferred: false,
+                    cloud_file: None,
+                }
+            }
         };
         if !path.exists() {
-            return ActionResult { success: false, error_message: Some("本地文件不存在".into()), deferred: false, cloud_file: None };
+            return ActionResult {
+                success: false,
+                error_message: Some("本地文件不存在".into()),
+                deferred: false,
+                cloud_file: None,
+            };
         }
 
         // 稳定性检查（4 次重试，退避 [0s, 2s, 3s, 5s]，对齐 dart _checkStabilityWithRetry）
@@ -368,16 +405,27 @@ impl SyncExecutor {
                 tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
                 let mut checker = stab.lock().await;
                 match checker.check(&path).await {
-                    StabilityResult::Editing => return ActionResult {
-                        success: false, error_message: Some("用户正在编辑，暂停自动同步".into()), deferred: true, cloud_file: None,
-                    },
-                    StabilityResult::Stable => { stable = true; break; }
+                    StabilityResult::Editing => {
+                        return ActionResult {
+                            success: false,
+                            error_message: Some("用户正在编辑，暂停自动同步".into()),
+                            deferred: true,
+                            cloud_file: None,
+                        }
+                    }
+                    StabilityResult::Stable => {
+                        stable = true;
+                        break;
+                    }
                     StabilityResult::Unstable => {} // 继续重试
                 }
             }
             if !stable {
                 return ActionResult {
-                    success: false, error_message: Some("文件尚不稳定，延迟到下次周期".into()), deferred: true, cloud_file: None,
+                    success: false,
+                    error_message: Some("文件尚不稳定，延迟到下次周期".into()),
+                    deferred: true,
+                    cloud_file: None,
                 };
             }
         }
@@ -390,16 +438,19 @@ impl SyncExecutor {
         // 断点续传回调：持久化 serverId/uploadId/offset
         let db_resume = self.db.clone();
         let task_name = action.relative_path.clone().unwrap_or_default();
-        let on_resume: crate::drive::upload_api::ResumeProgressFn = Box::new(move |sid, uid, offset| {
-            if let Some(ref db) = db_resume {
-                let conn = db.lock();
-                let _ = conn.execute(
+        let on_resume: crate::drive::upload_api::ResumeProgressFn = Box::new(
+            move |sid, uid, offset| {
+                if let Some(ref db) = db_resume {
+                    let conn = db.lock();
+                    let _ = conn.execute(
                     "UPDATE transfer_queue SET server_id=?1, upload_id=?2, resume_offset=?3, transferred=?3 WHERE name=?4 AND state=?5",
                     rusqlite::params![sid, uid, offset as i64, task_name, transfer_state::RUNNING],
                 );
-            }
-        });
-        let resume_cb: Option<&crate::drive::upload_api::ResumeProgressFn> = if is_large { Some(&on_resume) } else { None };
+                }
+            },
+        );
+        let resume_cb: Option<&crate::drive::upload_api::ResumeProgressFn> =
+            if is_large { Some(&on_resume) } else { None };
 
         // 进度回调：节流写 transferred 并通知前端刷新（500ms 一次）
         // throttle 节流状态由闭包 move 捕获，跨多次回调持久；AtomicI64 内部可变，Fn 闭包可用 &。
@@ -413,25 +464,71 @@ impl SyncExecutor {
             emit_throttled_progress(&db_prog, &tx_prog, &lp_prog, transferred, &throttle);
         });
         let result = if has_cloud_id && !is_large {
-            match self.upload_api.upload_update(action.file_id.as_ref().unwrap(), &path, parent_id, Some(&on_progress)).await {
-                Ok(f) => ActionResult { success: true, error_message: None, deferred: false, cloud_file: Some(f) },
+            match self
+                .upload_api
+                .upload_update(
+                    action.file_id.as_ref().unwrap(),
+                    &path,
+                    parent_id,
+                    Some(&on_progress),
+                )
+                .await
+            {
+                Ok(f) => ActionResult {
+                    success: true,
+                    error_message: None,
+                    deferred: false,
+                    cloud_file: Some(f),
+                },
                 Err(_e) => {
-                    match self.upload_api.upload(&path, parent_id, Some(&on_progress), resume_cb).await {
-                        Ok(f) => ActionResult { success: true, error_message: None, deferred: false, cloud_file: Some(f) },
-                        Err(e) => ActionResult { success: false, error_message: Some(e.to_string()), deferred: false, cloud_file: None },
+                    match self
+                        .upload_api
+                        .upload(&path, parent_id, Some(&on_progress), resume_cb)
+                        .await
+                    {
+                        Ok(f) => ActionResult {
+                            success: true,
+                            error_message: None,
+                            deferred: false,
+                            cloud_file: Some(f),
+                        },
+                        Err(e) => ActionResult {
+                            success: false,
+                            error_message: Some(e.to_string()),
+                            deferred: false,
+                            cloud_file: None,
+                        },
                     }
                 }
             }
         } else {
-            match self.upload_api.upload(&path, parent_id, Some(&on_progress), resume_cb).await {
-                Ok(f) => ActionResult { success: true, error_message: None, deferred: false, cloud_file: Some(f) },
-                Err(e) => ActionResult { success: false, error_message: Some(e.to_string()), deferred: false, cloud_file: None },
+            match self
+                .upload_api
+                .upload(&path, parent_id, Some(&on_progress), resume_cb)
+                .await
+            {
+                Ok(f) => ActionResult {
+                    success: true,
+                    error_message: None,
+                    deferred: false,
+                    cloud_file: Some(f),
+                },
+                Err(e) => ActionResult {
+                    success: false,
+                    error_message: Some(e.to_string()),
+                    deferred: false,
+                    cloud_file: None,
+                },
             }
         };
         if result.success {
             tracing::info!(rel, size, "上传成功");
         } else if !result.deferred {
-            tracing::warn!(rel, error = result.error_message.as_deref().unwrap_or("?"), "上传失败");
+            tracing::warn!(
+                rel,
+                error = result.error_message.as_deref().unwrap_or("?"),
+                "上传失败"
+            );
         }
         result
     }
@@ -439,17 +536,36 @@ impl SyncExecutor {
     async fn do_download(&self, action: &SyncAction) -> ActionResult {
         let local_path = match &action.local_path {
             Some(p) => PathBuf::from(p),
-            None => return ActionResult { success: false, error_message: Some("下载缺少本地路径".into()), deferred: false, cloud_file: None },
+            None => {
+                return ActionResult {
+                    success: false,
+                    error_message: Some("下载缺少本地路径".into()),
+                    deferred: false,
+                    cloud_file: None,
+                }
+            }
         };
         let file_id = match &action.file_id {
             Some(id) => id.clone(),
-            None => return ActionResult { success: false, error_message: Some("下载缺少 fileId".into()), deferred: false, cloud_file: None },
+            None => {
+                return ActionResult {
+                    success: false,
+                    error_message: Some("下载缺少 fileId".into()),
+                    deferred: false,
+                    cloud_file: None,
+                }
+            }
         };
 
         // 确保父目录存在（对齐 dart: parent.create(recursive: true)）
         if let Some(parent) = local_path.parent() {
             if let Err(e) = tokio::fs::create_dir_all(parent).await {
-                return ActionResult { success: false, error_message: Some(format!("创建父目录失败：{e}")), deferred: false, cloud_file: None };
+                return ActionResult {
+                    success: false,
+                    error_message: Some(format!("创建父目录失败：{e}")),
+                    deferred: false,
+                    cloud_file: None,
+                };
             }
         }
 
@@ -467,18 +583,32 @@ impl SyncExecutor {
         let on_progress: DownloadProgressFn = Box::new(move |received: u64, _total: u64| {
             emit_throttled_progress(&db_prog, &tx_prog, &lp_prog, received as i64, &throttle);
         });
-        let result = match self.download_api.download(&file_id, &local_path, Some(&on_progress)).await {
+        let result = match self
+            .download_api
+            .download(&file_id, &local_path, Some(&on_progress))
+            .await
+        {
             Ok(()) => {
                 if let Some(m) = &self.mount {
                     let _ = m.mark_downloaded(&local_path).await;
                 }
-                ActionResult { success: true, error_message: None, deferred: false, cloud_file: None }
+                ActionResult {
+                    success: true,
+                    error_message: None,
+                    deferred: false,
+                    cloud_file: None,
+                }
             }
             Err(e) => {
                 // 清理 .tmp 残留（对齐 dart: tmpPath.delete()）
                 let tmp = std::path::PathBuf::from(format!("{}.tmp", local_path.display()));
                 let _ = std::fs::remove_file(&tmp);
-                ActionResult { success: false, error_message: Some(e.to_string()), deferred: false, cloud_file: None }
+                ActionResult {
+                    success: false,
+                    error_message: Some(e.to_string()),
+                    deferred: false,
+                    cloud_file: None,
+                }
             }
         };
         Self::log_action_result(rel, "下载成功", "下载失败", &result);
@@ -488,34 +618,82 @@ impl SyncExecutor {
     async fn do_create_placeholder(&self, action: &SyncAction) -> ActionResult {
         let cloud = match &action.cloud_file {
             Some(c) => c,
-            None => return ActionResult { success: false, error_message: Some("缺少云端文件元数据".into()), deferred: false, cloud_file: None },
+            None => {
+                return ActionResult {
+                    success: false,
+                    error_message: Some("缺少云端文件元数据".into()),
+                    deferred: false,
+                    cloud_file: None,
+                }
+            }
         };
         let rel_path = match &action.relative_path {
             Some(p) => p,
-            None => return ActionResult { success: false, error_message: Some("缺少相对路径".into()), deferred: false, cloud_file: None },
+            None => {
+                return ActionResult {
+                    success: false,
+                    error_message: Some("缺少相对路径".into()),
+                    deferred: false,
+                    cloud_file: None,
+                }
+            }
         };
         if let Some(m) = &self.mount {
-            match m.create_placeholder_if_needed(rel_path, &cloud.id, cloud.size).await {
+            match m
+                .create_placeholder_if_needed(rel_path, &cloud.id, cloud.size)
+                .await
+            {
                 Ok(()) => {
                     // 对齐 dart：写 DB 记录（status=cloudOnly），防止孤儿占位符
                     if let (Some(db), Some(local_path)) = (&self.db, &action.local_path) {
-                        { let conn = db.lock();
-                            let _ = repository::upsert(&conn, &SyncItem {
-                                file_id: cloud.id.clone(), local_path: local_path.clone(),
-                                parent_folder_id: cloud.parent_folder.as_ref().and_then(|v| v.first().cloned()),
-                                name: cloud.name.clone(), is_folder: false, size: cloud.size,
-                                local_size: None, sha256: None, local_mtime: None,
-                                cloud_edited_time: cloud.edited_time.map(|t| t.timestamp_millis()),
-                                last_sync_time: None, status: sync_status::CLOUD_ONLY, error_message: None,
-                            });
+                        {
+                            let conn = db.lock();
+                            let _ = repository::upsert(
+                                &conn,
+                                &SyncItem {
+                                    file_id: cloud.id.clone(),
+                                    local_path: local_path.clone(),
+                                    parent_folder_id: cloud
+                                        .parent_folder
+                                        .as_ref()
+                                        .and_then(|v| v.first().cloned()),
+                                    name: cloud.name.clone(),
+                                    is_folder: false,
+                                    size: cloud.size,
+                                    local_size: None,
+                                    sha256: None,
+                                    local_mtime: None,
+                                    cloud_edited_time: cloud
+                                        .edited_time
+                                        .map(|t| t.timestamp_millis()),
+                                    last_sync_time: None,
+                                    status: sync_status::CLOUD_ONLY,
+                                    error_message: None,
+                                },
+                            );
                         }
                     }
-                    ActionResult { success: true, error_message: None, deferred: false, cloud_file: None }
+                    ActionResult {
+                        success: true,
+                        error_message: None,
+                        deferred: false,
+                        cloud_file: None,
+                    }
                 }
-                Err(e) => ActionResult { success: false, error_message: Some(e.to_string()), deferred: false, cloud_file: None },
+                Err(e) => ActionResult {
+                    success: false,
+                    error_message: Some(e.to_string()),
+                    deferred: false,
+                    cloud_file: None,
+                },
             }
         } else {
-            ActionResult { success: false, error_message: Some("mount manager 未初始化".into()), deferred: false, cloud_file: None }
+            ActionResult {
+                success: false,
+                error_message: Some("mount manager 未初始化".into()),
+                deferred: false,
+                cloud_file: None,
+            }
         }
     }
 
@@ -527,11 +705,26 @@ impl SyncExecutor {
             let _cloud = cloud_file;
             if let Some(m) = &self.mount {
                 match m.ensure_folder(rel) {
-                    Ok(_) => ActionResult { success: true, error_message: None, deferred: false, cloud_file: None },
-                    Err(e) => ActionResult { success: false, error_message: Some(e.to_string()), deferred: false, cloud_file: None },
+                    Ok(_) => ActionResult {
+                        success: true,
+                        error_message: None,
+                        deferred: false,
+                        cloud_file: None,
+                    },
+                    Err(e) => ActionResult {
+                        success: false,
+                        error_message: Some(e.to_string()),
+                        deferred: false,
+                        cloud_file: None,
+                    },
                 }
             } else {
-                ActionResult { success: true, error_message: None, deferred: false, cloud_file: None }
+                ActionResult {
+                    success: true,
+                    error_message: None,
+                    deferred: false,
+                    cloud_file: None,
+                }
             }
         } else {
             // FIX:fileName 取相对路径的**最后一段**，而非整条 relative_path。
@@ -566,26 +759,62 @@ impl SyncExecutor {
                 }
             }
 
-            match self.files_api.create_folder(name, action.parent_file_id.as_deref()).await {
-                Ok(f) => ActionResult { success: true, error_message: None, deferred: false, cloud_file: Some(f) },
+            match self
+                .files_api
+                .create_folder(name, action.parent_file_id.as_deref())
+                .await
+            {
+                Ok(f) => ActionResult {
+                    success: true,
+                    error_message: None,
+                    deferred: false,
+                    cloud_file: Some(f),
+                },
                 // 对齐 dart：400/409 时查同名已存在文件夹，存在则视为成功
                 // （同样用末段 name 匹配，与云端真名一致才能命中）
                 Err(ref e) if e.to_string().contains("400") || e.to_string().contains("409") => {
                     if let Some(pid) = action.parent_file_id.as_deref() {
                         if let Ok(list) = self.files_api.list_all(Some(pid)).await {
-                            if let Some(existing) = list.iter().find(|f| f.is_folder() && f.name == name) {
-                                ActionResult { success: true, error_message: None, deferred: false, cloud_file: Some(existing.clone()) }
+                            if let Some(existing) =
+                                list.iter().find(|f| f.is_folder() && f.name == name)
+                            {
+                                ActionResult {
+                                    success: true,
+                                    error_message: None,
+                                    deferred: false,
+                                    cloud_file: Some(existing.clone()),
+                                }
                             } else {
-                                ActionResult { success: false, error_message: Some(format!("{e}")), deferred: false, cloud_file: None }
+                                ActionResult {
+                                    success: false,
+                                    error_message: Some(format!("{e}")),
+                                    deferred: false,
+                                    cloud_file: None,
+                                }
                             }
                         } else {
-                            ActionResult { success: false, error_message: Some(format!("{e}")), deferred: false, cloud_file: None }
+                            ActionResult {
+                                success: false,
+                                error_message: Some(format!("{e}")),
+                                deferred: false,
+                                cloud_file: None,
+                            }
                         }
                     } else {
-                        ActionResult { success: false, error_message: Some(format!("{e}")), deferred: false, cloud_file: None }
+                        ActionResult {
+                            success: false,
+                            error_message: Some(format!("{e}")),
+                            deferred: false,
+                            cloud_file: None,
+                        }
                     }
                 }
-                Err(e) => ActionResult { success: false, error_message: Some(e.to_string()), deferred: false, cloud_file: None },
+                Err(e) => ActionResult {
+                    success: false,
+                    error_message: Some(e.to_string()),
+                    deferred: false,
+                    cloud_file: None,
+                },
             }
         };
         Self::log_action_result(rel, "创建目录成功", "创建目录失败", &result);
@@ -595,21 +824,43 @@ impl SyncExecutor {
     async fn do_delete_from_cloud(&self, action: &SyncAction) -> ActionResult {
         let file_id = match &action.file_id {
             Some(id) => id.clone(),
-            None => return ActionResult { success: false, error_message: Some("缺少 fileId".into()), deferred: false, cloud_file: None },
+            None => {
+                return ActionResult {
+                    success: false,
+                    error_message: Some("缺少 fileId".into()),
+                    deferred: false,
+                    cloud_file: None,
+                }
+            }
         };
         let rel = action.relative_path.as_deref().unwrap_or("?");
         // 入队传输记录
         self.enqueue_delete_transfer(action);
         let result = match self.files_api.delete(&file_id).await {
-            Ok(()) => ActionResult { success: true, error_message: None, deferred: false, cloud_file: None },
+            Ok(()) => ActionResult {
+                success: true,
+                error_message: None,
+                deferred: false,
+                cloud_file: None,
+            },
             Err(e) => {
                 let msg = e.to_string();
                 // 404 表示云端已不存在（可能已被前序操作删除），视为成功
                 if msg.contains("404") {
                     tracing::info!(rel, file_id, "云端文件已不存在（404），视为删除成功");
-                    ActionResult { success: true, error_message: None, deferred: false, cloud_file: None }
+                    ActionResult {
+                        success: true,
+                        error_message: None,
+                        deferred: false,
+                        cloud_file: None,
+                    }
                 } else {
-                    ActionResult { success: false, error_message: Some(msg), deferred: false, cloud_file: None }
+                    ActionResult {
+                        success: false,
+                        error_message: Some(msg),
+                        deferred: false,
+                        cloud_file: None,
+                    }
                 }
             }
         };
@@ -620,16 +871,38 @@ impl SyncExecutor {
     async fn do_delete_from_local(&self, action: &SyncAction) -> ActionResult {
         let path = match &action.local_path {
             Some(p) => PathBuf::from(p),
-            None => return ActionResult { success: true, error_message: None, deferred: false, cloud_file: None }, // DB 清理场景
+            None => {
+                return ActionResult {
+                    success: true,
+                    error_message: None,
+                    deferred: false,
+                    cloud_file: None,
+                }
+            } // DB 清理场景
         };
         let rel = action.relative_path.as_deref().unwrap_or("?");
         let result = if let Some(m) = &self.mount {
             match m.delete_local(&path).await {
-                Ok(()) => ActionResult { success: true, error_message: None, deferred: false, cloud_file: None },
-                Err(e) => ActionResult { success: false, error_message: Some(e.to_string()), deferred: false, cloud_file: None },
+                Ok(()) => ActionResult {
+                    success: true,
+                    error_message: None,
+                    deferred: false,
+                    cloud_file: None,
+                },
+                Err(e) => ActionResult {
+                    success: false,
+                    error_message: Some(e.to_string()),
+                    deferred: false,
+                    cloud_file: None,
+                },
             }
         } else {
-            ActionResult { success: true, error_message: None, deferred: false, cloud_file: None }
+            ActionResult {
+                success: true,
+                error_message: None,
+                deferred: false,
+                cloud_file: None,
+            }
         };
         Self::log_action_result(rel, "删除本地文件成功", "删除本地文件失败", &result);
         result
@@ -638,18 +911,37 @@ impl SyncExecutor {
     async fn do_conflict(&self, action: &SyncAction) -> ActionResult {
         let local_path = match &action.local_path {
             Some(p) => PathBuf::from(p),
-            None => return ActionResult { success: false, error_message: Some("冲突处理缺少本地路径".into()), deferred: false, cloud_file: None },
+            None => {
+                return ActionResult {
+                    success: false,
+                    error_message: Some("冲突处理缺少本地路径".into()),
+                    deferred: false,
+                    cloud_file: None,
+                }
+            }
         };
         let cloud_file = match &action.cloud_file {
             Some(c) => c,
-            None => return ActionResult { success: false, error_message: Some("冲突处理缺少云端文件元数据".into()), deferred: false, cloud_file: None },
+            None => {
+                return ActionResult {
+                    success: false,
+                    error_message: Some("冲突处理缺少云端文件元数据".into()),
+                    deferred: false,
+                    cloud_file: None,
+                }
+            }
         };
 
         // 获取本地 mtime
-        let local_mtime = tokio::fs::metadata(&local_path).await
-            .ok().and_then(|m| m.modified().ok())
+        let local_mtime = tokio::fs::metadata(&local_path)
+            .await
+            .ok()
+            .and_then(|m| m.modified().ok())
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| chrono::DateTime::from_timestamp(d.as_secs() as i64, d.subsec_nanos()).unwrap_or(chrono::Utc::now()))
+            .map(|d| {
+                chrono::DateTime::from_timestamp(d.as_secs() as i64, d.subsec_nanos())
+                    .unwrap_or(chrono::Utc::now())
+            })
             .unwrap_or(chrono::Utc::now());
 
         // 解析冲突
@@ -657,10 +949,20 @@ impl SyncExecutor {
             if let Ok(mut resolver) = conflict.lock() {
                 resolver.resolve(&local_path, cloud_file, &local_mtime)
             } else {
-                return ActionResult { success: false, error_message: Some("冲突解决器获取失败".into()), deferred: false, cloud_file: None };
+                return ActionResult {
+                    success: false,
+                    error_message: Some("冲突解决器获取失败".into()),
+                    deferred: false,
+                    cloud_file: None,
+                };
             }
         } else {
-            return ActionResult { success: false, error_message: Some("冲突解决器未初始化".into()), deferred: false, cloud_file: None };
+            return ActionResult {
+                success: false,
+                error_message: Some("冲突解决器未初始化".into()),
+                deferred: false,
+                cloud_file: None,
+            };
         };
 
         let rel = action.relative_path.as_deref().unwrap_or("?");
@@ -679,34 +981,77 @@ impl SyncExecutor {
                         cloud_file: None,
                     }
                 } else {
-                    match self.download_api.download(&cloud_file.id, &local_path, None).await {
+                    match self
+                        .download_api
+                        .download(&cloud_file.id, &local_path, None)
+                        .await
+                    {
                         Ok(()) => {
-                            if let Some(m) = &self.mount { let _ = m.mark_downloaded(&local_path).await; }
-                            if let Some(m) = &self.mount { let _ = m.clear_placeholder_xattr(&resolution.copy_path).await; }
-                            ActionResult { success: true, error_message: None, deferred: false, cloud_file: None }
+                            if let Some(m) = &self.mount {
+                                let _ = m.mark_downloaded(&local_path).await;
+                            }
+                            if let Some(m) = &self.mount {
+                                let _ = m.clear_placeholder_xattr(&resolution.copy_path).await;
+                            }
+                            ActionResult {
+                                success: true,
+                                error_message: None,
+                                deferred: false,
+                                cloud_file: None,
+                            }
                         }
                         Err(e) => {
                             let _ = tokio::fs::rename(&resolution.copy_path, &local_path).await;
-                            ActionResult { success: false, error_message: Some(e.to_string()), deferred: false, cloud_file: None }
+                            ActionResult {
+                                success: false,
+                                error_message: Some(e.to_string()),
+                                deferred: false,
+                                cloud_file: None,
+                            }
                         }
                     }
                 }
             }
             crate::sync::conflict::ConflictSide::Local => {
                 // 本地获胜：下载云端旧版 → copyPath（败方副本），上传本地覆盖云端。
-                if let Err(e) = self.download_api.download(&cloud_file.id, &resolution.copy_path, None).await {
+                if let Err(e) = self
+                    .download_api
+                    .download(&cloud_file.id, &resolution.copy_path, None)
+                    .await
+                {
                     ActionResult {
                         success: false,
-                        error_message: Some(format!("冲突副本（云端旧版）下载失败，跳过覆盖以保云端旧版：{e}")),
+                        error_message: Some(format!(
+                            "冲突副本（云端旧版）下载失败，跳过覆盖以保云端旧版：{e}"
+                        )),
                         deferred: false,
                         cloud_file: None,
                     }
                 } else {
-                    if let Some(m) = &self.mount { let _ = m.clear_placeholder_xattr(&resolution.copy_path).await; }
-                    let parent_id = cloud_file.parent_folder.as_ref().and_then(|v| v.first().map(|s| s.as_str()));
-                    match self.upload_api.upload_update(&cloud_file.id, &local_path, parent_id, None).await {
-                        Ok(_) => ActionResult { success: true, error_message: None, deferred: false, cloud_file: None },
-                        Err(e) => ActionResult { success: false, error_message: Some(e.to_string()), deferred: false, cloud_file: None },
+                    if let Some(m) = &self.mount {
+                        let _ = m.clear_placeholder_xattr(&resolution.copy_path).await;
+                    }
+                    let parent_id = cloud_file
+                        .parent_folder
+                        .as_ref()
+                        .and_then(|v| v.first().map(|s| s.as_str()));
+                    match self
+                        .upload_api
+                        .upload_update(&cloud_file.id, &local_path, parent_id, None)
+                        .await
+                    {
+                        Ok(_) => ActionResult {
+                            success: true,
+                            error_message: None,
+                            deferred: false,
+                            cloud_file: None,
+                        },
+                        Err(e) => ActionResult {
+                            success: false,
+                            error_message: Some(e.to_string()),
+                            deferred: false,
+                            cloud_file: None,
+                        },
                     }
                 }
             }
@@ -720,27 +1065,51 @@ impl SyncExecutor {
     async fn do_backup_before_cloud_delete(&self, action: &SyncAction) -> ActionResult {
         let path = match &action.local_path {
             Some(p) => PathBuf::from(p),
-            None => return ActionResult { success: true, error_message: None, deferred: false, cloud_file: None },
+            None => {
+                return ActionResult {
+                    success: true,
+                    error_message: None,
+                    deferred: false,
+                    cloud_file: None,
+                }
+            }
         };
         if !path.exists() {
-            return ActionResult { success: true, error_message: None, deferred: false, cloud_file: None };
+            return ActionResult {
+                success: true,
+                error_message: None,
+                deferred: false,
+                cloud_file: None,
+            };
         }
         // 本地 mtime 作为副本时间戳（败方=本地的修改时间）
-        let local_mtime = tokio::fs::metadata(&path).await
-            .ok().and_then(|m| m.modified().ok())
+        let local_mtime = tokio::fs::metadata(&path)
+            .await
+            .ok()
+            .and_then(|m| m.modified().ok())
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| chrono::DateTime::from_timestamp(d.as_secs() as i64, d.subsec_nanos()).unwrap_or(chrono::Utc::now()))
+            .map(|d| {
+                chrono::DateTime::from_timestamp(d.as_secs() as i64, d.subsec_nanos())
+                    .unwrap_or(chrono::Utc::now())
+            })
             .unwrap_or_else(chrono::Utc::now);
         let copy_path = crate::sync::conflict::dedupe_copy_path(&path, "本地副本", &local_mtime);
         match tokio::fs::rename(&path, &copy_path).await {
             Ok(()) => {
-                if let Some(m) = &self.mount { let _ = m.clear_placeholder_xattr(&copy_path).await; }
+                if let Some(m) = &self.mount {
+                    let _ = m.clear_placeholder_xattr(&copy_path).await;
+                }
                 tracing::info!(
                     src = %path.display(),
                     backup = %copy_path.display(),
                     "云端删除但本地有未上传修改，已备份副本"
                 );
-                ActionResult { success: true, error_message: None, deferred: false, cloud_file: None }
+                ActionResult {
+                    success: true,
+                    error_message: None,
+                    deferred: false,
+                    cloud_file: None,
+                }
             }
             Err(e) => ActionResult {
                 success: false,

@@ -60,12 +60,10 @@ async fn main() {
         .with_env_filter("info,petal_link_lib=info")
         .init();
 
-    let file_path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| {
-            eprintln!("用法: cargo run --bin upload-tester -- <file_path>");
-            std::process::exit(1);
-        });
+    let file_path = std::env::args().nth(1).unwrap_or_else(|| {
+        eprintln!("用法: cargo run --bin upload-tester -- <file_path>");
+        std::process::exit(1);
+    });
     let file_path = PathBuf::from(&file_path);
     if !file_path.exists() {
         eprintln!("错误: 文件不存在: {}", file_path.display());
@@ -73,7 +71,11 @@ async fn main() {
     }
 
     let file_size = file_path.metadata().unwrap().len();
-    eprintln!("文件: {} ({:.1} MB)", file_path.display(), file_size as f64 / 1_048_576.0);
+    eprintln!(
+        "文件: {} ({:.1} MB)",
+        file_path.display(),
+        file_size as f64 / 1_048_576.0
+    );
 
     let token = get_token().await;
 
@@ -91,7 +93,11 @@ async fn main() {
             eprintln!("✅ 上传成功！");
             eprintln!("   fileId:    {}", f.id);
             eprintln!("   fileName:  {}", f.name);
-            eprintln!("   size:      {} bytes ({:.1} MB)", f.size, f.size as f64 / 1_048_576.0);
+            eprintln!(
+                "   size:      {} bytes ({:.1} MB)",
+                f.size,
+                f.size as f64 / 1_048_576.0
+            );
             eprintln!("   耗时:      {:.1}s", elapsed.as_secs_f64());
             eprintln!("═══════════════════════════════════════");
         }

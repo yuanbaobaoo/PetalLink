@@ -56,11 +56,7 @@ pub struct LocalWatcher {
 impl LocalWatcher {
     /// 创建新监视器（未启动）。
     /// `on_change` 回调接收变更的相对路径集合。
-    pub fn new(
-        mount_dir: &Path,
-        skip_patterns: Vec<String>,
-        debounce_secs: u32,
-    ) -> Self {
+    pub fn new(mount_dir: &Path, skip_patterns: Vec<String>, debounce_secs: u32) -> Self {
         let (change_tx, _) = tokio::sync::broadcast::channel(256);
         Self {
             mount_dir: mount_dir.to_path_buf(),

@@ -24,28 +24,28 @@ const ENV_FILE: &str = ".env";
 /// assets/ PNG → icons/ PNG 映射（对齐 tauri.conf.json bundle.icon 所列文件）。
 /// 像素尺寸一一对应：assets/icon-NN.png(NN×NN) → icons/NNxNN.png。
 const PNG_COPY_MAP: &[(&str, &str)] = &[
-    ("icon_32x32.png",       "32x32.png"),
-    ("icon_32x32@2x.png",    "32x32@2x.png"),   // 64×64
-    ("icon_128x128.png",     "128x128.png"),
-    ("icon_128x128@2x.png",  "128x128@2x.png"), // 256×256
-    ("icon_512x512.png",     "icon-512.png"),
-    ("icon-1024.png",        "icon-1024.png"),
-    ("icon-1024.png",        "icon.png"),       // 1024×1024，Tauri 通用入口
+    ("icon_32x32.png", "32x32.png"),
+    ("icon_32x32@2x.png", "32x32@2x.png"), // 64×64
+    ("icon_128x128.png", "128x128.png"),
+    ("icon_128x128@2x.png", "128x128@2x.png"), // 256×256
+    ("icon_512x512.png", "icon-512.png"),
+    ("icon-1024.png", "icon-1024.png"),
+    ("icon-1024.png", "icon.png"), // 1024×1024，Tauri 通用入口
 ];
 
 /// iconutil 标准 .iconset 命名（assets/ 源 → iconset 内文件名）。
 /// 覆盖 16~512 及 @2x 全档位，生成多分辨率 icon.icns。
 const ICONSET_MAP: &[(&str, &str)] = &[
-    ("icon_16x16.png",       "icon_16x16.png"),
-    ("icon_16x16@2x.png",    "icon_16x16@2x.png"),
-    ("icon_32x32.png",       "icon_32x32.png"),
-    ("icon_32x32@2x.png",    "icon_32x32@2x.png"),
-    ("icon_128x128.png",     "icon_128x128.png"),
-    ("icon_128x128@2x.png",  "icon_128x128@2x.png"),
-    ("icon_256x256.png",     "icon_256x256.png"),
-    ("icon_256x256@2x.png",  "icon_256x256@2x.png"),
-    ("icon_512x512.png",     "icon_512x512.png"),
-    ("icon_512x512@2x.png",  "icon_512x512@2x.png"),
+    ("icon_16x16.png", "icon_16x16.png"),
+    ("icon_16x16@2x.png", "icon_16x16@2x.png"),
+    ("icon_32x32.png", "icon_32x32.png"),
+    ("icon_32x32@2x.png", "icon_32x32@2x.png"),
+    ("icon_128x128.png", "icon_128x128.png"),
+    ("icon_128x128@2x.png", "icon_128x128@2x.png"),
+    ("icon_256x256.png", "icon_256x256.png"),
+    ("icon_256x256@2x.png", "icon_256x256@2x.png"),
+    ("icon_512x512.png", "icon_512x512.png"),
+    ("icon_512x512@2x.png", "icon_512x512@2x.png"),
 ];
 
 fn main() {
@@ -73,15 +73,19 @@ fn main() {
 /// - `cargo:rerun-if-changed=.env` 确保凭证变更触发重新编译。
 fn inject_env_credentials() {
     // 检测 cargo 构建环境是否已设置（用户显式 export / 命令行前缀）
-    let env_id = std::env::var(ENV_CLIENT_ID_KEY).ok().filter(|v| !v.is_empty());
-    let env_secret = std::env::var(ENV_CLIENT_SECRET_KEY).ok().filter(|v| !v.is_empty());
+    let env_id = std::env::var(ENV_CLIENT_ID_KEY)
+        .ok()
+        .filter(|v| !v.is_empty());
+    let env_secret = std::env::var(ENV_CLIENT_SECRET_KEY)
+        .ok()
+        .filter(|v| !v.is_empty());
 
-    let (client_id, client_secret) = if env_id.is_some() && env_secret.is_some() {
+    let (client_id, client_secret) = if let (Some(client_id), Some(client_secret)) =
+        (env_id, env_secret)
+    {
         // 已通过环境变量显式设置，直接使用
-        println!(
-            "cargo:warning=使用构建环境变量 {ENV_CLIENT_ID_KEY} / {ENV_CLIENT_SECRET_KEY}"
-        );
-        (env_id.unwrap(), env_secret.unwrap())
+        println!("cargo:warning=使用构建环境变量 {ENV_CLIENT_ID_KEY} / {ENV_CLIENT_SECRET_KEY}");
+        (client_id, client_secret)
     } else {
         // 从 .env 文件读取
         let env_path = Path::new(ENV_FILE);
@@ -161,8 +165,8 @@ fn sync_icons() -> std::io::Result<()> {
 /// iconset 放在 OUT_DIR，避免污染项目树。
 #[cfg(target_os = "macos")]
 fn regenerate_icns() -> std::io::Result<()> {
-    let out_dir = std::env::var_os("OUT_DIR")
-        .ok_or_else(|| std::io::Error::other("OUT_DIR 未设置"))?;
+    let out_dir =
+        std::env::var_os("OUT_DIR").ok_or_else(|| std::io::Error::other("OUT_DIR 未设置"))?;
     let iconset = Path::new(&out_dir).join("app.iconset");
     let _ = fs::remove_dir_all(&iconset);
     fs::create_dir_all(&iconset)?;
@@ -183,9 +187,10 @@ fn regenerate_icns() -> std::io::Result<()> {
         .status()?;
 
     if !status.success() {
-        return Err(std::io::Error::other(
-            format!("iconutil 退出码 {:?}", status.code()),
-        ));
+        return Err(std::io::Error::other(format!(
+            "iconutil 退出码 {:?}",
+            status.code()
+        )));
     }
     Ok(())
 }

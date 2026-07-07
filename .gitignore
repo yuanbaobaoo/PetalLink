@@ -76,6 +76,9 @@ icons/
 # ai-context/ AI 上下文规范，本地保留不入库
 ai-context/
 
+# superpowers 执行计划/过程文件，本地保留不入库
+docs/superpowers/
+
 # ===== 前端构建产物 =====
 app/node_modules/
 app/dist/

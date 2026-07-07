@@ -18,10 +18,10 @@
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use tauri::image::Image;
+use tauri::menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager, Wry};
-use tauri::menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem};
-use tauri::image::Image;
 
 use crate::data::repository::{self, transfer_direction, transfer_state};
 use crate::error::AppResult;
@@ -45,11 +45,10 @@ pub fn setup(app: &AppHandle) {
     let menu = build_menu(app).expect("创建托盘菜单失败");
 
     // 加载 menubar 图标（PNG，对齐 Flutter MenubarIcon）
-    let icon = Image::from_bytes(MENUBAR_ICON_PNG)
-        .unwrap_or_else(|_| {
-            tracing::warn!("menubar PNG 加载失败，回退到应用图标");
-            app.default_window_icon().cloned().unwrap()
-        });
+    let icon = Image::from_bytes(MENUBAR_ICON_PNG).unwrap_or_else(|_| {
+        tracing::warn!("menubar PNG 加载失败，回退到应用图标");
+        app.default_window_icon().cloned().unwrap()
+    });
 
     let _ = TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon)
@@ -76,15 +75,15 @@ pub fn setup(app: &AppHandle) {
 fn build_menu(app: &AppHandle<Wry>) -> tauri::Result<Menu<Wry>> {
     // 版本项（disabled，纯展示）
     let version_item = MenuItem::with_id(
-        app, "version", "PetalLink - 华为云盘 Mac 客户端开源版 v1.0", false, None::<&str>,
+        app,
+        "version",
+        "PetalLink - 华为云盘 Mac 客户端开源版 v1.0",
+        false,
+        None::<&str>,
     )?;
     let sep1 = PredefinedMenuItem::separator(app)?;
-    let show_item = MenuItem::with_id(
-        app, "show_window", "显示主窗口", true, None::<&str>,
-    )?;
-    let quit_item = MenuItem::with_id(
-        app, "quit", "退出 PetalLink", true, None::<&str>,
-    )?;
+    let show_item = MenuItem::with_id(app, "show_window", "显示主窗口", true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(app, "quit", "退出 PetalLink", true, None::<&str>)?;
 
     // 进行中的传输项（每个任务两行 disabled MenuItem）
     let transfer_items = active_transfer_menu_items(app);
@@ -143,7 +142,10 @@ fn active_transfer_menu_items(app: &AppHandle<Wry>) -> Vec<MenuItem<Wry>> {
 ///
 /// @param app - 应用句柄（构造 MenuItem 必需）
 /// @param task - 传输任务
-fn build_one_transfer_item(app: &AppHandle<Wry>, task: &repository::TransferTask) -> Vec<MenuItem<Wry>> {
+fn build_one_transfer_item(
+    app: &AppHandle<Wry>,
+    task: &repository::TransferTask,
+) -> Vec<MenuItem<Wry>> {
     // 名字行：文件名（disabled 灰色展示），超长截断为最多 10 字符 + 省略号
     let display_name = truncate_name(&task.name, MAX_NAME_CHARS);
     let name_item = match MenuItem::with_id(
@@ -220,9 +222,7 @@ fn truncate_name(name: &str, max_chars: usize) -> String {
 fn load_active_transfers() -> AppResult<Vec<repository::TransferTask>> {
     let conn = crate::commands::DB.lock();
     let mut stmt = conn
-        .prepare(
-            "SELECT * FROM transfer_queue WHERE state IN (?1, ?2) ORDER BY created_at ASC",
-        )
+        .prepare("SELECT * FROM transfer_queue WHERE state IN (?1, ?2) ORDER BY created_at ASC")
         .map_err(|e| crate::error::AppError::generic(format!("查询传输任务失败：{e}")))?;
     let rows = stmt
         .query_map(

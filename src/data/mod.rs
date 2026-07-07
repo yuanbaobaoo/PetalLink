@@ -34,8 +34,8 @@ pub fn open_at(path: &PathBuf) -> AppResult<Connection> {
             std::fs::create_dir_all(parent)?;
         }
     }
-    let conn = Connection::open(path)
-        .map_err(|e| AppError::generic(format!("打开数据库失败：{e}")))?;
+    let conn =
+        Connection::open(path).map_err(|e| AppError::generic(format!("打开数据库失败：{e}")))?;
 
     // 启用外键约束（SQLite 默认关闭，对齐 dart beforeOpen）
     conn.execute_batch("PRAGMA foreign_keys = ON;")

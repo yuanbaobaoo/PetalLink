@@ -83,8 +83,8 @@ async fn test_list_uses_query_param_syntax() {
 /// 验证 list 响应解析（含 category/mimeType 怪癖）。
 #[test]
 fn test_list_response_parses_folder_by_mime() {
-    use petal_link_lib::drive::models::FileListResult;
     use petal_link_lib::drive::models::FileCategory;
+    use petal_link_lib::drive::models::FileListResult;
 
     let json = json!({
         "files": [

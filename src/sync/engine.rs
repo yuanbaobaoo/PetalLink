@@ -2,27 +2,27 @@
 //!
 //! 对齐 `legacy/lib/sync/sync_engine.dart`。
 
+use parking_lot::Mutex;
+use rusqlite::{params, Connection};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use parking_lot::Mutex;
 use tokio::sync::broadcast;
-use rusqlite::{Connection, params};
 
-use crate::error::{AppError, AppResult};
-use crate::sync::state::{FailedItem, FreeUpCheckResult, SyncGlobalState};
 use crate::data::repository;
-use crate::drive::files_api::FilesApi;
 use crate::drive::download_api::DownloadApi;
-use crate::drive::upload_api::UploadApi;
+use crate::drive::files_api::FilesApi;
 use crate::drive::models::DriveFile;
-use crate::mount::manager::{LocalFileEntry, MountManager};
+use crate::drive::upload_api::UploadApi;
+use crate::error::{AppError, AppResult};
 use crate::mount::local_watcher::LocalWatcher;
-use crate::sync::planner::{DbSnapshotEntry, SyncPlanner, SyncSnapshot};
-use crate::sync::executor::SyncExecutor;
-use crate::sync::conflict::ConflictResolver;
+use crate::mount::manager::{LocalFileEntry, MountManager};
 use crate::sync::cloud_tree;
+use crate::sync::conflict::ConflictResolver;
+use crate::sync::executor::SyncExecutor;
+use crate::sync::planner::{DbSnapshotEntry, SyncPlanner, SyncSnapshot};
+use crate::sync::state::{FailedItem, FreeUpCheckResult, SyncGlobalState};
 
 /// 增量同步安全网：连续走 N 次增量后强制一次全量 BFS，纠正改名/移动/新建文件的累积偏差。
 /// 增量 merge 无法处理"已知 id 但 rel_path 变了"（改名/移动）和"全新文件"，需定期全量收敛。
@@ -76,6 +76,7 @@ pub struct SyncEngine {
 }
 
 impl SyncEngine {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         files_api: Arc<FilesApi>,
         changes_api: Arc<crate::drive::changes_api::ChangesApi>,
@@ -88,7 +89,12 @@ impl SyncEngine {
     ) -> Self {
         let (state_tx, _) = broadcast::channel(256);
         Self {
-            files_api, changes_api, download_api, upload_api, mount: None, db,
+            files_api,
+            changes_api,
+            download_api,
+            upload_api,
+            mount: None,
+            db,
             planner: SyncPlanner,
             conflict: Arc::new(Mutex::new(ConflictResolver::new())),
             executor: None,
@@ -102,7 +108,10 @@ impl SyncEngine {
             state: Mutex::new(SyncGlobalState::default()),
             running: Mutex::new(false),
             mount_dir: Mutex::new(None),
-            skip_patterns, debounce_secs, poll_interval_secs, state_tx,
+            skip_patterns,
+            debounce_secs,
+            poll_interval_secs,
+            state_tx,
             is_first_time: Mutex::new(true),
             watcher: Mutex::new(None),
             shutdown: Mutex::new(false),
@@ -115,10 +124,18 @@ impl SyncEngine {
         self.mount = Some(mount);
     }
 
-    pub fn set_executor(&mut self, executor: SyncExecutor) { self.executor = Some(executor); }
-    pub fn state_receiver(&self) -> broadcast::Receiver<SyncGlobalState> { self.state_tx.subscribe() }
-    pub fn current_state(&self) -> SyncGlobalState { self.state.lock().clone() }
-    pub fn is_running(&self) -> bool { *self.running.lock() }
+    pub fn set_executor(&mut self, executor: SyncExecutor) {
+        self.executor = Some(executor);
+    }
+    pub fn state_receiver(&self) -> broadcast::Receiver<SyncGlobalState> {
+        self.state_tx.subscribe()
+    }
+    pub fn current_state(&self) -> SyncGlobalState {
+        self.state.lock().clone()
+    }
+    pub fn is_running(&self) -> bool {
+        *self.running.lock()
+    }
 
     /// 尝试获取 folder_syncing 锁（供 sync_folder_recursive 防并发用，独立于 syncing）。
     /// 已有目录同步进行中 → false；否则置 true 并返回 true。调用方负责在 finally 调 end_folder_sync。
@@ -310,11 +327,9 @@ impl SyncEngine {
             // --- UPLOAD ---
             else if task.direction == repository::transfer_direction::UPLOAD {
                 // 有断点信息且本地文件还在 → 尝试续传
-                if task.server_id.is_some()
-                    && task.upload_id.is_some()
-                    && task.local_path.is_some()
+                if let (Some(_), Some(_), Some(local_path)) =
+                    (&task.server_id, &task.upload_id, &task.local_path)
                 {
-                    let local_path = task.local_path.as_ref().unwrap();
                     let path = std::path::PathBuf::from(local_path);
                     if !path.exists() {
                         let conn = self.db.lock();
@@ -332,7 +347,9 @@ impl SyncEngine {
                         continue;
                     }
 
-                    let Some(ref exec) = self.executor else { break; };
+                    let Some(ref exec) = self.executor else {
+                        break;
+                    };
                     let upload_api = exec.upload_api();
                     let session = crate::drive::upload_api::ResumeSession {
                         server_id: task.server_id.clone().unwrap_or_default(),
@@ -343,14 +360,15 @@ impl SyncEngine {
 
                     let db_clone = self.db.clone();
                     let task_id = task.id;
-                    let on_resume: crate::drive::upload_api::ResumeProgressFn =
-                        Box::new(move |_sid, _uid, offset| {
+                    let on_resume: crate::drive::upload_api::ResumeProgressFn = Box::new(
+                        move |_sid, _uid, offset| {
                             let conn = db_clone.lock();
                             let _ = conn.execute(
                                 "UPDATE transfer_queue SET resume_offset=?1, transferred=?1 WHERE id=?2",
                                 rusqlite::params![offset as i64, task_id],
                             );
-                        });
+                        },
+                    );
 
                     tracing::info!(name = %task.name, offset = task.resume_offset, "尝试断点续传…");
 
@@ -450,7 +468,8 @@ impl SyncEngine {
                 *self.state.lock() = st.clone();
                 let _ = self.state_tx.send(st);
             }
-            let (tree, p2i, root) = cloud_tree::refresh_cloud_tree(&self.files_api, &self.mount, &abs_dir).await?;
+            let (tree, p2i, root) =
+                cloud_tree::refresh_cloud_tree(&self.files_api, &self.mount, &abs_dir).await?;
             *self.cloud_tree.lock() = tree;
             *self.path_to_id.lock() = p2i;
             *self.root_folder_id.lock() = root;
@@ -469,10 +488,13 @@ impl SyncEngine {
             let ct = self.cloud_tree.lock();
             // 收集所有 DELETED 但云端已不存在的路径
             let to_purge: Vec<String> = {
-                let mut stmt = conn.prepare(
-                    "SELECT local_path FROM sync_items WHERE status=?1"
-                ).map_err(|e| AppError::generic(format!("查询失败：{e}")))?;
-                let rows = stmt.query_map(rusqlite::params![repository::sync_status::DELETED], |r| r.get::<_, String>(0))
+                let mut stmt = conn
+                    .prepare("SELECT local_path FROM sync_items WHERE status=?1")
+                    .map_err(|e| AppError::generic(format!("查询失败：{e}")))?;
+                let rows = stmt
+                    .query_map(rusqlite::params![repository::sync_status::DELETED], |r| {
+                        r.get::<_, String>(0)
+                    })
                     .map_err(|e| AppError::generic(format!("查询失败：{e}")))?;
                 rows.filter_map(|r| r.ok())
                     .filter(|p| !ct.contains_key(p))
@@ -494,7 +516,11 @@ impl SyncEngine {
 
     async fn start_watcher(self: &Arc<Self>) {
         if let Some(ref m) = self.mount {
-            let watcher = Arc::new(LocalWatcher::new(m.mount_dir(), self.skip_patterns.clone(), self.debounce_secs));
+            let watcher = Arc::new(LocalWatcher::new(
+                m.mount_dir(),
+                self.skip_patterns.clone(),
+                self.debounce_secs,
+            ));
             if let Err(e) = watcher.start().await {
                 tracing::error!("watcher启动失败: {e}");
             } else {
@@ -538,7 +564,10 @@ impl SyncEngine {
             return;
         }
         let engine = self.clone();
-        tracing::info!(interval_secs = engine.poll_interval_secs, "启动云端定时刷新任务");
+        tracing::info!(
+            interval_secs = engine.poll_interval_secs,
+            "启动云端定时刷新任务"
+        );
         tokio::spawn(async move {
             loop {
                 if *engine.shutdown.lock() {
@@ -557,8 +586,11 @@ impl SyncEngine {
 
     /// 执行一次同步周期。
     pub async fn run_sync_cycle(&self, triggered_by: &str) -> AppResult<()> {
-        if *self.syncing.lock() || *self.folder_syncing.lock() { return Ok(()); }
-        if self.is_indexing() && triggered_by != "startup-resume" && triggered_by != "retry-failed" {
+        if *self.syncing.lock() || *self.folder_syncing.lock() {
+            return Ok(());
+        }
+        if self.is_indexing() && triggered_by != "startup-resume" && triggered_by != "retry-failed"
+        {
             tracing::info!(triggered_by, "索引进行中，跳过同步周期");
             return Ok(());
         }
@@ -604,12 +636,16 @@ impl SyncEngine {
         let db = self.load_db_snapshot();
 
         // 诊断日志：统计三方数据
-        let local_in_cloud_not_db: Vec<&str> = local.keys()
+        let local_in_cloud_not_db: Vec<&str> = local
+            .keys()
             .filter(|k| cloud.contains_key(*k) && !db.contains_key(*k))
-            .map(|s| s.as_str()).collect();
-        let in_cloud_db_not_local: Vec<&str> = cloud.keys()
+            .map(|s| s.as_str())
+            .collect();
+        let in_cloud_db_not_local: Vec<&str> = cloud
+            .keys()
             .filter(|k| db.contains_key(*k) && !local.contains_key(*k))
-            .map(|s| s.as_str()).collect();
+            .map(|s| s.as_str())
+            .collect();
         if !local_in_cloud_not_db.is_empty() {
             tracing::debug!(count = local_in_cloud_not_db.len(), paths = ?local_in_cloud_not_db, "本地+云端有但DB无（reconcile 将补）");
         }
@@ -621,7 +657,12 @@ impl SyncEngine {
         // 本地有内容无 DB → 补 synced；本地占位符无 DB → 补 cloudOnly
         self.reconcile_db_records(&local, &db);
 
-        let snapshot = SyncSnapshot { local: local.clone(), cloud: cloud.clone(), db, is_startup_resume: triggered_by == "startup-resume" };
+        let snapshot = SyncSnapshot {
+            local: local.clone(),
+            cloud: cloud.clone(),
+            db,
+            is_startup_resume: triggered_by == "startup-resume",
+        };
         let mut actions = self.planner.plan(&snapshot);
         // §2.8 改名检测：在本地新文件上检查 xattr fileId，匹配 → 改名而非 upload+delete
         self.detect_renames(&mut actions);
@@ -689,17 +730,18 @@ impl SyncEngine {
 
         // #7 contentChanged 逻辑（对齐 dart：仅结构性操作成功才 true）
         let content_changed = actions.iter().zip(results.iter()).any(|(a, r)| {
-            r.success && matches!(
-                a.action_type,
-                crate::sync::state::SyncActionType::Upload
-                | crate::sync::state::SyncActionType::Download
-                | crate::sync::state::SyncActionType::DeleteFromCloud
-                | crate::sync::state::SyncActionType::DeleteFromLocal
-                | crate::sync::state::SyncActionType::CreateFolder
-                | crate::sync::state::SyncActionType::CreateConflictCopy
-                | crate::sync::state::SyncActionType::CreatePlaceholder
-                | crate::sync::state::SyncActionType::BackupBeforeCloudDelete
-            )
+            r.success
+                && matches!(
+                    a.action_type,
+                    crate::sync::state::SyncActionType::Upload
+                        | crate::sync::state::SyncActionType::Download
+                        | crate::sync::state::SyncActionType::DeleteFromCloud
+                        | crate::sync::state::SyncActionType::DeleteFromLocal
+                        | crate::sync::state::SyncActionType::CreateFolder
+                        | crate::sync::state::SyncActionType::CreateConflictCopy
+                        | crate::sync::state::SyncActionType::CreatePlaceholder
+                        | crate::sync::state::SyncActionType::BackupBeforeCloudDelete
+                )
         });
         {
             let mut st = self.state.lock().clone();
@@ -710,7 +752,12 @@ impl SyncEngine {
         // 广播状态更新
         self.update_and_push_state();
 
-        tracing::info!(triggered_by, actions=actions.len(), content_changed, "sync cycle ok");
+        tracing::info!(
+            triggered_by,
+            actions = actions.len(),
+            content_changed,
+            "sync cycle ok"
+        );
         Ok(())
     }
 
@@ -737,11 +784,16 @@ impl SyncEngine {
         // 本地新建目录（CreateFolder 且无 cloud_file）下标，按深度升序
         let mut folder_idxs: Vec<usize> = (0..n)
             .filter(|&i| {
-                actions[i].action_type == SyncActionType::CreateFolder && actions[i].cloud_file.is_none()
+                actions[i].action_type == SyncActionType::CreateFolder
+                    && actions[i].cloud_file.is_none()
             })
             .collect();
         folder_idxs.sort_by_key(|&i| {
-            actions[i].relative_path.as_deref().map(|p| p.matches('/').count()).unwrap_or(0)
+            actions[i]
+                .relative_path
+                .as_deref()
+                .map(|p| p.matches('/').count())
+                .unwrap_or(0)
         });
 
         // 阶段 1：顺序执行本地新建目录，成功后回填 path_to_id/cloud_tree
@@ -760,7 +812,9 @@ impl SyncEngine {
                     cloud_file: None,
                 });
             if res.success {
-                if let (Some(rel), Some(cf)) = (actions[i].relative_path.clone(), res.cloud_file.clone()) {
+                if let (Some(rel), Some(cf)) =
+                    (actions[i].relative_path.clone(), res.cloud_file.clone())
+                {
                     self.cloud_tree_insert(rel.clone(), cf.clone());
                     self.path_to_id_insert(rel, cf.id.clone());
                     tracing::info!(rel = %actions[i].relative_path.as_deref().unwrap_or("?"),
@@ -818,7 +872,11 @@ impl SyncEngine {
     ///   之前用 `action.file_id` 取键 → `continue` 跳过 → DB 永不记录 + cloud_tree 不更新
     ///   → 下轮 watcher cycle 误判为「本地新增」重复上传，或「云端已删除」误删本地。
     /// - 之前 `local_mtime/size` 写死 None → `is_local_changed` 恒 true → 每轮重传。
-    pub fn apply_results(&self, actions: &[crate::sync::state::SyncAction], results: &[crate::sync::state::ActionResult]) {
+    pub fn apply_results(
+        &self,
+        actions: &[crate::sync::state::SyncAction],
+        results: &[crate::sync::state::ActionResult],
+    ) {
         use crate::sync::state::SyncActionType;
 
         // 1. 防振荡维护 + cloud_tree/path_to_id 回写
@@ -827,7 +885,9 @@ impl SyncEngine {
             let mut ct = self.cloud_tree.lock();
             let mut p2i = self.path_to_id.lock();
             for (action, result) in actions.iter().zip(results.iter()) {
-                let Some(rel) = &action.relative_path else { continue };
+                let Some(rel) = &action.relative_path else {
+                    continue;
+                };
                 if result.success && action.action_type == SyncActionType::DeleteFromCloud {
                     // 云端已删 → 记入防振荡集，并从 cloud_tree/path_to_id 移除
                     rdp.insert(rel.clone());
@@ -851,15 +911,21 @@ impl SyncEngine {
         // 2. 更新 DB（对齐 dart _updateDbFromResults：用执行结果回写 fileId/元数据/真实 mtime）
         let conn = self.db.lock();
         for (action, result) in actions.iter().zip(results.iter()) {
-            let Some(rel) = &action.relative_path else { continue };
+            let Some(rel) = &action.relative_path else {
+                continue;
+            };
 
             // 删除/备份动作成功 → 清 DB 记录（按 local_path；file_id 可选，覆盖"双方都删清理"file_id=None 场景）
             // BackupBeforeCloudDelete：原文件改名走，原路径腾空 + 云端已删 → 同样清掉原 DB 记录，
             // 让下轮该路径「全缺席」无动作；副本是全新路径，下轮正常 Upload。
-            if result.success && matches!(
-                action.action_type,
-                SyncActionType::DeleteFromCloud | SyncActionType::DeleteFromLocal | SyncActionType::BackupBeforeCloudDelete
-            ) {
+            if result.success
+                && matches!(
+                    action.action_type,
+                    SyncActionType::DeleteFromCloud
+                        | SyncActionType::DeleteFromLocal
+                        | SyncActionType::BackupBeforeCloudDelete
+                )
+            {
                 let fid = action.file_id.as_deref().unwrap_or("");
                 let _ = conn.execute(
                     "DELETE FROM sync_items WHERE local_path=?1 AND (?2='' OR file_id=?2)",
@@ -879,7 +945,8 @@ impl SyncEngine {
                             rusqlite::params![rel, format!("{}%", prefix)],
                         );
                         // 从 cloud_tree / path_to_id 移除整个子树
-                        let to_remove: Vec<String> = ct.keys()
+                        let to_remove: Vec<String> = ct
+                            .keys()
                             .filter(|k| *k == rel || k.starts_with(&prefix))
                             .cloned()
                             .collect();
@@ -939,12 +1006,17 @@ impl SyncEngine {
             // 读取本地真实 mtime/size（对齐 dart _updateDbFromResults 从本地文件 stat）。
             // 写死 None 会导致 is_local_changed 恒 true（db.local_mtime.is_none()），每轮重传。
             let (local_mtime, local_size) = match &action.local_path {
-                Some(p) => std::fs::metadata(p).ok().map(|m| {
-                    let mt = m.modified().ok()
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map(|d| d.as_millis() as i64);
-                    (mt, Some(m.len() as i64))
-                }).unwrap_or((None, None)),
+                Some(p) => std::fs::metadata(p)
+                    .ok()
+                    .map(|m| {
+                        let mt = m
+                            .modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_millis() as i64);
+                        (mt, Some(m.len() as i64))
+                    })
+                    .unwrap_or((None, None)),
                 None => (None, None),
             };
 
@@ -970,22 +1042,30 @@ impl SyncEngine {
             }
 
             // upsert（对齐 dart insertOnConflictUpdate）
-            let _ = repository::upsert(&conn, &repository::SyncItem {
-                file_id,
-                local_path: rel.clone(),
-                parent_folder_id: action.parent_file_id.clone(),
-                name: rel.rsplit('/').next().unwrap_or(rel).to_string(),
-                is_folder: matches!(action.action_type, SyncActionType::CreateFolder),
-                size: cloud_file.map(|f| f.size).unwrap_or(0),
-                local_size,
-                sha256: None,
-                local_mtime,
-                cloud_edited_time: cloud_file.and_then(|f| f.edited_time.map(|t| t.timestamp_millis())),
-                last_sync_time: Some(chrono::Utc::now().timestamp_millis()),
-                status,
-                // 成功时清空 error_message（Skip 收敛等场景 result 可能带 reason，但已同步不应残留错误）
-                error_message: if result.success { None } else { result.error_message.clone() },
-            });
+            let _ = repository::upsert(
+                &conn,
+                &repository::SyncItem {
+                    file_id,
+                    local_path: rel.clone(),
+                    parent_folder_id: action.parent_file_id.clone(),
+                    name: rel.rsplit('/').next().unwrap_or(rel).to_string(),
+                    is_folder: matches!(action.action_type, SyncActionType::CreateFolder),
+                    size: cloud_file.map(|f| f.size).unwrap_or(0),
+                    local_size,
+                    sha256: None,
+                    local_mtime,
+                    cloud_edited_time: cloud_file
+                        .and_then(|f| f.edited_time.map(|t| t.timestamp_millis())),
+                    last_sync_time: Some(chrono::Utc::now().timestamp_millis()),
+                    status,
+                    // 成功时清空 error_message（Skip 收敛等场景 result 可能带 reason，但已同步不应残留错误）
+                    error_message: if result.success {
+                        None
+                    } else {
+                        result.error_message.clone()
+                    },
+                },
+            );
         }
         drop(conn);
     }
@@ -1028,10 +1108,13 @@ impl SyncEngine {
                 repository::sync_status::SYNCED
             };
             // 尝试从 xattr 获取 fileId（占位符有 xattr）
-            let file_id = std::fs::metadata(&entry.absolute_path).ok()
+            let file_id = std::fs::metadata(&entry.absolute_path)
+                .ok()
                 .and_then(|_| {
                     use crate::mount::manager::XATTR_FILE_ID;
-                    xattr::get(&entry.absolute_path, XATTR_FILE_ID).ok().flatten()
+                    xattr::get(&entry.absolute_path, XATTR_FILE_ID)
+                        .ok()
+                        .flatten()
                         .and_then(|b| String::from_utf8(b).ok())
                 })
                 .unwrap_or_default();
@@ -1053,21 +1136,33 @@ impl SyncEngine {
                     continue;
                 }
             }
-            let _ = repository::upsert(&conn, &repository::SyncItem {
-                file_id,
-                local_path: rel.clone(),
-                parent_folder_id: None,
-                name: entry.relative_path.rsplit('/').next().unwrap_or(&entry.relative_path).to_string(),
-                is_folder: entry.is_folder,
-                size: 0,
-                local_size: if entry.is_placeholder { None } else { Some(entry.size as i64) },
-                sha256: None,
-                local_mtime: Some(entry.mtime),
-                cloud_edited_time: None,
-                last_sync_time: Some(chrono::Utc::now().timestamp_millis()),
-                status,
-                error_message: None,
-            });
+            let _ = repository::upsert(
+                &conn,
+                &repository::SyncItem {
+                    file_id,
+                    local_path: rel.clone(),
+                    parent_folder_id: None,
+                    name: entry
+                        .relative_path
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(&entry.relative_path)
+                        .to_string(),
+                    is_folder: entry.is_folder,
+                    size: 0,
+                    local_size: if entry.is_placeholder {
+                        None
+                    } else {
+                        Some(entry.size as i64)
+                    },
+                    sha256: None,
+                    local_mtime: Some(entry.mtime),
+                    cloud_edited_time: None,
+                    last_sync_time: Some(chrono::Utc::now().timestamp_millis()),
+                    status,
+                    error_message: None,
+                },
+            );
         }
         drop(conn);
     }
@@ -1080,27 +1175,43 @@ impl SyncEngine {
         let db = self.db.lock();
         // 先收集全体 DB 记录（按 fileId 索引）
         let db_by_id: std::collections::HashMap<String, crate::data::repository::SyncItem> =
-            repository::load_all(&db).unwrap_or_default().into_iter()
+            repository::load_all(&db)
+                .unwrap_or_default()
+                .into_iter()
                 .filter(|r| !r.file_id.is_empty())
                 .map(|r| (r.file_id.clone(), r))
                 .collect();
         drop(db);
 
         let ct = self.cloud_tree.lock();
-        let mount_dir = crate::core::paths::expand_tilde(&self.mount_dir.lock().clone().unwrap_or_default());
+        let mount_dir =
+            crate::core::paths::expand_tilde(&self.mount_dir.lock().clone().unwrap_or_default());
         for action in actions.iter_mut() {
-            if action.action_type != crate::sync::state::SyncActionType::Upload || action.file_id.is_some() {
+            if action.action_type != crate::sync::state::SyncActionType::Upload
+                || action.file_id.is_some()
+            {
                 continue;
             }
-            let local_path = match &action.local_path { Some(p) => std::path::PathBuf::from(p), None => continue };
+            let local_path = match &action.local_path {
+                Some(p) => std::path::PathBuf::from(p),
+                None => continue,
+            };
             let xattr_id = std::fs::metadata(&local_path).ok().and_then(|_| {
-                xattr::get(&local_path, XATTR_FILE_ID).ok().flatten()
+                xattr::get(&local_path, XATTR_FILE_ID)
+                    .ok()
+                    .flatten()
                     .and_then(|b| String::from_utf8(b).ok())
             });
             let Some(fid) = xattr_id else { continue };
-            let Some(old_record) = db_by_id.get(&fid) else { continue };
-            if Some(&old_record.local_path) == action.relative_path.as_ref() { continue; }
-            if !ct.contains_key(&old_record.local_path) { continue; }
+            let Some(old_record) = db_by_id.get(&fid) else {
+                continue;
+            };
+            if Some(&old_record.local_path) == action.relative_path.as_ref() {
+                continue;
+            }
+            if !ct.contains_key(&old_record.local_path) {
+                continue;
+            }
             // 旧文件仍在本地 → 复制（非改名）：新文件应作为全新上传，
             // 不能复用旧 fileId 走 update/rename 路径（否则云端文件被移动/覆盖）。
             // 同时清除新文件上的旧 xattr fileId，避免下轮又被误判为改名。
@@ -1116,7 +1227,10 @@ impl SyncEngine {
 
             action.file_id = Some(fid.clone());
             if let Some(cloud_file) = ct.get(&old_record.local_path) {
-                action.parent_file_id = cloud_file.parent_folder.as_ref().and_then(|v| v.first().cloned());
+                action.parent_file_id = cloud_file
+                    .parent_folder
+                    .as_ref()
+                    .and_then(|v| v.first().cloned());
             }
             action.reason = Some(format!(
                 "改名检测：{} → {}（fileId={}，先于内容同步）",
@@ -1133,7 +1247,9 @@ impl SyncEngine {
     fn update_and_push_state(&self) {
         let conn = self.db.lock();
         let total: u64 = conn
-            .query_row("SELECT COUNT(*) FROM sync_items", [], |r| r.get::<_, i64>(0))
+            .query_row("SELECT COUNT(*) FROM sync_items", [], |r| {
+                r.get::<_, i64>(0)
+            })
             .unwrap_or(0) as u64;
         let failed: u64 = conn
             .query_row(
@@ -1152,20 +1268,27 @@ impl SyncEngine {
         let uploading: u64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM transfer_queue WHERE state=?1 AND direction=?2",
-                params![repository::transfer_state::RUNNING, repository::transfer_direction::UPLOAD],
+                params![
+                    repository::transfer_state::RUNNING,
+                    repository::transfer_direction::UPLOAD
+                ],
                 |r| r.get::<_, i64>(0),
             )
             .unwrap_or(0) as u64;
         let downloading: u64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM transfer_queue WHERE state=?1 AND direction IN (?2, ?3)",
-                params![repository::transfer_state::RUNNING, repository::transfer_direction::DOWNLOAD, repository::transfer_direction::DOWNLOAD_UPDATE],
+                params![
+                    repository::transfer_state::RUNNING,
+                    repository::transfer_direction::DOWNLOAD,
+                    repository::transfer_direction::DOWNLOAD_UPDATE
+                ],
                 |r| r.get::<_, i64>(0),
             )
             .unwrap_or(0) as u64;
-        let failed_items: Vec<FailedItem> = match conn.prepare(
-            "SELECT local_path, error_message FROM sync_items WHERE status=?1 LIMIT 20",
-        ) {
+        let failed_items: Vec<FailedItem> = match conn
+            .prepare("SELECT local_path, error_message FROM sync_items WHERE status=?1 LIMIT 20")
+        {
             Ok(mut stmt) => stmt
                 .query_map(params![repository::sync_status::FAILED], |row| {
                     Ok(FailedItem {
@@ -1207,14 +1330,21 @@ impl SyncEngine {
             let uploading: u64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM transfer_queue WHERE state=?1 AND direction=?2",
-                    params![repository::transfer_state::RUNNING, repository::transfer_direction::UPLOAD],
+                    params![
+                        repository::transfer_state::RUNNING,
+                        repository::transfer_direction::UPLOAD
+                    ],
                     |r| r.get::<_, i64>(0),
                 )
                 .unwrap_or(0) as u64;
             let downloading: u64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM transfer_queue WHERE state=?1 AND direction IN (?2, ?3)",
-                    params![repository::transfer_state::RUNNING, repository::transfer_direction::DOWNLOAD, repository::transfer_direction::DOWNLOAD_UPDATE],
+                    params![
+                        repository::transfer_state::RUNNING,
+                        repository::transfer_direction::DOWNLOAD,
+                        repository::transfer_direction::DOWNLOAD_UPDATE
+                    ],
                     |r| r.get::<_, i64>(0),
                 )
                 .unwrap_or(0) as u64;
@@ -1229,23 +1359,44 @@ impl SyncEngine {
 
     async fn scan_local(&self) -> HashMap<String, LocalFileEntry> {
         match &self.mount {
-            Some(m) => m.scan_local(&self.skip_patterns).await.unwrap_or_default().into_iter()
-                .map(|e| (e.relative_path.clone(), e)).collect(),
+            Some(m) => m
+                .scan_local(&self.skip_patterns)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|e| (e.relative_path.clone(), e))
+                .collect(),
             None => HashMap::new(),
         }
     }
 
     fn load_db_snapshot(&self) -> HashMap<String, DbSnapshotEntry> {
         let conn = self.db.lock();
-        repository::load_all(&conn).unwrap_or_default().into_iter()
-            .map(|r| (r.local_path.clone(), DbSnapshotEntry { file_id: r.file_id, local_mtime: r.local_mtime, local_size: r.local_size, cloud_edited_time: r.cloud_edited_time, status: r.status, is_folder: r.is_folder }))
+        repository::load_all(&conn)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|r| {
+                (
+                    r.local_path.clone(),
+                    DbSnapshotEntry {
+                        file_id: r.file_id,
+                        local_mtime: r.local_mtime,
+                        local_size: r.local_size,
+                        cloud_edited_time: r.cloud_edited_time,
+                        status: r.status,
+                        is_folder: r.is_folder,
+                    },
+                )
+            })
             .collect()
     }
 
     /// 安全释放校验。
     pub fn can_safely_free_up(&self, rel_path: &str, file_id: &str) -> FreeUpCheckResult {
         let tree = self.cloud_tree.lock();
-        if !tree.is_empty() && !tree.contains_key(rel_path) { return FreeUpCheckResult::NotInCloud; }
+        if !tree.is_empty() && !tree.contains_key(rel_path) {
+            return FreeUpCheckResult::NotInCloud;
+        }
         drop(tree);
         let conn = self.db.lock();
         if let Ok(Some(record)) = repository::find_by_file_id(&conn, file_id) {
@@ -1256,7 +1407,11 @@ impl SyncEngine {
             let Ok(meta) = std::fs::metadata(path) else {
                 return FreeUpCheckResult::NotSynced;
             };
-            let mtime = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as i64);
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as i64);
             if record.local_mtime != mtime || record.local_size != Some(meta.len() as i64) {
                 FreeUpCheckResult::NotSynced
             } else {
@@ -1300,7 +1455,8 @@ impl SyncEngine {
             let _ = self.state_tx.send(st);
         }
         // 无论成功失败都要复位 is_indexing，避免 BFS 出错后状态条卡在索引态
-        let refresh_result = cloud_tree::refresh_cloud_tree(&self.files_api, &self.mount, &abs_dir).await;
+        let refresh_result =
+            cloud_tree::refresh_cloud_tree(&self.files_api, &self.mount, &abs_dir).await;
         {
             let mut st = self.state.lock().clone();
             st.is_indexing = false;
@@ -1395,7 +1551,11 @@ impl SyncEngine {
         let consecutive = self.incremental_since_full.load(Ordering::Relaxed);
         let force_full = consecutive >= INCREMENTAL_FORCED_FULL_THRESHOLD;
         if force_full {
-            tracing::info!(consecutive, threshold = INCREMENTAL_FORCED_FULL_THRESHOLD, "连续增量达阈值，强制全量 BFS 纠偏");
+            tracing::info!(
+                consecutive,
+                threshold = INCREMENTAL_FORCED_FULL_THRESHOLD,
+                "连续增量达阈值，强制全量 BFS 纠偏"
+            );
         }
 
         if !force_full {
@@ -1404,7 +1564,10 @@ impl SyncEngine {
                 self.set_phase("querying-changes");
                 match self.changes_api.list_all_changes(Some(cursor)).await {
                     Ok((changes, new_cursor)) => {
-                        tracing::info!(count = changes.len(), "增量 changes 拉取成功，merge 进 cloud_tree");
+                        tracing::info!(
+                            count = changes.len(),
+                            "增量 changes 拉取成功，merge 进 cloud_tree"
+                        );
                         let (hit, resolved, skipped) = self.merge_changes_into_cloud_tree(&changes);
                         // 若全部变更都无法解析（如从回收站恢复后 parent_folder 缺失），
                         // 增量 merge 完全无效 → 回退全量 BFS，确保 cloud_tree 正确更新。
@@ -1434,7 +1597,8 @@ impl SyncEngine {
 
         // 全量 BFS 路径（无 cursor / 增量失败 / 强制纠偏）
         self.set_phase("indexing-auto-full");
-        let (tree, p2i, root) = cloud_tree::refresh_cloud_tree(&self.files_api, &self.mount, abs_dir).await?;
+        let (tree, p2i, root) =
+            cloud_tree::refresh_cloud_tree(&self.files_api, &self.mount, abs_dir).await?;
         *self.cloud_tree.lock() = tree;
         *self.path_to_id.lock() = p2i;
         *self.root_folder_id.lock() = root;
@@ -1459,7 +1623,9 @@ impl SyncEngine {
             Err(_) => return,
         };
         // 已有 cursor 则不重复初始化
-        if cursor_path.exists() { return; }
+        if cursor_path.exists() {
+            return;
+        }
         // 取初始游标：华为 /changes 强制要求 cursor，初始 cursor 必须先调 getStartCursor 获取。
         // 失败（如接口不可用）静默，首次自动刷新会因无 cursor 走全量回退，不报错。
         match self.changes_api.get_start_cursor().await {
@@ -1467,10 +1633,11 @@ impl SyncEngine {
                 let _ = std::fs::write(&cursor_path, &c);
                 tracing::info!(cursor = %c, "已建立 changes 增量基线 cursor");
             }
-            Err(e) => tracing::debug!(error = %e, "取 changes startCursor 失败（忽略，首次自动刷新会全量回退）"),
+            Err(e) => {
+                tracing::debug!(error = %e, "取 changes startCursor 失败（忽略，首次自动刷新会全量回退）")
+            }
         }
     }
-
 
     /// 把增量 changes merge 进内存 cloud_tree + path_to_id（按 fileId 反查 rel_path 增删改）。
     ///
@@ -1482,7 +1649,10 @@ impl SyncEngine {
     /// 已知局限：
     /// - 改名/移动（已知 id 但 rel_path 已变）：会按旧 rel_path 更新，与真实路径不一致，
     ///   靠定期强制全量收敛（INCREMENTAL_FORCED_FULL_THRESHOLD）
-    fn merge_changes_into_cloud_tree(&self, changes: &[crate::drive::changes_api::Change]) -> (u32, u32, u32) {
+    fn merge_changes_into_cloud_tree(
+        &self,
+        changes: &[crate::drive::changes_api::Change],
+    ) -> (u32, u32, u32) {
         use crate::drive::changes_api::ChangeKind;
         // 先读 path_to_id 建 fileId→rel_path 反查表
         let mut id_to_path: std::collections::HashMap<String, String> = {
@@ -1529,7 +1699,10 @@ impl SyncEngine {
                 let mut still_unknown: Vec<&crate::drive::changes_api::Change> = Vec::new();
                 for c in unknowns {
                     // 从 parent_folder[0] 查找父目录路径
-                    let parent_id = c.file.parent_folder.as_ref()
+                    let parent_id = c
+                        .file
+                        .parent_folder
+                        .as_ref()
                         .and_then(|v| v.first())
                         .filter(|s| !s.is_empty());
                     let Some(parent_rel) = parent_id.and_then(|pid| id_to_path.get(pid)) else {
@@ -1558,7 +1731,10 @@ impl SyncEngine {
         }
 
         tracing::info!(
-            total = changes.len(), hit, resolved_new, skip,
+            total = changes.len(),
+            hit,
+            resolved_new,
+            skip,
             "增量 merge 完成（hit=已知更新, resolved=新文件路径解析, skip=仍未知跳过）"
         );
         (hit, resolved_new, skip)
@@ -1579,7 +1755,9 @@ impl SyncEngine {
             if a.action_type != crate::sync::state::SyncActionType::DeleteFromCloud {
                 continue;
             }
-            let Some(rel) = &a.relative_path else { continue };
+            let Some(rel) = &a.relative_path else {
+                continue;
+            };
             let abs = mount_dir.join(rel);
             if abs.exists() {
                 let meta = std::fs::metadata(&abs).ok();
@@ -1644,28 +1822,47 @@ impl SyncEngine {
         {
             let conn = self.db.lock();
             // 对齐 dart：重置为 synced(0) 而非 cloudOnly(1)，让 diff 重新评估
-            let _ = conn.execute("UPDATE sync_items SET status=?1 WHERE status=?2", rusqlite::params![repository::sync_status::SYNCED, repository::sync_status::FAILED]);
+            let _ = conn.execute(
+                "UPDATE sync_items SET status=?1 WHERE status=?2",
+                rusqlite::params![
+                    repository::sync_status::SYNCED,
+                    repository::sync_status::FAILED
+                ],
+            );
         }
         self.run_sync_cycle("retry-failed").await
     }
 }
 
 /// 防振荡过滤。
-fn filter_anti_oscillation(actions: &mut Vec<crate::sync::state::SyncAction>, rdp: &HashSet<String>) {
+fn filter_anti_oscillation(
+    actions: &mut Vec<crate::sync::state::SyncAction>,
+    rdp: &HashSet<String>,
+) {
     use crate::sync::state::SyncActionType;
     actions.retain(|a| {
-        let rel = match &a.relative_path { Some(p) => p, None => return true };
+        let rel = match &a.relative_path {
+            Some(p) => p,
+            None => return true,
+        };
         !rdp.contains(rel) || matches!(a.action_type, SyncActionType::DeleteFromCloud)
     });
 }
 
 /// 填充 parent_file_id。
-fn fill_parent_file_ids(actions: &mut [crate::sync::state::SyncAction], p2i: &HashMap<String, String>) {
+fn fill_parent_file_ids(
+    actions: &mut [crate::sync::state::SyncAction],
+    p2i: &HashMap<String, String>,
+) {
     for a in actions {
-        if a.parent_file_id.is_some() || a.relative_path.is_none() { continue; }
+        if a.parent_file_id.is_some() || a.relative_path.is_none() {
+            continue;
+        }
         let rel = a.relative_path.as_ref().unwrap();
         if let Some(pos) = rel.rfind('/') {
-            if let Some(pid) = p2i.get(&rel[..pos]) { a.parent_file_id = Some(pid.clone()); }
+            if let Some(pid) = p2i.get(&rel[..pos]) {
+                a.parent_file_id = Some(pid.clone());
+            }
         }
     }
 }
@@ -1704,8 +1901,10 @@ fn add_rescue_folder_recreations(
     }
 
     // 已有动作的路径（owned，避免与下方 push 的可变借用冲突）
-    let existing: std::collections::HashSet<String> =
-        actions.iter().filter_map(|a| a.relative_path.clone()).collect();
+    let existing: std::collections::HashSet<String> = actions
+        .iter()
+        .filter_map(|a| a.relative_path.clone())
+        .collect();
 
     let mut to_recreate: std::collections::HashSet<String> = std::collections::HashSet::new();
     for path in &rescue_paths {
@@ -1739,7 +1938,9 @@ fn add_rescue_folder_recreations(
     let mut folders: Vec<String> = to_recreate.into_iter().collect();
     folders.sort_by_key(|p| p.matches('/').count());
     for rel in folders {
-        let Some(entry) = snapshot.local.get(&rel) else { continue };
+        let Some(entry) = snapshot.local.get(&rel) else {
+            continue;
+        };
         actions.push(SyncAction {
             action_type: SyncActionType::CreateFolder,
             relative_path: Some(rel.clone()),
@@ -1789,11 +1990,12 @@ fn dedupe_directory_deletes(
         if a.action_type != SyncActionType::DeleteFromCloud {
             return true;
         }
-        let Some(rel) = &a.relative_path else { return true };
+        let Some(rel) = &a.relative_path else {
+            return true;
+        };
         // 检查是否有祖先目录也在删除列表中
-        let has_ancestor = (0..rel.len()).any(|i| {
-            rel.as_bytes().get(i) == Some(&b'/') && ancestor_set.contains(&rel[..i])
-        });
+        let has_ancestor = (0..rel.len())
+            .any(|i| rel.as_bytes().get(i) == Some(&b'/') && ancestor_set.contains(&rel[..i]));
         if has_ancestor {
             skipped_rel_paths.push(rel.clone());
             return false;
@@ -1829,7 +2031,9 @@ fn dedupe_directory_deletes(
     let mut dir_files: std::collections::HashMap<String, Vec<String>> =
         std::collections::HashMap::new();
     for a in &remaining_deletes {
-        let Some(rel) = &a.relative_path else { continue };
+        let Some(rel) = &a.relative_path else {
+            continue;
+        };
         // 跳过已经是目录的删除（在上一步已保留）
         if let Some(entry) = cloud_tree.get(rel.as_str()) {
             if entry.is_folder() {
@@ -1842,7 +2046,10 @@ fn dedupe_directory_deletes(
             parent = &parent[..pos];
             if let Some(entry) = cloud_tree.get(parent) {
                 if entry.is_folder() {
-                    dir_files.entry(parent.to_string()).or_default().push(rel.clone());
+                    dir_files
+                        .entry(parent.to_string())
+                        .or_default()
+                        .push(rel.clone());
                     break;
                 }
             }
@@ -1853,7 +2060,8 @@ fn dedupe_directory_deletes(
     let mut merged = 0usize;
     for (dir, deleting) in &dir_files {
         // 统计 cloud_tree 中该目录下的文件总数（不含子目录）
-        let total_in_cloud = cloud_tree.keys()
+        let total_in_cloud = cloud_tree
+            .keys()
             .filter(|k| {
                 k.starts_with(&format!("{}/", dir))
                     && !k[dir.len() + 1..].contains('/') // 仅直接子项
@@ -1871,7 +2079,9 @@ fn dedupe_directory_deletes(
             if a.action_type != SyncActionType::DeleteFromCloud {
                 return true;
             }
-            let Some(rel) = &a.relative_path else { return true };
+            let Some(rel) = &a.relative_path else {
+                return true;
+            };
             if rel == dir {
                 return true; // 保留目录自身
             }
@@ -1906,7 +2116,10 @@ fn dedupe_directory_deletes(
                     action_type: SyncActionType::DeleteFromCloud,
                     relative_path: Some(dir.clone()),
                     file_id: Some(dir_entry.id.clone()),
-                    parent_file_id: dir_entry.parent_folder.as_ref().and_then(|v| v.first().cloned()),
+                    parent_file_id: dir_entry
+                        .parent_folder
+                        .as_ref()
+                        .and_then(|v| v.first().cloned()),
                     local_path: None,
                     cloud_file: None,
                     reason: Some(format!(
@@ -1938,9 +2151,7 @@ fn dedupe_directory_deletes(
 /// §2.13 目录删除保护：若云端目录下有文件被 BackupBeforeCloudDelete（本地修改过
 /// 需要备份保存），则移除该目录的 DeleteFromLocal，保留目录作为备份副本的栖身之所。
 /// 其余无本地修改的目录正常删除。
-fn preserve_dirs_with_pending_backups(
-    actions: &mut Vec<crate::sync::state::SyncAction>,
-) {
+fn preserve_dirs_with_pending_backups(actions: &mut Vec<crate::sync::state::SyncAction>) {
     use crate::sync::state::SyncActionType;
     // 收集所有 BackupBeforeCloudDelete 的目标路径（owned，避免 borrow 冲突）
     let backup_paths: std::collections::HashSet<String> = actions
@@ -1957,11 +2168,13 @@ fn preserve_dirs_with_pending_backups(
         if a.action_type != SyncActionType::DeleteFromLocal {
             return true;
         }
-        let Some(rel) = &a.relative_path else { return true };
+        let Some(rel) = &a.relative_path else {
+            return true;
+        };
         // 检查是否有 BackupBeforeCloudDelete 的文件在此目录下
-        let has_backup_child = backup_paths.iter().any(|bp| {
-            bp.starts_with(&format!("{}/", rel))
-        });
+        let has_backup_child = backup_paths
+            .iter()
+            .any(|bp| bp.starts_with(&format!("{}/", rel)));
         if has_backup_child {
             tracing::info!(
                 dir = %rel,
@@ -1973,16 +2186,18 @@ fn preserve_dirs_with_pending_backups(
         true
     });
     if preserved > 0 {
-        tracing::info!(preserved, "目录删除保护：保留 {} 个有备份子文件的目录", preserved);
+        tracing::info!(
+            preserved,
+            "目录删除保护：保留 {} 个有备份子文件的目录",
+            preserved
+        );
     }
 }
 
 /// DeleteFromLocal 祖先去重：若目录自身已在 DeleteFromLocal 列表中，
 /// 则其子孙的文件删除动作是多余的（目录 delete 会级联清空）。移除它们，
 /// 避免并发执行时报 "No such file or directory"。
-fn dedupe_local_descendants(
-    actions: &mut Vec<crate::sync::state::SyncAction>,
-) {
+fn dedupe_local_descendants(actions: &mut Vec<crate::sync::state::SyncAction>) {
     use crate::sync::state::SyncActionType;
     // 收集所有 DeleteFromLocal 的路径（owned，避免 borrow 冲突）
     let delete_paths: Vec<String> = actions
@@ -1990,16 +2205,18 @@ fn dedupe_local_descendants(
         .filter(|a| a.action_type == SyncActionType::DeleteFromLocal)
         .filter_map(|a| a.relative_path.clone())
         .collect();
-    let ancestor_set: std::collections::HashSet<&str> = delete_paths.iter().map(|s| s.as_str()).collect();
+    let ancestor_set: std::collections::HashSet<&str> =
+        delete_paths.iter().map(|s| s.as_str()).collect();
     let mut skipped = 0usize;
     actions.retain(|a| {
         if a.action_type != SyncActionType::DeleteFromLocal {
             return true;
         }
-        let Some(rel) = &a.relative_path else { return true };
-        let has_ancestor = (0..rel.len()).any(|i| {
-            rel.as_bytes().get(i) == Some(&b'/') && ancestor_set.contains(&rel[..i])
-        });
+        let Some(rel) = &a.relative_path else {
+            return true;
+        };
+        let has_ancestor = (0..rel.len())
+            .any(|i| rel.as_bytes().get(i) == Some(&b'/') && ancestor_set.contains(&rel[..i]));
         if has_ancestor {
             skipped += 1;
             return false;
@@ -2007,7 +2224,11 @@ fn dedupe_local_descendants(
         true
     });
     if skipped > 0 {
-        tracing::info!(skipped, "DeleteFromLocal 祖先去重：跳过 {} 个被子目录删除覆盖的文件", skipped);
+        tracing::info!(
+            skipped,
+            "DeleteFromLocal 祖先去重：跳过 {} 个被子目录删除覆盖的文件",
+            skipped
+        );
     }
 }
 
@@ -2027,7 +2248,10 @@ mod tests {
 
     /// 构造测试用引擎：in-memory SQLite（含 sync_items 表）+ 桩 API。
     /// apply_results 不触网，故 API Arc 仅需可构造。
-    fn build_engine() -> (SyncEngine, std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>) {
+    fn build_engine() -> (
+        SyncEngine,
+        std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    ) {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE sync_items (
@@ -2043,7 +2267,8 @@ mod tests {
         let auth = std::sync::Arc::new(AuthService::new());
         let client = std::sync::Arc::new(DriveClient::new(auth));
         let files_api = std::sync::Arc::new(FilesApi::new(client.clone()));
-        let changes_api = std::sync::Arc::new(crate::drive::changes_api::ChangesApi::new(client.clone()));
+        let changes_api =
+            std::sync::Arc::new(crate::drive::changes_api::ChangesApi::new(client.clone()));
         let download_api = std::sync::Arc::new(DownloadApi::new(client.clone()));
         let upload_api = std::sync::Arc::new(UploadApi::new(client));
         let eng = SyncEngine::new(
@@ -2106,7 +2331,10 @@ mod tests {
             .unwrap();
         assert_eq!(row.0, "cloud-id-1", "DB fileId 应取自 result.cloud_file");
         assert_eq!(row.1, repository::sync_status::SYNCED);
-        assert!(row.2.is_some(), "local_mtime 必须写入真实值（None 会致每轮重传）");
+        assert!(
+            row.2.is_some(),
+            "local_mtime 必须写入真实值（None 会致每轮重传）"
+        );
         assert_eq!(row.3, Some(5));
         drop(conn);
 
@@ -2125,7 +2353,10 @@ mod tests {
         // 预置 cloud_tree / path_to_id / DB 记录
         eng.cloud_tree_insert(
             "old.txt".into(),
-            DriveFile { id: "c-old".into(), ..Default::default() },
+            DriveFile {
+                id: "c-old".into(),
+                ..Default::default()
+            },
         );
         eng.path_to_id_insert("old.txt".into(), "c-old".into());
         {
@@ -2214,10 +2445,16 @@ mod tests {
         p2i.insert("NEWDIR/sub".to_string(), "folder-id-2".to_string());
 
         super::fill_parent_file_ids(&mut actions, &p2i);
-        assert_eq!(actions[0].parent_file_id.as_deref(), Some("folder-id-1"),
-            "NEWDIR/file.txt 的 parent 应指向新建目录 NEWDIR 的 id");
-        assert_eq!(actions[1].parent_file_id.as_deref(), Some("folder-id-2"),
-            "NEWDIR/sub/deep.txt 的 parent 应指向新建子目录 NEWDIR/sub 的 id");
+        assert_eq!(
+            actions[0].parent_file_id.as_deref(),
+            Some("folder-id-1"),
+            "NEWDIR/file.txt 的 parent 应指向新建目录 NEWDIR 的 id"
+        );
+        assert_eq!(
+            actions[1].parent_file_id.as_deref(),
+            Some("folder-id-2"),
+            "NEWDIR/sub/deep.txt 的 parent 应指向新建子目录 NEWDIR/sub 的 id"
+        );
     }
 
     /// 云端删了 B、B/sub，本地改过 B/sub/f2.txt → BackupBeforeCloudDelete。
@@ -2232,20 +2469,34 @@ mod tests {
         let mk_folder = |rel: &str| LocalFileEntry {
             absolute_path: PathBuf::from(format!("/mount/{rel}")),
             relative_path: rel.into(),
-            size: 0, mtime: 1000, is_folder: true, is_placeholder: false,
+            size: 0,
+            mtime: 1000,
+            is_folder: true,
+            is_placeholder: false,
         };
         let mk_file = |rel: &str, size: u64, mtime: i64| LocalFileEntry {
             absolute_path: PathBuf::from(format!("/mount/{rel}")),
             relative_path: rel.into(),
-            size, mtime, is_folder: false, is_placeholder: false,
+            size,
+            mtime,
+            is_folder: false,
+            is_placeholder: false,
         };
         let mk_db_folder = |fid: &str| DbSnapshotEntry {
-            file_id: fid.into(), local_mtime: None, local_size: None,
-            cloud_edited_time: Some(1000), status: 0, is_folder: true,
+            file_id: fid.into(),
+            local_mtime: None,
+            local_size: None,
+            cloud_edited_time: Some(1000),
+            status: 0,
+            is_folder: true,
         };
         let mk_db_file = |fid: &str, mtime: i64, size: i64| DbSnapshotEntry {
-            file_id: fid.into(), local_mtime: Some(mtime), local_size: Some(size),
-            cloud_edited_time: Some(1000), status: 0, is_folder: false,
+            file_id: fid.into(),
+            local_mtime: Some(mtime),
+            local_size: Some(size),
+            cloud_edited_time: Some(1000),
+            status: 0,
+            is_folder: false,
         };
 
         let mut local = std::collections::HashMap::new();
@@ -2259,7 +2510,10 @@ mod tests {
         db.insert("B/sub/f2.txt".into(), mk_db_file("fid2", 1000, 100)); // db mtime=1000，local=9000
 
         let snapshot = SyncSnapshot {
-            local, cloud: std::collections::HashMap::new(), db, is_startup_resume: false,
+            local,
+            cloud: std::collections::HashMap::new(),
+            db,
+            is_startup_resume: false,
         };
         // 模拟 planner 产出的备份动作
         let mut actions = vec![SyncAction {
@@ -2272,49 +2526,102 @@ mod tests {
             reason: None,
         }];
 
-        super::add_rescue_folder_recreations(&mut actions, &snapshot, &std::collections::HashSet::new());
+        super::add_rescue_folder_recreations(
+            &mut actions,
+            &snapshot,
+            &std::collections::HashSet::new(),
+        );
 
-        let has_create = |rel: &str| actions.iter().any(|a|
-            a.action_type == SyncActionType::CreateFolder && a.relative_path.as_deref() == Some(rel));
+        let has_create = |rel: &str| {
+            actions.iter().any(|a| {
+                a.action_type == SyncActionType::CreateFolder
+                    && a.relative_path.as_deref() == Some(rel)
+            })
+        };
         assert!(has_create("B"), "应为被删祖先目录 B 补 CreateFolder");
-        assert!(has_create("B/sub"), "应为被删祖先目录 B/sub 补 CreateFolder");
-        assert!(actions.iter().any(|a| a.action_type == SyncActionType::BackupBeforeCloudDelete),
-            "原备份动作应保留");
+        assert!(
+            has_create("B/sub"),
+            "应为被删祖先目录 B/sub 补 CreateFolder"
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|a| a.action_type == SyncActionType::BackupBeforeCloudDelete),
+            "原备份动作应保留"
+        );
     }
 
     /// 反例：祖先目录仍在云端（非被删）→ 不应补 CreateFolder。
     #[test]
     fn test_add_rescue_folder_recreations_skips_when_folder_on_cloud() {
+        use crate::drive::models::{DriveFile, FileCategory};
         use crate::mount::manager::LocalFileEntry;
         use crate::sync::planner::{DbSnapshotEntry, SyncSnapshot};
-        use crate::drive::models::{DriveFile, FileCategory};
         use std::path::PathBuf;
 
         let mut local = std::collections::HashMap::new();
-        local.insert("A".into(), LocalFileEntry {
-            absolute_path: PathBuf::from("/mount/A"), relative_path: "A".into(),
-            size: 0, mtime: 1000, is_folder: true, is_placeholder: false,
-        });
-        local.insert("A/f.txt".into(), LocalFileEntry {
-            absolute_path: PathBuf::from("/mount/A/f.txt"), relative_path: "A/f.txt".into(),
-            size: 200, mtime: 9000, is_folder: false, is_placeholder: false,
-        });
+        local.insert(
+            "A".into(),
+            LocalFileEntry {
+                absolute_path: PathBuf::from("/mount/A"),
+                relative_path: "A".into(),
+                size: 0,
+                mtime: 1000,
+                is_folder: true,
+                is_placeholder: false,
+            },
+        );
+        local.insert(
+            "A/f.txt".into(),
+            LocalFileEntry {
+                absolute_path: PathBuf::from("/mount/A/f.txt"),
+                relative_path: "A/f.txt".into(),
+                size: 200,
+                mtime: 9000,
+                is_folder: false,
+                is_placeholder: false,
+            },
+        );
         // A 仍在云端
         let mut cloud = std::collections::HashMap::new();
-        cloud.insert("A".into(), DriveFile {
-            id: "fa".into(), name: "A".into(), category: FileCategory::Folder,
-            ..Default::default()
-        });
+        cloud.insert(
+            "A".into(),
+            DriveFile {
+                id: "fa".into(),
+                name: "A".into(),
+                category: FileCategory::Folder,
+                ..Default::default()
+            },
+        );
         let mut db = std::collections::HashMap::new();
-        db.insert("A".into(), DbSnapshotEntry {
-            file_id: "fa".into(), local_mtime: None, local_size: None,
-            cloud_edited_time: Some(1000), status: 0, is_folder: true,
-        });
-        db.insert("A/f.txt".into(), DbSnapshotEntry {
-            file_id: "fid".into(), local_mtime: Some(1000), local_size: Some(100),
-            cloud_edited_time: Some(1000), status: 0, is_folder: false,
-        });
-        let snapshot = SyncSnapshot { local, cloud, db, is_startup_resume: false };
+        db.insert(
+            "A".into(),
+            DbSnapshotEntry {
+                file_id: "fa".into(),
+                local_mtime: None,
+                local_size: None,
+                cloud_edited_time: Some(1000),
+                status: 0,
+                is_folder: true,
+            },
+        );
+        db.insert(
+            "A/f.txt".into(),
+            DbSnapshotEntry {
+                file_id: "fid".into(),
+                local_mtime: Some(1000),
+                local_size: Some(100),
+                cloud_edited_time: Some(1000),
+                status: 0,
+                is_folder: false,
+            },
+        );
+        let snapshot = SyncSnapshot {
+            local,
+            cloud,
+            db,
+            is_startup_resume: false,
+        };
         let mut actions = vec![SyncAction {
             action_type: SyncActionType::BackupBeforeCloudDelete,
             relative_path: Some("A/f.txt".into()),
@@ -2325,11 +2632,19 @@ mod tests {
             reason: None,
         }];
 
-        super::add_rescue_folder_recreations(&mut actions, &snapshot, &std::collections::HashSet::new());
+        super::add_rescue_folder_recreations(
+            &mut actions,
+            &snapshot,
+            &std::collections::HashSet::new(),
+        );
 
-        assert!(!actions.iter().any(|a|
-            a.action_type == SyncActionType::CreateFolder && a.relative_path.as_deref() == Some("A")),
-            "A 仍在云端 → 不应补建");
+        assert!(
+            !actions
+                .iter()
+                .any(|a| a.action_type == SyncActionType::CreateFolder
+                    && a.relative_path.as_deref() == Some("A")),
+            "A 仍在云端 → 不应补建"
+        );
         assert_eq!(actions.len(), 1, "仅保留原备份动作");
     }
 }

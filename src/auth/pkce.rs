@@ -22,7 +22,11 @@ pub struct PkcePair {
 impl std::fmt::Display for PkcePair {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // 故意隐藏 verifier（对齐 dart toString）
-        write!(f, "PkcePair(challenge={}, verifier=<hidden>)", self.code_challenge)
+        write!(
+            f,
+            "PkcePair(challenge={}, verifier=<hidden>)",
+            self.code_challenge
+        )
     }
 }
 

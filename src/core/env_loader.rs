@@ -96,7 +96,10 @@ mod tests {
     fn test_parse_simple() {
         let mut map = std::collections::HashMap::new();
         parse_env_content("HWCLOUD_CLIENT_SECRET=abc123", &mut map);
-        assert_eq!(map.get("HWCLOUD_CLIENT_SECRET"), Some(&"abc123".to_string()));
+        assert_eq!(
+            map.get("HWCLOUD_CLIENT_SECRET"),
+            Some(&"abc123".to_string())
+        );
     }
 
     #[test]
@@ -109,10 +112,7 @@ mod tests {
     #[test]
     fn test_parse_skips_comments_and_empty() {
         let mut map = std::collections::HashMap::new();
-        parse_env_content(
-            "# comment\n\nexport FOO=bar\nBAZ=qux\n",
-            &mut map,
-        );
+        parse_env_content("# comment\n\nexport FOO=bar\nBAZ=qux\n", &mut map);
         assert_eq!(map.len(), 2);
         assert_eq!(map.get("FOO"), Some(&"bar".to_string()));
         assert_eq!(map.get("BAZ"), Some(&"qux".to_string()));

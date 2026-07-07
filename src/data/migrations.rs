@@ -90,7 +90,12 @@ fn create_all(conn: &Connection) -> AppResult<()> {
 fn upgrade_to_v2(conn: &Connection) -> AppResult<()> {
     add_column_if_missing(conn, "transfer_queue", "server_id", "TEXT")?;
     add_column_if_missing(conn, "transfer_queue", "upload_id", "TEXT")?;
-    add_column_if_missing(conn, "transfer_queue", "resume_offset", "INTEGER NOT NULL DEFAULT 0")?;
+    add_column_if_missing(
+        conn,
+        "transfer_queue",
+        "resume_offset",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
     Ok(())
 }
 
@@ -125,8 +130,10 @@ fn add_column_if_missing(
         found
     };
     if !exists {
-        conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {definition};"))
-            .map_err(|e| AppError::generic(format!("加列失败：{e}")))?;
+        conn.execute_batch(&format!(
+            "ALTER TABLE {table} ADD COLUMN {column} {definition};"
+        ))
+        .map_err(|e| AppError::generic(format!("加列失败：{e}")))?;
     }
     Ok(())
 }

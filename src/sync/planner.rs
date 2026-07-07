@@ -95,7 +95,10 @@ impl SyncPlanner {
                     });
                 }
                 // 启动恢复期 + DELETED tombstone → 跳过（不重建）
-                if db_exists && snap.is_startup_resume && db.unwrap().status == crate::data::repository::sync_status::DELETED {
+                if db_exists
+                    && snap.is_startup_resume
+                    && db.unwrap().status == crate::data::repository::sync_status::DELETED
+                {
                     return None;
                 }
                 // 否则本地缺失 → 创建文件夹
@@ -103,7 +106,11 @@ impl SyncPlanner {
                     action_type: SyncActionType::CreateFolder,
                     relative_path: Some(rel_path.to_string()),
                     file_id: cloud.unwrap().id.clone().into(),
-                    parent_file_id: cloud.unwrap().parent_folder.as_ref().and_then(|v| v.first().cloned()),
+                    parent_file_id: cloud
+                        .unwrap()
+                        .parent_folder
+                        .as_ref()
+                        .and_then(|v| v.first().cloned()),
                     local_path: None,
                     cloud_file: Some(cloud.unwrap().clone()),
                     reason: Some("云端文件夹 → 本地创建".to_string()),
@@ -124,7 +131,11 @@ impl SyncPlanner {
             // ★ pending: 占位项 + 云端已有 → 上次「失败」其实成功（如 308 误判），收敛为已同步。
             // 用 Skip 携带真实 cloud_file：engine 结算时 upsert 真实 fileId + status=SYNCED +
             // 清理 pending 孤儿行。避免重复上传（华为不查重）和 Download 覆盖（cloud_edited_time=None 误判）。
-            if db.unwrap().file_id.starts_with(crate::data::repository::PENDING_FILE_ID_PREFIX) {
+            if db
+                .unwrap()
+                .file_id
+                .starts_with(crate::data::repository::PENDING_FILE_ID_PREFIX)
+            {
                 return Some(SyncAction {
                     action_type: SyncActionType::Skip,
                     relative_path: Some(rel_path.to_string()),
@@ -132,7 +143,9 @@ impl SyncPlanner {
                     parent_file_id: None,
                     local_path: None,
                     cloud_file: Some(cloud.unwrap().clone()),
-                    reason: Some("pending 占位项发现云端已有 → 收敛为已同步（上次失败实为成功）".to_string()),
+                    reason: Some(
+                        "pending 占位项发现云端已有 → 收敛为已同步（上次失败实为成功）".to_string(),
+                    ),
                 });
             }
             let local_changed = is_local_changed(local.unwrap(), db.unwrap());
@@ -191,13 +204,19 @@ impl SyncPlanner {
                 // ★ pending: 占位项（新增上传失败 / retry 后仍未成功）→ 重新计划上传。
                 // 绝不能走下面的 BackupBeforeCloudDelete / DeleteFromLocal，否则会删本地文件（数据丢失）。
                 // 占位 fileId 无真实云端对应，云端无此文件是「还没传上去」而非「云端删了」。
-                if db.unwrap().file_id.starts_with(crate::data::repository::PENDING_FILE_ID_PREFIX) {
+                if db
+                    .unwrap()
+                    .file_id
+                    .starts_with(crate::data::repository::PENDING_FILE_ID_PREFIX)
+                {
                     return Some(SyncAction {
                         action_type: SyncActionType::Upload,
                         relative_path: Some(rel_path.to_string()),
                         file_id: None,
                         parent_file_id: None,
-                        local_path: Some(local.unwrap().absolute_path.to_string_lossy().to_string()),
+                        local_path: Some(
+                            local.unwrap().absolute_path.to_string_lossy().to_string(),
+                        ),
                         cloud_file: None,
                         reason: Some("pending 占位项（上传待重试）→ 重新上传".to_string()),
                     });
@@ -210,7 +229,9 @@ impl SyncPlanner {
                         relative_path: Some(rel_path.to_string()),
                         file_id: db.unwrap().file_id.clone().into(),
                         parent_file_id: None,
-                        local_path: Some(local.unwrap().absolute_path.to_string_lossy().to_string()),
+                        local_path: Some(
+                            local.unwrap().absolute_path.to_string_lossy().to_string(),
+                        ),
                         cloud_file: None,
                         reason: Some("云端已删除文件夹 → 同步删除本地".to_string()),
                     });
@@ -222,7 +243,9 @@ impl SyncPlanner {
                         relative_path: Some(rel_path.to_string()),
                         file_id: db.unwrap().file_id.clone().into(),
                         parent_file_id: None,
-                        local_path: Some(local.unwrap().absolute_path.to_string_lossy().to_string()),
+                        local_path: Some(
+                            local.unwrap().absolute_path.to_string_lossy().to_string(),
+                        ),
                         cloud_file: None,
                         reason: Some("云端已删除但本地有未上传修改 → 备份副本".to_string()),
                     });
@@ -289,7 +312,10 @@ impl SyncPlanner {
                 });
             }
             // 启动恢复期 / 无 DB：检查是否是用户主动删除的 tombstone
-            if db_exists && snap.is_startup_resume && db.unwrap().status == crate::data::repository::sync_status::DELETED {
+            if db_exists
+                && snap.is_startup_resume
+                && db.unwrap().status == crate::data::repository::sync_status::DELETED
+            {
                 // 用户主动删除的 tombstone → 跳过（不重建占位符）
                 return Some(SyncAction {
                     action_type: SyncActionType::Skip,
@@ -398,19 +424,33 @@ mod tests {
         DriveFile {
             id: id.to_string(),
             name: name.to_string(),
-            category: if is_folder { FileCategory::Folder } else { FileCategory::None },
+            category: if is_folder {
+                FileCategory::Folder
+            } else {
+                FileCategory::None
+            },
             size: if is_folder { 0 } else { 100 },
             parent_folder: None,
             description: None,
             created_time: None,
             edited_time: chrono::DateTime::from_timestamp_millis(edited_time_ms),
-            mime_type: if is_folder { Some("application/vnd.huawei-apps.folder".into()) } else { Some("text/plain".into()) },
+            mime_type: if is_folder {
+                Some("application/vnd.huawei-apps.folder".into())
+            } else {
+                Some("text/plain".into())
+            },
             content_hash: None,
             thumbnail_link: None,
         }
     }
 
-    fn make_db(file_id: &str, local_mtime: i64, local_size: i64, cloud_edited_time: i64, status: i32) -> DbSnapshotEntry {
+    fn make_db(
+        file_id: &str,
+        local_mtime: i64,
+        local_size: i64,
+        cloud_edited_time: i64,
+        status: i32,
+    ) -> DbSnapshotEntry {
         DbSnapshotEntry {
             file_id: file_id.to_string(),
             local_mtime: Some(local_mtime),
@@ -424,7 +464,10 @@ mod tests {
     #[test]
     fn test_local_new_file_upload() {
         let mut local = HashMap::new();
-        local.insert("new.txt".to_string(), make_local("new.txt", 100, 1000, false));
+        local.insert(
+            "new.txt".to_string(),
+            make_local("new.txt", 100, 1000, false),
+        );
         let snapshot = SyncSnapshot {
             local,
             cloud: HashMap::new(),
@@ -440,7 +483,10 @@ mod tests {
     #[test]
     fn test_cloud_new_file_placeholder() {
         let mut cloud = HashMap::new();
-        cloud.insert("cloud-file.txt".to_string(), make_cloud("f1", "cloud-file.txt", false, 1000));
+        cloud.insert(
+            "cloud-file.txt".to_string(),
+            make_cloud("f1", "cloud-file.txt", false, 1000),
+        );
         let snapshot = SyncSnapshot {
             local: HashMap::new(),
             cloud,
@@ -459,7 +505,10 @@ mod tests {
         let mut cloud = HashMap::new();
         cloud.insert("f.txt".to_string(), make_cloud("f1", "f.txt", false, 1000));
         let mut db = HashMap::new();
-        db.insert("f.txt".to_string(), make_db("f1", 1000, 100, 1000, sync_status::SYNCED));
+        db.insert(
+            "f.txt".to_string(),
+            make_db("f1", 1000, 100, 1000, sync_status::SYNCED),
+        );
         let snapshot = SyncSnapshot {
             local,
             cloud,
@@ -467,7 +516,9 @@ mod tests {
             is_startup_resume: false,
         };
         let actions = SyncPlanner.plan(&snapshot);
-        assert!(actions.iter().any(|a| a.action_type == SyncActionType::Upload));
+        assert!(actions
+            .iter()
+            .any(|a| a.action_type == SyncActionType::Upload));
     }
 
     #[test]
@@ -477,7 +528,10 @@ mod tests {
         let mut cloud = HashMap::new();
         cloud.insert("f.txt".to_string(), make_cloud("f1", "f.txt", false, 5000)); // editedTime changed
         let mut db = HashMap::new();
-        db.insert("f.txt".to_string(), make_db("f1", 1000, 100, 1000, sync_status::SYNCED));
+        db.insert(
+            "f.txt".to_string(),
+            make_db("f1", 1000, 100, 1000, sync_status::SYNCED),
+        );
         let snapshot = SyncSnapshot {
             local,
             cloud,
@@ -485,7 +539,9 @@ mod tests {
             is_startup_resume: false,
         };
         let actions = SyncPlanner.plan(&snapshot);
-        assert!(actions.iter().any(|a| a.action_type == SyncActionType::Download));
+        assert!(actions
+            .iter()
+            .any(|a| a.action_type == SyncActionType::Download));
     }
 
     #[test]
@@ -495,7 +551,10 @@ mod tests {
         let mut cloud = HashMap::new();
         cloud.insert("f.txt".to_string(), make_cloud("f1", "f.txt", false, 5000));
         let mut db = HashMap::new();
-        db.insert("f.txt".to_string(), make_db("f1", 1000, 100, 1000, sync_status::SYNCED));
+        db.insert(
+            "f.txt".to_string(),
+            make_db("f1", 1000, 100, 1000, sync_status::SYNCED),
+        );
         let snapshot = SyncSnapshot {
             local,
             cloud,
@@ -503,7 +562,9 @@ mod tests {
             is_startup_resume: false,
         };
         let actions = SyncPlanner.plan(&snapshot);
-        assert!(actions.iter().any(|a| a.action_type == SyncActionType::CreateConflictCopy));
+        assert!(actions
+            .iter()
+            .any(|a| a.action_type == SyncActionType::CreateConflictCopy));
     }
 
     #[test]
@@ -528,7 +589,10 @@ mod tests {
         let mut cloud = HashMap::new();
         cloud.insert("f.txt".to_string(), make_cloud("f1", "f.txt", false, 1000));
         let mut db = HashMap::new();
-        db.insert("f.txt".to_string(), make_db("f1", 1000, 100, 1000, sync_status::SYNCED));
+        db.insert(
+            "f.txt".to_string(),
+            make_db("f1", 1000, 100, 1000, sync_status::SYNCED),
+        );
         let snapshot = SyncSnapshot {
             local,
             cloud,
@@ -537,7 +601,9 @@ mod tests {
         };
         let actions = SyncPlanner.plan(&snapshot);
         // 未变化 → 应无动作（或 skip 被过滤）
-        assert!(!actions.iter().any(|a| a.action_type != SyncActionType::Skip));
+        assert!(!actions
+            .iter()
+            .any(|a| a.action_type != SyncActionType::Skip));
     }
 
     /// 云端删除整个目录（云端无、本地有文件夹、db 有）→ 不删本地（保目录结构供副本栖身）。
@@ -557,10 +623,18 @@ mod tests {
                 is_folder: true,
             },
         );
-        let snapshot = SyncSnapshot { local, cloud: HashMap::new(), db, is_startup_resume: false };
+        let snapshot = SyncSnapshot {
+            local,
+            cloud: HashMap::new(),
+            db,
+            is_startup_resume: false,
+        };
         let actions = SyncPlanner.plan(&snapshot);
         assert!(
-            actions.iter().any(|a| a.action_type == SyncActionType::DeleteFromLocal && a.relative_path.as_deref() == Some("B")),
+            actions
+                .iter()
+                .any(|a| a.action_type == SyncActionType::DeleteFromLocal
+                    && a.relative_path.as_deref() == Some("B")),
             "云端删除的目录应产生 DeleteFromLocal（目录内无修改文件时同步删除本地）"
         );
     }
@@ -570,17 +644,32 @@ mod tests {
     fn test_cloud_deleted_modified_file_backed_up() {
         let mut local = HashMap::new();
         // 本地 mtime=5000 ≠ db mtime=1000 → is_local_changed
-        local.insert("A/f.txt".to_string(), make_local("A/f.txt", 200, 5000, false));
+        local.insert(
+            "A/f.txt".to_string(),
+            make_local("A/f.txt", 200, 5000, false),
+        );
         let mut db = HashMap::new();
-        db.insert("A/f.txt".to_string(), make_db("fid-1", 1000, 100, 1000, sync_status::SYNCED));
-        let snapshot = SyncSnapshot { local, cloud: HashMap::new(), db, is_startup_resume: false };
+        db.insert(
+            "A/f.txt".to_string(),
+            make_db("fid-1", 1000, 100, 1000, sync_status::SYNCED),
+        );
+        let snapshot = SyncSnapshot {
+            local,
+            cloud: HashMap::new(),
+            db,
+            is_startup_resume: false,
+        };
         let actions = SyncPlanner.plan(&snapshot);
         assert!(
-            actions.iter().any(|a| a.action_type == SyncActionType::BackupBeforeCloudDelete),
+            actions
+                .iter()
+                .any(|a| a.action_type == SyncActionType::BackupBeforeCloudDelete),
             "本地有未上传修改 → 应备份副本而非直接删"
         );
         assert!(
-            !actions.iter().any(|a| a.action_type == SyncActionType::DeleteFromLocal),
+            !actions
+                .iter()
+                .any(|a| a.action_type == SyncActionType::DeleteFromLocal),
             "改过的文件不应直接删除"
         );
     }
@@ -590,13 +679,28 @@ mod tests {
     fn test_cloud_deleted_unchanged_file_deleted() {
         let mut local = HashMap::new();
         // mtime/size 与 db 一致 → 未改
-        local.insert("A/f.txt".to_string(), make_local("A/f.txt", 100, 1000, false));
+        local.insert(
+            "A/f.txt".to_string(),
+            make_local("A/f.txt", 100, 1000, false),
+        );
         let mut db = HashMap::new();
-        db.insert("A/f.txt".to_string(), make_db("fid-1", 1000, 100, 1000, sync_status::SYNCED));
-        let snapshot = SyncSnapshot { local, cloud: HashMap::new(), db, is_startup_resume: false };
+        db.insert(
+            "A/f.txt".to_string(),
+            make_db("fid-1", 1000, 100, 1000, sync_status::SYNCED),
+        );
+        let snapshot = SyncSnapshot {
+            local,
+            cloud: HashMap::new(),
+            db,
+            is_startup_resume: false,
+        };
         let actions = SyncPlanner.plan(&snapshot);
-        assert!(actions.iter().any(|a| a.action_type == SyncActionType::DeleteFromLocal));
-        assert!(!actions.iter().any(|a| a.action_type == SyncActionType::BackupBeforeCloudDelete));
+        assert!(actions
+            .iter()
+            .any(|a| a.action_type == SyncActionType::DeleteFromLocal));
+        assert!(!actions
+            .iter()
+            .any(|a| a.action_type == SyncActionType::BackupBeforeCloudDelete));
     }
 
     /// ★ pending: 占位项（新增上传失败）→ 必须重新 Upload，绝不 DeleteFromLocal（防数据丢失）。
@@ -606,19 +710,48 @@ mod tests {
     fn test_pending_placeholder_reuploads_not_delete() {
         let mut local = HashMap::new();
         // mtime/size 与 db 一致（is_local_changed=false）—— 正是会触发 DeleteFromLocal 的危险条件
-        local.insert("A/big.mp4".to_string(), make_local("A/big.mp4", 800_000_000, 2000, false));
+        local.insert(
+            "A/big.mp4".to_string(),
+            make_local("A/big.mp4", 800_000_000, 2000, false),
+        );
         let mut db = HashMap::new();
         // pending: 占位 fileId + status=FAILED
         db.insert(
             "A/big.mp4".to_string(),
-            make_db("pending:A/big.mp4", 2000, 800_000_000, 0, sync_status::FAILED),
+            make_db(
+                "pending:A/big.mp4",
+                2000,
+                800_000_000,
+                0,
+                sync_status::FAILED,
+            ),
         );
-        let snapshot = SyncSnapshot { local, cloud: HashMap::new(), db, is_startup_resume: false };
+        let snapshot = SyncSnapshot {
+            local,
+            cloud: HashMap::new(),
+            db,
+            is_startup_resume: false,
+        };
         let actions = SyncPlanner.plan(&snapshot);
         // 必须 Upload，绝不 DeleteFromLocal / BackupBeforeCloudDelete
-        assert!(actions.iter().any(|a| a.action_type == SyncActionType::Upload), "pending 占位应重新 Upload");
-        assert!(!actions.iter().any(|a| a.action_type == SyncActionType::DeleteFromLocal), "绝不能删本地文件");
-        assert!(!actions.iter().any(|a| a.action_type == SyncActionType::BackupBeforeCloudDelete), "绝不能备份改名");
+        assert!(
+            actions
+                .iter()
+                .any(|a| a.action_type == SyncActionType::Upload),
+            "pending 占位应重新 Upload"
+        );
+        assert!(
+            !actions
+                .iter()
+                .any(|a| a.action_type == SyncActionType::DeleteFromLocal),
+            "绝不能删本地文件"
+        );
+        assert!(
+            !actions
+                .iter()
+                .any(|a| a.action_type == SyncActionType::BackupBeforeCloudDelete),
+            "绝不能备份改名"
+        );
     }
 
     /// ★ pending: 占位项即使 retry 后 status=SYNCED 也应重新 Upload（cloud 仍无此文件）。
@@ -626,17 +759,41 @@ mod tests {
     #[test]
     fn test_pending_placeholder_after_retry_reuploads() {
         let mut local = HashMap::new();
-        local.insert("A/big.mp4".to_string(), make_local("A/big.mp4", 800_000_000, 2000, false));
+        local.insert(
+            "A/big.mp4".to_string(),
+            make_local("A/big.mp4", 800_000_000, 2000, false),
+        );
         let mut db = HashMap::new();
         // retry 后 status=SYNCED，但 file_id 仍 pending: 前缀
         db.insert(
             "A/big.mp4".to_string(),
-            make_db("pending:A/big.mp4", 2000, 800_000_000, 0, sync_status::SYNCED),
+            make_db(
+                "pending:A/big.mp4",
+                2000,
+                800_000_000,
+                0,
+                sync_status::SYNCED,
+            ),
         );
-        let snapshot = SyncSnapshot { local, cloud: HashMap::new(), db, is_startup_resume: false };
+        let snapshot = SyncSnapshot {
+            local,
+            cloud: HashMap::new(),
+            db,
+            is_startup_resume: false,
+        };
         let actions = SyncPlanner.plan(&snapshot);
-        assert!(actions.iter().any(|a| a.action_type == SyncActionType::Upload), "retry 后的 pending 占位仍应 Upload");
-        assert!(!actions.iter().any(|a| a.action_type == SyncActionType::DeleteFromLocal), "绝不能删本地文件");
+        assert!(
+            actions
+                .iter()
+                .any(|a| a.action_type == SyncActionType::Upload),
+            "retry 后的 pending 占位仍应 Upload"
+        );
+        assert!(
+            !actions
+                .iter()
+                .any(|a| a.action_type == SyncActionType::DeleteFromLocal),
+            "绝不能删本地文件"
+        );
     }
 
     /// ★ pending 占位项 + 云端已存在 → 收敛为已同步（上次 308 误判实为成功），绝不重复上传/下载。
@@ -645,24 +802,60 @@ mod tests {
     #[test]
     fn test_pending_placeholder_with_cloud_resolves() {
         let mut local = HashMap::new();
-        local.insert("A/big.mp4".to_string(), make_local("A/big.mp4", 800_000_000, 2000, false));
+        local.insert(
+            "A/big.mp4".to_string(),
+            make_local("A/big.mp4", 800_000_000, 2000, false),
+        );
         let mut cloud = HashMap::new();
         // 云端已有该文件（说明上次「失败」其实成功了）
-        cloud.insert("A/big.mp4".to_string(), make_cloud("real-fid-123", "big.mp4", false, 2000));
+        cloud.insert(
+            "A/big.mp4".to_string(),
+            make_cloud("real-fid-123", "big.mp4", false, 2000),
+        );
         let mut db = HashMap::new();
         // pending: 占位项（cloud_edited_time=0/None → 会被 is_cloud_changed 误判为 true）
         db.insert(
             "A/big.mp4".to_string(),
-            make_db("pending:A/big.mp4", 2000, 800_000_000, 0, sync_status::FAILED),
+            make_db(
+                "pending:A/big.mp4",
+                2000,
+                800_000_000,
+                0,
+                sync_status::FAILED,
+            ),
         );
-        let snapshot = SyncSnapshot { local, cloud, db, is_startup_resume: false };
+        let snapshot = SyncSnapshot {
+            local,
+            cloud,
+            db,
+            is_startup_resume: false,
+        };
         let actions = SyncPlanner.plan(&snapshot);
         // 必须收敛（Skip 携带真实 cloud_file），绝不重复上传/下载
-        let resolve = actions.iter().find(|a| a.action_type == SyncActionType::Skip && a.cloud_file.is_some());
-        assert!(resolve.is_some(), "pending + 云端已有应返回收敛 Skip（携带 cloud_file）");
-        assert_eq!(resolve.unwrap().file_id.as_deref(), Some("real-fid-123"), "应携带真实 fileId");
-        assert!(!actions.iter().any(|a| a.action_type == SyncActionType::Upload), "绝不能重复上传");
-        assert!(!actions.iter().any(|a| a.action_type == SyncActionType::Download), "绝不能下载覆盖");
+        let resolve = actions
+            .iter()
+            .find(|a| a.action_type == SyncActionType::Skip && a.cloud_file.is_some());
+        assert!(
+            resolve.is_some(),
+            "pending + 云端已有应返回收敛 Skip（携带 cloud_file）"
+        );
+        assert_eq!(
+            resolve.unwrap().file_id.as_deref(),
+            Some("real-fid-123"),
+            "应携带真实 fileId"
+        );
+        assert!(
+            !actions
+                .iter()
+                .any(|a| a.action_type == SyncActionType::Upload),
+            "绝不能重复上传"
+        );
+        assert!(
+            !actions
+                .iter()
+                .any(|a| a.action_type == SyncActionType::Download),
+            "绝不能下载覆盖"
+        );
     }
 
     /// 云端删除整个目录 + 目录内某文件本地改过 → 目录 skip + 改过文件备份 + 未改文件删除。
@@ -673,9 +866,15 @@ mod tests {
         local.insert("B".to_string(), make_local_folder("B"));
         local.insert("B/sub".to_string(), make_local_folder("B/sub"));
         // f2.txt 本地改过（mtime≠db）
-        local.insert("B/sub/f2.txt".to_string(), make_local("B/sub/f2.txt", 300, 9000, false));
+        local.insert(
+            "B/sub/f2.txt".to_string(),
+            make_local("B/sub/f2.txt", 300, 9000, false),
+        );
         // f1.txt 未改
-        local.insert("B/sub/f1.txt".to_string(), make_local("B/sub/f1.txt", 100, 1000, false));
+        local.insert(
+            "B/sub/f1.txt".to_string(),
+            make_local("B/sub/f1.txt", 100, 1000, false),
+        );
 
         let mut db = HashMap::new();
         db.insert(
@@ -700,17 +899,32 @@ mod tests {
                 is_folder: true,
             },
         );
-        db.insert("B/sub/f2.txt".to_string(), make_db("fid2", 1000, 100, 1000, sync_status::SYNCED));
-        db.insert("B/sub/f1.txt".to_string(), make_db("fid1", 1000, 100, 1000, sync_status::SYNCED));
+        db.insert(
+            "B/sub/f2.txt".to_string(),
+            make_db("fid2", 1000, 100, 1000, sync_status::SYNCED),
+        );
+        db.insert(
+            "B/sub/f1.txt".to_string(),
+            make_db("fid1", 1000, 100, 1000, sync_status::SYNCED),
+        );
 
-        let snapshot = SyncSnapshot { local, cloud: HashMap::new(), db, is_startup_resume: false };
+        let snapshot = SyncSnapshot {
+            local,
+            cloud: HashMap::new(),
+            db,
+            is_startup_resume: false,
+        };
         let actions = SyncPlanner.plan(&snapshot);
 
         // 目录 B、B/sub → planner 生成 DeleteFromLocal（引擎层 preserve_dirs_with_pending_backups 负责保留有备份的目录）
         // 改过的 f2.txt → 备份；未改的 f1.txt → 删除
-        assert!(actions.iter().any(|a| a.relative_path.as_deref() == Some("B/sub/f2.txt")
-            && a.action_type == SyncActionType::BackupBeforeCloudDelete));
-        assert!(actions.iter().any(|a| a.relative_path.as_deref() == Some("B/sub/f1.txt")
-            && a.action_type == SyncActionType::DeleteFromLocal));
+        assert!(actions
+            .iter()
+            .any(|a| a.relative_path.as_deref() == Some("B/sub/f2.txt")
+                && a.action_type == SyncActionType::BackupBeforeCloudDelete));
+        assert!(actions
+            .iter()
+            .any(|a| a.relative_path.as_deref() == Some("B/sub/f1.txt")
+                && a.action_type == SyncActionType::DeleteFromLocal));
     }
 }

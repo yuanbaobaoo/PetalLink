@@ -35,7 +35,11 @@ impl DriveClient {
             .pool_max_idle_per_host(15)
             .build()
             .expect("构建 reqwest client 失败");
-        Self { http, auth, base_url: constants::DRIVE_API_BASE.to_string() }
+        Self {
+            http,
+            auth,
+            base_url: constants::DRIVE_API_BASE.to_string(),
+        }
     }
 
     /// 测试用：注入自定义 base URL（如 wiremock 地址）。
@@ -47,7 +51,11 @@ impl DriveClient {
             .pool_max_idle_per_host(15)
             .build()
             .expect("构建 reqwest client 失败");
-        Self { http, auth, base_url }
+        Self {
+            http,
+            auth,
+            base_url,
+        }
     }
 
     /// 获取 auth service 引用。
@@ -73,13 +81,15 @@ impl DriveClient {
 
     /// 发送请求，401 时刷新 token 并重放一次。
     /// 对齐 dart AuthInterceptor.onError 的 401 重放逻辑。
-    async fn execute_with_retry(&self, method: Method, url: &str, apply: impl Fn(RequestBuilder) -> RequestBuilder + Clone) -> AppResult<reqwest::Response> {
+    async fn execute_with_retry(
+        &self,
+        method: Method,
+        url: &str,
+        apply: impl Fn(RequestBuilder) -> RequestBuilder + Clone,
+    ) -> AppResult<reqwest::Response> {
         // 第一次尝试
         let req = apply(self.build_authed(method.clone(), url).await?);
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| classify_error(&e))?;
+        let resp = req.send().await.map_err(|e| classify_error(&e))?;
         if resp.status() != StatusCode::UNAUTHORIZED {
             return Ok(resp);
         }
@@ -93,7 +103,12 @@ impl DriveClient {
     }
 
     /// 构造带指定 token 的请求（重放用，不再 ensureValidAccessToken）。
-    fn build_authed_with_token(&self, method: Method, url: &str, token: &str) -> AppResult<RequestBuilder> {
+    fn build_authed_with_token(
+        &self,
+        method: Method,
+        url: &str,
+        token: &str,
+    ) -> AppResult<RequestBuilder> {
         Ok(self.http.request(method, url).bearer_auth(token))
     }
 
@@ -104,7 +119,12 @@ impl DriveClient {
     }
 
     /// POST 请求。
-    pub async fn post(&self, path: &str, body: Option<Vec<u8>>, content_type: &str) -> AppResult<reqwest::Response> {
+    pub async fn post(
+        &self,
+        path: &str,
+        body: Option<Vec<u8>>,
+        content_type: &str,
+    ) -> AppResult<reqwest::Response> {
         let url = format!("{}{}", self.base_url, path);
         let ct = content_type.to_string();
         self.execute_with_retry(Method::POST, &url, move |r| {
@@ -118,7 +138,12 @@ impl DriveClient {
     }
 
     /// PATCH 请求。
-    pub async fn patch(&self, path: &str, body: Vec<u8>, content_type: &str) -> AppResult<reqwest::Response> {
+    pub async fn patch(
+        &self,
+        path: &str,
+        body: Vec<u8>,
+        content_type: &str,
+    ) -> AppResult<reqwest::Response> {
         let url = format!("{}{}", self.base_url, path);
         let ct = content_type.to_string();
         self.execute_with_retry(Method::PATCH, &url, move |r| {
@@ -140,7 +165,12 @@ impl DriveClient {
     }
 
     /// POST 请求（完整 URL）。
-    pub async fn post_full(&self, url: &str, body: Option<Vec<u8>>, content_type: &str) -> AppResult<reqwest::Response> {
+    pub async fn post_full(
+        &self,
+        url: &str,
+        body: Option<Vec<u8>>,
+        content_type: &str,
+    ) -> AppResult<reqwest::Response> {
         let ct = content_type.to_string();
         self.execute_with_retry(Method::POST, url, move |r| {
             let mut r = r.header("Content-Type", &ct);
@@ -153,7 +183,12 @@ impl DriveClient {
     }
 
     /// PATCH 请求（完整 URL）。
-    pub async fn patch_full(&self, url: &str, body: Vec<u8>, content_type: &str) -> AppResult<reqwest::Response> {
+    pub async fn patch_full(
+        &self,
+        url: &str,
+        body: Vec<u8>,
+        content_type: &str,
+    ) -> AppResult<reqwest::Response> {
         let ct = content_type.to_string();
         self.execute_with_retry(Method::PATCH, url, move |r| {
             r.header("Content-Type", &ct).body(body.clone())
@@ -195,7 +230,10 @@ pub async fn handle_error_response(resp: reqwest::Response) -> AppError {
 ///
 /// - 非 2xx → `handle_error_response` 归一化为 AppError
 /// - JSON 解析失败 → `AppError::generic("解析{ctx}响应失败：{e}")`
-pub async fn parse_json_response(resp: reqwest::Response, ctx: &str) -> AppResult<serde_json::Value> {
+pub async fn parse_json_response(
+    resp: reqwest::Response,
+    ctx: &str,
+) -> AppResult<serde_json::Value> {
     if !resp.status().is_success() {
         return Err(handle_error_response(resp).await);
     }

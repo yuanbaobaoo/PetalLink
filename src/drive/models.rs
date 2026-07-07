@@ -75,7 +75,11 @@ impl FileCategory {
             return Self::Archive;
         }
         // 安装包
-        if m.contains("apk") || m.contains("dmg") || m.contains("pkg") || m.contains("debian") || m.contains("rpm")
+        if m.contains("apk")
+            || m.contains("dmg")
+            || m.contains("pkg")
+            || m.contains("debian")
+            || m.contains("rpm")
         {
             return Self::Package;
         }
@@ -123,7 +127,10 @@ impl DriveFile {
             .or_else(|| json.get("name").and_then(Value::as_str))
             .unwrap_or("")
             .to_string();
-        let mime_type = json.get("mimeType").and_then(Value::as_str).map(String::from);
+        let mime_type = json
+            .get("mimeType")
+            .and_then(Value::as_str)
+            .map(String::from);
         let category = FileCategory::from_mime_type(mime_type.as_deref());
         let size = json
             .get("size")
@@ -132,15 +139,32 @@ impl DriveFile {
         let parent_folder = json
             .get("parentFolder")
             .and_then(Value::as_array)
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect());
-        let description = json.get("description").and_then(Value::as_str).map(String::from);
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            });
+        let description = json
+            .get("description")
+            .and_then(Value::as_str)
+            .map(String::from);
         let created_time = parse_time(json.get("createdTime"));
         let edited_time = parse_time(json.get("editedTime"));
         // 内容 hash：兼容华为多种字段名
-        let content_hash = ["sha256", "md5", "md5Checksum", "fileSha256", "hash", "contentHash"]
-            .iter()
-            .find_map(|k| json.get(*k).and_then(Value::as_str).map(String::from));
-        let thumbnail_link = json.get("thumbnailLink").and_then(Value::as_str).map(String::from);
+        let content_hash = [
+            "sha256",
+            "md5",
+            "md5Checksum",
+            "fileSha256",
+            "hash",
+            "contentHash",
+        ]
+        .iter()
+        .find_map(|k| json.get(*k).and_then(Value::as_str).map(String::from));
+        let thumbnail_link = json
+            .get("thumbnailLink")
+            .and_then(Value::as_str)
+            .map(String::from);
 
         Some(Self {
             id,
@@ -268,7 +292,10 @@ pub struct FileListResult {
 impl FileListResult {
     /// 是否还有下一页
     pub fn has_next(&self) -> bool {
-        self.next_cursor.as_deref().map(|s| !s.is_empty()).unwrap_or(false)
+        self.next_cursor
+            .as_deref()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false)
     }
 
     /// 从华为 list 响应构造。
@@ -307,11 +334,26 @@ mod tests {
 
     #[test]
     fn test_file_category_by_mime_prefix() {
-        assert_eq!(FileCategory::from_mime_type(Some("image/png")), FileCategory::Image);
-        assert_eq!(FileCategory::from_mime_type(Some("video/mp4")), FileCategory::Video);
-        assert_eq!(FileCategory::from_mime_type(Some("audio/mpeg")), FileCategory::Audio);
-        assert_eq!(FileCategory::from_mime_type(Some("application/pdf")), FileCategory::Document);
-        assert_eq!(FileCategory::from_mime_type(Some("application/zip")), FileCategory::Archive);
+        assert_eq!(
+            FileCategory::from_mime_type(Some("image/png")),
+            FileCategory::Image
+        );
+        assert_eq!(
+            FileCategory::from_mime_type(Some("video/mp4")),
+            FileCategory::Video
+        );
+        assert_eq!(
+            FileCategory::from_mime_type(Some("audio/mpeg")),
+            FileCategory::Audio
+        );
+        assert_eq!(
+            FileCategory::from_mime_type(Some("application/pdf")),
+            FileCategory::Document
+        );
+        assert_eq!(
+            FileCategory::from_mime_type(Some("application/zip")),
+            FileCategory::Archive
+        );
         assert_eq!(FileCategory::from_mime_type(None), FileCategory::None);
     }
 
@@ -352,10 +394,21 @@ mod tests {
     #[test]
     fn test_drive_file_content_hash_aliases() {
         // contentHash 字段别名兼容
-        for key in ["sha256", "md5", "md5Checksum", "fileSha256", "hash", "contentHash"] {
+        for key in [
+            "sha256",
+            "md5",
+            "md5Checksum",
+            "fileSha256",
+            "hash",
+            "contentHash",
+        ] {
             let json = json!({ "id": "f", "fileName": "n", key: "hash-value" });
             let f = DriveFile::from_json(&json).unwrap();
-            assert_eq!(f.content_hash.as_deref(), Some("hash-value"), "字段 {key} 应被识别");
+            assert_eq!(
+                f.content_hash.as_deref(),
+                Some("hash-value"),
+                "字段 {key} 应被识别"
+            );
         }
     }
 

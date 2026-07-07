@@ -19,7 +19,7 @@
 
 | 模块 | 能力 |
 |---|---|
-| **授权登录** | OAuth 2.0 + PKCE（S256）；`openid profile drive` 全盘访问；Token 自动刷新 + Keychain 安全存储 |
+| **授权登录** | OAuth 2.0 + PKCE（S256）；`openid profile drive` 全盘访问；Token 自动刷新 + 机器码绑定的 `token.bin` 加密存储 |
 | **网盘主界面** | 双栏布局（侧边栏递归目录树 + 文件列表）；面包屑导航；搜索；新建文件夹 |
 | **文件操作** | 上传（≤20MB multipart + >20MB 分片续传：init → Location 头 → 308 分片 → 状态查询）、下载（流式原子写）、删除、重命名、移动、缩略图 |
 | **双向同步** | 本地 FSEvents 实时监听 + 3s debounce；云端 BFS 全量索引 + 磁盘缓存（17K 文件启动 ~200ms）；三段式稳定性检查（mtime/size/lsof） |
@@ -42,7 +42,7 @@
 | **数据库** | SQLite（rusqlite, bundled） |
 | **HTTP** | reqwest（rustls-tls） |
 | **文件监听** | notify（macOS FSEvents） |
-| **安全存储** | keyring（macOS Keychain） |
+| **安全存储** | `token.bin` + ChaCha20-Poly1305 AEAD（密钥由本机 IOPlatformUUID 派生） |
 | **UI 设计** | Mate 组件库 + 自建设计令牌（主色 `#0052D9`） |
 | **日志** | tracing + tracing-appender |
 
@@ -102,7 +102,7 @@ cargo tauri dev --config tauri.dev.conf.json
 ## 测试
 
 ```bash
-# Rust 单元测试（175 个）
+# Rust 单元测试（数量以命令输出为准）
 cargo test --lib
 
 # Rust 集成测试（wiremock 模拟华为 API，12 个）
@@ -120,7 +120,7 @@ cargo run --bin upload-tester -- <file_path>
 
 | 类型 | 数量 | 覆盖模块 |
 |---|---|---|
-| Rust 单元测试 | 175 | auth / config / pkce / conflict / sync / stability / constants / drive |
+| Rust 单元测试 | 以 `cargo test --lib` 输出为准 | auth / config / pkce / conflict / sync / stability / constants / drive |
 | Rust 集成测试 | 12 | Drive API（7）+ OAuth 流程（5） |
 | 上传 wiremock 测试 | 8 | Location 头捕获 / HTTP 308 / rangeList / 端到端 22MB |
 
@@ -181,7 +181,7 @@ PetalLink/
 │   ├── lib.rs                   # 应用装配 + 命令注册 + setup
 │   ├── bin/upload_tester.rs     # 大文件上传独立测试工具
 │   ├── commands.rs              # 42 个 Tauri 命令
-│   ├── auth/                    # OAuth + PKCE + Keychain
+│   ├── auth/                    # OAuth + PKCE + token.bin 加密存储
 │   ├── drive/                   # 华为 Drive REST API 客户端
 │   ├── sync/                    # 同步引擎（planner/executor/conflict/stability）
 │   ├── mount/                   # 本地镜像 + FSEvents 监听
