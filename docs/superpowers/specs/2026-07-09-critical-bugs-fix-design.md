@@ -15,9 +15,20 @@
 | BUG 3 | 断网恢复后点菜单栏崩溃闪退 | `panic="abort"` 放大器 + muda 0.19.3 `icon.rs:34` `write_header().unwrap()` 在 ZeroWidth 时 panic | 高 |
 | BUG 4 | 重启后删本地未上传文件 / 副本反复删除重现 | BFS 子树永久失败仍写 `complete=true` + 删除分支无启动守卫 + 删本地无二次校验 | **致命** |
 
-> BUG 1（日志只存一天）：代码与磁盘均显示有 14 天日志、无删除逻辑，疑为 dev/release 目录混淆或观察的是内存缓冲（`logs_list` 只返回最近 1000 条）。**本方案不纳入修复**，先由用户按 dev/release 目录区分复现确认；若确认确有问题再单独定位。
+> BUG 1（日志导出）：用户反馈"导出文件只有当天内容"。经用 Rust 直接运行 `logs_export` 等价逻辑实测，当前能正确读入 logs 目录全部 12 个文件（跨度 14 天）并拼接为 4.2MB。代码逻辑（`commands.rs:1698` read_dir 全部文件）与 v1.0.7 二进制一致，无法从代码层复现。**根因待定**，但用户诉求明确——无论根因如何，导出必须保证全部日志。本次纳入为**增强项 REQ-2**，加固导出健壮性 + 可观测性。
 
 > BUG 5（莫名出现云端副本）：经查证，这些"云端副本"是华为官方客户端在 2025 年生成的历史冲突副本，原本就存在于云端，PetalLink 只是如实镜像。其"删除又重现"是 BUG 4 的次生症状，随 BUG 4 修复一并解决。
+
+---
+
+## 0.1 新增需求（本轮补充）
+
+除上述 BUG 修复外，用户追加两项需求：
+
+| 需求 | 现象 | 根因 |
+|---|---|---|
+| **REQ-1** | 睡眠/断网时不应做任何同步/检测操作，只做网络连通性检测，等网络恢复再继续 | 当前**完全没有网络状态检测和睡眠监听**；`auto-cloud-refresh` 定时器（engine.rs:561-585）每 60s 无脑触发，网络断了也照常发起 BFS → 这是 BUG 3/4 的**上游触发源**（凌晨断网连续 BFS 失败写出残缺 cloud_tree） |
+| **REQ-2** | 日志导出应支持导出全部日志 | 见上 BUG 1 说明 |
 
 ---
 
@@ -301,32 +312,208 @@ Err(e) => {
 
 ---
 
-## 4. 实施顺序与依赖
+## 4. REQ-1 — 睡眠/断网时暂停一切同步，仅做网络检测
+
+### 4.1 根因
+
+当前系统**完全没有网络状态感知**：
+- `start_cloud_refresh_timer`（engine.rs:561-585）：纯 `tokio::sleep` 循环，每 `poll_interval_secs`（默认 60s）无脑触发 `run_auto_cloud_refresh`，**不检查网络**。
+- watcher 触发的 `run_sync_cycle`、手动刷新同理，网络断了也照常发起 BFS / changes API / 上传。
+- 无 macOS 睡眠/唤醒监听。
+
+**后果链**（运行时实锤）：凌晨网络断开 → 定时器照常触发 → BFS 子目录连续失败 3 次（7/08 00:38-01:05 实锤）→ 写出 `complete=true` 但 `files=0` 的残缺缓存（BUG 4 根因）→ 后续误删。睡眠唤醒后也可能触发同样的陈旧状态误判。
+
+> 即：**REQ-1 的修复同时是 BUG 4 的上游预防**——从源头消除"网络断开时瞎跑 BFS"。
+
+### 4.2 设计
+
+新增一个**网络与电源状态守卫模块**，作为所有同步操作的统一前置门控。
+
+#### 4.2.1 网络连通性检测模块
+
+**新增文件**：`src/core/net_guard.rs`
+
+核心能力：
+- 维护一个全局 `AtomicU8` 网络状态（`Online` / `Offline`），通过轻量探测维护。
+- `is_online() -> bool`：供同步引擎各入口快速查询，零开销。
+- `wait_until_online()`：异步等待网络恢复（供定时器循环使用，替代盲目 sleep）。
+
+**网络状态判定策略**（两层）：
+
+1. **被动监听（首选，零开销）**：监听 macOS 系统网络状态变化通知。通过 `objc2`/`SCNetworkReachability` 或更简单的方案——监听 `NSWorkspace.didWakeNotification`（睡眠唤醒）+ 周期性轻量 TCP 探测。考虑到实现复杂度，**采用探测为主、事件为辅**的混合方案（见下）。
+
+2. **主动探测（兜底，权威）**：定时（如每 30s）向华为 API 域名做一次**极轻量 TCP 连接探测**（只 connect 不发数据，超时 3s）。目标 host 取 `DRIVE_API_BASE` 的主机名。这比完整 HTTP 请求轻得多，且能准确反映"到云端的连通性"。
+
+**为什么用 TCP 探测而非 HTTP**：
+- HTTP 探测要建 TLS + 发请求 + 收响应，重；TCP connect 只需握手，3s 超时，极轻。
+- 目标是"网络是否通到华为云"，TCP connect 到 443 端口足够准确。
+- 探测失败 → Offline；连续 1 次成功 → Online（保守地快速恢复）。
+
+#### 4.2.2 睡眠/唤醒监听
+
+**位置**：`src/core/net_guard.rs` + `src/lib.rs`（setup 注册）
+
+监听 macOS 系统睡眠/唤醒通知：
+- **睡眠时**（`NSWorkspaceWillSleepNotification`）：立即将状态置为 `Offline`（语义等同断网——睡眠期间不做任何操作），暂停所有同步。
+- **唤醒时**（`NSWorkspaceDidWakeNotification`）：不立即置 Online，而是触发一次主动探测——唤醒后网络通常需要几秒重建（Wi-Fi 重连），探测确认恢复后才置 Online，恢复同步。
+
+实现用 `objc2-app-kit` 的 `NSWorkspace` 通知中心（项目已依赖 `objc2-app-kit 0.3`，features 已含 `NSWorkspace`）。在 `lib.rs` setup 中注册观察者，回调里更新 `AtomicU8` 状态。
+
+#### 4.2.3 同步引擎门控接入
+
+**位置**：`src/sync/engine.rs`（三个入口）+ `src/mount/local_watcher.rs`
+
+在以下入口增加 `if !net_guard::is_online() { return skip; }` 前置检查：
+
+| 入口 | 位置 | 门控行为 |
+|---|---|---|
+| 云端定时刷新 | `start_cloud_refresh_timer`（L571-584） | 循环改为 `wait_until_online().await` 替代盲目 sleep；Offline 期间完全不触发 BFS |
+| watcher 同步 | `run_sync_cycle`（L588） | Offline 时跳过（本地文件变更可累积，网络恢复后一并处理） |
+| 增量 changes | `run_auto_cloud_refresh_impl` | Offline 时直接返回，不调 changes API |
+
+**本地 watcher 特殊处理**：网络断开时，FSEvents 监听**保持运行**（本地变更仍需记录，避免遗漏），但触发的同步 cycle 在 engine 层被门控跳过。本地变更在 DB/内存中累积，网络恢复后首个 cycle 统一处理。
+
+#### 4.2.4 定时器循环改造（核心）
+
+```rust
+// engine.rs start_cloud_refresh_timer 改造
+tokio::spawn(async move {
+    loop {
+        if *engine.shutdown.lock() { break; }
+        // ★ 替代盲目 sleep：等到网络在线 + 间隔到期
+        // wait_until_online 内部是轻量探测循环（每 30s 探测），网络断开时阻塞在此
+        net_guard::wait_until_online(&engine.shutdown).await;
+        if *engine.shutdown.lock() { break; }
+        tokio::time::sleep(Duration::from_secs(engine.poll_interval_secs as u64)).await;
+        if *engine.shutdown.lock() { break; }
+        // 二次确认（sleep 期间网络可能又断了）
+        if !net_guard::is_online() {
+            tracing::info!("网络离线，跳过本次云端刷新");
+            continue;
+        }
+        engine.run_auto_cloud_refresh().await;
+    }
+});
+```
+
+**关键**：`wait_until_online` 接收 shutdown 信号，确保退出时能立即唤醒返回，不卡住。
+
+#### 4.2.5 网络状态前端感知（可选增强）
+
+广播一个 `network_state` 事件（online/offline），前端 SyncStatusBar 显示"网络未连接"提示，让用户知晓同步暂停原因。这提升体验但非必须，可作为可选项。
+
+### 4.3 与 BUG 3/4 的协同
+
+- **BUG 4**：REQ-1 从源头消除"断网时瞎跑 BFS"，残缺 cloud_tree 不再产生（上游预防）。
+- **BUG 3**：网络断开时定时器不再触发 `run_auto_cloud_refresh` → 不广播 `sync_state` → `refresh_menu` 不被频繁调用 → 降低 muda icon panic 概率（频率降低）。
+
+---
+
+## 5. REQ-2 — 日志导出加固（保证导出全部）
+
+### 5.1 现状与诊断困境
+
+`logs_export`（commands.rs:1698-1720）逻辑：`read_dir(log_dir) → sort → 逐个 read_to_string 拼接 → write`。
+
+**实测**：用 Rust 运行等价逻辑，当前能正确读入 12 个文件、拼接 4.2MB，导出全部 14 天。代码与 v1.0.7 二进制一致（`git diff` 为空）。
+
+**无法复现**"导出只有当天"的现象。可能的原因（无法证实）：历史某次日志目录确实只剩当天文件后被恢复、或观察的是查看页列表而非导出文件。但用户诉求明确：**无论根因，导出必须保证全部**。
+
+### 5.2 设计：加固导出健壮性 + 可观测性
+
+既然根因待定，采取**多管齐下的加固**，覆盖所有可能的失败路径：
+
+#### 5.2.1 导出诊断日志（可观测性，定位根因的关键）
+
+在 `logs_export` 中增加 `tracing` 诊断，记录实际读到了几个文件、每个文件大小、最终拼接大小。下次用户复现时，可从日志里直接看到 `read_dir` 到底返回了几个文件——若返回 1 个，说明运行时 `log_dir` 指向的目录确实只有 1 个文件（路径分歧/清理），从而定位真正根因。
+
+```rust
+pub fn logs_export(path: String) -> AppResult<()> {
+    let dir = crate::core::logging::log_dir()?;
+    let mut files: Vec<_> = std::fs::read_dir(&dir)
+        .map(|rd| rd.flatten().map(|e| e.path()).collect())
+        .unwrap_or_default();
+    files.sort();
+    // ★ 诊断：记录实际读到的文件，定位"只有当天"根因
+    tracing::info!(
+        dir = %dir.display(),
+        count = files.len(),
+        files = ?files.iter().map(|f| f.file_name().unwrap_or_default().to_string_lossy().to_string()).collect::<Vec<_>>(),
+        "logs_export 开始导出"
+    );
+    // ... 原拼接逻辑 ...
+    tracing::info!(out_bytes = out.len(), file_count = files.len(), "logs_export 完成");
+    std::fs::write(&path, out)?;
+    Ok(())
+}
+```
+
+#### 5.2.2 导出健壮性加固
+
+针对所有可能的失败路径加固：
+
+1. **目录不存在/为空**：当前返回 `Err("日志目录为空")`。改为：若目录不存在，先记录警告并尝试创建（可能首次运行），仍为空才报错。
+
+2. **read_to_string 对非 UTF-8 失败会静默跳过该文件**（`if let Ok(...)` 丢了 Err）：当前若某日志文件含非法 UTF-8（极端情况），会被静默跳过，用户不知道少了内容。改为：记录哪些文件读取失败；对失败文件用 `read`（字节）+ `from_utf8_lossy` 容忍解码，确保不丢内容。
+
+3. **滚动文件过滤**：`read_dir` 会返回目录下**所有**文件。若 logs 目录混入非日志文件（如 `.DS_Store`），当前会被一起读入。增加前缀过滤：只处理 `PetalLink.log` 开头的文件，避免污染导出内容。
+
+4. **日志数量上限保护**（预防性）：`tracing-appender 0.2.5` 的 `daily` 滚动**无 `with_max_log_files`**（该 API 在 0.2.x 不存在），旧日志会无限累积。虽当前是"存太多"而非"只存一天"，但长期会占空间。增加启动时的清理逻辑：保留最近 N 天（如 30 天）的日志文件，超出删除。这也防止目录膨胀拖慢导出。
+
+#### 5.2.3 导出内容增强（可选）
+
+导出文件开头增加一段元信息头，方便排查：
+```
+===== PetalLink 日志导出 =====
+导出时间：2026-07-09 10:00:00
+文件数：12
+总大小：4294 KB
+日期范围：2026-06-26 ~ 2026-07-09
+==============================
+===== PetalLink.log.2026-06-26 =====
+（日志内容...）
+```
+
+### 5.3 验证策略
+
+由于无法稳定复现，加固后的验证依赖**诊断日志**：下次用户导出时若仍只有当天，查看 `logs_export 开始导出` 那条诊断日志的 `count` 和 `files` 字段——
+- 若 `count=1`：确认运行时 `log_dir` 目录确实只有 1 个文件，根因在文件系统/路径，进一步查为何其他文件消失。
+- 若 `count=12` 但导出仍只有当天：说明拼接后写入出问题（极不可能，但诊断会排除）。
+
+---
+
+## 6. 实施顺序与依赖
 
 按风险与依赖关系排序：
 
 ```
-第一阶段（数据安全，最高优先）：
-  1. BUG 4 第一道：cloud_tree BFS 完整性诚实化
-  2. BUG 4 第二道：planner 启动恢复期删除守卫
-  3. BUG 4 第三道：validate_delete_from_local 云端复核
+第一阶段（上游预防 + 数据安全，最高优先）：
+  1. REQ-1 net_guard 模块（网络检测 + 睡眠监听）+ 定时器门控
+     → 从源头消除"断网时瞎跑 BFS"，是 BUG 4 的上游预防
+  2. BUG 4 第一道：cloud_tree BFS 完整性诚实化
+  3. BUG 4 第二道：planner 启动恢复期删除守卫
+  4. BUG 4 第三道：validate_delete_from_local 云端复核
   → 三道可并行开发，互不依赖，合并后立即生效
 
 第二阶段（崩溃止血）：
-  4. BUG 3 层一：refresh_menu 频率降低 + 图标防御
-  5. BUG 3 层二：panic hook crash 标记
-  → 依赖第一阶段完成验证后进行
+  5. BUG 3 层一：refresh_menu 频率降低 + 图标防御
+  6. BUG 3 层二：panic hook crash 标记
 
-第三阶段（上传体验）：
-  6. BUG 2 失败进度保留 + toast（小改动，先做）
-  7. BUG 2 transfer_queue schema v4 migration（断点字段）
-  8. BUG 2 单任务重试 + 真断点续传（核心改动）
-  9. BUG 2 前端重试按钮
+第三阶段（日志导出加固，独立小改动）：
+  7. REQ-2 logs_export 诊断日志 + 健壮性加固 + 日志数量上限
+
+第四阶段（上传体验）：
+  8. BUG 2 失败进度保留 + toast（小改动，先做）
+  9. BUG 2 transfer_queue schema v4 migration（断点字段）
+  10. BUG 2 单任务重试 + 真断点续传（核心改动）
+  11. BUG 2 前端重试按钮
 ```
 
-## 5. 测试策略
+> REQ-1 提到第一阶段首位，因为它是 BUG 3/4 的上游触发源——先堵住"断网瞎跑"，能显著降低后续 BUG 的触发概率，也让 BUG 4 三道防御的压力减轻。
 
-### 5.1 BUG 4 测试（最关键）
+## 7. 测试策略
+
+### 7.1 BUG 4 测试（最关键）
 
 - **单元测试**：
   - planner：构造 `is_startup_resume=true` + `local有/云端无/DB有真实id/未改` → 断言生成 Skip 而非 DeleteFromLocal。
@@ -338,28 +525,41 @@ Err(e) => {
   - mock BFS list 子目录返回 500 连续 3 次 → 断言持久化文件 complete=false。
   - mock get_file 返回 200 → 断言 DeleteFromLocal 被拦截。
 
-### 5.2 BUG 3 测试
+### 7.2 REQ-1 测试（网络门控）
+
+- 单元测试：net_guard `is_online()` 在探测成功/失败时状态正确翻转。
+- 集成测试：mock 网络离线 → 断言 `run_auto_cloud_refresh` 不被触发；mock 恢复 → 断言恢复触发。
+- 手动测试：关闭 Wi-Fi → 观察日志无 BFS/changes 调用；睡眠 → 唤醒 → 观察先探测后恢复同步。
+
+### 7.3 BUG 3 测试
 
 - 构造高频 sync_state 广播场景 → 断言 refresh_menu 不重建（signature 未变）。
 - 验证托盘图标加载防御：传入 0 尺寸图标 → 不 panic、降级处理。
 
-### 5.3 BUG 2 测试
+### 7.4 REQ-2 测试
+
+- 单元测试：logs_export 读取多文件场景（mock 目录）→ 断言拼接全部；含非 UTF-8 文件 → 断言 from_utf8_lossy 不丢内容；含 .DS_Store → 断言被过滤。
+- 手动验证：实际导出，检查诊断日志的 count 字段。
+
+### 7.5 BUG 2 测试
 
 - 单元测试：settle_transfer 失败时 transferred 保留非 0。
 - 集成测试：mock 上传分片在第 5 片失败 → transfer_retry → 断言从第 5 片续传（upload_resume 收到正确 offset）。
 - 前端测试：TransferPopover 失败项渲染重试按钮，点击触发 transfer_retry。
 
-## 6. 风险与回退
+## 8. 风险与回退
 
 | 风险 | 缓解 |
 |---|---|
+| REQ-1 TCP 探测误判（防火墙/代理） | 探测目标用华为 API 域名（同步目标本身），端口 443；探测失败保守置 Offline 不影响数据安全，网络真恢复后快速恢复 |
+| REQ-1 睡眠监听 FFI 复杂度 | objc2-app-kit NSWorkspace 通知项目已依赖；若 FFI 不稳定，退化为纯定时探测（功能降级但不阻塞） |
 | validate_delete_from_local 增加 API 调用拖慢同步 | 仅对真实 fileId 的 DeleteFromLocal 触发；正常同步中删除动作少 |
 | transfer_queue schema v4 migration 失败 | migration 加事务 + 旧字段兼容（NULL 容忍）；回退到 v3 仅丢失断点信息，不影响基础功能 |
 | refresh_menu 频率降低导致传输状态更新不及时 | 传输段变化（项目数/状态）仍立即重建，仅"无变化"时跳过；tooltip 独立更新 |
-| muda 升级引入新问题 | 升级前在 dev 环境完整回归；保留层一频率降低作为不依赖升级的主防线 |
+| 日志数量上限清理误删 | 仅删超 30 天的 `PetalLink.log.*` 文件，保留近期；清理前记录日志 |
 
-## 7. 不在本次范围
+## 9. 不在本次范围
 
-- BUG 1（日志）：待用户确认复现环境后再定。
 - BUG 5（云端副本）：随 BUG 4 修复解决，不单独处理。
 - panic 策略调整：用户明确选择保留 abort，不改动 Cargo.toml:112。
+- REQ-2 的"网络状态前端提示"：列为可选项，非必须。
