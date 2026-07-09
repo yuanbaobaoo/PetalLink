@@ -49,8 +49,14 @@ export const useTransferStore = defineStore("transfer", () => {
     await loadAll();
   }
 
+  /** 重试单个失败任务（从断点续传）。后端非阻塞立即返回，后续进度靠 sync_state 事件驱动刷新 */
+  async function retry(taskId: number): Promise<void> {
+    await transferApi.retryTransfer(taskId);
+    await loadAll();
+  }
+
   return {
     tasks, uploads, downloads, running, pending, completed,
-    loadAll, clearCompleted, clearFailed, clearFinished,
+    loadAll, clearCompleted, clearFailed, clearFinished, retry,
   };
 });

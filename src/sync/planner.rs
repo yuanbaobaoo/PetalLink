@@ -204,11 +204,18 @@ impl SyncPlanner {
                 // ★ pending: 占位项（新增上传失败 / retry 后仍未成功）→ 重新计划上传。
                 // 绝不能走下面的 BackupBeforeCloudDelete / DeleteFromLocal，否则会删本地文件（数据丢失）。
                 // 占位 fileId 无真实云端对应，云端无此文件是「还没传上去」而非「云端删了」。
+                //
+                // ★★ 但 FAILED 状态的占位项不再自动重试（避免空间不足等原因导致的无限重试循环），
+                // 留给用户在传输面板手动点"重试"。仅非 FAILED（如 SYNCING 延迟）的才自动重试。
                 if db
                     .unwrap()
                     .file_id
                     .starts_with(crate::data::repository::PENDING_FILE_ID_PREFIX)
                 {
+                    if db.unwrap().status == crate::data::repository::sync_status::FAILED {
+                        // FAILED → 不自动重试，等用户手动触发（传输面板重试按钮）
+                        return None;
+                    }
                     return Some(SyncAction {
                         action_type: SyncActionType::Upload,
                         relative_path: Some(rel_path.to_string()),
@@ -219,6 +226,23 @@ impl SyncPlanner {
                         ),
                         cloud_file: None,
                         reason: Some("pending 占位项（上传待重试）→ 重新上传".to_string()),
+                    });
+                }
+                // ★★ 启动恢复期删除守卫 ★★
+                // 启动恢复期 cloud_tree 可能不可信（BFS 部分失败/缓存残缺）。
+                // 对"DB 有真实 fileId（非 pending:）且本地未改"的文件，绝不直接删除，
+                // 改为 Skip，等下一次 BFS 成功后重新判定。
+                // 仅保护本地未改的文件（本地已改的走 BackupBeforeCloudDelete，本就不删内容）。
+                // 注：文件夹因 local_mtime=None → is_local_changed=true → !is_local_changed=false，不走此守卫。
+                if snap.is_startup_resume && !is_local_changed(local.unwrap(), db.unwrap()) {
+                    return Some(SyncAction {
+                        action_type: SyncActionType::Skip,
+                        relative_path: Some(rel_path.to_string()),
+                        file_id: db.unwrap().file_id.clone().into(),
+                        parent_file_id: None,
+                        local_path: None,
+                        cloud_file: None,
+                        reason: Some("启动恢复期 cloud_tree 不可信，跳过删除待复核".to_string()),
                     });
                 }
                 // 文件夹：同样生成 DeleteFromLocal，由 engine 层判断是否需要保留
@@ -251,6 +275,12 @@ impl SyncPlanner {
                     });
                 }
                 // 未改 / 占位 → 删除本地（匹配云端删除）
+                tracing::debug!(
+                    rel = %rel_path,
+                    local_has_content,
+                    is_placeholder = local.map(|e| e.is_placeholder).unwrap_or(false),
+                    "云端已删除文件 → 同步删除本地占位/未改文件"
+                );
                 return Some(SyncAction {
                     action_type: SyncActionType::DeleteFromLocal,
                     relative_path: Some(rel_path.to_string()),
@@ -703,9 +733,9 @@ mod tests {
             .any(|a| a.action_type == SyncActionType::BackupBeforeCloudDelete));
     }
 
-    /// ★ pending: 占位项（新增上传失败）→ 必须重新 Upload，绝不 DeleteFromLocal（防数据丢失）。
-    /// 场景：本地有文件 + 云端无（上传失败）+ DB 是 pending: 占位 + mtime 一致（is_local_changed=false）。
-    /// 若无护栏会走 DeleteFromLocal 删本地文件 → 这是必须防住的危险路径。
+    /// ★ pending: 占位项 + FAILED → 不自动重试（避免空间不足等原因导致无限重试循环），
+    /// 也不删本地文件（防数据丢失）。留给用户在传输面板手动点"重试"。
+    /// 场景：本地有文件 + 云端无（上传失败）+ DB 是 pending: 占位 + status=FAILED + mtime 一致。
     #[test]
     fn test_pending_placeholder_reuploads_not_delete() {
         let mut local = HashMap::new();
@@ -733,12 +763,13 @@ mod tests {
             is_startup_resume: false,
         };
         let actions = SyncPlanner.plan(&snapshot);
-        // 必须 Upload，绝不 DeleteFromLocal / BackupBeforeCloudDelete
+        // FAILED 的 pending 占位项：不自动 Upload（避免无限重试），不 Delete（防数据丢失）
         assert!(
-            actions
+            !actions
                 .iter()
-                .any(|a| a.action_type == SyncActionType::Upload),
-            "pending 占位应重新 Upload"
+                .any(|a| a.relative_path.as_deref() == Some("A/big.mp4")
+                    && a.action_type == SyncActionType::Upload),
+            "FAILED 的 pending 占位项不应自动 Upload（等用户手动重试）"
         );
         assert!(
             !actions
@@ -751,6 +782,43 @@ mod tests {
                 .iter()
                 .any(|a| a.action_type == SyncActionType::BackupBeforeCloudDelete),
             "绝不能备份改名"
+        );
+    }
+
+    /// ★ pending: 占位项 + 非 FAILED（如 SYNCING 延迟）→ 应自动重新 Upload。
+    #[test]
+    fn test_pending_placeholder_non_failed_reuploads() {
+        let mut local = HashMap::new();
+        local.insert(
+            "A/big.mp4".to_string(),
+            make_local("A/big.mp4", 800_000_000, 2000, false),
+        );
+        let mut db = HashMap::new();
+        // pending: 占位 fileId + status=SYNCING（延迟中，非 FAILED）
+        db.insert(
+            "A/big.mp4".to_string(),
+            make_db(
+                "pending:A/big.mp4",
+                2000,
+                800_000_000,
+                0,
+                sync_status::SYNCING,
+            ),
+        );
+        let snapshot = SyncSnapshot {
+            local,
+            cloud: HashMap::new(),
+            db,
+            is_startup_resume: false,
+        };
+        let actions = SyncPlanner.plan(&snapshot);
+        // 非 FAILED 的 pending 应自动 Upload
+        assert!(
+            actions
+                .iter()
+                .any(|a| a.relative_path.as_deref() == Some("A/big.mp4")
+                    && a.action_type == SyncActionType::Upload),
+            "非 FAILED 的 pending 占位项应自动 Upload"
         );
     }
 
@@ -926,5 +994,66 @@ mod tests {
             .iter()
             .any(|a| a.relative_path.as_deref() == Some("B/sub/f1.txt")
                 && a.action_type == SyncActionType::DeleteFromLocal));
+    }
+
+    /// ★ 启动恢复期删除守卫：本地有文件（未改）+ 云端无（cloud_tree 残缺）+ DB 有真实 id
+    /// 期望：decide 生成 Skip（而非 DeleteFromLocal），等 cloud_tree 可信后重新判定。
+    #[test]
+    fn test_startup_resume_guards_delete_when_cloud_missing() {
+        let mut local = HashMap::new();
+        // mtime/size 与 db 一致 → is_local_changed=false
+        local.insert("A/f.txt".to_string(), make_local("A/f.txt", 100, 1000, false));
+        let mut db = HashMap::new();
+        // 真实 fileId（非 pending:）+ status=SYNCED
+        db.insert(
+            "A/f.txt".to_string(),
+            make_db("fid-1", 1000, 100, 1000, sync_status::SYNCED),
+        );
+        let snapshot = SyncSnapshot {
+            local,
+            cloud: HashMap::new(),
+            db,
+            is_startup_resume: true, // 启动恢复期
+        };
+        let action = SyncPlanner.decide("A/f.txt", &snapshot).expect("应有动作");
+        assert_eq!(
+            action.action_type,
+            SyncActionType::Skip,
+            "启动恢复期 + 本地未改 + DB 真实 id → 应 Skip 而非 DeleteFromLocal"
+        );
+        assert_eq!(action.file_id.as_deref(), Some("fid-1"));
+        assert!(
+            !is_local_changed(
+                &make_local("A/f.txt", 100, 1000, false),
+                &make_db("fid-1", 1000, 100, 1000, sync_status::SYNCED)
+            ),
+            "前置条件：本地应未改"
+        );
+    }
+
+    /// ★ 会话内（非启动恢复）：同样条件应正常生成 DeleteFromLocal（守卫不影响会话内行为）。
+    #[test]
+    fn test_session_delete_not_guarded() {
+        let mut local = HashMap::new();
+        // mtime/size 与 db 一致 → is_local_changed=false
+        local.insert("A/f.txt".to_string(), make_local("A/f.txt", 100, 1000, false));
+        let mut db = HashMap::new();
+        // 真实 fileId + status=SYNCED
+        db.insert(
+            "A/f.txt".to_string(),
+            make_db("fid-1", 1000, 100, 1000, sync_status::SYNCED),
+        );
+        let snapshot = SyncSnapshot {
+            local,
+            cloud: HashMap::new(),
+            db,
+            is_startup_resume: false, // 会话内
+        };
+        let action = SyncPlanner.decide("A/f.txt", &snapshot).expect("应有动作");
+        assert_eq!(
+            action.action_type,
+            SyncActionType::DeleteFromLocal,
+            "会话内应正常删除（守卫仅作用于启动恢复期）"
+        );
     }
 }

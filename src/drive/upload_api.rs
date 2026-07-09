@@ -46,8 +46,9 @@ pub struct UploadApi {
 }
 
 pub type ProgressFn = Box<dyn Fn(f64) + Send + Sync>;
-/// 断点续传进度回调：server_id, upload_id, 已上传字节偏移
-pub type ResumeProgressFn = Box<dyn Fn(&str, &str, u64) + Send + Sync>;
+/// 断点续传进度回调：server_id, upload_id, 已上传字节偏移, session_url
+/// session_url 为华为 resume 上传 Location 头返回的会话 URL（断点续传唯一 token）。
+pub type ResumeProgressFn = Box<dyn Fn(&str, &str, u64, &str) + Send + Sync>;
 
 #[derive(Debug, Clone)]
 pub struct ResumeSession {
@@ -58,6 +59,10 @@ pub struct ResumeSession {
     pub session_url: String,
     /// API 建议的分片大小（来自 init 响应 body `sliceSize`），0 表示用默认值。
     pub chunk_size: u64,
+    /// 续传起始偏移（从 transfer_queue.resume_offset 读回）。
+    /// 大于 0 时 upload_resume 从该偏移开始 PUT，跳过已上传分片（断点续传）。
+    /// 新建会话（init_resume_session 构造）时为 0。
+    pub start_offset: u64,
 }
 
 /// put_chunk 返回：已上传字节偏移 + 可选（兜底查询用的 createdFileId）
@@ -211,7 +216,7 @@ impl UploadApi {
     }
 
     /// 路由：≤ 20MB → 小文件上传，否则分片续传。
-    /// `on_resume_progress`：分片续传进度回调（serverId, uploadId, offset），供断点续传持久化。
+    /// `on_resume_progress`：分片续传进度回调（serverId, uploadId, offset, session_url），供断点续传持久化。
     pub async fn upload(
         &self,
         file_path: &std::path::Path,
@@ -374,9 +379,9 @@ impl UploadApi {
                 .await
             {
                 Ok(s) => {
-                    // 通知调用方持久化会话信息
+                    // 通知调用方持久化会话信息（含 session_url，断点续传必需）
                     if let Some(cb) = on_resume_progress {
-                        cb(&s.server_id, &s.upload_id, 0);
+                        cb(&s.server_id, &s.upload_id, 0, &s.session_url);
                     }
                     s
                 }
@@ -400,7 +405,10 @@ impl UploadApi {
         let mut file = File::open(file_path)
             .await
             .map_err(|e| AppError::generic(format!("打开文件失败：{e}")))?;
-        let mut offset: u64 = 0;
+        // ★ 从 ResumeSession.start_offset 初始化（断点续传），无 resume 时从 0 开始。
+        // offset 既是分片定位指针，也是进度上报变量（on_progress/on_resume_progress 均用它），
+        // 因此从 start_offset 起步即可让进度与已上传字节对齐，无需额外的 transferred 变量。
+        let mut offset: u64 = resume.as_ref().map(|r| r.start_offset).unwrap_or(0);
         let mut created_file_id: Option<String> = None;
 
         while offset < total_size {
@@ -456,9 +464,9 @@ impl UploadApi {
             if let Some(cb) = on_progress {
                 cb(offset as f64 / total_size as f64);
             }
-            // 通知调用方持久化进度（断点续传）
+            // 通知调用方持久化进度（断点续传，含 session_url）
             if let Some(cb) = on_resume_progress {
-                cb(&session.server_id, &session.upload_id, offset);
+                cb(&session.server_id, &session.upload_id, offset, &session.session_url);
             }
         }
 
@@ -574,6 +582,7 @@ impl UploadApi {
             upload_id,
             session_url,
             chunk_size,
+            start_offset: 0,
         })
     }
 
@@ -1035,6 +1044,7 @@ mod tests {
             upload_id: String::new(),
             session_url: session_url.clone(), // ← 走 session_url 路径
             chunk_size: 5_000_000,
+            start_offset: 0,
         };
 
         let chunk = vec![0u8; 5_000_000];
@@ -1070,6 +1080,7 @@ mod tests {
             upload_id: "old-uid".to_string(),
             session_url: String::new(), // ← 无 session_url，走旧路径
             chunk_size: 3_000_000,
+            start_offset: 0,
         };
 
         let chunk = vec![0u8; 3_000_000];
@@ -1107,6 +1118,7 @@ mod tests {
             upload_id: String::new(),
             session_url: format!("{base}/files"),
             chunk_size: 0,
+            start_offset: 0,
         };
 
         let chunk = vec![0u8; 2_000_000];
@@ -1182,6 +1194,7 @@ mod tests {
             upload_id: String::new(),
             session_url,
             chunk_size: 10_485_760,
+            start_offset: 0,
         };
 
         // 发送第一个分片 bytes 0-10485759/30000000

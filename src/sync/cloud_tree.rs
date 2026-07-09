@@ -83,6 +83,11 @@ pub async fn refresh_cloud_tree(
     );
 
     let mut processed_folders: usize = 0;
+    // BUG 4 第一道防线：追踪永久失败子树计数。
+    // 永久失败（重试耗尽）的文件夹其子树会从 tree 中缺失 → 若仍写 complete=true，
+    // 残缺缓存会通过完整性校验 → planner 误判「云端无此文件」→ DeleteFromLocal 删本地。
+    // 故 >0 时写 complete=false（残缺数据不作为可信基线，下次启动强制重跑）。
+    let mut permanent_failures: usize = 0;
 
     tracing::info!("开始 BFS 云端树构建");
 
@@ -172,6 +177,7 @@ pub async fn refresh_cloud_tree(
                         });
                     } else {
                         tracing::error!(path = %node.path, error = %e, "BFS 文件夹永久失败（子树将缺失）");
+                        permanent_failures += 1;
                     }
                 }
             }
@@ -200,8 +206,23 @@ pub async fn refresh_cloud_tree(
         processed_folders,
     );
 
-    // 持久化缓存（complete:true：BFS 已成功跑完）
-    let _ = persist_cloud_tree(abs_mount_dir, &tree, &path_to_id, &root_folder_id);
+    // 持久化缓存：永久失败时标 complete=false（残缺数据不作为可信基线）
+    let _ = persist_cloud_tree_internal(
+        abs_mount_dir,
+        &tree,
+        &path_to_id,
+        &root_folder_id,
+        permanent_failures == 0,
+    );
+    if permanent_failures > 0 {
+        tracing::warn!(
+            failures = permanent_failures,
+            files = tree.len(),
+            "云端树存在永久失败子树，缓存标记为 incomplete（下次启动强制重跑）"
+        );
+    } else {
+        tracing::info!(files = tree.len(), "云端树已持久化 complete=true");
+    }
 
     Ok((tree, path_to_id, root_folder_id))
 }
@@ -263,24 +284,13 @@ pub fn load_persisted_cloud_tree(abs_mount_dir: &str) -> Option<CloudTreeCache> 
     Some(cache)
 }
 
-/// 持久化云端树到磁盘（complete=true，BFS 成功跑完时调用）。
-///
-/// 内部走 [`persist_cloud_tree_internal`] 的原子写。
-fn persist_cloud_tree(
-    abs_mount_dir: &str,
-    tree: &HashMap<String, DriveFile>,
-    path_to_id: &HashMap<String, String>,
-    root_folder_id: &Option<String>,
-) -> AppResult<()> {
-    persist_cloud_tree_internal(abs_mount_dir, tree, path_to_id, root_folder_id, true)
-}
-
 /// 原子写云端树缓存。
 ///
 /// 写到 `cache_file + TMP_SUFFIX` → 同步落盘 → rename 覆盖 `cache_file`。
 /// 保证磁盘上要么是完整新版、要么是上一版，绝不出现写到一半的半截 JSON
 /// （对齐项目已有的 `.tmp` + rename 原子写范式，见 `constants::TMP_SUFFIX`、
-/// `download_api`）。`complete=false` 时写空 tree 哨兵。
+/// `download_api`）。`complete` 由调用方决定：BFS 成功跑完且无永久失败 → true；
+/// 存在永久失败子树 / 哨兵 → false（残缺数据不作为可信基线，下次启动强制重跑）。
 fn persist_cloud_tree_internal(
     abs_mount_dir: &str,
     tree: &HashMap<String, DriveFile>,

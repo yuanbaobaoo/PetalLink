@@ -59,8 +59,6 @@ function handleShowFailed(): void { showFailedDialog.value = true; }
       <span v-if="sync.failed" class="tag tag--error" @click="handleShowFailed">失败 {{ sync.failed }}</span>
     </div>
 
-    <MateButton v-if="sync.failed" variant="text" icon="refresh" @click="sync.retryFailed()">重试失败项</MateButton>
-
     <!-- 失败项弹窗 -->
     <MateDialog
       :open="showFailedDialog"

@@ -234,6 +234,8 @@ pub fn ensure_engine_started(app: &AppHandle) -> AppResult<()> {
     // 传输进度实时推送通道：每次传输结算时触发前端刷新
     let (transfer_update_tx, mut transfer_update_rx) = tokio::sync::broadcast::channel::<()>(64);
     executor.set_transfer_update_tx(transfer_update_tx.clone());
+    // 注入 AppHandle：上传失败时直接 emit upload_failed → 前端弹 toast
+    executor.set_app_handle(app.clone());
     // 存入全局，供双端对齐等非 executor 路径的进度回调触发前端刷新
     set_transfer_update_tx(transfer_update_tx);
     // 传输进度实时推送监听器
@@ -896,6 +898,7 @@ pub async fn sync_download_on_demand(
                 server_id: None,
                 upload_id: None,
                 resume_offset: 0,
+                session_url: None,
             },
         )
         .unwrap_or(0)
@@ -1213,6 +1216,7 @@ async fn sync_folder_recursive_impl(
                     server_id: None,
                     upload_id: None,
                     resume_offset: 0,
+                    session_url: None,
                 },
             )
             .unwrap_or(0)
@@ -1288,6 +1292,7 @@ async fn sync_folder_recursive_impl(
                     server_id: None,
                     upload_id: None,
                     resume_offset: 0,
+                    session_url: None,
                 },
             )
             .unwrap_or(0)
@@ -1596,6 +1601,14 @@ pub fn transfer_clear_finished() -> AppResult<()> {
     Ok(())
 }
 
+/// 重试单个传输任务（从断点续传）。
+/// 直接调起单任务上传：有有效 session_url 则断点续传，否则从头重传。
+#[tauri::command]
+pub async fn transfer_retry(task_id: i64) -> AppResult<()> {
+    let engine = sync_engine()?;
+    engine.retry_transfer(task_id).await
+}
+
 // ========================================================================
 // 六、SyncItem 状态命令（FileTile 用）
 // ========================================================================
@@ -1700,21 +1713,45 @@ pub fn logs_export(path: String) -> AppResult<()> {
     let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
         .map(|rd| rd.flatten().map(|e| e.path()).collect())
         .unwrap_or_default();
+    // 只处理 PetalLink.log 开头的文件（过滤 .DS_Store 等非日志文件）
+    files.retain(|f| {
+        f.file_name()
+            .map(|n| n.to_string_lossy().starts_with("PetalLink.log"))
+            .unwrap_or(false)
+    });
     files.sort(); // 按文件名升序（日期 oldest-first）
+
+    // ★ 诊断：记录实际读到的文件，定位"只有当天"根因
+    tracing::info!(
+        dir = %dir.display(),
+        count = files.len(),
+        files = ?files.iter()
+            .map(|f| f.file_name().unwrap_or_default().to_string_lossy().to_string())
+            .collect::<Vec<_>>(),
+        "logs_export 开始导出"
+    );
+
     let mut out = String::new();
-    for f in files {
-        if let Ok(content) = std::fs::read_to_string(&f) {
-            use std::fmt::Write;
-            let _ = writeln!(out, "===== {} =====", f.display());
-            out.push_str(&content);
-            if !out.ends_with('\n') {
-                out.push('\n');
+    for f in &files {
+        // 用 read + from_utf8_lossy 容忍非 UTF-8（不丢内容），替代 read_to_string 的静默跳过
+        let content = match std::fs::read(f) {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+            Err(e) => {
+                tracing::warn!(file = %f.display(), error = %e, "日志文件读取失败，跳过");
+                continue;
             }
+        };
+        use std::fmt::Write;
+        let _ = writeln!(out, "===== {} =====", f.display());
+        out.push_str(&content);
+        if !out.ends_with('\n') {
+            out.push('\n');
         }
     }
     if out.is_empty() {
         return Err(AppError::generic("日志目录为空，无可导出内容"));
     }
+    tracing::info!(out_bytes = out.len(), file_count = files.len(), "logs_export 完成");
     std::fs::write(&path, out)?;
     Ok(())
 }

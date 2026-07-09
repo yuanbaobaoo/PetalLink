@@ -239,6 +239,11 @@ impl MountManager {
     /// 大目录在独立线程池执行以避免阻塞 tokio runtime。
     pub async fn scan_local(&self, skip_patterns: &[String]) -> AppResult<Vec<LocalFileEntry>> {
         let mount = self.mount_dir.clone();
+        // ★ 挂载目录为空时跳过扫描，返回空列表（避免误扫根目录或判断"本地无"误删云端）
+        if mount.to_string_lossy().is_empty() {
+            tracing::warn!("scan_local 跳过：挂载目录未配置");
+            return Ok(Vec::new());
+        }
         let patterns = skip_patterns.to_vec();
         // 用 spawn_blocking 避免阻塞 tokio worker（对齐 dart Isolate.run）
         tokio::task::spawn_blocking(move || scan_local_sync(&mount, &patterns))

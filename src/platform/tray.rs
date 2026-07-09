@@ -15,7 +15,7 @@
 //! （文件名 / 正在上传…N% 或 正在下载…N%），disabled 仅展示。
 //! macOS 原生菜单项超出屏幕高度时自动出现上下箭头滚动，无需手写滚动条。
 
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tauri::image::Image;
@@ -35,6 +35,9 @@ const MAX_NAME_CHARS: usize = 20;
 const MENU_REBUILD_INTERVAL_MS: i64 = 5000;
 /// 上次菜单重建的 epoch 毫秒（0=从未重建，首条传输出现时立即重建）
 static LAST_MENU_REBUILD_MS: AtomicI64 = AtomicI64::new(0);
+/// 上次传输段签名（项目数 + 每个 task 的 id+state+transferred 组合 hash），相同则跳过菜单重建
+/// 防止无传输状态变化时高频重建触发 muda icon 渲染 panic
+static LAST_TRANSFER_SIGNATURE: AtomicU64 = AtomicU64::new(0);
 /// menubar-icon.png（编译期嵌入，对齐 Flutter Asset Catalog 的 MenubarIcon）
 /// SVG 经 qlmanage 转 PNG（Tauri 2 Image::from_bytes 不支持 SVG）
 const MENUBAR_ICON_PNG: &[u8] = include_bytes!("../../assets/menubar-icon.png");
@@ -244,15 +247,43 @@ fn load_active_transfers() -> AppResult<Vec<repository::TransferTask>> {
 /// 故按 MENU_REBUILD_INTERVAL_MS（5 秒）节流。仅当「无进行中传输」时不节流，
 /// 以保证任务完成时立即清掉传输段（不残留已完成项）。
 /// 容错：重建失败仅告警不中断，对齐 update_tooltip 的容错风格。
+/// 计算传输任务的签名（项目数 + 每个 task 的 id+state+transferred 组合 hash）。
+/// 签名相同 → 传输段无变化 → 可跳过重建。
+fn transfer_signature(tasks: &[repository::TransferTask]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    tasks.len().hash(&mut hasher);
+    for t in tasks {
+        t.id.hash(&mut hasher);
+        t.state.hash(&mut hasher);
+        t.transferred.hash(&mut hasher);
+        t.total_size.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
 pub fn refresh_menu(app: &AppHandle) {
     let Some(tray) = app.tray_by_id(TRAY_ID) else {
         return;
     };
 
+    // 先查传输任务（用于签名判等 + 节流）
+    let tasks = match load_active_transfers() {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(error = %e, "查询进行中传输失败，托盘菜单省略传输段");
+            Vec::new()
+        }
+    };
+    let has_active = !tasks.is_empty();
+
+    // ★ 签名判等：传输段无变化时跳过重建（防止高频 sync_state 广播触发 muda icon panic）
+    let sig = transfer_signature(&tasks);
+    if sig == LAST_TRANSFER_SIGNATURE.load(Ordering::Relaxed) {
+        return; // 传输段完全没变，不重建
+    }
+
     // 有进行中传输 → 节流（避免高频重绘打断用户查看菜单）；无传输 → 立即重建（清场）
-    let has_active = load_active_transfers()
-        .map(|tasks| !tasks.is_empty())
-        .unwrap_or(false);
     if has_active {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -269,6 +300,9 @@ pub fn refresh_menu(app: &AppHandle) {
         Ok(menu) => {
             if let Err(e) = tray.set_menu(Some(menu)) {
                 tracing::warn!(error = %e, "托盘菜单重建失败");
+            } else {
+                // ★ 签名仅在成功重建后更新，避免"签名已更新但菜单未重建"的语义偏差
+                LAST_TRANSFER_SIGNATURE.store(sig, Ordering::Relaxed);
             }
         }
         Err(e) => tracing::warn!(error = %e, "构造托盘菜单失败"),

@@ -53,3 +53,8 @@ export function clearFailed(): Promise<void> {
 export function clearFinished(): Promise<void> {
   return invoke<void>("transfer_clear_finished");
 }
+
+/** 重试单个传输任务（从断点续传） */
+export function retryTransfer(taskId: number): Promise<void> {
+  return invoke<void>("transfer_retry", { taskId });
+}

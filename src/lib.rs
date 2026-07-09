@@ -8,7 +8,7 @@ use tauri::Manager;
 pub mod auth;
 pub mod commands;
 pub mod constants;
-mod core;
+pub mod core;
 mod data;
 pub mod drive;
 pub mod error;
@@ -61,6 +61,8 @@ pub fn init_logger() {
                 .try_init()
         }
     };
+    // 启动时清理超期日志（保留 30 天）
+    crate::core::logging::cleanup_old_logs();
 }
 
 /// 加载 .env（开发期便利）。
@@ -160,6 +162,7 @@ pub fn run() {
             commands::transfer_clear_completed,
             commands::transfer_clear_failed,
             commands::transfer_clear_finished,
+            commands::transfer_retry,
             // Platform
             commands::open_in_finder,
             commands::launch_at_login_is_enabled,
@@ -196,6 +199,19 @@ pub fn run() {
             platform::activation::init_activation_policy();
             // ★ 必须最早安装：拦截 Dock/Cmd+Q 退出，防止 macOS 直接杀进程
             platform::activation::install_terminate_interceptor();
+            // ★ 检测上次崩溃标记（panic hook 写入），记录到日志后清理
+            if let Ok(support) = crate::core::config_store::support_dir() {
+                let marker = support.join("last_crash.marker");
+                if marker.exists() {
+                    if let Ok(content) = std::fs::read_to_string(&marker) {
+                        tracing::warn!(
+                            crash = %content.trim(),
+                            "检测到上次启动异常退出（last_crash.marker），详情见上次日志末尾"
+                        );
+                    }
+                    let _ = std::fs::remove_file(&marker);
+                }
+            }
             // 创建系统托盘
             platform::tray::setup(app.handle());
 
@@ -275,6 +291,7 @@ pub fn run() {
             }
         }
         tauri::RunEvent::Exit => {
+            crate::core::net_guard::shutdown_probe();
             platform::shutdown::flush_with_timeout(handle);
         }
         _ => {}

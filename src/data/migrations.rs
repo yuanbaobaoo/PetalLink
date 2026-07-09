@@ -1,9 +1,10 @@
-//! 数据库迁移 —— schemaVersion=3。
+//! 数据库迁移 —— schemaVersion=4。
 //!
 //! 对齐 dart `MigrationStrategy`：
 //! - v1 onCreate: 建全部表
 //! - v2 onUpgrade from<2: TransferQueue 加 serverId/uploadId/resumeOffset（分片续传断点）
 //! - v3 onUpgrade from<3: SyncItems 加 localSize（本地变更检测）
+//! - v4 onUpgrade from<4: TransferQueue 加 session_url（华为 resume 上传 Location 头会话 URL）
 //! - beforeOpen: PRAGMA foreign_keys = ON（已在 open 中处理）
 
 use rusqlite::Connection;
@@ -22,7 +23,7 @@ pub fn run(conn: &Connection) -> AppResult<()> {
         .unwrap_or(0);
 
     if current == 0 {
-        // 全新数据库：建全部表（v3 终态）
+        // 全新数据库：建全部表（v4 终态）
         create_all(conn)?;
         set_version(conn, SCHEMA_VERSION)?;
         return Ok(());
@@ -34,6 +35,9 @@ pub fn run(conn: &Connection) -> AppResult<()> {
     }
     if current < 3 {
         upgrade_to_v3(conn)?;
+    }
+    if current < 4 {
+        upgrade_to_v4(conn)?;
     }
     set_version(conn, SCHEMA_VERSION)?;
     Ok(())
@@ -74,7 +78,8 @@ fn create_all(conn: &Connection) -> AppResult<()> {
             finished_at   INTEGER,
             server_id     TEXT,
             upload_id     TEXT,
-            resume_offset INTEGER NOT NULL DEFAULT 0
+            resume_offset INTEGER NOT NULL DEFAULT 0,
+            session_url   TEXT
         );
 
         CREATE INDEX IF NOT EXISTS idx_sync_items_file_id ON sync_items(file_id);
@@ -102,6 +107,12 @@ fn upgrade_to_v2(conn: &Connection) -> AppResult<()> {
 /// v3: SyncItems 加 localSize（本地变更检测，避免 mtime 精度不足漏判）。
 fn upgrade_to_v3(conn: &Connection) -> AppResult<()> {
     add_column_if_missing(conn, "sync_items", "local_size", "INTEGER")?;
+    Ok(())
+}
+
+/// v4: TransferQueue 加 session_url（华为 resume 上传的 Location 头会话 URL，断点续传必需）。
+fn upgrade_to_v4(conn: &Connection) -> AppResult<()> {
+    add_column_if_missing(conn, "transfer_queue", "session_url", "TEXT")?;
     Ok(())
 }
 
@@ -160,13 +171,13 @@ mod tests {
     }
 
     #[test]
-    fn test_create_all_sets_version_3() {
+    fn test_create_all_sets_version_4() {
         let conn = fresh_conn();
         run(&conn).unwrap();
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(v, 3);
+        assert_eq!(v, 4);
     }
 
     #[test]
@@ -200,9 +211,9 @@ mod tests {
     }
 
     #[test]
-    fn test_upgrade_from_v1_to_v3() {
+    fn test_upgrade_from_v1_to_v4() {
         let conn = fresh_conn();
-        // 模拟 v1 表结构（无 resume 字段，无 local_size）
+        // 模拟 v1 表结构（无 resume 字段，无 local_size，无 session_url）
         conn.execute_batch(
             "CREATE TABLE sync_items (file_id TEXT NOT NULL, local_path TEXT NOT NULL, name TEXT NOT NULL, is_folder INTEGER NOT NULL DEFAULT 0, size INTEGER NOT NULL DEFAULT 0, sha256 TEXT, local_mtime INTEGER, cloud_edited_time INTEGER, last_sync_time INTEGER, status INTEGER NOT NULL DEFAULT 0, error_message TEXT, PRIMARY KEY (file_id, local_path));
              CREATE TABLE transfer_queue (id INTEGER PRIMARY KEY AUTOINCREMENT, direction INTEGER NOT NULL, file_id TEXT, local_path TEXT, name TEXT NOT NULL, total_size INTEGER NOT NULL DEFAULT 0, transferred INTEGER NOT NULL DEFAULT 0, state INTEGER NOT NULL DEFAULT 0, error_message TEXT, created_at INTEGER NOT NULL, finished_at INTEGER);
@@ -213,10 +224,16 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(v, 3);
+        assert_eq!(v, 4);
         // resume_offset 列应存在
         conn.execute(
             "INSERT INTO transfer_queue (direction, name, created_at, resume_offset) VALUES (0,'t',1,500)",
+            [],
+        )
+        .unwrap();
+        // session_url 列应存在（v4 新增）
+        conn.execute(
+            "INSERT INTO transfer_queue (direction, name, created_at, session_url) VALUES (0,'t2',1,'https://example/upload/session')",
             [],
         )
         .unwrap();

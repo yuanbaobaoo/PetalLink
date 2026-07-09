@@ -18,7 +18,7 @@ use crate::data::repository::{
 use crate::drive::{
     download_api::{DownloadApi, ProgressFn as DownloadProgressFn},
     files_api::FilesApi,
-    upload_api::{ProgressFn as UploadProgressFn, UploadApi},
+    upload_api::{ProgressFn as UploadProgressFn, ResumeSession, UploadApi},
 };
 use crate::mount::manager::MountManager;
 use crate::sync::conflict::ConflictResolver;
@@ -40,6 +40,8 @@ pub struct SyncExecutor {
     db: Option<Arc<parking_lot::Mutex<rusqlite::Connection>>>,
     /// 传输更新通知发送端（每次传输结算时触发前端刷新）
     transfer_update_tx: Option<tokio::sync::broadcast::Sender<()>>,
+    /// AppHandle（用于上传失败时广播事件给前端弹 toast）
+    app_handle: Option<tauri::AppHandle>,
 }
 
 // ===== 进度更新（节流） =====
@@ -103,6 +105,7 @@ impl SyncExecutor {
             stability: None,
             db: None,
             transfer_update_tx: None,
+            app_handle: None,
         }
     }
 
@@ -131,9 +134,19 @@ impl SyncExecutor {
         self.transfer_update_tx = Some(tx);
     }
 
+    /// 注入 AppHandle（用于上传失败时广播事件给前端）。
+    pub fn set_app_handle(&mut self, handle: tauri::AppHandle) {
+        self.app_handle = Some(handle);
+    }
+
     /// 获取 UploadApi 引用（供引擎断点续传等外部调用）。
     pub fn upload_api(&self) -> &Arc<UploadApi> {
         &self.upload_api
+    }
+
+    /// FilesApi 访问器（用于上传成功后补取文件元数据）。
+    pub fn files_api(&self) -> &Arc<FilesApi> {
+        &self.files_api
     }
 
     /// 并发执行全部动作。
@@ -177,6 +190,7 @@ impl SyncExecutor {
             stability: self.stability.clone(),
             db: self.db.clone(),
             transfer_update_tx: self.transfer_update_tx.clone(),
+            app_handle: self.app_handle.clone(),
         }
     }
 
@@ -266,6 +280,7 @@ impl SyncExecutor {
                 server_id: None,
                 upload_id: None,
                 resume_offset: 0,
+                session_url: None,
             };
             let id = repository::insert_transfer(&conn, &task).ok();
             // 立即通知前端显示新传输项
@@ -298,20 +313,25 @@ impl SyncExecutor {
                     rusqlite::params![state, result.error_message.as_deref(), chrono::Utc::now().timestamp_millis(), name, transfer_direction::DELETE, transfer_state::RUNNING],
                 );
             } else if let Some(ref lp) = action.local_path {
-                let size = if result.success {
-                    std::fs::metadata(lp)
+                if result.success {
+                    // 成功：transferred 设为实际文件大小；若 total_size 为 0（入队时 cloud_file 缺失），
+                    // 同步修正为实际大小，确保前端进度百分比正确显示（避免 0/0 → 0%）
+                    let size = std::fs::metadata(lp)
                         .ok()
                         .map(|m| m.len() as i64)
-                        .unwrap_or(0)
+                        .unwrap_or(0);
+                    let _ = conn.execute(
+                        "UPDATE transfer_queue SET state=?1, error_message=?2, finished_at=?3, transferred=?4, total_size=CASE WHEN total_size=0 AND ?5!=0 THEN ?5 ELSE total_size END WHERE local_path=?6 AND state=?7",
+                        rusqlite::params![state, result.error_message.as_deref(), chrono::Utc::now().timestamp_millis(), size, size, lp.as_str(), transfer_state::RUNNING],
+                    );
                 } else {
-                    0
-                };
-                // 结算传输：transferred 设为实际文件大小；若 total_size 为 0（入队时 cloud_file 缺失），
-                // 同步修正为实际大小，确保前端进度百分比正确显示（避免 0/0 → 0%）
-                let _ = conn.execute(
-                    "UPDATE transfer_queue SET state=?1, error_message=?2, finished_at=?3, transferred=?4, total_size=CASE WHEN total_size=0 AND ?5!=0 THEN ?5 ELSE total_size END WHERE local_path=?6 AND state=?7",
-                    rusqlite::params![state, result.error_message.as_deref(), chrono::Utc::now().timestamp_millis(), size, size, lp.as_str(), transfer_state::RUNNING],
-                );
+                    // 失败：保留已传输字节数（不清零），仅更新 state/error_message/finished_at。
+                    // 让用户看到「传了一半」的进度，而非 0%，便于判断是否值得手动重试。
+                    let _ = conn.execute(
+                        "UPDATE transfer_queue SET state=?1, error_message=?2, finished_at=?3 WHERE local_path=?4 AND state=?5",
+                        rusqlite::params![state, result.error_message.as_deref(), chrono::Utc::now().timestamp_millis(), lp.as_str(), transfer_state::RUNNING],
+                    );
+                }
             }
             // 触发前端传输面板刷新
             if let Some(ref tx) = self.transfer_update_tx {
@@ -343,6 +363,7 @@ impl SyncExecutor {
                 server_id: None,
                 upload_id: None,
                 resume_offset: 0,
+                session_url: None,
             };
             let _ = repository::insert_transfer(&conn, &task);
         }
@@ -374,6 +395,61 @@ impl SyncExecutor {
                 "{verb_fail}"
             );
         }
+    }
+
+    /// 从 transfer_queue 读回断点信息，构造 ResumeSession（用于断点续传）。
+    ///
+    /// 查找同一 local_path 下「有可用断点」的传输行（resume_offset > 0 且 session_url 非空），
+    /// 取最近一条：
+    /// - 命中 → 构造 ResumeSession（start_offset = resume_offset，session_url 从 DB 读回）
+    /// - 否则返回 None（无可用断点，走全新上传）
+    ///
+    /// 不限定 state：transfer_retry 把 FAILED 重置为 PENDING 后，断点信息仍在该行；
+    /// 本轮 enqueue_transfer 会新建 RUNNING 行（offset=0，被 SQL 的 resume_offset>0 过滤排除），
+    /// 故查询能稳定命中带断点的旧行。RUNNING/FAILED/PENDING 均可命中。
+    ///
+    /// ★ 必须用 session_url 作为过滤条件：华为 API 变更后 init 响应 body 不再返回 serverId/uploadId，
+    /// 只在 Location 头返回 session_url。on_resume 回调持久化的 server_id/uploadId 可能为空字符串，
+    /// 若用 `server_id != ''` 过滤会误拒所有新 API 行 → 断点续传失效。
+    /// chunk_size 传 0 → upload_resume 用 DEFAULT_CHUNK_SIZE（5MB）切分。
+    /// 华为 resume 上传按 Content-Range 接受任意分片边界，续传时用默认分片大小即可，
+    /// 不需要与首次上传的 sliceSize 严格一致（只要字节范围连续）。
+    fn load_resume_session(&self, local_path: &str) -> Option<ResumeSession> {
+        let db = self.db.as_ref()?;
+        let conn = db.lock();
+        let result = conn
+            .query_row(
+                "SELECT server_id, upload_id, resume_offset, session_url FROM transfer_queue
+                 WHERE local_path=?1 AND resume_offset > 0 AND session_url IS NOT NULL AND session_url != ''
+                 AND state IN (4, 1)
+                 ORDER BY created_at DESC LIMIT 1",
+                rusqlite::params![local_path],
+                |row| {
+                    let server_id: Option<String> = row.get(0)?;
+                    let upload_id: Option<String> = row.get(1)?;
+                    let resume_offset: i64 = row.get(2)?;
+                    let session_url: Option<String> = row.get(3)?;
+                    Ok((server_id, upload_id, resume_offset, session_url))
+                },
+            )
+            .ok()?;
+        let (server_id, upload_id, resume_offset, session_url) = result;
+        // session_url 已由 SQL 保证非空，解包为非空字符串。
+        let session_url = session_url.unwrap_or_default();
+        tracing::info!(
+            path = %local_path,
+            offset = resume_offset,
+            has_session_url = !session_url.is_empty(),
+            "发现断点续传信息，从 offset 继续"
+        );
+        Some(ResumeSession {
+            // server_id/upload_id 可能为空（新 API 不返回），续传靠 session_url 直 PUT 即可。
+            server_id: server_id.unwrap_or_default(),
+            upload_id: upload_id.unwrap_or_default(),
+            session_url,
+            chunk_size: 0, // 0 → upload_resume 用 DEFAULT_CHUNK_SIZE 切分
+            start_offset: resume_offset as u64,
+        })
     }
 
     async fn do_upload(&self, action: &SyncAction) -> ActionResult {
@@ -435,16 +511,26 @@ impl SyncExecutor {
         let size = path.metadata().map(|m| m.len()).unwrap_or(0);
         let is_large = size > 20 * 1024 * 1024;
         let rel = action.relative_path.as_deref().unwrap_or("?");
-        // 断点续传回调：持久化 serverId/uploadId/offset
+        // ★ 大文件断点续传：从 transfer_queue 读回 server_id/upload_id/resume_offset，
+        // 构造 ResumeSession 传给 upload_resume，跳过已上传分片。小文件不适用。
+        let resume_session = if is_large {
+            action
+                .local_path
+                .as_deref()
+                .and_then(|p| self.load_resume_session(p))
+        } else {
+            None
+        };
+        // 断点续传回调：持久化 serverId/uploadId/offset/session_url
         let db_resume = self.db.clone();
         let task_name = action.relative_path.clone().unwrap_or_default();
         let on_resume: crate::drive::upload_api::ResumeProgressFn = Box::new(
-            move |sid, uid, offset| {
+            move |sid, uid, offset, session_url| {
                 if let Some(ref db) = db_resume {
                     let conn = db.lock();
                     let _ = conn.execute(
-                    "UPDATE transfer_queue SET server_id=?1, upload_id=?2, resume_offset=?3, transferred=?3 WHERE name=?4 AND state=?5",
-                    rusqlite::params![sid, uid, offset as i64, task_name, transfer_state::RUNNING],
+                    "UPDATE transfer_queue SET server_id=?1, upload_id=?2, resume_offset=?3, transferred=?3, session_url=?4 WHERE name=?5 AND state=?6",
+                    rusqlite::params![sid, uid, offset as i64, session_url, task_name, transfer_state::RUNNING],
                 );
                 }
             },
@@ -463,7 +549,7 @@ impl SyncExecutor {
             let transferred = (ratio * total as f64) as i64;
             emit_throttled_progress(&db_prog, &tx_prog, &lp_prog, transferred, &throttle);
         });
-        let result = if has_cloud_id && !is_large {
+        let mut result = if has_cloud_id && !is_large {
             match self
                 .upload_api
                 .upload_update(
@@ -502,11 +588,18 @@ impl SyncExecutor {
                 }
             }
         } else {
-            match self
-                .upload_api
-                .upload(&path, parent_id, Some(&on_progress), resume_cb)
-                .await
-            {
+            // ★ 大文件且有断点 → 直接走 upload_resume（传 ResumeSession 跳过已传分片）；
+            // 否则走 upload（内部按大小路由：小→upload_small，大→upload_resume(None)）。
+            let upload_result = if let Some(ref session) = resume_session {
+                self.upload_api
+                    .upload_resume(&path, parent_id, Some(session), Some(&on_progress), resume_cb)
+                    .await
+            } else {
+                self.upload_api
+                    .upload(&path, parent_id, Some(&on_progress), resume_cb)
+                    .await
+            };
+            match upload_result {
                 Ok(f) => ActionResult {
                     success: true,
                     error_message: None,
@@ -523,12 +616,47 @@ impl SyncExecutor {
         };
         if result.success {
             tracing::info!(rel, size, "上传成功");
+            // ★ 华为上传完成响应不含 editedTime（只有 id/fileName/mimeType），
+            // 若直接回写 DB 会导致 cloud_edited_time=NULL，下一轮 is_cloud_changed
+            // 误判为 true → 生成 Download 下载自己刚上传的文件（同步循环）。
+            // 修复：上传成功后若 cloud_file 缺 edited_time，补取完整元数据。
+            if let Some(ref cf) = result.cloud_file {
+                if cf.edited_time.is_none() {
+                    match self.files_api.get(&cf.id).await {
+                        Ok(full) => {
+                            tracing::debug!(rel, fid = %cf.id, "补取上传文件完整元数据（含 editedTime）");
+                            result.cloud_file = Some(full);
+                        }
+                        Err(e) => {
+                            // 补取失败不阻断成功状态（上传已成功），但记录警告
+                            tracing::warn!(rel, fid = %cf.id, error = %e, "补取上传文件元数据失败，cloud_edited_time 将为空");
+                        }
+                    }
+                }
+            }
         } else if !result.deferred {
             tracing::warn!(
                 rel,
                 error = result.error_message.as_deref().unwrap_or("?"),
                 "上传失败"
             );
+            // ★ 广播失败事件（含文件名 + 错误），前端据此弹 toast
+            if let Some(ref app) = self.app_handle {
+                use tauri::Emitter;
+                let name = rel.rsplit('/').next().unwrap_or(rel);
+                let error = result.error_message.as_deref().unwrap_or("?");
+                tracing::info!(rel, name, error, "广播 upload_failed 事件给前端");
+                let _ = app.emit(
+                    "upload_failed",
+                    serde_json::json!({
+                        "rel_path": rel,
+                        "name": name,
+                        "error": error,
+                    }),
+                );
+            } else {
+                tracing::warn!(rel, "上传失败但 app_handle 未注入，无法通知前端");
+            }
         }
         result
     }

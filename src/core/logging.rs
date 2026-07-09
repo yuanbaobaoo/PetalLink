@@ -212,6 +212,44 @@ pub fn log_dir() -> AppResult<PathBuf> {
     Ok(config_store::support_dir()?.join("logs"))
 }
 
+/// 清理超期日志文件（保留最近 MAX_LOG_DAYS 天），在启动 init_logger 时调用。
+/// tracing-appender 0.2.x 无 with_max_log_files，需手动清理防止无限累积。
+pub fn cleanup_old_logs() {
+    const MAX_LOG_DAYS: i64 = 30;
+    let dir = match log_dir() {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    let now = chrono::Utc::now();
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = match path.file_name().map(|n| n.to_string_lossy().to_string()) {
+            Some(n) => n,
+            None => continue,
+        };
+        // 只处理 PetalLink.log.YYYY-MM-DD 格式
+        if !name.starts_with("PetalLink.log.") {
+            continue;
+        }
+        // 从文件名解析日期
+        let date_str = name.trim_start_matches("PetalLink.log.");
+        if let Ok(date) = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+            let file_age = now.date_naive().signed_duration_since(date).num_days();
+            if file_age > MAX_LOG_DAYS && std::fs::remove_file(&path).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+    if removed > 0 {
+        tracing::info!(removed = removed, max_days = MAX_LOG_DAYS, "清理超期日志文件");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

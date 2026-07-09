@@ -1,9 +1,9 @@
 <!-- 传输队列弹窗，420×560，单列表含上传/下载/删除 -->
 <script setup lang="ts">
-import { computed, onMounted } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { useTransferStore } from "@/stores/transfer";
 import { TRANSFER_DIR, TRANSFER_STATE, DIR_LABEL } from "@/api/transfer";
-import { MateIcon, MateButton, MateLinearProgress, MateEmpty, MatePopupMenu } from "@/components/mate";
+import { MateIcon, MateButton, MateLinearProgress, MateEmpty, MatePopupMenu, showToast } from "@/components/mate";
 import type { PopupItem } from "@/components/mate";
 import { formatFileSize } from "@/utils/format";
 
@@ -28,6 +28,9 @@ const clearItems: PopupItem[] = [
 ];
 
 const emit = defineEmits<{ (e: "close"): void }>();
+
+// 正在重试的任务 id（防抖：重试中禁用该按钮，避免连点）
+const retryingId = ref<number | null>(null);
 
 onMounted(() => { transfer.loadAll(); });
 
@@ -60,6 +63,22 @@ async function onClear(value: string | number): Promise<void> {
   if (value === "completed") await transfer.clearCompleted();
   else if (value === "failed") await transfer.clearFailed();
   else if (value === "finished") await transfer.clearFinished();
+}
+
+/** 重试失败任务 */
+async function onRetry(id: number): Promise<void> {
+  if (retryingId.value !== null) return; // 防抖：已有重试进行中
+  retryingId.value = id;
+  try {
+    await transfer.retry(id);
+    showToast("已重新加入传输队列", { variant: "success" });
+  } catch (e) {
+    // AppError 经 Tauri 序列化后是对象，取 message 字段；兜底 String
+    const msg = (e as { message?: string })?.message ?? String(e);
+    showToast("重试失败：" + msg, { variant: "error" });
+  } finally {
+    retryingId.value = null;
+  }
 }
 </script>
 
@@ -94,7 +113,11 @@ async function onClear(value: string | number): Promise<void> {
             <span class="tp-item__tag">{{ DIR_LABEL[item.direction] ?? "—" }}</span>
             {{ item.name }}
           </div>
-          <div class="tp-item__progress" v-if="item.direction !== TRANSFER_DIR.DELETE">
+          <!-- 失败时显示错误原因，否则显示进度条 -->
+          <div v-if="item.state === TRANSFER_STATE.FAILED && item.error_message" class="tp-item__error">
+            {{ item.error_message }}
+          </div>
+          <div class="tp-item__progress" v-else-if="item.direction !== TRANSFER_DIR.DELETE">
             <MateLinearProgress
               class="tp-item__bar"
               :value="progressValue(item)"
@@ -109,6 +132,17 @@ async function onClear(value: string | number): Promise<void> {
           <MateIcon :name="stateMeta[item.state]?.icon ?? 'clock'" :size="12" :spin="stateMeta[item.state]?.spin" />
           {{ stateMeta[item.state]?.label ?? "" }}
         </div>
+        <!-- 失败项重试按钮（仅上传/下载失败时显示） -->
+        <MateButton
+          v-if="item.state === TRANSFER_STATE.FAILED && item.direction !== TRANSFER_DIR.DELETE"
+          variant="icon"
+          icon="refresh"
+          tooltip="重试"
+          :loading="retryingId === item.id"
+          :disabled="retryingId !== null"
+          class="tp-item__retry"
+          @click="onRetry(item.id)"
+        />
       </div>
     </div>
   </div>
@@ -145,7 +179,9 @@ async function onClear(value: string | number): Promise<void> {
 .tp-item__tag { font-size: var(--font-caption); color: var(--text-secondary); margin-right: 4px; padding: 0 4px; background: var(--bg-hover); border-radius: 3px; }
 .tp-item__progress { display: flex; align-items: center; gap: var(--space-sm); margin-top: 4px; }
 .tp-item__progress--delete { font-size: var(--font-caption); color: var(--text-secondary); }
+.tp-item__error { font-size: var(--font-caption); color: var(--color-error); margin-top: 4px; line-height: 1.4; word-break: break-all; }
 .tp-item__bar { flex: 1; }
 .tp-item__pct { font-size: var(--font-caption); color: var(--text-secondary); white-space: nowrap; }
 .tp-item__state { font-size: var(--font-caption); font-weight: var(--fw-medium); white-space: nowrap; width: 80px; text-align: right; display: inline-flex; align-items: center; justify-content: flex-end; gap: 3px; }
+.tp-item__retry { flex-shrink: 0; margin-left: var(--space-xs); }
 </style>

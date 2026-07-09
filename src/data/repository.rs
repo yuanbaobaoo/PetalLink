@@ -122,6 +122,9 @@ pub struct TransferTask {
     pub upload_id: Option<String>,
     /// 已上传字节偏移（断点续传恢复点，v2）
     pub resume_offset: i64,
+    /// 华为 resume 上传 Location 头返回的会话 URL（v4，断点续传必需的唯一 token）。
+    /// 新 API 不再在 body 返回 serverId/uploadId，分片 PUT 必须直接用此 URL。
+    pub session_url: Option<String>,
 }
 
 // ===== SyncItems 仓储 =====
@@ -264,6 +267,7 @@ impl TransferTask {
             server_id: row.get("server_id")?,
             upload_id: row.get("upload_id")?,
             resume_offset: row.get("resume_offset")?,
+            session_url: row.get("session_url")?,
         })
     }
 }
@@ -295,6 +299,20 @@ pub fn insert_transfer(conn: &Connection, task: &TransferTask) -> AppResult<i64>
         )
     );
     Ok(conn.last_insert_rowid())
+}
+
+/// 按 id 查询单个传输任务。
+pub fn get_transfer_by_id(conn: &Connection, id: i64) -> AppResult<Option<TransferTask>> {
+    let mut stmt = db_err!(
+        "查询",
+        conn.prepare("SELECT * FROM transfer_queue WHERE id = ?1")
+    );
+    let mut rows = db_err!("查询", stmt.query_map(params![id], TransferTask::from_row));
+    // 取第一条（id 是主键，最多一条）
+    match rows.next() {
+        Some(Ok(t)) => Ok(Some(t)),
+        Some(Err(_)) | None => Ok(None),
+    }
 }
 
 /// 按状态+方向查询传输任务（按 created_at 倒序）。对齐 dart 传输队列列表。
@@ -540,6 +558,7 @@ mod tests {
             server_id: None,
             upload_id: None,
             resume_offset: 0,
+            session_url: None,
         };
         let id = insert_transfer(&conn, &task).unwrap();
         assert!(id > 0);
@@ -571,6 +590,7 @@ mod tests {
                 server_id: None,
                 upload_id: None,
                 resume_offset: 0,
+                session_url: None,
             };
             insert_transfer(&conn, &t).unwrap();
             t.state = transfer_state::RUNNING;

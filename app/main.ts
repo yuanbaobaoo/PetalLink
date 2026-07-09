@@ -31,11 +31,15 @@ import { useSyncStore } from "@/stores/sync";
 import type { SyncGlobalState } from "@/api/sync";
 import { useFileBrowserStore } from "@/stores/fileBrowser";
 import { useTransferStore } from "@/stores/transfer";
+import { showToast } from "@/components/mate";
 
 // 监听同步状态变化
 on("sync_state", (state: unknown) => {
   const sync = useSyncStore();
   sync.applyState(state as SyncGlobalState);
+  // 同步刷新传输队列（重试上传的进度回调通过 sync_state 广播触发）
+  const transfer = useTransferStore();
+  transfer.loadAll().catch(() => {});
 }).catch(() => {});
 
 // 监听目录内容变化 → 刷新文件列表 + 侧边栏
@@ -51,4 +55,24 @@ on("folder_content_changed", () => {
 on("transfer_update", () => {
   const transfer = useTransferStore();
   transfer.loadAll().catch(() => {});
+}).catch(() => {});
+
+// 上传失败提示（自动同步的上传失败，非用户手动操作）
+// 展示文件名 + 具体错误原因（如"空间不足"），5 秒去重避免刷屏
+let lastFailToastTime = 0;
+let lastFailToastMsg = "";
+interface UploadFailedPayload {
+  name?: string;
+  error?: string;
+}
+on<UploadFailedPayload>("upload_failed", (payload) => {
+  const name = payload?.name ?? "未知文件";
+  const error = payload?.error ?? "未知原因";
+  const msg = `上传失败：${name}（${error}）`;
+  const now = Date.now();
+  // 去重：同一条错误消息 5 秒内只弹一次（避免重试风暴刷屏）
+  if (msg === lastFailToastMsg && now - lastFailToastTime < 5000) return;
+  lastFailToastTime = now;
+  lastFailToastMsg = msg;
+  showToast(msg, { variant: "error" });
 }).catch(() => {});

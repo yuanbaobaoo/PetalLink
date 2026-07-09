@@ -2,7 +2,7 @@
 //!
 //! 对齐 `legacy/lib/data/`（database.dart + tables/sync_items.dart + tables/transfer_queue.dart）。
 //!
-//! 使用 rusqlite（bundled），schemaVersion=3，启用外键约束。
+//! 使用 rusqlite（bundled），schemaVersion=4，启用外键约束。
 //! DB 文件：`<Application Support>/io.github.yuanbaobaoo.PetalLink/petal_link.db`。
 
 pub mod migrations;
@@ -15,8 +15,8 @@ use rusqlite::Connection;
 use crate::core::config_store::support_dir;
 use crate::error::{AppError, AppResult};
 
-/// 当前 schema 版本（对齐 dart `schemaVersion = 3`）
-pub const SCHEMA_VERSION: u32 = 3;
+/// 当前 schema 版本（v4：transfer_queue 加 session_url 列）
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// DB 文件名
 pub const DB_FILE_NAME: &str = "petal_link.db";

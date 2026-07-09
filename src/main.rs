@@ -27,6 +27,17 @@ fn main() {
             .or_else(|| info.payload().downcast_ref::<String>().map(|s| s.as_str()))
             .unwrap_or("Box<dyn Any>");
         tracing::error!(location = %location, payload = %payload, "未捕获 panic");
+        // ★ 写入 crash 标记文件，下次启动时检测并提示用户
+        if let Ok(support) = petal_link_lib::core::config_store::support_dir() {
+            let marker = support.join("last_crash.marker");
+            let content = format!(
+                "time={}\nlocation={}\npayload={}\n",
+                chrono::Utc::now().to_rfc3339(),
+                location,
+                payload
+            );
+            let _ = std::fs::write(&marker, content);
+        }
         default_hook(info);
     }));
 
