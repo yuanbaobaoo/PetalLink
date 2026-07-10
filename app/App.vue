@@ -5,10 +5,12 @@
   - loggedOut / error / authorizing：登录页
 -->
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref } from "vue";
+import type { UnlistenFn } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useAuthStore } from "@/stores/auth";
 import { useSyncStore } from "@/stores/sync";
-import { useUpdaterStore } from "@/stores/updater";
+import { useUpdaterStore, CHECK_INTERVAL_MS } from "@/stores/updater";
 import { on } from "@/api/tauri";
 import LoginPage from "@/views/LoginPage.vue";
 import MainPage from "@/views/main/MainPage.vue";
@@ -25,8 +27,13 @@ const currentPage = ref<"main" | "settings" | "logs">("main");
 const showSplash = computed(() => auth.status === "initial" && auth.loading);
 const showMain = computed(() => auth.status === "loggedIn");
 
+// 定时器 / 事件监听句柄（onUnmounted 时清理）
+let initialCheckTimer: ReturnType<typeof setTimeout> | null = null;
+let periodicCheckTimer: ReturnType<typeof setInterval> | null = null;
+let unlistenFocus: UnlistenFn | null = null;
+
 /**
- * 启动时恢复登录态 + 初始化同步 + 注册全局事件
+ * 启动时恢复登录态 + 初始化同步 + 注册全局事件 + 更新检查
  */
   onMounted(async () => {
   await auth.restore();
@@ -41,9 +48,31 @@ const showMain = computed(() => auth.status === "loggedIn");
 
   // 启动后延迟静默检查更新（不阻塞启动流程）
   const updater = useUpdaterStore();
-  setTimeout(() => {
+  // ① 首次检查（启动 3s 后，强制不节流）
+  initialCheckTimer = setTimeout(() => {
     updater.silentCheck();
   }, 3000);
+
+  // ② 每 1 小时定时检查（内部 1 小时节流，重复触发也不会超频）
+  periodicCheckTimer = setInterval(() => {
+    updater.periodicCheck();
+  }, CHECK_INTERVAL_MS);
+
+  // ③ 窗口获得焦点时检查（节流 10 分钟）——覆盖从后台恢复、托盘/Dock 点击、
+  //   单实例聚焦等所有「主窗口重新显示」的路径
+  getCurrentWindow()
+    .onFocusChanged(({ payload: focused }) => {
+      if (focused) updater.checkOnFocus();
+    })
+    .then((fn) => {
+      unlistenFocus = fn;
+    });
+});
+
+onUnmounted(() => {
+  if (initialCheckTimer) clearTimeout(initialCheckTimer);
+  if (periodicCheckTimer) clearInterval(periodicCheckTimer);
+  unlistenFocus?.();
 });
 
 /** 显示设置页（全局事件，MainPage 通过 emit 触发） */

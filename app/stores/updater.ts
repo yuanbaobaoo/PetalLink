@@ -6,6 +6,11 @@ import { ref, computed } from "vue";
 import * as updaterApi from "@/api/updater";
 import type { UpdateInfo, DownloadProgress } from "@/api/updater";
 
+/** 定时检查间隔：每 1 小时检查一次 */
+export const CHECK_INTERVAL_MS = 60 * 60 * 1000;
+/** 窗口聚焦检查节流：距上次检查不足 10 分钟则跳过 */
+export const FOCUS_THROTTLE_MS = 10 * 60 * 1000;
+
 export type UpdatePhase =
   | "idle"           // 空闲
   | "checking"       // 检查中
@@ -44,20 +49,42 @@ export const useUpdaterStore = defineStore("updater", () => {
 
   // ---- 动作 ----
 
-  /** 静默检查更新（启动时使用），仅更新侧边栏提示，不弹对话框 */
-  async function silentCheck(): Promise<void> {
+  /** 实际发起一次检查请求（不含节流），仅更新侧边栏提示，不弹对话框 */
+  async function doCheck(): Promise<void> {
     try {
       const info = await updaterApi.checkForUpdate();
       if (info) {
         updateInfo.value = info;
         phase.value = "available";
         dismissed.value = false;
-        dialogOpen.value = false; // 启动时不弹窗
+        dialogOpen.value = false; // 静默检查不弹窗
       }
     } catch {
       // 静默失败
     }
     lastCheckTime.value = Date.now();
+  }
+
+  /** 静默检查更新（启动时使用），强制检查不节流 */
+  async function silentCheck(): Promise<void> {
+    await doCheck();
+  }
+
+  /** 节流检查：距上次检查不足 throttleMs 则跳过 */
+  async function throttledCheck(throttleMs: number): Promise<void> {
+    const last = lastCheckTime.value;
+    if (last !== null && Date.now() - last < throttleMs) return;
+    await doCheck();
+  }
+
+  /** 每 1 小时定时检查（由 setInterval 驱动） */
+  async function periodicCheck(): Promise<void> {
+    await throttledCheck(CHECK_INTERVAL_MS);
+  }
+
+  /** 窗口获得焦点时检查，节流 10 分钟避免频繁切换应用重复请求 */
+  async function checkOnFocus(): Promise<void> {
+    await throttledCheck(FOCUS_THROTTLE_MS);
   }
 
   /** 手动检查更新（关于页 / 侧边栏点击），有更新时自动弹出对话框 */
@@ -189,6 +216,9 @@ export const useUpdaterStore = defineStore("updater", () => {
     newVersion,
     // 动作
     silentCheck,
+    periodicCheck,
+    checkOnFocus,
+    throttledCheck,
     manualCheck,
     showDialog,
     showDownloadDialog,

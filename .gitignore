@@ -82,3 +82,4 @@ docs/superpowers/
 # ===== 前端构建产物 =====
 app/node_modules/
 app/dist/
+.zcode
