@@ -8,11 +8,11 @@
 pub mod migrations;
 pub mod repository;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
 
-use crate::core::config_store::support_dir;
+use crate::core::config_store::{support_dir, ConfigStore};
 use crate::error::{AppError, AppResult};
 
 /// 当前 schema 版本（v5：持久化传输状态机上下文）
@@ -24,11 +24,21 @@ pub const DB_FILE_NAME: &str = "petal_link.db";
 /// 打开数据库连接（运行迁移 + 启用外键）。
 /// 对齐 dart `AppDatabase`：`PRAGMA foreign_keys = ON` + 迁移策略。
 pub fn open() -> AppResult<Connection> {
-    open_at(&db_file_path()?)
+    let config = ConfigStore::load()?;
+    let mount_root = config
+        .mount_configured
+        .then(|| config.expanded_mount_dir());
+    open_at_with_mount(&db_file_path()?, mount_root.as_deref())
 }
 
 /// 在指定路径打开数据库（测试用，可指向临时文件）。
-pub fn open_at(path: &PathBuf) -> AppResult<Connection> {
+#[allow(dead_code)]
+pub fn open_at(path: &Path) -> AppResult<Connection> {
+    open_at_with_mount(path, None)
+}
+
+/// Open a database and supply a trusted mount root for legacy v5 recovery.
+pub fn open_at_with_mount(path: &Path, mount_root: Option<&Path>) -> AppResult<Connection> {
     if let Some(parent) = path.parent() {
         if !parent.exists() {
             std::fs::create_dir_all(parent)?;
@@ -41,7 +51,7 @@ pub fn open_at(path: &PathBuf) -> AppResult<Connection> {
     conn.execute_batch("PRAGMA foreign_keys = ON;")
         .map_err(|e| AppError::generic(format!("启用外键约束失败：{e}")))?;
 
-    migrations::run(&conn)?;
+    migrations::run_with_mount(&conn, mount_root)?;
     Ok(conn)
 }
 

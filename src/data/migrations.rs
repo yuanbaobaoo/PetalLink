@@ -8,6 +8,8 @@
 //! - v5 onUpgrade from<5: TransferQueue 加任务状态机上下文、revision 与重试索引
 //! - beforeOpen: PRAGMA foreign_keys = ON（已在 open 中处理）
 
+use std::path::Path;
+
 use rusqlite::{params, Connection};
 
 use crate::data::SCHEMA_VERSION;
@@ -18,7 +20,13 @@ use crate::sync::transfer_state::{TransferErrorKind, TransferState};
 const USER_VERSION_PRAGMA: &str = "PRAGMA user_version";
 
 /// 运行迁移。读取当前 user_version，按需建表/升级。
+#[allow(dead_code)]
 pub fn run(conn: &Connection) -> AppResult<()> {
+    run_with_mount(conn, None)
+}
+
+/// Run migrations with an optional trusted mount root for legacy task recovery.
+pub fn run_with_mount(conn: &Connection, mount_root: Option<&Path>) -> AppResult<()> {
     let current: u32 = conn
         .query_row(USER_VERSION_PRAGMA, [], |row| row.get::<_, i64>(0))
         .map(|v| v as u32)
@@ -47,7 +55,7 @@ pub fn run(conn: &Connection) -> AppResult<()> {
             upgrade_to_v4(&transaction)?;
         }
         if current < 5 {
-            upgrade_to_v5(&transaction)?;
+            upgrade_to_v5(&transaction, mount_root)?;
         }
     }
 
@@ -147,7 +155,7 @@ fn upgrade_to_v4(conn: &Connection) -> AppResult<()> {
 }
 
 /// v5: add persistent task context and normalize legacy lifecycle values.
-fn upgrade_to_v5(conn: &Connection) -> AppResult<()> {
+fn upgrade_to_v5(conn: &Connection, mount_root: Option<&Path>) -> AppResult<()> {
     add_column_if_missing(conn, "transfer_queue", "relative_path", "TEXT")?;
     add_column_if_missing(conn, "transfer_queue", "parent_file_id", "TEXT")?;
     add_column_if_missing(conn, "transfer_queue", "operation", "INTEGER")?;
@@ -174,6 +182,8 @@ fn upgrade_to_v5(conn: &Connection) -> AppResult<()> {
         "state_revision",
         "INTEGER NOT NULL DEFAULT 0",
     )?;
+
+    recover_legacy_relative_paths(conn, mount_root)?;
 
     // Legacy FAILED=4 has no structured classification in schemas v1-v4.
     conn.execute(
@@ -211,6 +221,80 @@ fn upgrade_to_v5(conn: &Connection) -> AppResult<()> {
     )
     .map_err(|e| AppError::generic(format!("创建 v5 传输索引失败：{e}")))?;
     Ok(())
+}
+
+fn recover_legacy_relative_paths(conn: &Connection, mount_root: Option<&Path>) -> AppResult<()> {
+    let legacy_tasks = {
+        let mut stmt = conn
+            .prepare("SELECT id, state, local_path FROM transfer_queue")
+            .map_err(|e| AppError::generic(format!("读取旧传输任务失败：{e}")))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i32>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })
+            .map_err(|e| AppError::generic(format!("读取旧传输任务失败：{e}")))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| AppError::generic(format!("解析旧传输任务失败：{e}")))?
+    };
+
+    for (task_id, legacy_state, local_path) in legacy_tasks {
+        match derive_legacy_relative_path(mount_root, local_path.as_deref()) {
+            Ok(relative_path) => {
+                conn.execute(
+                    "UPDATE transfer_queue SET relative_path=?1 WHERE id=?2",
+                    params![relative_path, task_id],
+                )
+                .map_err(|e| AppError::generic(format!("回填旧传输相对路径失败：{e}")))?;
+            }
+            Err(reason) if matches!(legacy_state, 0..=2) => {
+                let error_message = format!("旧传输任务无法安全恢复：{reason}");
+                conn.execute(
+                    "UPDATE transfer_queue
+                     SET state=?1, error_kind=?2, error_message=?3
+                     WHERE id=?4",
+                    params![
+                        i32::from(TransferState::Failed),
+                        i32::from(TransferErrorKind::Validation),
+                        error_message,
+                        task_id,
+                    ],
+                )
+                .map_err(|e| AppError::generic(format!("标记旧传输任务验证失败：{e}")))?;
+            }
+            Err(_) => {}
+        }
+    }
+    Ok(())
+}
+
+fn derive_legacy_relative_path(
+    mount_root: Option<&Path>,
+    local_path: Option<&str>,
+) -> Result<String, String> {
+    let mount_root = mount_root.ok_or_else(|| "未配置同步目录".to_string())?;
+    if !mount_root.is_absolute() {
+        return Err(format!("同步目录不是绝对路径：{}", mount_root.display()));
+    }
+    let local_path = local_path
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| "缺少本地路径".to_string())?;
+    let candidate = Path::new(local_path);
+    if !candidate.is_absolute() {
+        return Err(format!("本地路径不是绝对路径：{local_path}"));
+    }
+    let relative = candidate
+        .strip_prefix(mount_root)
+        .map_err(|_| format!("本地路径不在同步目录内：{local_path}"))?;
+    let relative = relative
+        .to_str()
+        .ok_or_else(|| format!("相对路径不是 UTF-8：{}", relative.display()))?;
+    crate::core::paths::validate_relative_path(relative, false)
+        .map_err(|error| format!("相对路径校验失败：{error}"))?;
+    Ok(relative.to_string())
 }
 
 /// 幂等加列：列已存在时跳过（SQLite ALTER TABLE 不支持 IF NOT EXISTS）。
@@ -362,6 +446,19 @@ mod tests {
             .collect()
     }
 
+    fn legacy_transfer_recovery(
+        conn: &Connection,
+        id: i64,
+    ) -> (i32, Option<String>, Option<i32>, Option<String>) {
+        conn.query_row(
+            "SELECT state, relative_path, error_kind, error_message
+             FROM transfer_queue WHERE id=?1",
+            params![id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn fresh_database_is_created_directly_at_v5() {
         let conn = fresh_conn();
@@ -426,6 +523,127 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn active_legacy_tasks_inside_mount_recover_as_pending() {
+        let conn = fresh_conn();
+        create_legacy_schema(&conn, 4);
+        let mount = tempfile::tempdir().unwrap().keep();
+        for (id, state, relative_path) in [
+            (1, 0, "pending.txt"),
+            (2, 1, "nested/running.txt"),
+            (3, 2, "paused.txt"),
+        ] {
+            let absolute = mount.join(relative_path);
+            conn.execute(
+                "INSERT INTO transfer_queue
+                 (id, direction, local_path, name, state, created_at)
+                 VALUES (?1, 0, ?2, ?3, ?4, ?1)",
+                params![id, absolute.to_str().unwrap(), relative_path, state],
+            )
+            .unwrap();
+        }
+
+        run_with_mount(&conn, Some(&mount)).unwrap();
+
+        for (id, _, relative_path) in [
+            (1, 0, "pending.txt"),
+            (2, 1, "nested/running.txt"),
+            (3, 2, "paused.txt"),
+        ] {
+            assert_eq!(
+                legacy_transfer_recovery(&conn, id),
+                (0, Some(relative_path.to_string()), None, None)
+            );
+        }
+    }
+
+    #[test]
+    fn active_legacy_task_outside_mount_fails_validation() {
+        let conn = fresh_conn();
+        create_legacy_schema(&conn, 4);
+        let mount = tempfile::tempdir().unwrap().keep();
+        conn.execute(
+            "INSERT INTO transfer_queue
+             (id, direction, local_path, name, state, created_at)
+             VALUES (1, 0, '/outside/file.txt', 'file.txt', 0, 1)",
+            [],
+        )
+        .unwrap();
+
+        run_with_mount(&conn, Some(&mount)).unwrap();
+
+        let row = legacy_transfer_recovery(&conn, 1);
+        assert_eq!((row.0, row.1, row.2), (7, None, Some(7)));
+        assert!(row.3.unwrap().contains("不在同步目录内"));
+    }
+
+    #[test]
+    fn active_legacy_task_without_mount_fails_validation() {
+        let conn = fresh_conn();
+        create_legacy_schema(&conn, 4);
+        conn.execute(
+            "INSERT INTO transfer_queue
+             (id, direction, local_path, name, state, created_at)
+             VALUES (1, 0, '/mount/file.txt', 'file.txt', 1, 1)",
+            [],
+        )
+        .unwrap();
+
+        run(&conn).unwrap();
+
+        let row = legacy_transfer_recovery(&conn, 1);
+        assert_eq!((row.0, row.1, row.2), (7, None, Some(7)));
+        assert!(row.3.unwrap().contains("未配置同步目录"));
+    }
+
+    #[test]
+    fn active_legacy_task_without_local_path_fails_validation() {
+        let conn = fresh_conn();
+        create_legacy_schema(&conn, 4);
+        let mount = tempfile::tempdir().unwrap().keep();
+        conn.execute(
+            "INSERT INTO transfer_queue
+             (id, direction, local_path, name, state, created_at)
+             VALUES (1, 0, NULL, 'file.txt', 2, 1)",
+            [],
+        )
+        .unwrap();
+
+        run_with_mount(&conn, Some(&mount)).unwrap();
+
+        let row = legacy_transfer_recovery(&conn, 1);
+        assert_eq!((row.0, row.1, row.2), (7, None, Some(7)));
+        assert!(row.3.unwrap().contains("缺少本地路径"));
+    }
+
+    #[test]
+    fn legacy_history_is_preserved_without_recovery_path() {
+        let conn = fresh_conn();
+        create_legacy_schema(&conn, 4);
+        for (id, state, error_message) in [
+            (1, 3, None),
+            (2, 4, Some("legacy failure")),
+            (3, 5, None),
+        ] {
+            conn.execute(
+                "INSERT INTO transfer_queue
+                 (id, direction, local_path, name, state, error_message, created_at)
+                 VALUES (?1, 0, NULL, ?2, ?3, ?4, ?1)",
+                params![id, format!("history-{id}"), state, error_message],
+            )
+            .unwrap();
+        }
+
+        run(&conn).unwrap();
+
+        assert_eq!(legacy_transfer_recovery(&conn, 1), (6, None, None, None));
+        assert_eq!(
+            legacy_transfer_recovery(&conn, 2),
+            (7, None, Some(11), Some("legacy failure".to_string()))
+        );
+        assert_eq!(legacy_transfer_recovery(&conn, 3), (8, None, None, None));
     }
 
     #[test]
@@ -553,9 +771,9 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                (0, None),
-                (0, None),
-                (0, None),
+                (7, Some(7)),
+                (7, Some(7)),
+                (7, Some(7)),
                 (6, None),
                 (7, Some(11)),
                 (8, None),

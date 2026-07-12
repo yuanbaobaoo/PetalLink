@@ -892,6 +892,34 @@ mod tests {
     }
 
     #[test]
+    fn legal_default_patch_keeps_all_patchable_fields() {
+        let conn = fresh_db();
+        let original = sample_transfer_task(TransferState::Running);
+        let id = insert_transfer(&conn, &original).unwrap();
+
+        let updated = transition_transfer(
+            &conn,
+            id,
+            0,
+            TransferState::VerifyingRemote,
+            TransferPatch::default(),
+        )
+        .unwrap();
+
+        assert_eq!(updated.state_kind().unwrap(), TransferState::VerifyingRemote);
+        assert_eq!(updated.state_revision, 1);
+        assert_eq!(updated.error_kind, original.error_kind);
+        assert_eq!(updated.error_message, original.error_message);
+        assert_eq!(updated.next_retry_at, original.next_retry_at);
+        assert_eq!(updated.finished_at, original.finished_at);
+        assert_eq!(updated.remote_result_file_id, original.remote_result_file_id);
+        assert_eq!(updated.session_url, original.session_url);
+        assert_eq!(updated.transferred, original.transferred);
+        assert_eq!(updated.resume_offset, original.resume_offset);
+        assert_eq!(updated.attempt_count, original.attempt_count);
+    }
+
+    #[test]
     fn illegal_transition_does_not_mutate_task() {
         let conn = fresh_db();
         let id = insert_transfer(&conn, &sample_transfer_task(TransferState::Pending)).unwrap();
