@@ -9,5 +9,6 @@ pub mod executor;
 pub mod planner;
 pub mod stability;
 pub mod state;
+pub mod status_aggregator;
 pub mod sync_state_store;
 pub mod transfer_state;

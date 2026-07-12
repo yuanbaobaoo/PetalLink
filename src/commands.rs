@@ -30,7 +30,8 @@ use crate::error::{AppError, AppResult};
 use crate::mount::manager::MountManager;
 use crate::sync::engine::SyncEngine;
 use crate::sync::executor::SyncExecutor;
-use crate::sync::state::{FailedItem, FreeUpCheckResult, SyncGlobalState};
+use crate::sync::state::{FreeUpCheckResult, SyncGlobalState};
+use crate::sync::status_aggregator::{RuntimeStatus, StatusAggregator};
 
 // ===== 全局单例 =====
 
@@ -66,6 +67,10 @@ pub static DB: Lazy<Arc<Mutex<rusqlite::Connection>>> = Lazy::new(|| {
     let conn = crate::data::open().expect("打开数据库失败");
     Arc::new(Mutex::new(conn))
 });
+
+/// Process-wide status revision source, shared across replacement SyncEngine instances.
+static STATUS_AGGREGATOR: Lazy<Arc<StatusAggregator>> =
+    Lazy::new(|| Arc::new(StatusAggregator::default()));
 
 /// 全局 MountManager（启动时由 setup 注入路径）
 static MOUNT_MANAGER: Mutex<Option<Arc<MountManager>>> = Mutex::new(None);
@@ -262,6 +267,7 @@ pub fn ensure_engine_started(app: &AppHandle) -> AppResult<()> {
         DOWNLOAD_API.clone(),
         UPLOAD_API.clone(),
         DB.clone(),
+        STATUS_AGGREGATOR.clone(),
         config.skip_patterns.clone(),
         config.debounce_sec,
         config.poll_interval_sec,
@@ -631,24 +637,9 @@ pub async fn drive_upload_file(
 
 /// 全量刷新云端树 + 同步周期（走 SyncEngine）。
 #[tauri::command]
-pub async fn sync_manual_refresh(app: AppHandle) -> AppResult<()> {
+pub async fn sync_manual_refresh(_app: AppHandle) -> AppResult<()> {
     let e = sync_engine()?;
-    // 直接向前端广播 is_indexing=true（不依赖状态桥接任务，保证手动刷新期间
-    // 状态条立刻显示「正在读取云端索引…」）。trigger_manual_sync 内部仍会经桥接
-    // 广播一次，二者并存无害；此处直接 emit 是为绕开桥接可能的滞后/死亡。
-    {
-        let mut st = e.current_state();
-        st.is_indexing = true;
-        emit_sync_state(&app, &st);
-    }
-    let result = e.trigger_manual_sync().await;
-    // 无论成败都复位 is_indexing（避免状态条卡在索引态）
-    {
-        let mut st = e.current_state();
-        st.is_indexing = false;
-        emit_sync_state(&app, &st);
-    }
-    result
+    e.trigger_manual_sync().await
 }
 
 /// 查询文件本地同步状态（供前端删除确认用）。
@@ -1042,11 +1033,11 @@ pub async fn sync_folder_recursive(
         // 无论成功失败都释放锁（防 panic 泄漏 → 放在 spawn 任务收尾，确定性释放）
         eng_clone.end_folder_sync();
         // 完成后广播 contentChanged 让前端目录刷新
-        {
-            let mut st = eng_clone.current_state();
-            st.content_changed = true;
-            st.last_sync_time = Some(chrono::Utc::now().timestamp_millis());
-            emit_sync_state(&app_clone, &st);
+        if let Err(error) = eng_clone.update_runtime_and_broadcast(|runtime| {
+            runtime.content_changed = true;
+            runtime.last_sync_time = Some(chrono::Utc::now().timestamp_millis());
+        }) {
+            tracing::warn!(%error, "目录同步完成后重算全局状态失败");
         }
         match &result {
             Ok(done) => tracing::info!(done, rel = %rel_path, "sync_folder_recursive（后台）完成"),
@@ -1464,57 +1455,14 @@ pub async fn sync_retry_failed() -> AppResult<()> {
 
 #[tauri::command]
 pub async fn sync_state() -> AppResult<SyncGlobalState> {
-    // 引擎已启动 → 返回引擎聚合状态（含实时计数）
+    // 引擎已启动 → 以当前 runtime 重新聚合并广播完整快照。
     if let Some(e) = try_sync_engine() {
-        return Ok(e.current_state());
+        return e.recompute_and_broadcast_state();
     }
-    // 引擎未启动：DB 兜底
+    // 引擎未启动：复用进程级 revision source 从 DB 生成完整兜底快照。
+    let _publish_guard = STATUS_AGGREGATOR.lock_publication();
     let conn = DB.lock();
-    let total: u64 = conn
-        .query_row("SELECT COUNT(*) FROM sync_items", [], |r| {
-            r.get::<_, i64>(0)
-        })
-        .unwrap_or(0) as u64;
-    let failed: u64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sync_items WHERE status = 4",
-            [],
-            |r| r.get::<_, i64>(0),
-        )
-        .unwrap_or(0) as u64;
-    let conflict: u64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sync_items WHERE status = 5",
-            [],
-            |r| r.get::<_, i64>(0),
-        )
-        .unwrap_or(0) as u64;
-
-    // 失败项详情（最多 20 条，供 SyncStatusBar 失败项弹窗）
-    let failed_items: Vec<FailedItem> = {
-        let mut stmt = conn
-            .prepare("SELECT local_path, error_message FROM sync_items WHERE status = 4 LIMIT 20")
-            .map_err(|e| AppError::generic(format!("查询失败项失败：{e}")))?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok(FailedItem {
-                    relative_path: row.get::<_, String>(0)?,
-                    error_message: row.get::<_, Option<String>>(1)?,
-                })
-            })
-            .map_err(|e| AppError::generic(format!("查询失败项失败：{e}")))?;
-        rows.filter_map(|r| r.ok()).collect()
-    };
-
-    Ok(SyncGlobalState {
-        total,
-        completed: total - failed - conflict,
-        failed,
-        failed_items,
-        conflict,
-        last_sync_time: Some(chrono::Utc::now().timestamp_millis()),
-        ..Default::default()
-    })
+    STATUS_AGGREGATOR.snapshot(&conn, RuntimeStatus::default())
 }
 
 // ========================================================================
@@ -1604,39 +1552,68 @@ pub fn transfer_has_active() -> AppResult<bool> {
     Ok(count > 0)
 }
 
-#[tauri::command]
-pub fn transfer_clear_completed() -> AppResult<()> {
-    let conn = DB.lock();
+fn clear_transfer_history_and_snapshot(
+    conn: &rusqlite::Connection,
+    aggregator: &StatusAggregator,
+    include_completed: bool,
+    include_failed: bool,
+) -> AppResult<SyncGlobalState> {
     conn.execute(
-        "DELETE FROM transfer_queue WHERE state = ?1",
-        rusqlite::params![repository::transfer_state::COMPLETED],
-    )
-    .map_err(|e| AppError::generic(format!("清除已完成传输失败：{e}")))?;
-    Ok(())
-}
-
-#[tauri::command]
-pub fn transfer_clear_failed() -> AppResult<()> {
-    let conn = DB.lock();
-    conn.execute(
-        "DELETE FROM transfer_queue WHERE state = ?1",
-        rusqlite::params![repository::transfer_state::FAILED],
-    )
-    .map_err(|e| AppError::generic(format!("清除失败传输失败：{e}")))?;
-    Ok(())
-}
-
-#[tauri::command]
-pub fn transfer_clear_finished() -> AppResult<()> {
-    let conn = DB.lock();
-    conn.execute(
-        "DELETE FROM transfer_queue WHERE state IN (?1, ?2)",
+        "DELETE FROM transfer_queue
+         WHERE (?1=1 AND state=?2) OR (?3=1 AND state=?4)",
         rusqlite::params![
-            repository::transfer_state::COMPLETED,
-            repository::transfer_state::FAILED
+            include_completed as i32,
+            i32::from(crate::sync::transfer_state::TransferState::Completed),
+            include_failed as i32,
+            i32::from(crate::sync::transfer_state::TransferState::Failed),
         ],
     )
-    .map_err(|e| AppError::generic(format!("清除已结束传输失败：{e}")))?;
+    .map_err(|error| AppError::generic(format!("清除传输历史失败：{error}")))?;
+    aggregator.snapshot(conn, RuntimeStatus::default())
+}
+
+#[tauri::command]
+pub fn transfer_clear_completed(app: AppHandle) -> AppResult<()> {
+    if let Some(engine) = try_sync_engine() {
+        engine.clear_transfer_history_and_broadcast(true, false)?;
+        return Ok(());
+    }
+    let _publish_guard = STATUS_AGGREGATOR.lock_publication();
+    let snapshot = {
+        let conn = DB.lock();
+        clear_transfer_history_and_snapshot(&conn, &STATUS_AGGREGATOR, true, false)?
+    };
+    emit_sync_state(&app, &snapshot);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn transfer_clear_failed(app: AppHandle) -> AppResult<()> {
+    if let Some(engine) = try_sync_engine() {
+        engine.clear_transfer_history_and_broadcast(false, true)?;
+        return Ok(());
+    }
+    let _publish_guard = STATUS_AGGREGATOR.lock_publication();
+    let snapshot = {
+        let conn = DB.lock();
+        clear_transfer_history_and_snapshot(&conn, &STATUS_AGGREGATOR, false, true)?
+    };
+    emit_sync_state(&app, &snapshot);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn transfer_clear_finished(app: AppHandle) -> AppResult<()> {
+    if let Some(engine) = try_sync_engine() {
+        engine.clear_transfer_history_and_broadcast(true, true)?;
+        return Ok(());
+    }
+    let _publish_guard = STATUS_AGGREGATOR.lock_publication();
+    let snapshot = {
+        let conn = DB.lock();
+        clear_transfer_history_and_snapshot(&conn, &STATUS_AGGREGATOR, true, true)?
+    };
+    emit_sync_state(&app, &snapshot);
     Ok(())
 }
 
@@ -1902,4 +1879,63 @@ fn ensure_not_indexing() -> AppResult<()> {
 fn notify_transfer(app: &AppHandle) {
     emit_transfer_update(app);
     crate::platform::tray::refresh_menu(app);
+}
+
+#[cfg(test)]
+mod status_command_tests {
+    use super::clear_transfer_history_and_snapshot;
+    use crate::data::repository::{self, SyncItem};
+    use crate::sync::status_aggregator::{RuntimeStatus, StatusAggregator};
+    use crate::sync::transfer_state::TransferState;
+
+    #[test]
+    fn no_engine_history_clear_recomputes_complete_snapshot() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::data::migrations::run(&conn).unwrap();
+        repository::upsert(
+            &conn,
+            &SyncItem {
+                file_id: "failed-sync".into(),
+                local_path: "failed.txt".into(),
+                parent_folder_id: None,
+                name: "failed.txt".into(),
+                is_folder: false,
+                size: 1,
+                local_size: Some(1),
+                sha256: None,
+                local_mtime: Some(1),
+                cloud_edited_time: Some(1),
+                last_sync_time: Some(1),
+                status: repository::sync_status::FAILED,
+                error_message: Some("sync failure".into()),
+            },
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO transfer_queue
+             (direction, name, total_size, transferred, state, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                repository::transfer_direction::UPLOAD,
+                "failed.txt",
+                1,
+                0,
+                i32::from(TransferState::Failed),
+                1,
+            ],
+        )
+        .unwrap();
+        let aggregator = StatusAggregator::default();
+        let before = aggregator
+            .snapshot(&conn, RuntimeStatus::default())
+            .unwrap();
+
+        let after = clear_transfer_history_and_snapshot(&conn, &aggregator, false, true).unwrap();
+
+        assert!(after.revision > before.revision);
+        assert_eq!(before.transfer_failed, 1);
+        assert_eq!(after.transfer_failed, 0);
+        assert_eq!(after.failed, 1);
+        assert_eq!(after.failed_items.len(), 1);
+    }
 }

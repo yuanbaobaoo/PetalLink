@@ -43,11 +43,17 @@ pub struct SyncAction {
 /// 同步全局状态（对齐 dart SyncGlobalState，供 UI 透传）
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct SyncGlobalState {
+    /// 权威快照的进程内单调版本。
+    pub revision: u64,
     pub total: u64,
     pub completed: u64,
     pub uploading: u64,
     pub downloading: u64,
+    /// 因网络不可用而等待恢复的传输任务数（不属于永久失败）。
+    pub waiting_network: u64,
     pub failed: u64,
+    /// 传输队列中永久失败的历史任务数，与当前同步失败分开统计。
+    pub transfer_failed: u64,
     /// 失败项详情（供 SyncStatusBar 失败项弹窗，最多 20 条）
     pub failed_items: Vec<FailedItem>,
     pub conflict: u64,

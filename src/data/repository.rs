@@ -440,7 +440,26 @@ pub fn transition_transfer(
     patch: TransferPatch,
 ) -> Result<TransferTask, TransitionError> {
     let transaction = conn.unchecked_transaction()?;
-    let current = transaction
+    let updated = transition_transfer_in_transaction(
+        &transaction,
+        task_id,
+        expected_revision,
+        next_state,
+        patch,
+    )?;
+    transaction.commit()?;
+    Ok(updated)
+}
+
+/// Transition core for callers that must settle related rows in the same transaction.
+pub(crate) fn transition_transfer_in_transaction(
+    conn: &Connection,
+    task_id: i64,
+    expected_revision: i64,
+    next_state: TransferState,
+    patch: TransferPatch,
+) -> Result<TransferTask, TransitionError> {
+    let current = conn
         .query_row(
             "SELECT * FROM transfer_queue WHERE id=?1",
             params![task_id],
@@ -483,7 +502,7 @@ pub fn transition_transfer(
     let (remote_result_file_id_mode, remote_result_file_id) = nullable_patch(remote_result_file_id);
     let (session_url_mode, session_url) = nullable_patch(session_url);
 
-    let changed = transaction.execute(
+    let changed = conn.execute(
         "UPDATE transfer_queue SET
             state=?1,
             error_kind=CASE ?2 WHEN 0 THEN error_kind WHEN 1 THEN ?3 ELSE NULL END,
@@ -525,7 +544,7 @@ pub fn transition_transfer(
         });
     }
 
-    let updated = transaction
+    let updated = conn
         .query_row(
             "SELECT * FROM transfer_queue WHERE id=?1",
             params![task_id],
@@ -533,7 +552,6 @@ pub fn transition_transfer(
         )
         .optional()?
         .ok_or(TransitionError::NotFound { task_id })?;
-    transaction.commit()?;
     Ok(updated)
 }
 

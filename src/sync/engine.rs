@@ -3,7 +3,7 @@
 //! 对齐 `legacy/lib/sync/sync_engine.dart`。
 
 use parking_lot::Mutex;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -22,12 +22,31 @@ use crate::sync::cloud_tree;
 use crate::sync::conflict::ConflictResolver;
 use crate::sync::executor::SyncExecutor;
 use crate::sync::planner::{DbSnapshotEntry, SyncPlanner, SyncSnapshot};
-use crate::sync::state::{FailedItem, FreeUpCheckResult, SyncGlobalState};
+use crate::sync::state::{FreeUpCheckResult, SyncGlobalState};
+use crate::sync::status_aggregator::{RuntimeStatus, StatusAggregator};
+use crate::sync::transfer_state::TransferState;
 
 /// 增量同步安全网：连续走 N 次增量后强制一次全量 BFS，纠正改名/移动/新建文件的累积偏差。
 /// 增量 merge 无法处理"已知 id 但 rel_path 变了"（改名/移动）和"全新文件"，需定期全量收敛。
 /// 配合自动刷新间隔（默认 60s）：300 次 × 60s = 5 小时强制一次全量纠偏。
 const INCREMENTAL_FORCED_FULL_THRESHOLD: u32 = 300;
+
+/// Resets a lifecycle gate on every return path, including cancellation and panic unwind.
+struct ResetFlag<'a> {
+    flag: &'a Mutex<bool>,
+}
+
+impl<'a> ResetFlag<'a> {
+    fn new(flag: &'a Mutex<bool>) -> Self {
+        Self { flag }
+    }
+}
+
+impl Drop for ResetFlag<'_> {
+    fn drop(&mut self) {
+        *self.flag.lock() = false;
+    }
+}
 
 pub struct SyncEngine {
     files_api: Arc<FilesApi>,
@@ -56,6 +75,7 @@ pub struct SyncEngine {
     root_folder_id: Mutex<Option<String>>,
     recently_deleted_paths: Mutex<HashMap<String, i64>>,
     state: Mutex<SyncGlobalState>,
+    status_aggregator: Arc<StatusAggregator>,
     running: Mutex<bool>,
     mount_dir: Mutex<Option<String>>,
     skip_patterns: Vec<String>,
@@ -83,6 +103,7 @@ impl SyncEngine {
         download_api: Arc<DownloadApi>,
         upload_api: Arc<UploadApi>,
         db: Arc<Mutex<Connection>>,
+        status_aggregator: Arc<StatusAggregator>,
         skip_patterns: Vec<String>,
         debounce_secs: u32,
         poll_interval_secs: u32,
@@ -106,6 +127,7 @@ impl SyncEngine {
             root_folder_id: Mutex::new(None),
             recently_deleted_paths: Mutex::new(HashMap::new()),
             state: Mutex::new(SyncGlobalState::default()),
+            status_aggregator,
             running: Mutex::new(false),
             mount_dir: Mutex::new(None),
             skip_patterns,
@@ -132,6 +154,288 @@ impl SyncEngine {
     }
     pub fn current_state(&self) -> SyncGlobalState {
         self.state.lock().clone()
+    }
+
+    /// Recompute and publish one complete authoritative snapshot.
+    pub fn recompute_and_broadcast_state(&self) -> AppResult<SyncGlobalState> {
+        self.update_runtime_and_broadcast(|_| {})
+    }
+
+    /// Apply an explicit runtime transition, then rebuild and publish every persisted field.
+    pub(crate) fn update_runtime_and_broadcast(
+        &self,
+        update: impl FnOnce(&mut RuntimeStatus),
+    ) -> AppResult<SyncGlobalState> {
+        let _publish_guard = self.status_aggregator.lock_publication();
+        if *self.shutdown.lock() {
+            return Err(AppError::generic("同步引擎已停止，拒绝发布状态"));
+        }
+        let mut runtime = RuntimeStatus::from(&*self.state.lock());
+        update(&mut runtime);
+        let snapshot_result = {
+            let conn = self.db.lock();
+            self.status_aggregator.snapshot(&conn, runtime.clone())
+        };
+        let snapshot = match snapshot_result {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                runtime.apply_to(&mut self.state.lock());
+                return Err(error);
+            }
+        };
+        *self.state.lock() = snapshot.clone();
+        let _ = self.state_tx.send(snapshot.clone());
+        Ok(snapshot)
+    }
+
+    fn restore_idle_runtime_after_error(&self) {
+        let _ = self.update_runtime_and_broadcast(|runtime| {
+            runtime.is_running = false;
+            runtime.is_indexing = false;
+            runtime.sync_phase = None;
+        });
+    }
+
+    /// Accept one permanent transfer failure for retry without touching its success baseline.
+    ///
+    /// The transfer lifecycle and compatibility sync status change in one SQLite transaction.
+    /// Task execution remains the responsibility of the existing runner path.
+    fn accept_failed_transfer_retry(&self, task_id: i64) -> AppResult<repository::TransferTask> {
+        let pending = {
+            let conn = self.db.lock();
+            let transaction = conn
+                .unchecked_transaction()
+                .map_err(|error| AppError::generic(format!("开始重试事务失败：{error}")))?;
+            let current = transaction
+                .query_row(
+                    "SELECT * FROM transfer_queue WHERE id=?1",
+                    params![task_id],
+                    repository::TransferTask::from_row,
+                )
+                .optional()
+                .map_err(|error| AppError::generic(format!("查询传输任务失败：{error}")))?
+                .ok_or_else(|| AppError::generic("任务不存在"))?;
+            let current_state = current
+                .state_kind()
+                .map_err(|error| AppError::generic(error.to_string()))?;
+            if current_state != TransferState::Failed {
+                return Err(AppError::generic("任务不存在或非失败状态"));
+            }
+            let relative_path = current
+                .relative_path
+                .as_deref()
+                .ok_or_else(|| AppError::generic("任务缺少相对路径，无法安全重试"))?;
+            crate::core::paths::validate_relative_path(relative_path, false)?;
+
+            let changed = transaction
+                .execute(
+                    "UPDATE transfer_queue SET
+                        state=?1,
+                        error_kind=NULL,
+                        error_message=NULL,
+                        next_retry_at=NULL,
+                        finished_at=NULL,
+                        state_revision=state_revision+1
+                     WHERE id=?2 AND state=?3 AND state_revision=?4",
+                    params![
+                        i32::from(TransferState::Pending),
+                        task_id,
+                        i32::from(TransferState::Failed),
+                        current.state_revision,
+                    ],
+                )
+                .map_err(|error| AppError::generic(format!("重置传输任务失败：{error}")))?;
+            if changed != 1 {
+                return Err(AppError::generic("传输任务状态已变化，请刷新后重试"));
+            }
+            transaction
+                .execute(
+                    "UPDATE sync_items
+                     SET status=?1, error_message=NULL
+                     WHERE local_path=?2 AND status=?3",
+                    params![
+                        repository::sync_status::SYNCING,
+                        relative_path,
+                        repository::sync_status::FAILED,
+                    ],
+                )
+                .map_err(|error| AppError::generic(format!("重置同步失败状态失败：{error}")))?;
+            let updated = transaction
+                .query_row(
+                    "SELECT * FROM transfer_queue WHERE id=?1",
+                    params![task_id],
+                    repository::TransferTask::from_row,
+                )
+                .map_err(|error| AppError::generic(format!("读取重试任务失败：{error}")))?;
+            transaction
+                .commit()
+                .map_err(|error| AppError::generic(format!("提交重试事务失败：{error}")))?;
+            updated
+        };
+        self.recompute_and_broadcast_state()?;
+        Ok(pending)
+    }
+
+    /// Apply one optimistic typed lifecycle transition and publish the resulting full snapshot.
+    fn transition_transfer_and_broadcast(
+        &self,
+        task_id: i64,
+        expected_revision: i64,
+        next_state: TransferState,
+        patch: repository::TransferPatch,
+    ) -> AppResult<repository::TransferTask> {
+        let updated = {
+            let conn = self.db.lock();
+            repository::transition_transfer(
+                &conn,
+                task_id,
+                expected_revision,
+                next_state,
+                patch,
+            )
+            .map_err(|error| AppError::generic(error.to_string()))?
+        };
+        self.recompute_and_broadcast_state()?;
+        Ok(updated)
+    }
+
+    /// Persist a retry's permanent failure in both task history and compatibility sync status.
+    fn record_retry_failure_and_broadcast(
+        &self,
+        task_id: i64,
+        expected_revision: i64,
+        error_message: &str,
+        finished_at: i64,
+    ) -> AppResult<SyncGlobalState> {
+        {
+            let conn = self.db.lock();
+            let transaction = conn
+                .unchecked_transaction()
+                .map_err(|error| AppError::generic(format!("开始重试失败结算事务失败：{error}")))?;
+            let failed = repository::transition_transfer_in_transaction(
+                &transaction,
+                task_id,
+                expected_revision,
+                TransferState::Failed,
+                repository::TransferPatch {
+                    error_kind: repository::ColumnPatch::Set(
+                        crate::sync::transfer_state::TransferErrorKind::Unknown,
+                    ),
+                    error_message: repository::ColumnPatch::Set(error_message.to_string()),
+                    next_retry_at: repository::ColumnPatch::Clear,
+                    finished_at: repository::ColumnPatch::Set(finished_at),
+                    ..Default::default()
+                },
+            )
+            .map_err(|error| AppError::generic(error.to_string()))?;
+            let relative_path = failed
+                .relative_path
+                .as_deref()
+                .ok_or_else(|| AppError::generic("任务缺少相对路径，无法记录重试失败"))?;
+            transaction.execute(
+                "UPDATE sync_items
+                 SET status=?1, error_message=?2
+                 WHERE local_path=?3 AND status=?4",
+                params![
+                    repository::sync_status::FAILED,
+                    error_message,
+                    relative_path,
+                    repository::sync_status::SYNCING,
+                ],
+            )
+            .map_err(|error| AppError::generic(format!("记录重试失败状态失败：{error}")))?;
+            transaction
+                .commit()
+                .map_err(|error| AppError::generic(format!("提交重试失败结算失败：{error}")))?;
+        }
+        self.recompute_and_broadcast_state()
+    }
+
+    /// Atomically confirm a retry task and replace its successful sync baseline.
+    fn settle_retry_success_and_broadcast(
+        &self,
+        task_id: i64,
+        expected_revision: i64,
+        cloud_file: &DriveFile,
+        finished_at: i64,
+    ) -> AppResult<SyncGlobalState> {
+        {
+            let conn = self.db.lock();
+            let transaction = conn
+                .unchecked_transaction()
+                .map_err(|error| AppError::generic(format!("开始重试成功结算事务失败：{error}")))?;
+            let completed = repository::transition_transfer_in_transaction(
+                &transaction,
+                task_id,
+                expected_revision,
+                TransferState::Completed,
+                repository::TransferPatch {
+                    error_kind: repository::ColumnPatch::Clear,
+                    error_message: repository::ColumnPatch::Clear,
+                    next_retry_at: repository::ColumnPatch::Clear,
+                    finished_at: repository::ColumnPatch::Set(finished_at),
+                    remote_result_file_id: repository::ColumnPatch::Set(cloud_file.id.clone()),
+                    transferred: Some(cloud_file.size),
+                    ..Default::default()
+                },
+            )
+            .map_err(|error| AppError::generic(error.to_string()))?;
+            let relative_path = completed
+                .relative_path
+                .as_deref()
+                .ok_or_else(|| AppError::generic("任务缺少相对路径，无法结算重试"))?;
+            transaction
+                .execute(
+                    "DELETE FROM sync_items WHERE local_path=?1",
+                    params![relative_path],
+                )
+                .map_err(|error| AppError::generic(format!("替换重试成功基线失败：{error}")))?;
+            repository::upsert(
+                &transaction,
+                &repository::SyncItem {
+                    file_id: cloud_file.id.clone(),
+                    local_path: relative_path.to_string(),
+                    parent_folder_id: completed.parent_file_id.clone(),
+                    name: completed.name.clone(),
+                    is_folder: false,
+                    size: cloud_file.size,
+                    local_size: completed.source_size.or(Some(completed.total_size)),
+                    sha256: None,
+                    local_mtime: completed.source_mtime,
+                    cloud_edited_time: cloud_file.edited_time.map(|time| time.timestamp_millis()),
+                    last_sync_time: Some(finished_at),
+                    status: repository::sync_status::SYNCED,
+                    error_message: None,
+                },
+            )?;
+            transaction
+                .commit()
+                .map_err(|error| AppError::generic(format!("提交重试成功结算失败：{error}")))?;
+        }
+        self.recompute_and_broadcast_state()
+    }
+
+    /// Delete selected terminal transfer history without changing sync baseline facts.
+    pub(crate) fn clear_transfer_history_and_broadcast(
+        &self,
+        include_completed: bool,
+        include_failed: bool,
+    ) -> AppResult<SyncGlobalState> {
+        {
+            let conn = self.db.lock();
+            conn.execute(
+                "DELETE FROM transfer_queue
+                 WHERE (?1=1 AND state=?2) OR (?3=1 AND state=?4)",
+                params![
+                    include_completed as i32,
+                    i32::from(TransferState::Completed),
+                    include_failed as i32,
+                    i32::from(TransferState::Failed),
+                ],
+            )
+            .map_err(|error| AppError::generic(format!("清除传输历史失败：{error}")))?;
+        }
+        self.recompute_and_broadcast_state()
     }
     pub fn is_running(&self) -> bool {
         *self.running.lock()
@@ -172,7 +476,18 @@ impl SyncEngine {
     /// drop RecommendedWatcher 会同步关闭底层 FSEvents stream → 不再有事件回调，
     /// detached watcher 任务下次循环见 shutdown 标志退出。
     pub fn shutdown_sync(&self) {
-        *self.shutdown.lock() = true;
+        self.shutdown_sync_with_contention_hook(|| {});
+    }
+
+    fn shutdown_sync_with_contention_hook(&self, on_publication_contention: impl FnOnce()) {
+        // 与状态发布共用同一屏障：先开始的发布可以完成；本方法返回后，旧引擎的
+        // 后续 closure 只能在屏障内看到 shutdown=true，并在分配 revision 前失败。
+        {
+            let _publish_guard = self
+                .status_aggregator
+                .lock_publication_with_contention_hook(on_publication_contention);
+            *self.shutdown.lock() = true;
+        }
         // take 出 watcher 并 drop（同步释放 FSEvents 句柄）
         let taken = self.watcher.lock().take();
         drop(taken);
@@ -217,12 +532,11 @@ impl SyncEngine {
         }
         *self.running.lock() = true;
 
-        // 广播 is_running=true
+        if let Err(error) =
+            self.update_runtime_and_broadcast(|runtime| runtime.is_running = true)
         {
-            let mut st = self.state.lock().clone();
-            st.is_running = true;
-            *self.state.lock() = st.clone();
-            let _ = self.state_tx.send(st);
+            self.restore_idle_runtime_after_error();
+            return Err(error);
         }
 
         // ★ 启动网络探测任务 + 初始化睡眠处理（必须在 tokio 运行时上下文中，
@@ -269,16 +583,13 @@ impl SyncEngine {
         self.start_cloud_refresh_timer().await;
 
         // 启动完成，复位运行/索引状态
-        {
-            let mut st = self.state.lock().clone();
-            st.is_running = false;
+        self.update_runtime_and_broadcast(|runtime| {
+            runtime.is_running = false;
             // 启动全程（BFS + 首次 cycle）已结束，确保 is_indexing 也复位，
             // 防止 BFS 设的 true 因后续交错未被清，卡住状态条。
-            st.is_indexing = false;
-            st.sync_phase = None;
-            *self.state.lock() = st.clone();
-            let _ = self.state_tx.send(st);
-        }
+            runtime.is_indexing = false;
+            runtime.sync_phase = None;
+        })?;
 
         Ok(())
     }
@@ -485,6 +796,7 @@ impl SyncEngine {
                 failed_delete = failed_del,
                 "中断传输恢复完成"
             );
+            self.push_live_transfer_state();
         }
     }
 
@@ -497,27 +809,32 @@ impl SyncEngine {
         });
         if loaded.is_none() {
             *self.syncing.lock() = true;
-            // 广播 is_indexing=true（对齐 dart BFS 期间的状态广播）
-            {
-                let mut st = self.state.lock().clone();
-                st.is_indexing = true;
-                st.sync_phase = Some("indexing-startup".to_string());
-                *self.state.lock() = st.clone();
-                let _ = self.state_tx.send(st);
+            let refresh_result = {
+                let _syncing_reset = ResetFlag::new(&self.syncing);
+                async {
+                    // 广播 is_indexing=true（对齐 dart BFS 期间的状态广播）
+                    self.update_runtime_and_broadcast(|runtime| {
+                        runtime.is_indexing = true;
+                        runtime.sync_phase = Some("indexing-startup".to_string());
+                    })?;
+                    let (tree, p2i, root) =
+                        cloud_tree::refresh_cloud_tree(&self.files_api, &self.mount, &abs_dir)
+                            .await?;
+                    *self.cloud_tree.lock() = tree;
+                    *self.path_to_id.lock() = p2i;
+                    *self.root_folder_id.lock() = root;
+                    self.update_runtime_and_broadcast(|runtime| {
+                        runtime.is_indexing = false;
+                        runtime.sync_phase = None;
+                    })?;
+                    Ok::<(), AppError>(())
+                }
+                .await
+            };
+            if refresh_result.is_err() {
+                self.restore_idle_runtime_after_error();
             }
-            let (tree, p2i, root) =
-                cloud_tree::refresh_cloud_tree(&self.files_api, &self.mount, &abs_dir).await?;
-            *self.cloud_tree.lock() = tree;
-            *self.path_to_id.lock() = p2i;
-            *self.root_folder_id.lock() = root;
-            *self.syncing.lock() = false;
-            {
-                let mut st = self.state.lock().clone();
-                st.is_indexing = false;
-                st.sync_phase = None;
-                *self.state.lock() = st.clone();
-                let _ = self.state_tx.send(st);
-            }
+            refresh_result?;
         }
         // ★ 清理无效墓碑：云端树里已不存在的 DELETED 记录可以真删了
         {
@@ -655,13 +972,14 @@ impl SyncEngine {
             return Ok(());
         }
         *self.syncing.lock() = true;
+        let _syncing_reset = ResetFlag::new(&self.syncing);
         // ★ 周期开始 → 立即通知前端"同步中" + 设置 phase（auto-cloud-refresh
         //   由上层调用方已设好 phase，此处不覆盖；其余按 triggered_by 设对应 phase）
-        {
-            let mut st = self.state.lock().clone();
-            st.is_running = true;
-            if st.sync_phase.is_none() {
-                st.sync_phase = match triggered_by {
+        let result = async {
+            self.update_runtime_and_broadcast(|runtime| {
+            runtime.is_running = true;
+            if runtime.sync_phase.is_none() {
+                runtime.sync_phase = match triggered_by {
                     "local-watcher" => Some("syncing-local".to_string()),
                     "manual-refresh" => Some("syncing-manual".to_string()),
                     "retry-failed" => Some("syncing-retry".to_string()),
@@ -669,11 +987,13 @@ impl SyncEngine {
                     _ => None, // auto-cloud-refresh 由上层设好
                 };
             }
-            *self.state.lock() = st.clone();
-            let _ = self.state_tx.send(st);
+            })?;
+            self.run_sync_cycle_inner(triggered_by).await
         }
-        let result = self.run_sync_cycle_inner(triggered_by).await;
-        *self.syncing.lock() = false;
+        .await;
+        if result.is_err() {
+            self.restore_idle_runtime_after_error();
+        }
         result
     }
 
@@ -683,11 +1003,11 @@ impl SyncEngine {
     }
 
     /// 设置当前同步阶段并广播（供前端状态条精确显示）。
-    fn set_phase(&self, phase: &str) {
-        let mut st = self.state.lock().clone();
-        st.sync_phase = Some(phase.to_string());
-        *self.state.lock() = st.clone();
-        let _ = self.state_tx.send(st);
+    fn set_phase(&self, phase: &str) -> AppResult<()> {
+        self.update_runtime_and_broadcast(|runtime| {
+            runtime.sync_phase = Some(phase.to_string());
+        })?;
+        Ok(())
     }
 
     async fn run_sync_cycle_inner(&self, triggered_by: &str) -> AppResult<()> {
@@ -763,19 +1083,16 @@ impl SyncEngine {
 
         // #8 空操作短路（对齐 dart：无 action → 清零计数 + contentChanged=false → return）
         if actions.is_empty() {
-            let mut st = self.state.lock().clone();
-            st.uploading = 0;
-            st.downloading = 0;
-            st.editing = 0;
-            st.content_changed = false;
-            st.is_running = false;
+            self.update_runtime_and_broadcast(|runtime| {
+                runtime.editing = 0;
+                runtime.content_changed = false;
+                runtime.is_running = false;
             // 同步周期结束即非索引态：复位 is_indexing，防止此前某次 BFS/刷新
             // 的 is_indexing=true 因交错未被清，导致状态条永久卡在「正在读取云端索引」。
-            st.is_indexing = false;
-            st.sync_phase = None;
-            st.last_sync_time = Some(chrono::Utc::now().timestamp_millis());
-            *self.state.lock() = st.clone();
-            let _ = self.state_tx.send(st);
+                runtime.is_indexing = false;
+                runtime.sync_phase = None;
+                runtime.last_sync_time = Some(chrono::Utc::now().timestamp_millis());
+            })?;
             tracing::info!(
                 triggered_by,
                 local = local_len,
@@ -820,14 +1137,8 @@ impl SyncEngine {
                         | crate::sync::state::SyncActionType::BackupBeforeCloudDelete
                 )
         });
-        {
-            let mut st = self.state.lock().clone();
-            st.content_changed = content_changed;
-            *self.state.lock() = st.clone();
-        }
-
         // 广播状态更新
-        self.update_and_push_state();
+        self.update_and_push_state(content_changed)?;
 
         tracing::info!(
             triggered_by,
@@ -903,11 +1214,11 @@ impl SyncEngine {
 
         // ★ 目录创建完成，立即通知前端刷新列表和侧边栏
         if !folder_idxs.is_empty() {
-            let mut st = self.state.lock().clone();
-            st.content_changed = true;
-            // 不修改计数——update_and_push_state 在周期结束时更新准确数字
-            *self.state.lock() = st.clone();
-            let _ = self.state_tx.send(st);
+            if let Err(error) = self.update_runtime_and_broadcast(|runtime| {
+                runtime.content_changed = true;
+            }) {
+                tracing::warn!(%error, "目录创建后重算全局状态失败");
+            }
         }
 
         // 阶段 2：为其余动作重新填充 parent，再并发执行
@@ -1327,117 +1638,27 @@ impl SyncEngine {
     }
 
     /// 更新并广播全局状态（聚合 DB 计数，对齐 dart _updateState）
-    fn update_and_push_state(&self) {
-        let conn = self.db.lock();
-        let total: u64 = conn
-            .query_row("SELECT COUNT(*) FROM sync_items", [], |r| {
-                r.get::<_, i64>(0)
-            })
-            .unwrap_or(0) as u64;
-        let failed: u64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sync_items WHERE status=?1",
-                params![repository::sync_status::FAILED],
-                |r| r.get::<_, i64>(0),
-            )
-            .unwrap_or(0) as u64;
-        let conflict: u64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sync_items WHERE status=?1",
-                params![repository::sync_status::CONFLICT],
-                |r| r.get::<_, i64>(0),
-            )
-            .unwrap_or(0) as u64;
-        let uploading: u64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM transfer_queue WHERE state=?1 AND direction=?2",
-                params![
-                    repository::transfer_state::RUNNING,
-                    repository::transfer_direction::UPLOAD
-                ],
-                |r| r.get::<_, i64>(0),
-            )
-            .unwrap_or(0) as u64;
-        let downloading: u64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM transfer_queue WHERE state=?1 AND direction IN (?2, ?3)",
-                params![
-                    repository::transfer_state::RUNNING,
-                    repository::transfer_direction::DOWNLOAD,
-                    repository::transfer_direction::DOWNLOAD_UPDATE
-                ],
-                |r| r.get::<_, i64>(0),
-            )
-            .unwrap_or(0) as u64;
-        let failed_items: Vec<FailedItem> = match conn
-            .prepare("SELECT local_path, error_message FROM sync_items WHERE status=?1 LIMIT 20")
-        {
-            Ok(mut stmt) => stmt
-                .query_map(params![repository::sync_status::FAILED], |row| {
-                    Ok(FailedItem {
-                        relative_path: row.get::<_, String>(0)?,
-                        error_message: row.get::<_, Option<String>>(1)?,
-                    })
-                })
-                .map(|rows| rows.filter_map(|r| r.ok()).collect())
-                .unwrap_or_default(),
-            Err(_) => Vec::new(),
-        };
-        drop(conn);
-
-        let mut st = self.state.lock().clone();
-        st.total = total;
-        st.completed = total - failed - conflict;
-        st.failed = failed;
-        st.conflict = conflict;
-        st.uploading = uploading;
-        st.downloading = downloading;
-        st.failed_items = failed_items;
-        st.last_sync_time = Some(chrono::Utc::now().timestamp_millis());
-        st.is_running = false; // 周期结束，重置运行状态
-        st.is_indexing = false; // 周期结束即非索引态（防 BFS 的 true 因交错残留）
-        st.sync_phase = None; // 周期结束回到空闲
-        *self.state.lock() = st.clone();
-        let _ = self.state_tx.send(st);
+    fn update_and_push_state(&self, content_changed: bool) -> AppResult<()> {
+        self.update_runtime_and_broadcast(|runtime| {
+            runtime.content_changed = content_changed;
+            runtime.last_sync_time = Some(chrono::Utc::now().timestamp_millis());
+            runtime.is_running = false;
+            runtime.is_indexing = false;
+            runtime.sync_phase = None;
+        })?;
+        Ok(())
     }
 
-    /// 实时重算传输队列的进行中计数并推送 SyncGlobalState（不重置 is_running）。
+    /// 委托权威聚合器重算完整状态（不重置 runtime-only fields）。
     ///
     /// 供 transfer_update 监听器调用：双端对齐/手动下载/传输进度等不经过 sync cycle 的场景，
     /// 入队/结算 RUNNING 传输后，需刷新状态条的 uploading/downloading 计数。
     /// 与 [`update_and_push_state`] 区别：后者只在周期结束调用且重置 is_running；
-    /// 本方法保留 is_running/is_indexing 原值，仅刷新传输计数，避免误清「同步中」。
+    /// 本方法保留 runtime fields，但不会保留任何过期 DB 计数。
     pub fn push_live_transfer_state(&self) {
-        let (uploading, downloading) = {
-            let conn = self.db.lock();
-            let uploading: u64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM transfer_queue WHERE state=?1 AND direction=?2",
-                    params![
-                        repository::transfer_state::RUNNING,
-                        repository::transfer_direction::UPLOAD
-                    ],
-                    |r| r.get::<_, i64>(0),
-                )
-                .unwrap_or(0) as u64;
-            let downloading: u64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM transfer_queue WHERE state=?1 AND direction IN (?2, ?3)",
-                    params![
-                        repository::transfer_state::RUNNING,
-                        repository::transfer_direction::DOWNLOAD,
-                        repository::transfer_direction::DOWNLOAD_UPDATE
-                    ],
-                    |r| r.get::<_, i64>(0),
-                )
-                .unwrap_or(0) as u64;
-            (uploading, downloading)
-        };
-        let mut st = self.state.lock().clone();
-        st.uploading = uploading;
-        st.downloading = downloading;
-        *self.state.lock() = st.clone();
-        let _ = self.state_tx.send(st);
+        if let Err(error) = self.recompute_and_broadcast_state() {
+            tracing::warn!(%error, "传输变化后重算全局状态失败");
+        }
     }
 
     async fn scan_local(&self) -> HashMap<String, LocalFileEntry> {
@@ -1516,8 +1737,11 @@ impl SyncEngine {
             }
             *guard = true;
         }
+        let _manual_reset = ResetFlag::new(&self.manual_syncing);
         let result = self.trigger_manual_sync_impl().await;
-        *self.manual_syncing.lock() = false;
+        if result.is_err() {
+            self.restore_idle_runtime_after_error();
+        }
         result
     }
 
@@ -1530,32 +1754,33 @@ impl SyncEngine {
         // 广播 is_indexing=true（对齐 dart _refreshCloudTree 的 isIndexing 广播）。
         // trigger_manual_sync 直接调 refresh_cloud_tree，需在此补 is_indexing 广播，
         // 否则手动刷新期间前端全程收到 idle 态、状态条显示「同步完成」。
-        {
-            let mut st = self.state.lock().clone();
-            st.is_indexing = true;
-            st.sync_phase = Some("indexing-manual".to_string());
-            *self.state.lock() = st.clone();
-            let _ = self.state_tx.send(st);
-        }
+        self.update_runtime_and_broadcast(|runtime| {
+            runtime.is_indexing = true;
+            runtime.sync_phase = Some("indexing-manual".to_string());
+        })?;
         // 无论成功失败都要复位 is_indexing，避免 BFS 出错后状态条卡在索引态
         let refresh_result =
             cloud_tree::refresh_cloud_tree(&self.files_api, &self.mount, &abs_dir).await;
-        {
-            let mut st = self.state.lock().clone();
-            st.is_indexing = false;
-            st.sync_phase = None;
-            *self.state.lock() = st.clone();
-            let _ = self.state_tx.send(st);
-        }
-        let (tree, p2i, root) = refresh_result?;
+        let reset_result = self.update_runtime_and_broadcast(|runtime| {
+            runtime.is_indexing = false;
+            runtime.sync_phase = None;
+        });
+        let (tree, p2i, root) = match refresh_result {
+            Ok(refreshed) => {
+                reset_result?;
+                refreshed
+            }
+            Err(error) => {
+                let _ = reset_result;
+                return Err(error);
+            }
+        };
         *self.cloud_tree.lock() = tree;
         *self.path_to_id.lock() = p2i;
         *self.root_folder_id.lock() = root;
         self.run_sync_cycle("manual-refresh").await?;
         // 强制 contentChanged=true（用户主动刷新就是要看新内容）
-        let mut state = self.state.lock().clone();
-        state.content_changed = true;
-        let _ = self.state_tx.send(state);
+        self.update_runtime_and_broadcast(|runtime| runtime.content_changed = true)?;
         Ok(())
     }
 
@@ -1580,8 +1805,11 @@ impl SyncEngine {
             }
             *guard = true;
         }
+        let _manual_reset = ResetFlag::new(&self.manual_syncing);
         let result = self.run_auto_cloud_refresh_impl().await;
-        *self.manual_syncing.lock() = false;
+        if result.is_err() {
+            self.restore_idle_runtime_after_error();
+        }
         if let Err(e) = result {
             tracing::warn!(error = %e, "自动云端刷新失败（忽略，下次定时重试）");
         }
@@ -1593,32 +1821,32 @@ impl SyncEngine {
         let abs_dir = crate::core::paths::expand_tilde(&mount_dir);
 
         // 广播 is_indexing=true（phase 由 try_incremental_or_full_refresh 内部按增量/全量设）
-        {
-            let mut st = self.state.lock().clone();
-            st.is_indexing = true;
-            *self.state.lock() = st.clone();
-            let _ = self.state_tx.send(st);
-        }
+        self.update_runtime_and_broadcast(|runtime| runtime.is_indexing = true)?;
 
         // 尝试增量（有持久化 cursor）；失败/无 cursor 回退全量 BFS
         let refresh_result = self.try_incremental_or_full_refresh(&abs_dir).await;
 
         // 无论成败复位 is_indexing + phase
-        {
-            let mut st = self.state.lock().clone();
-            st.is_indexing = false;
-            st.sync_phase = None;
+        let reset_result = self.update_runtime_and_broadcast(|runtime| {
+            runtime.is_indexing = false;
+            runtime.sync_phase = None;
             // ★ 云端刷新（增量或全量）可能引入了新文件/恢复文件，强制 contentChanged
             // 通知前端刷新文件列表，否则 BFS 回退路径下 sync cycle 无 action 时前端不更新
-            st.content_changed = true;
-            *self.state.lock() = st.clone();
-            let _ = self.state_tx.send(st);
-        }
+            runtime.content_changed = true;
+        });
 
-        refresh_result?;
+        match refresh_result {
+            Ok(()) => {
+                reset_result?;
+            }
+            Err(error) => {
+                let _ = reset_result;
+                return Err(error);
+            }
+        }
         // 增量 merge 完成后，cycle 阶段显示"同步云端变更"（try_incremental 设了 querying，
         // 此处 cycle 前覆盖为 syncing；run_sync_cycle 对 auto-cloud-refresh 不覆盖 phase）
-        self.set_phase("syncing-auto-incremental");
+        self.set_phase("syncing-auto-incremental")?;
         self.run_sync_cycle("auto-cloud-refresh").await?;
         Ok(())
     }
@@ -1644,7 +1872,7 @@ impl SyncEngine {
         if !force_full {
             if let Some(ref cursor) = saved_cursor {
                 // 增量路径：先查询云端变更，再 merge（phase 分两步：querying → syncing）
-                self.set_phase("querying-changes");
+                self.set_phase("querying-changes")?;
                 match self.changes_api.list_all_changes(Some(cursor)).await {
                     Ok((changes, new_cursor)) => {
                         tracing::info!(
@@ -1679,7 +1907,7 @@ impl SyncEngine {
         }
 
         // 全量 BFS 路径（无 cursor / 增量失败 / 强制纠偏）
-        self.set_phase("indexing-auto-full");
+        self.set_phase("indexing-auto-full")?;
         let (tree, p2i, root) =
             cloud_tree::refresh_cloud_tree(&self.files_api, &self.mount, abs_dir).await?;
         *self.cloud_tree.lock() = tree;
@@ -1960,64 +2188,48 @@ impl SyncEngine {
         // 块作用域确保 MutexGuard 在 await 前释放
         {
             let conn = self.db.lock();
-            // 对齐 dart：重置为 synced(0) 而非 cloudOnly(1)，让 diff 重新评估
-            let _ = conn.execute(
-                "UPDATE sync_items SET status=?1 WHERE status=?2",
+            conn.execute(
+                "UPDATE sync_items SET status=?1, error_message=NULL WHERE status=?2",
                 rusqlite::params![
-                    repository::sync_status::SYNCED,
+                    repository::sync_status::SYNCING,
                     repository::sync_status::FAILED
                 ],
-            );
+            )
+            .map_err(|error| AppError::generic(format!("接受失败项重试失败：{error}")))?;
         }
+        self.recompute_and_broadcast_state()?;
         self.run_sync_cycle("retry-failed").await
     }
 
     /// 重试单个 transfer_queue 任务（用户在传输面板点"重试"时调用）。
-    /// 非阻塞：立即重置状态为 RUNNING 并广播刷新，然后后台 spawn 上传任务。
+    /// 非阻塞：接受为 PENDING 后按类型化状态机进入 RUNNING，再后台 spawn 上传任务。
     /// 有有效 session_url → 断点续传；无 → 从头重传。
-    pub async fn retry_transfer(&self, task_id: i64) -> AppResult<()> {
+    pub async fn retry_transfer(self: &Arc<Self>, task_id: i64) -> AppResult<()> {
         use repository::transfer_direction;
         use std::path::PathBuf;
 
-        // 读取任务 + 重置状态（块作用域释放 MutexGuard）
+        // 所有前置条件先验证；拒绝的重试不得清除现有失败事实。
         let task = {
             let conn = self.db.lock();
-            // 重置 transfer_queue 为 RUNNING
-            let affected = conn
-                .execute(
-                    "UPDATE transfer_queue SET state=?1, error_message=NULL WHERE id=?2 AND state=?3",
-                    rusqlite::params![
-                        repository::transfer_state::RUNNING,
-                        task_id,
-                        repository::transfer_state::FAILED
-                    ],
-                )
-                .map_err(|e| crate::error::AppError::generic(format!("重置传输任务失败：{e}")))?;
-            if affected == 0 {
-                return Err(crate::error::AppError::generic("任务不存在或非失败状态"));
-            }
-            let task = repository::get_transfer_by_id(&conn, task_id)
+            repository::get_transfer_by_id(&conn, task_id)
                 .map_err(|e| crate::error::AppError::generic(format!("查询传输任务失败：{e}")))?
-                .ok_or_else(|| crate::error::AppError::generic("任务不存在"))?;
-            // ★ 同步重置 sync_items 的 FAILED 状态为 SYNCING（主页失败提示立即消失）
-            if let Some(ref lp) = task.local_path {
-                let _ = conn.execute(
-                    "UPDATE sync_items SET status=?1 WHERE local_path=?2 AND status=?3",
-                    rusqlite::params![
-                        repository::sync_status::SYNCING,
-                        lp,
-                        repository::sync_status::FAILED
-                    ],
-                );
-            }
-            task
+                .ok_or_else(|| crate::error::AppError::generic("任务不存在"))?
         };
-        tracing::info!(task_id, name = %task.name, "开始重试传输任务");
+        if task.state_kind().map_err(|error| AppError::generic(error.to_string()))?
+            != TransferState::Failed
+        {
+            return Err(AppError::generic("任务不存在或非失败状态"));
+        }
 
         // 仅处理上传方向
         if task.direction != transfer_direction::UPLOAD {
             return Err(crate::error::AppError::generic("当前仅支持上传任务重试"));
         }
+        let relative_path = task
+            .relative_path
+            .as_deref()
+            .ok_or_else(|| AppError::generic("任务缺少相对路径，无法安全重试"))?;
+        crate::core::paths::validate_relative_path(relative_path, false)?;
 
         let local_path = task
             .local_path
@@ -2025,30 +2237,24 @@ impl SyncEngine {
             .ok_or_else(|| crate::error::AppError::generic("任务缺少本地路径"))?;
         let path = PathBuf::from(local_path);
         if !path.exists() {
-            let now = chrono::Utc::now().timestamp_millis();
-            let conn = self.db.lock();
-            let _ = conn.execute(
-                "UPDATE transfer_queue SET state=?1, error_message=?2, finished_at=?3 WHERE id=?4",
-                rusqlite::params![
-                    repository::transfer_state::FAILED,
-                    "本地文件不存在，无法重试",
-                    now,
-                    task_id
-                ],
-            );
             return Err(crate::error::AppError::generic("本地文件不存在"));
         }
-
-        // ★ 立即广播状态变更：前端传输队列 + 主页状态条实时刷新
-        self.push_live_transfer_state();
-
-        // ★ 后台 spawn 上传任务（非阻塞，命令立即返回）
         let exec = match &self.executor {
             Some(e) => e.clone_executor(),
             None => return Err(crate::error::AppError::generic("同步引擎未就绪")),
         };
-        let db = self.db.clone();
-        let state_tx = self.state_tx.clone();
+
+        let pending = self.accept_failed_transfer_retry(task_id)?;
+        let task = self.transition_transfer_and_broadcast(
+            task_id,
+            pending.state_revision,
+            TransferState::Running,
+            repository::TransferPatch::default(),
+        )?;
+        tracing::info!(task_id, name = %task.name, "开始重试传输任务");
+
+        // ★ 后台 spawn 上传任务（非阻塞，命令立即返回）
+        let engine = self.clone();
         let total_size = task.total_size;
         let task_id_val = task.id;
         let task_name = task.name.clone();
@@ -2070,25 +2276,25 @@ impl SyncEngine {
         tauri::async_runtime::spawn(async move {
             // 进度回调（写 DB + 广播触发前端刷新）
             let progress: crate::drive::upload_api::ProgressFn = {
-                let db = db.clone();
-                let tx = state_tx.clone();
+                let engine = engine.clone();
                 Box::new(move |frac: f64| {
-                    let conn = db.lock();
+                    let conn = engine.db.lock();
                     let transferred = (frac * total_size as f64) as i64;
                     let _ = conn.execute(
                         "UPDATE transfer_queue SET transferred=?1 WHERE id=?2",
                         rusqlite::params![transferred, task_id_val],
                     );
                     drop(conn);
-                    // 广播触发前端刷新（状态桥接任务会调 transfer.loadAll + emit_sync_state）
-                    let _ = tx.send(SyncGlobalState::default());
+                    if let Err(error) = engine.recompute_and_broadcast_state() {
+                        tracing::warn!(%error, "重试进度后重算全局状态失败");
+                    }
                 })
             };
             // 续传回调
             let on_resume: crate::drive::upload_api::ResumeProgressFn = {
-                let db = db.clone();
+                let engine = engine.clone();
                 Box::new(move |sid, uid, offset, session_url| {
-                    let conn = db.lock();
+                    let conn = engine.db.lock();
                     let _ = conn.execute(
                         "UPDATE transfer_queue SET server_id=?1, upload_id=?2, resume_offset=?3, transferred=?3, session_url=?4 WHERE id=?5",
                         rusqlite::params![sid, uid, offset as i64, session_url, task_id_val],
@@ -2120,52 +2326,30 @@ impl SyncEngine {
                     } else {
                         drive_file.clone()
                     };
-                    let conn = db.lock();
-                    // transfer_queue → COMPLETED
-                    let _ = conn.execute(
-                        "UPDATE transfer_queue SET state=?1, finished_at=?2, transferred=total_size WHERE id=?3",
-                        rusqlite::params![repository::transfer_state::COMPLETED, now, task_id_val],
-                    );
-                    // ★ sync_items → 写真实 fileId + SYNCED（清 pending: 占位 + FAILED）
-                    let rel = task.local_path.clone().unwrap_or_default();
-                    let _ = conn.execute(
-                        "DELETE FROM sync_items WHERE local_path=?1 AND file_id LIKE ?2",
-                        rusqlite::params![&rel, format!("{}%", repository::PENDING_FILE_ID_PREFIX)],
-                    );
-                    let _ = repository::upsert(&conn, &repository::SyncItem {
-                        file_id: cf.id.clone(),
-                        local_path: rel,
-                        parent_folder_id: None,
-                        name: task_name.clone(),
-                        is_folder: false,
-                        size: cf.size,
-                        local_size: Some(total_size),
-                        sha256: None,
-                        local_mtime: Some(now),
-                        cloud_edited_time: cf.edited_time.map(|t| t.timestamp_millis()),
-                        last_sync_time: Some(now),
-                        status: repository::sync_status::SYNCED,
-                        error_message: None,
-                    });
-                    tracing::info!(name = %task_name, "重试上传成功（已更新 sync_items）");
+                    match engine.settle_retry_success_and_broadcast(
+                        task_id_val,
+                        task.state_revision,
+                        &cf,
+                        now,
+                    ) {
+                        Ok(_) => tracing::info!(name = %task_name, "重试上传成功（已更新 sync_items）"),
+                        Err(error) => tracing::error!(%error, name = %task_name, "重试上传结算失败"),
+                    }
                 }
                 Err(e) => {
-                    let conn = db.lock();
-                    let _ = conn.execute(
-                        "UPDATE transfer_queue SET state=?1, error_message=?2, finished_at=?3 WHERE id=?4",
-                        rusqlite::params![
-                            repository::transfer_state::FAILED,
-                            e.to_string(),
-                            now,
-                            task_id_val
-                        ],
-                    );
+                    let error_message = e.to_string();
+                    if let Err(error) = engine.record_retry_failure_and_broadcast(
+                        task_id_val,
+                        task.state_revision,
+                        &error_message,
+                        now,
+                    ) {
+                        tracing::error!(%error, name = %task_name, "重试上传失败结算失败");
+                    }
                     tracing::warn!(name = %task_name, error = %e, "重试上传失败");
                 }
             }
 
-            // 广播最终状态让前端刷新
-            let _ = state_tx.send(SyncGlobalState::default());
         });
 
         Ok(())
@@ -2597,21 +2781,14 @@ mod tests {
 
     /// 构造测试用引擎：in-memory SQLite（含 sync_items 表）+ 桩 API。
     /// apply_results 不触网，故 API Arc 仅需可构造。
-    fn build_engine() -> (
+    fn build_engine_with_aggregator(
+        status_aggregator: std::sync::Arc<crate::sync::status_aggregator::StatusAggregator>,
+    ) -> (
         SyncEngine,
         std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
     ) {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE sync_items (
-                file_id TEXT NOT NULL, local_path TEXT NOT NULL, parent_folder_id TEXT,
-                name TEXT NOT NULL, is_folder INTEGER NOT NULL DEFAULT 0, size INTEGER NOT NULL DEFAULT 0,
-                local_size INTEGER, sha256 TEXT, local_mtime INTEGER, cloud_edited_time INTEGER,
-                last_sync_time INTEGER, status INTEGER NOT NULL DEFAULT 0, error_message TEXT,
-                PRIMARY KEY (file_id, local_path)
-            );",
-        )
-        .unwrap();
+        crate::data::migrations::run(&conn).unwrap();
         let db = std::sync::Arc::new(parking_lot::Mutex::new(conn));
         let auth = std::sync::Arc::new(AuthService::new());
         let client = std::sync::Arc::new(DriveClient::new(auth));
@@ -2626,11 +2803,620 @@ mod tests {
             download_api,
             upload_api,
             db.clone(),
+            status_aggregator,
             vec![],
             3,
             0,
         );
         (eng, db)
+    }
+
+    fn build_engine() -> (
+        SyncEngine,
+        std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    ) {
+        build_engine_with_aggregator(std::sync::Arc::new(
+            crate::sync::status_aggregator::StatusAggregator::default(),
+        ))
+    }
+
+    fn failed_sync_item(relative_path: &str) -> repository::SyncItem {
+        repository::SyncItem {
+            file_id: "baseline-file-id".into(),
+            local_path: relative_path.into(),
+            parent_folder_id: Some("baseline-parent".into()),
+            name: "retry.txt".into(),
+            is_folder: false,
+            size: 333,
+            local_size: Some(222),
+            sha256: Some("baseline-sha".into()),
+            local_mtime: Some(1_111),
+            cloud_edited_time: Some(2_222),
+            last_sync_time: Some(3_333),
+            status: repository::sync_status::FAILED,
+            error_message: Some("old sync failure".into()),
+        }
+    }
+
+    fn failed_transfer_task(relative_path: Option<&str>) -> repository::TransferTask {
+        use crate::sync::transfer_state::{
+            TransferErrorKind, TransferOperation, TransferState,
+        };
+
+        repository::TransferTask {
+            id: 0,
+            direction: repository::transfer_direction::UPLOAD,
+            file_id: Some("baseline-file-id".into()),
+            local_path: Some("/mount/folder/retry.txt".into()),
+            name: "retry.txt".into(),
+            total_size: 222,
+            transferred: 100,
+            state: TransferState::Failed.into(),
+            error_message: Some("old transfer failure".into()),
+            created_at: 1_000,
+            finished_at: Some(2_000),
+            server_id: Some("server".into()),
+            upload_id: Some("upload".into()),
+            resume_offset: 100,
+            session_url: Some("https://upload/session".into()),
+            relative_path: relative_path.map(str::to_string),
+            parent_file_id: Some("parent".into()),
+            operation: Some(TransferOperation::Create.into()),
+            source_mtime: Some(1_000),
+            source_size: Some(222),
+            expected_cloud_edited_time: Some(2_000),
+            attempt_count: 2,
+            next_retry_at: Some(4_000),
+            error_kind: Some(TransferErrorKind::Permission.into()),
+            remote_result_file_id: None,
+            state_revision: 0,
+        }
+    }
+
+    #[test]
+    fn accepting_failed_retry_uses_relative_path_and_preserves_success_baseline() {
+        use crate::sync::transfer_state::TransferState;
+
+        let (eng, db) = build_engine();
+        let before = failed_sync_item("folder/retry.txt");
+        let task_id = {
+            let conn = db.lock();
+            repository::upsert(&conn, &before).unwrap();
+            repository::insert_transfer(
+                &conn,
+                &failed_transfer_task(Some("folder/retry.txt")),
+            )
+            .unwrap()
+        };
+        let mut state_rx = eng.state_receiver();
+
+        let pending = eng.accept_failed_transfer_retry(task_id).unwrap();
+
+        assert_eq!(pending.state_kind().unwrap(), TransferState::Pending);
+        assert_eq!(pending.state_revision, 1);
+        assert_eq!(pending.error_message, None);
+        assert_eq!(pending.error_kind, None);
+        assert_eq!(pending.next_retry_at, None);
+        assert_eq!(pending.finished_at, None);
+        let snapshot = state_rx.try_recv().unwrap();
+        assert!(snapshot.revision > 0);
+        assert_eq!(snapshot.failed, 0);
+        assert_eq!(snapshot.transfer_failed, 0);
+        assert_eq!(snapshot.uploading, 0);
+
+        let after = {
+            let conn = db.lock();
+            repository::find_by_file_id(&conn, &before.file_id)
+                .unwrap()
+                .unwrap()
+        };
+        assert_eq!(after.status, repository::sync_status::SYNCING);
+        assert_eq!(after.error_message, None);
+        assert_eq!(after.file_id, before.file_id);
+        assert_eq!(after.local_mtime, before.local_mtime);
+        assert_eq!(after.local_size, before.local_size);
+        assert_eq!(after.cloud_edited_time, before.cloud_edited_time);
+        assert_eq!(after.last_sync_time, before.last_sync_time);
+    }
+
+    #[test]
+    fn accepting_retry_without_relative_path_is_rejected_without_mutation() {
+        use crate::sync::transfer_state::TransferState;
+
+        let (eng, db) = build_engine();
+        let before = failed_sync_item("folder/retry.txt");
+        let task_id = {
+            let conn = db.lock();
+            repository::upsert(&conn, &before).unwrap();
+            repository::insert_transfer(&conn, &failed_transfer_task(None)).unwrap()
+        };
+        let mut state_rx = eng.state_receiver();
+
+        let error = eng.accept_failed_transfer_retry(task_id).unwrap_err();
+
+        assert!(error.to_string().contains("相对路径"));
+        let (task, sync_item) = {
+            let conn = db.lock();
+            (
+                repository::get_transfer_by_id(&conn, task_id)
+                    .unwrap()
+                    .unwrap(),
+                repository::find_by_file_id(&conn, &before.file_id)
+                    .unwrap()
+                    .unwrap(),
+            )
+        };
+        assert_eq!(task.state_kind().unwrap(), TransferState::Failed);
+        assert_eq!(task.state_revision, 0);
+        assert_eq!(sync_item.status, repository::sync_status::FAILED);
+        assert_eq!(sync_item.error_message, before.error_message);
+        assert!(state_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn runtime_broadcasts_recompute_complete_state_with_increasing_revisions() {
+        use crate::sync::transfer_state::TransferState;
+
+        let (eng, db) = build_engine();
+        {
+            let conn = db.lock();
+            repository::upsert(&conn, &failed_sync_item("folder/retry.txt")).unwrap();
+            let mut waiting = failed_transfer_task(Some("folder/waiting.txt"));
+            waiting.state = TransferState::WaitingForNetwork.into();
+            waiting.error_kind = None;
+            waiting.error_message = Some("offline".into());
+            waiting.finished_at = None;
+            repository::insert_transfer(&conn, &waiting).unwrap();
+        }
+
+        let first = eng
+            .update_runtime_and_broadcast(|runtime| {
+                runtime.is_running = true;
+                runtime.sync_phase = Some("syncing-local".into());
+            })
+            .unwrap();
+        let second = eng
+            .update_runtime_and_broadcast(|runtime| {
+                runtime.is_running = false;
+                runtime.sync_phase = None;
+                runtime.content_changed = true;
+            })
+            .unwrap();
+
+        for snapshot in [&first, &second] {
+            assert_eq!(snapshot.total, 1);
+            assert_eq!(snapshot.failed, 1);
+            assert_eq!(snapshot.failed_items.len(), 1);
+            assert_eq!(snapshot.waiting_network, 1);
+            assert_eq!(snapshot.transfer_failed, 0);
+        }
+        assert!(first.is_running);
+        assert_eq!(first.sync_phase.as_deref(), Some("syncing-local"));
+        assert!(!second.is_running);
+        assert_eq!(second.sync_phase, None);
+        assert!(second.content_changed);
+        assert!(second.revision > first.revision);
+        assert_eq!(eng.current_state().revision, second.revision);
+    }
+
+    #[test]
+    fn shutdown_is_a_publication_barrier_across_engine_replacement() {
+        use std::sync::{mpsc, Arc};
+
+        let aggregator = Arc::new(crate::sync::status_aggregator::StatusAggregator::default());
+        let (old_engine, _) = build_engine_with_aggregator(aggregator.clone());
+        let old_engine = Arc::new(old_engine);
+        let mut old_rx = old_engine.state_receiver();
+        let initial = old_engine.recompute_and_broadcast_state().unwrap();
+        assert_eq!(old_rx.try_recv().unwrap().revision, initial.revision);
+
+        // The runtime closure executes while publication is held. Keep it there until shutdown has
+        // explicitly observed contention on that exact mutex (no scheduler timeout inference).
+        let (publish_entered_tx, publish_entered_rx) = mpsc::channel();
+        let (release_publish_tx, release_publish_rx) = mpsc::channel();
+        let old_for_publish = old_engine.clone();
+        let publish_handle = std::thread::spawn(move || {
+            old_for_publish.update_runtime_and_broadcast(|runtime| {
+                runtime.sync_phase = Some("old-in-flight".into());
+                publish_entered_tx.send(()).unwrap();
+                release_publish_rx.recv().unwrap();
+            })
+        });
+        publish_entered_rx.recv().unwrap();
+
+        let (shutdown_contended_tx, shutdown_contended_rx) = mpsc::channel();
+        let (shutdown_done_tx, shutdown_done_rx) = mpsc::channel();
+        let old_for_shutdown = old_engine.clone();
+        let shutdown_handle = std::thread::spawn(move || {
+            old_for_shutdown.shutdown_sync_with_contention_hook(|| {
+                shutdown_contended_tx.send(()).unwrap();
+            });
+            shutdown_done_tx.send(()).unwrap();
+        });
+        shutdown_contended_rx.recv().unwrap();
+        assert!(!*old_engine.shutdown.lock());
+        assert!(shutdown_done_rx.try_recv().is_err());
+
+        release_publish_tx.send(()).unwrap();
+        let in_flight = publish_handle.join().unwrap().unwrap();
+        shutdown_done_rx.recv().unwrap();
+        shutdown_handle.join().unwrap();
+        assert_eq!(in_flight.revision, initial.revision + 1);
+        assert_eq!(old_rx.try_recv().unwrap().revision, in_flight.revision);
+
+        let (new_engine, _) = build_engine_with_aggregator(aggregator);
+        let mut new_rx = new_engine.state_receiver();
+        let new_snapshot = new_engine
+            .update_runtime_and_broadcast(|runtime| {
+                runtime.sync_phase = Some("new-engine".into());
+            })
+            .unwrap();
+        assert_eq!(new_snapshot.revision, in_flight.revision + 1);
+        assert_eq!(new_rx.try_recv().unwrap().revision, new_snapshot.revision);
+
+        let old_revision = old_engine.current_state().revision;
+        let error = old_engine.recompute_and_broadcast_state().unwrap_err();
+        assert!(error.to_string().contains("已停止"));
+        assert_eq!(old_engine.current_state().revision, old_revision);
+        assert!(old_rx.try_recv().is_err());
+        assert_eq!(new_engine.current_state().revision, new_snapshot.revision);
+        assert_eq!(
+            new_engine.current_state().sync_phase.as_deref(),
+            Some("new-engine")
+        );
+
+        old_engine.push_live_transfer_state();
+        assert_eq!(old_engine.current_state().revision, old_revision);
+        assert!(old_rx.try_recv().is_err());
+
+        let next_new_snapshot = new_engine.recompute_and_broadcast_state().unwrap();
+        assert_eq!(next_new_snapshot.revision, new_snapshot.revision + 1);
+    }
+
+    #[test]
+    fn runtime_cleanup_is_applied_in_memory_when_aggregation_fails() {
+        let (eng, db) = build_engine();
+        let mut state_rx = eng.state_receiver();
+        {
+            let conn = db.lock();
+            conn.execute_batch("DROP TABLE transfer_queue;").unwrap();
+        }
+
+        assert!(eng
+            .update_runtime_and_broadcast(|runtime| {
+                runtime.is_indexing = true;
+                runtime.sync_phase = Some("indexing-manual".into());
+            })
+            .is_err());
+        assert!(eng.current_state().is_indexing);
+        assert_eq!(eng.current_state().sync_phase.as_deref(), Some("indexing-manual"));
+
+        assert!(eng
+            .update_runtime_and_broadcast(|runtime| {
+                runtime.is_indexing = false;
+                runtime.sync_phase = None;
+            })
+            .is_err());
+        assert!(!eng.current_state().is_indexing);
+        assert_eq!(eng.current_state().sync_phase, None);
+        assert_eq!(eng.current_state().revision, 0);
+        assert!(state_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn aggregation_failure_releases_sync_cycle_and_indexing_gates() {
+        let (eng, db) = build_engine();
+        {
+            let conn = db.lock();
+            conn.execute_batch("DROP TABLE transfer_queue;").unwrap();
+        }
+
+        assert!(eng.run_sync_cycle("startup-resume").await.is_err());
+        assert!(!*eng.syncing.lock());
+        assert!(!eng.current_state().is_running);
+
+        let mount_dir = tempfile::tempdir().unwrap();
+        assert!(eng
+            .load_or_refresh_cloud_tree(&mount_dir.path().to_string_lossy())
+            .await
+            .is_err());
+        assert!(!*eng.syncing.lock());
+        assert!(!eng.current_state().is_indexing);
+        assert_eq!(eng.current_state().sync_phase, None);
+    }
+
+    #[test]
+    fn single_retry_transitions_publish_consistent_running_and_completed_snapshots() {
+        use crate::data::repository::TransferPatch;
+        use crate::sync::transfer_state::TransferState;
+
+        let (eng, db) = build_engine();
+        let task_id = {
+            let conn = db.lock();
+            repository::upsert(&conn, &failed_sync_item("folder/retry.txt")).unwrap();
+            repository::insert_transfer(
+                &conn,
+                &failed_transfer_task(Some("folder/retry.txt")),
+            )
+            .unwrap()
+        };
+
+        let pending = eng.accept_failed_transfer_retry(task_id).unwrap();
+        let running = eng
+            .transition_transfer_and_broadcast(
+                task_id,
+                pending.state_revision,
+                TransferState::Running,
+                TransferPatch::default(),
+            )
+            .unwrap();
+        let running_snapshot = eng.current_state();
+        assert_eq!(running.state_kind().unwrap(), TransferState::Running);
+        assert_eq!(running_snapshot.uploading, 1);
+        assert_eq!(running_snapshot.failed, 0);
+        assert_eq!(running_snapshot.transfer_failed, 0);
+        assert!(running_snapshot.failed_items.is_empty());
+
+        let cloud_file = DriveFile {
+            id: "confirmed-file-id".into(),
+            name: "retry.txt".into(),
+            size: 222,
+            edited_time: chrono::DateTime::from_timestamp_millis(8_000),
+            ..Default::default()
+        };
+        let completed_snapshot = eng
+            .settle_retry_success_and_broadcast(
+                task_id,
+                running.state_revision,
+                &cloud_file,
+                9_000,
+            )
+            .unwrap();
+        let (completed, settled_sync_item, sync_item_count) = {
+            let conn = db.lock();
+            (
+                repository::get_transfer_by_id(&conn, task_id)
+                    .unwrap()
+                    .unwrap(),
+                repository::find_by_file_id(&conn, "confirmed-file-id")
+                    .unwrap()
+                    .unwrap(),
+                conn.query_row(
+                    "SELECT COUNT(*) FROM sync_items WHERE local_path=?1",
+                    rusqlite::params!["folder/retry.txt"],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            )
+        };
+        assert_eq!(completed.state_kind().unwrap(), TransferState::Completed);
+        assert_eq!(settled_sync_item.local_path, "folder/retry.txt");
+        assert_eq!(settled_sync_item.parent_folder_id.as_deref(), Some("parent"));
+        assert_eq!(settled_sync_item.local_mtime, Some(1_000));
+        assert_eq!(settled_sync_item.local_size, Some(222));
+        assert_eq!(settled_sync_item.cloud_edited_time, Some(8_000));
+        assert_eq!(settled_sync_item.last_sync_time, Some(9_000));
+        assert_eq!(settled_sync_item.status, repository::sync_status::SYNCED);
+        assert_eq!(sync_item_count, 1);
+        assert_eq!(completed_snapshot.uploading, 0);
+        assert_eq!(completed_snapshot.failed, 0);
+        assert_eq!(completed_snapshot.transfer_failed, 0);
+        assert!(completed_snapshot.failed_items.is_empty());
+        assert!(completed_snapshot.revision > running_snapshot.revision);
+    }
+
+    #[test]
+    fn retry_success_settlement_rolls_back_task_when_baseline_write_fails() {
+        use crate::data::repository::TransferPatch;
+        use crate::sync::transfer_state::TransferState;
+
+        let (eng, db) = build_engine();
+        let task_id = {
+            let conn = db.lock();
+            repository::upsert(&conn, &failed_sync_item("folder/retry.txt")).unwrap();
+            repository::insert_transfer(&conn, &failed_transfer_task(Some("folder/retry.txt")))
+                .unwrap()
+        };
+        let pending = eng.accept_failed_transfer_retry(task_id).unwrap();
+        let running = eng
+            .transition_transfer_and_broadcast(
+                task_id,
+                pending.state_revision,
+                TransferState::Running,
+                TransferPatch::default(),
+            )
+            .unwrap();
+        let revision_before = eng.current_state().revision;
+        {
+            let conn = db.lock();
+            conn.execute_batch(
+                "CREATE TRIGGER force_retry_baseline_delete_failure
+                 BEFORE DELETE ON sync_items
+                 BEGIN SELECT RAISE(ABORT, 'forced baseline failure'); END;",
+            )
+            .unwrap();
+        }
+        let cloud_file = DriveFile {
+            id: "confirmed-file-id".into(),
+            name: "retry.txt".into(),
+            size: 222,
+            ..Default::default()
+        };
+
+        let error = eng
+            .settle_retry_success_and_broadcast(
+                task_id,
+                running.state_revision,
+                &cloud_file,
+                9_000,
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("forced baseline failure"));
+        let (task, sync_item) = {
+            let conn = db.lock();
+            (
+                repository::get_transfer_by_id(&conn, task_id)
+                    .unwrap()
+                    .unwrap(),
+                repository::find_by_file_id(&conn, "baseline-file-id")
+                    .unwrap()
+                    .unwrap(),
+            )
+        };
+        assert_eq!(task.state_kind().unwrap(), TransferState::Running);
+        assert_eq!(task.state_revision, running.state_revision);
+        assert_eq!(sync_item.status, repository::sync_status::SYNCING);
+        assert_eq!(eng.current_state().revision, revision_before);
+    }
+
+    #[test]
+    fn retry_failure_settlement_rolls_back_task_when_sync_write_fails() {
+        use crate::data::repository::TransferPatch;
+        use crate::sync::transfer_state::TransferState;
+
+        let (eng, db) = build_engine();
+        let task_id = {
+            let conn = db.lock();
+            repository::upsert(&conn, &failed_sync_item("folder/retry.txt")).unwrap();
+            repository::insert_transfer(&conn, &failed_transfer_task(Some("folder/retry.txt")))
+                .unwrap()
+        };
+        let pending = eng.accept_failed_transfer_retry(task_id).unwrap();
+        let running = eng
+            .transition_transfer_and_broadcast(
+                task_id,
+                pending.state_revision,
+                TransferState::Running,
+                TransferPatch::default(),
+            )
+            .unwrap();
+        let revision_before = eng.current_state().revision;
+        {
+            let conn = db.lock();
+            conn.execute_batch(
+                "CREATE TRIGGER force_retry_sync_failure
+                 BEFORE UPDATE ON sync_items
+                 BEGIN SELECT RAISE(ABORT, 'forced sync failure'); END;",
+            )
+            .unwrap();
+        }
+
+        let error = eng
+            .record_retry_failure_and_broadcast(
+                task_id,
+                running.state_revision,
+                "permission denied",
+                9_000,
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("forced sync failure"));
+        let (task, sync_item) = {
+            let conn = db.lock();
+            (
+                repository::get_transfer_by_id(&conn, task_id)
+                    .unwrap()
+                    .unwrap(),
+                repository::find_by_file_id(&conn, "baseline-file-id")
+                    .unwrap()
+                    .unwrap(),
+            )
+        };
+        assert_eq!(task.state_kind().unwrap(), TransferState::Running);
+        assert_eq!(task.state_revision, running.state_revision);
+        assert_eq!(sync_item.status, repository::sync_status::SYNCING);
+        assert_eq!(eng.current_state().revision, revision_before);
+    }
+
+    #[test]
+    fn retry_failure_explicitly_restores_both_failure_facts() {
+        use crate::data::repository::TransferPatch;
+        use crate::sync::transfer_state::TransferState;
+
+        let (eng, db) = build_engine();
+        let task_id = {
+            let conn = db.lock();
+            repository::upsert(&conn, &failed_sync_item("folder/retry.txt")).unwrap();
+            repository::insert_transfer(
+                &conn,
+                &failed_transfer_task(Some("folder/retry.txt")),
+            )
+            .unwrap()
+        };
+        let pending = eng.accept_failed_transfer_retry(task_id).unwrap();
+        let running = eng
+            .transition_transfer_and_broadcast(
+                task_id,
+                pending.state_revision,
+                TransferState::Running,
+                TransferPatch::default(),
+            )
+            .unwrap();
+
+        let snapshot = eng
+            .record_retry_failure_and_broadcast(
+                task_id,
+                running.state_revision,
+                "permission denied",
+                9_000,
+            )
+            .unwrap();
+
+        assert_eq!(snapshot.failed, 1);
+        assert_eq!(snapshot.transfer_failed, 1);
+        assert_eq!(snapshot.waiting_network, 0);
+        assert_eq!(snapshot.failed_items.len(), 1);
+        assert_eq!(
+            snapshot.failed_items[0].error_message.as_deref(),
+            Some("permission denied")
+        );
+        let task = {
+            let conn = db.lock();
+            repository::get_transfer_by_id(&conn, task_id)
+                .unwrap()
+                .unwrap()
+        };
+        assert_eq!(task.state_kind().unwrap(), TransferState::Failed);
+        assert_eq!(task.state_revision, running.state_revision + 1);
+    }
+
+    #[test]
+    fn clearing_failed_transfer_history_preserves_current_sync_failure() {
+        use crate::sync::transfer_state::TransferState;
+
+        let (eng, db) = build_engine();
+        {
+            let conn = db.lock();
+            repository::upsert(&conn, &failed_sync_item("folder/retry.txt")).unwrap();
+            repository::insert_transfer(
+                &conn,
+                &failed_transfer_task(Some("folder/failed-transfer.txt")),
+            )
+            .unwrap();
+            let mut waiting = failed_transfer_task(Some("folder/waiting.txt"));
+            waiting.state = TransferState::WaitingForNetwork.into();
+            waiting.error_kind = None;
+            waiting.finished_at = None;
+            repository::insert_transfer(&conn, &waiting).unwrap();
+        }
+
+        let snapshot = eng.clear_transfer_history_and_broadcast(false, true).unwrap();
+
+        assert_eq!(snapshot.failed, 1);
+        assert_eq!(snapshot.failed_items.len(), 1);
+        assert_eq!(snapshot.failed_items[0].relative_path, "folder/retry.txt");
+        assert_eq!(snapshot.transfer_failed, 0);
+        assert_eq!(snapshot.waiting_network, 1);
+        let remaining = {
+            let conn = db.lock();
+            repository::list_all_transfers(&conn).unwrap()
+        };
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(
+            remaining[0].state_kind().unwrap(),
+            TransferState::WaitingForNetwork
+        );
     }
 
     /// 新文件上传成功后，DB/cloud_tree/path_to_id 必须用 result.cloud_file 回写。
