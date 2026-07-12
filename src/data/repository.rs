@@ -2,10 +2,13 @@
 //!
 //! 状态/方向常量以 i32 形式持久化，提供枚举转换。
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, AppResult};
+use crate::sync::transfer_state::{
+    can_transition, TransferErrorKind, TransferOperation, TransferState, TransitionError,
+};
 
 /// 统一 DB 操作错误映射：`db_err!("查询", expr)` 等价于
 /// `expr.map_err(|e| AppError::generic(format!("查询失败：{e}")))?`。
@@ -47,15 +50,23 @@ pub mod transfer_direction {
 /// planner 据此前缀判断「待上传占位项」→ 重新 Upload，绝不删本地。
 pub const PENDING_FILE_ID_PREFIX: &str = "pending:";
 
-// ===== 传输状态常量（对齐 dart TransferStateType） =====
+// ===== 传输状态常量（保持 Tauri/TypeScript 数字协议） =====
 pub mod transfer_state {
-    pub const PENDING: i32 = 0;
-    pub const RUNNING: i32 = 1;
+    use crate::sync::transfer_state::TransferState;
+
+    pub const PENDING: i32 = TransferState::Pending as i32;
+    pub const RUNNING: i32 = TransferState::Running as i32;
     #[allow(dead_code)]
-    pub const PAUSED: i32 = 2;
-    pub const COMPLETED: i32 = 3;
-    pub const FAILED: i32 = 4;
-    pub const CANCELED: i32 = 5;
+    pub const WAITING_FOR_NETWORK: i32 = TransferState::WaitingForNetwork as i32;
+    #[allow(dead_code)]
+    pub const BACKING_OFF: i32 = TransferState::BackingOff as i32;
+    #[allow(dead_code)]
+    pub const VERIFYING_REMOTE: i32 = TransferState::VerifyingRemote as i32;
+    #[allow(dead_code)]
+    pub const RESTART_REQUIRED: i32 = TransferState::RestartRequired as i32;
+    pub const COMPLETED: i32 = TransferState::Completed as i32;
+    pub const FAILED: i32 = TransferState::Failed as i32;
+    pub const CANCELED: i32 = TransferState::Canceled as i32;
 }
 
 /// 同步状态项实体（对应 sync_items 表一行）。
@@ -125,6 +136,61 @@ pub struct TransferTask {
     /// 华为 resume 上传 Location 头返回的会话 URL（v4，断点续传必需的唯一 token）。
     /// 新 API 不再在 body 返回 serverId/uploadId，分片 PUT 必须直接用此 URL。
     pub session_url: Option<String>,
+    /// 相对挂载根的规范 UTF-8 路径（绝不替代 absolute local_path）。
+    pub relative_path: Option<String>,
+    /// 规划时的云端父目录 fileId。
+    pub parent_file_id: Option<String>,
+    /// 持久化操作类型（见 `TransferOperation`）。
+    pub operation: Option<i32>,
+    /// 入队时本地源 mtime 快照。
+    pub source_mtime: Option<i64>,
+    /// 入队时本地源大小快照。
+    pub source_size: Option<i64>,
+    /// 规划时观察到的云端 editedTime。
+    pub expected_cloud_edited_time: Option<i64>,
+    /// 已消耗的持久化尝试次数。
+    pub attempt_count: i64,
+    /// 下一次允许重试的时间戳。
+    pub next_retry_at: Option<i64>,
+    /// 结构化错误类型（见 `TransferErrorKind`）。
+    pub error_kind: Option<i32>,
+    /// 远端结果复核确认的资源 fileId。
+    pub remote_result_file_id: Option<String>,
+    /// 乐观并发状态版本。
+    pub state_revision: i64,
+}
+
+/// Explicit three-state patch for nullable transfer columns.
+// Task 1 establishes this API; the unified executor adopts it in a later task.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ColumnPatch<T> {
+    /// Preserve the current database value.
+    #[default]
+    Keep,
+    /// Replace the current value.
+    Set(T),
+    /// Store SQL NULL.
+    Clear,
+}
+
+/// Mutable transfer fields applied atomically with a lifecycle transition.
+// Task 1 establishes this API; the unified executor adopts it in a later task.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TransferPatch {
+    pub error_kind: ColumnPatch<TransferErrorKind>,
+    pub error_message: ColumnPatch<String>,
+    pub next_retry_at: ColumnPatch<i64>,
+    pub finished_at: ColumnPatch<i64>,
+    pub remote_result_file_id: ColumnPatch<String>,
+    pub session_url: ColumnPatch<String>,
+    /// `Some` replaces the non-null counter; `None` preserves it.
+    pub transferred: Option<i64>,
+    /// `Some` replaces the non-null offset; `None` preserves it.
+    pub resume_offset: Option<i64>,
+    /// `Some` replaces the non-null attempt count; `None` preserves it.
+    pub attempt_count: Option<i64>,
 }
 
 // ===== SyncItems 仓储 =====
@@ -268,7 +334,33 @@ impl TransferTask {
             upload_id: row.get("upload_id")?,
             resume_offset: row.get("resume_offset")?,
             session_url: row.get("session_url")?,
+            relative_path: row.get("relative_path")?,
+            parent_file_id: row.get("parent_file_id")?,
+            operation: row.get("operation")?,
+            source_mtime: row.get("source_mtime")?,
+            source_size: row.get("source_size")?,
+            expected_cloud_edited_time: row.get("expected_cloud_edited_time")?,
+            attempt_count: row.get("attempt_count")?,
+            next_retry_at: row.get("next_retry_at")?,
+            error_kind: row.get("error_kind")?,
+            remote_result_file_id: row.get("remote_result_file_id")?,
+            state_revision: row.get("state_revision")?,
         })
+    }
+
+    /// Parse the persisted numeric lifecycle state.
+    pub fn state_kind(&self) -> Result<TransferState, TransitionError> {
+        TransferState::try_from(self.state)
+    }
+
+    /// Parse the optional persisted numeric operation.
+    pub fn operation_kind(&self) -> Result<Option<TransferOperation>, TransitionError> {
+        self.operation.map(TransferOperation::try_from).transpose()
+    }
+
+    /// Parse the optional persisted numeric structured error kind.
+    pub fn error_kind_typed(&self) -> Result<Option<TransferErrorKind>, TransitionError> {
+        self.error_kind.map(TransferErrorKind::try_from).transpose()
     }
 }
 
@@ -279,8 +371,12 @@ pub fn insert_transfer(conn: &Connection, task: &TransferTask) -> AppResult<i64>
         conn.execute(
             "INSERT INTO transfer_queue
                 (direction, file_id, local_path, name, total_size, transferred, state,
-                 error_message, created_at, finished_at, server_id, upload_id, resume_offset)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+                 error_message, created_at, finished_at, server_id, upload_id, resume_offset,
+                 session_url, relative_path, parent_file_id, operation, source_mtime,
+                 source_size, expected_cloud_edited_time, attempt_count, next_retry_at,
+                 error_kind, remote_result_file_id, state_revision)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,
+                     ?17,?18,?19,?20,?21,?22,?23,?24,?25)",
             params![
                 task.direction,
                 task.file_id,
@@ -295,6 +391,18 @@ pub fn insert_transfer(conn: &Connection, task: &TransferTask) -> AppResult<i64>
                 task.server_id,
                 task.upload_id,
                 task.resume_offset,
+                task.session_url,
+                task.relative_path,
+                task.parent_file_id,
+                task.operation,
+                task.source_mtime,
+                task.source_size,
+                task.expected_cloud_edited_time,
+                task.attempt_count,
+                task.next_retry_at,
+                task.error_kind,
+                task.remote_result_file_id,
+                task.state_revision,
             ],
         )
     );
@@ -303,16 +411,130 @@ pub fn insert_transfer(conn: &Connection, task: &TransferTask) -> AppResult<i64>
 
 /// 按 id 查询单个传输任务。
 pub fn get_transfer_by_id(conn: &Connection, id: i64) -> AppResult<Option<TransferTask>> {
-    let mut stmt = db_err!(
-        "查询",
-        conn.prepare("SELECT * FROM transfer_queue WHERE id = ?1")
-    );
-    let mut rows = db_err!("查询", stmt.query_map(params![id], TransferTask::from_row));
-    // 取第一条（id 是主键，最多一条）
-    match rows.next() {
-        Some(Ok(t)) => Ok(Some(t)),
-        Some(Err(_)) | None => Ok(None),
+    conn.query_row(
+        "SELECT * FROM transfer_queue WHERE id = ?1",
+        params![id],
+        TransferTask::from_row,
+    )
+    .optional()
+    .map_err(|e| AppError::generic(format!("查询失败：{e}")))
+}
+
+#[allow(dead_code)]
+fn nullable_patch<T>(patch: ColumnPatch<T>) -> (i32, Option<T>) {
+    match patch {
+        ColumnPatch::Keep => (0, None),
+        ColumnPatch::Set(value) => (1, Some(value)),
+        ColumnPatch::Clear => (2, None),
     }
+}
+
+/// Atomically transition a task by ID and expected state revision.
+// Task 1 establishes this API; the unified executor adopts it in a later task.
+#[allow(dead_code)]
+pub fn transition_transfer(
+    conn: &Connection,
+    task_id: i64,
+    expected_revision: i64,
+    next_state: TransferState,
+    patch: TransferPatch,
+) -> Result<TransferTask, TransitionError> {
+    let transaction = conn.unchecked_transaction()?;
+    let current = transaction
+        .query_row(
+            "SELECT * FROM transfer_queue WHERE id=?1",
+            params![task_id],
+            TransferTask::from_row,
+        )
+        .optional()?
+        .ok_or(TransitionError::NotFound { task_id })?;
+
+    if current.state_revision != expected_revision {
+        return Err(TransitionError::StaleRevision {
+            task_id,
+            expected_revision,
+        });
+    }
+
+    let from = current.state_kind()?;
+    if !can_transition(from, next_state) {
+        return Err(TransitionError::IllegalTransition {
+            from,
+            to: next_state,
+        });
+    }
+
+    let TransferPatch {
+        error_kind,
+        error_message,
+        next_retry_at,
+        finished_at,
+        remote_result_file_id,
+        session_url,
+        transferred,
+        resume_offset,
+        attempt_count,
+    } = patch;
+    let (error_kind_mode, error_kind) = nullable_patch(error_kind);
+    let error_kind = error_kind.map(i32::from);
+    let (error_message_mode, error_message) = nullable_patch(error_message);
+    let (next_retry_at_mode, next_retry_at) = nullable_patch(next_retry_at);
+    let (finished_at_mode, finished_at) = nullable_patch(finished_at);
+    let (remote_result_file_id_mode, remote_result_file_id) = nullable_patch(remote_result_file_id);
+    let (session_url_mode, session_url) = nullable_patch(session_url);
+
+    let changed = transaction.execute(
+        "UPDATE transfer_queue SET
+            state=?1,
+            error_kind=CASE ?2 WHEN 0 THEN error_kind WHEN 1 THEN ?3 ELSE NULL END,
+            error_message=CASE ?4 WHEN 0 THEN error_message WHEN 1 THEN ?5 ELSE NULL END,
+            next_retry_at=CASE ?6 WHEN 0 THEN next_retry_at WHEN 1 THEN ?7 ELSE NULL END,
+            finished_at=CASE ?8 WHEN 0 THEN finished_at WHEN 1 THEN ?9 ELSE NULL END,
+            remote_result_file_id=CASE ?10 WHEN 0 THEN remote_result_file_id WHEN 1 THEN ?11 ELSE NULL END,
+            session_url=CASE ?12 WHEN 0 THEN session_url WHEN 1 THEN ?13 ELSE NULL END,
+            transferred=CASE WHEN ?14 IS NULL THEN transferred ELSE ?14 END,
+            resume_offset=CASE WHEN ?15 IS NULL THEN resume_offset ELSE ?15 END,
+            attempt_count=CASE WHEN ?16 IS NULL THEN attempt_count ELSE ?16 END,
+            state_revision=state_revision+1
+         WHERE id=?17 AND state_revision=?18",
+        params![
+            i32::from(next_state),
+            error_kind_mode,
+            error_kind,
+            error_message_mode,
+            error_message,
+            next_retry_at_mode,
+            next_retry_at,
+            finished_at_mode,
+            finished_at,
+            remote_result_file_id_mode,
+            remote_result_file_id,
+            session_url_mode,
+            session_url,
+            transferred,
+            resume_offset,
+            attempt_count,
+            task_id,
+            expected_revision,
+        ],
+    )?;
+    if changed != 1 {
+        return Err(TransitionError::StaleRevision {
+            task_id,
+            expected_revision,
+        });
+    }
+
+    let updated = transaction
+        .query_row(
+            "SELECT * FROM transfer_queue WHERE id=?1",
+            params![task_id],
+            TransferTask::from_row,
+        )
+        .optional()?
+        .ok_or(TransitionError::NotFound { task_id })?;
+    transaction.commit()?;
+    Ok(updated)
 }
 
 /// 按状态+方向查询传输任务（按 created_at 倒序）。对齐 dart 传输队列列表。
@@ -461,6 +683,9 @@ pub fn prune_transfer_history(conn: &Connection, keep: usize) -> AppResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sync::transfer_state::{
+        TransferErrorKind, TransferOperation, TransferState, TransitionError,
+    };
 
     fn fresh_db() -> Connection {
         // 注意：tempdir() 返回的 TempDir 在 drop 时会删除目录及文件，
@@ -488,6 +713,37 @@ mod tests {
             last_sync_time: Some(1000),
             status,
             error_message: None,
+        }
+    }
+
+    fn sample_transfer_task(state: TransferState) -> TransferTask {
+        TransferTask {
+            id: 0,
+            direction: transfer_direction::UPLOAD,
+            file_id: Some("f1".into()),
+            local_path: Some("/tmp/f1.txt".into()),
+            name: "f1.txt".into(),
+            total_size: 1000,
+            transferred: 500,
+            state: state.into(),
+            error_message: Some("original error".into()),
+            created_at: 1000,
+            finished_at: Some(1500),
+            server_id: Some("server-1".into()),
+            upload_id: Some("upload-1".into()),
+            resume_offset: 500,
+            session_url: Some("https://upload/session".into()),
+            relative_path: Some("folder/f1.txt".into()),
+            parent_file_id: Some("parent-1".into()),
+            operation: Some(TransferOperation::Create.into()),
+            source_mtime: Some(900),
+            source_size: Some(1000),
+            expected_cloud_edited_time: Some(800),
+            attempt_count: 2,
+            next_retry_at: Some(2000),
+            error_kind: Some(TransferErrorKind::Network.into()),
+            remote_result_file_id: Some("remote-1".into()),
+            state_revision: 0,
         }
     }
 
@@ -543,31 +799,192 @@ mod tests {
     #[test]
     fn test_transfer_crud() {
         let conn = fresh_db();
-        let task = TransferTask {
-            id: 0,
-            direction: transfer_direction::UPLOAD,
-            file_id: Some("f1".into()),
-            local_path: Some("/tmp/f1.txt".into()),
-            name: "f1.txt".into(),
-            total_size: 1000,
-            transferred: 500,
-            state: transfer_state::RUNNING,
-            error_message: None,
-            created_at: 1000,
-            finished_at: None,
-            server_id: None,
-            upload_id: None,
-            resume_offset: 0,
-            session_url: None,
-        };
+        let task = sample_transfer_task(TransferState::Running);
         let id = insert_transfer(&conn, &task).unwrap();
         assert!(id > 0);
-        update_transfer_state(&conn, id, transfer_state::COMPLETED, 1000, Some(2000), None)
-            .unwrap();
-        let all = list_all_transfers(&conn).unwrap();
-        assert_eq!(all.len(), 1);
-        assert_eq!(all[0].state, transfer_state::COMPLETED);
-        assert_eq!(all[0].transferred, 1000);
+        let found = get_transfer_by_id(&conn, id).unwrap().unwrap();
+        assert_eq!(found.state_kind().unwrap(), TransferState::Running);
+        assert_eq!(
+            found.operation_kind().unwrap(),
+            Some(TransferOperation::Create)
+        );
+        assert_eq!(
+            found.error_kind_typed().unwrap(),
+            Some(TransferErrorKind::Network)
+        );
+        assert_eq!(found.session_url, task.session_url);
+        assert_eq!(found.relative_path, task.relative_path);
+        assert_eq!(found.parent_file_id, task.parent_file_id);
+        assert_eq!(found.source_mtime, task.source_mtime);
+        assert_eq!(found.source_size, task.source_size);
+        assert_eq!(
+            found.expected_cloud_edited_time,
+            task.expected_cloud_edited_time
+        );
+        assert_eq!(found.attempt_count, task.attempt_count);
+        assert_eq!(found.next_retry_at, task.next_retry_at);
+        assert_eq!(found.remote_result_file_id, task.remote_result_file_id);
+        assert_eq!(found.state_revision, 0);
+    }
+
+    #[test]
+    fn typed_accessors_reject_invalid_persisted_values() {
+        let mut task = sample_transfer_task(TransferState::Pending);
+        task.state = 99;
+        task.operation = Some(98);
+        task.error_kind = Some(97);
+
+        assert!(matches!(
+            task.state_kind(),
+            Err(TransitionError::InvalidStoredValue {
+                field: "state",
+                value: 99
+            })
+        ));
+        assert!(matches!(
+            task.operation_kind(),
+            Err(TransitionError::InvalidStoredValue {
+                field: "operation",
+                value: 98
+            })
+        ));
+        assert!(matches!(
+            task.error_kind_typed(),
+            Err(TransitionError::InvalidStoredValue {
+                field: "error_kind",
+                value: 97
+            })
+        ));
+    }
+
+    #[test]
+    fn legal_transition_applies_patch_and_increments_revision_once() {
+        let conn = fresh_db();
+        let id = insert_transfer(&conn, &sample_transfer_task(TransferState::Running)).unwrap();
+        let patch = TransferPatch {
+            error_kind: ColumnPatch::Set(TransferErrorKind::RateLimit),
+            error_message: ColumnPatch::Set("retry later".into()),
+            next_retry_at: ColumnPatch::Set(9000),
+            finished_at: ColumnPatch::Clear,
+            remote_result_file_id: ColumnPatch::Set("remote-2".into()),
+            session_url: ColumnPatch::Clear,
+            transferred: Some(750),
+            resume_offset: Some(750),
+            attempt_count: Some(3),
+        };
+
+        let updated = transition_transfer(&conn, id, 0, TransferState::BackingOff, patch).unwrap();
+
+        assert_eq!(updated.state_kind().unwrap(), TransferState::BackingOff);
+        assert_eq!(updated.state_revision, 1);
+        assert_eq!(
+            updated.error_kind_typed().unwrap(),
+            Some(TransferErrorKind::RateLimit)
+        );
+        assert_eq!(updated.error_message.as_deref(), Some("retry later"));
+        assert_eq!(updated.next_retry_at, Some(9000));
+        assert_eq!(updated.finished_at, None);
+        assert_eq!(updated.remote_result_file_id.as_deref(), Some("remote-2"));
+        assert_eq!(updated.session_url, None);
+        assert_eq!(updated.transferred, 750);
+        assert_eq!(updated.resume_offset, 750);
+        assert_eq!(updated.attempt_count, 3);
+    }
+
+    #[test]
+    fn illegal_transition_does_not_mutate_task() {
+        let conn = fresh_db();
+        let id = insert_transfer(&conn, &sample_transfer_task(TransferState::Pending)).unwrap();
+
+        let error = transition_transfer(
+            &conn,
+            id,
+            0,
+            TransferState::Completed,
+            TransferPatch::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            TransitionError::IllegalTransition {
+                from: TransferState::Pending,
+                to: TransferState::Completed,
+            }
+        );
+        let unchanged = get_transfer_by_id(&conn, id).unwrap().unwrap();
+        assert_eq!(unchanged.state_kind().unwrap(), TransferState::Pending);
+        assert_eq!(unchanged.state_revision, 0);
+    }
+
+    #[test]
+    fn stale_revision_does_not_mutate_task() {
+        let conn = fresh_db();
+        let id = insert_transfer(&conn, &sample_transfer_task(TransferState::Pending)).unwrap();
+
+        let error = transition_transfer(
+            &conn,
+            id,
+            7,
+            TransferState::Running,
+            TransferPatch::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            TransitionError::StaleRevision {
+                task_id: id,
+                expected_revision: 7,
+            }
+        );
+        let unchanged = get_transfer_by_id(&conn, id).unwrap().unwrap();
+        assert_eq!(unchanged.state_kind().unwrap(), TransferState::Pending);
+        assert_eq!(unchanged.state_revision, 0);
+    }
+
+    #[test]
+    fn terminal_states_reject_all_transitions() {
+        let conn = fresh_db();
+        for terminal in [TransferState::Completed, TransferState::Canceled] {
+            let id = insert_transfer(&conn, &sample_transfer_task(terminal)).unwrap();
+            let error = transition_transfer(
+                &conn,
+                id,
+                0,
+                TransferState::Running,
+                TransferPatch::default(),
+            )
+            .unwrap_err();
+            assert!(matches!(
+                error,
+                TransitionError::IllegalTransition { from, to }
+                    if from == terminal && to == TransferState::Running
+            ));
+            assert_eq!(
+                get_transfer_by_id(&conn, id)
+                    .unwrap()
+                    .unwrap()
+                    .state_revision,
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn transition_reports_missing_task() {
+        let conn = fresh_db();
+
+        let error = transition_transfer(
+            &conn,
+            404,
+            0,
+            TransferState::Running,
+            TransferPatch::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error, TransitionError::NotFound { task_id: 404 });
     }
 
     #[test]
@@ -575,25 +992,14 @@ mod tests {
         let conn = fresh_db();
         // 插入 5 条已完成 + 1 条运行中
         for i in 0..5 {
-            let mut t = TransferTask {
-                id: 0,
-                direction: transfer_direction::UPLOAD,
-                file_id: None,
-                local_path: None,
-                name: format!("t{i}"),
-                total_size: 0,
-                transferred: 0,
-                state: transfer_state::COMPLETED,
-                error_message: None,
-                created_at: i,
-                finished_at: Some(i),
-                server_id: None,
-                upload_id: None,
-                resume_offset: 0,
-                session_url: None,
-            };
+            let mut t = sample_transfer_task(TransferState::Completed);
+            t.file_id = None;
+            t.local_path = None;
+            t.name = format!("t{i}");
+            t.created_at = i;
+            t.finished_at = Some(i);
             insert_transfer(&conn, &t).unwrap();
-            t.state = transfer_state::RUNNING;
+            t.state = TransferState::Running.into();
             t.name = "running".into();
             insert_transfer(&conn, &t).unwrap();
         }

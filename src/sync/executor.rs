@@ -251,6 +251,21 @@ impl SyncExecutor {
             _ => return None, // 建目录/占位符/删除不入队
         };
         if let Some(db) = &self.db {
+            let operation = match action.action_type {
+                SyncActionType::Upload if action.file_id.is_some() => {
+                    crate::sync::transfer_state::TransferOperation::Update
+                }
+                SyncActionType::Upload | SyncActionType::CreateConflictCopy => {
+                    crate::sync::transfer_state::TransferOperation::Create
+                }
+                SyncActionType::Download if direction == transfer_direction::DOWNLOAD_UPDATE => {
+                    crate::sync::transfer_state::TransferOperation::DownloadUpdate
+                }
+                SyncActionType::Download => {
+                    crate::sync::transfer_state::TransferOperation::Download
+                }
+                _ => unreachable!("visible transfer direction was filtered above"),
+            };
             let total_size = match direction {
                 d if d == transfer_direction::UPLOAD => action
                     .local_path
@@ -281,6 +296,25 @@ impl SyncExecutor {
                 upload_id: None,
                 resume_offset: 0,
                 session_url: None,
+                relative_path: action.relative_path.clone(),
+                parent_file_id: action.parent_file_id.clone(),
+                operation: Some(i32::from(operation)),
+                source_mtime: None,
+                source_size: matches!(
+                    operation,
+                    crate::sync::transfer_state::TransferOperation::Create
+                        | crate::sync::transfer_state::TransferOperation::Update
+                )
+                .then_some(total_size),
+                expected_cloud_edited_time: action
+                    .cloud_file
+                    .as_ref()
+                    .and_then(|file| file.edited_time.map(|time| time.timestamp_millis())),
+                attempt_count: 0,
+                next_retry_at: None,
+                error_kind: None,
+                remote_result_file_id: None,
+                state_revision: 0,
             };
             let id = repository::insert_transfer(&conn, &task).ok();
             // 立即通知前端显示新传输项
@@ -364,6 +398,22 @@ impl SyncExecutor {
                 upload_id: None,
                 resume_offset: 0,
                 session_url: None,
+                relative_path: action.relative_path.clone(),
+                parent_file_id: action.parent_file_id.clone(),
+                operation: Some(i32::from(
+                    crate::sync::transfer_state::TransferOperation::Delete,
+                )),
+                source_mtime: None,
+                source_size: None,
+                expected_cloud_edited_time: action
+                    .cloud_file
+                    .as_ref()
+                    .and_then(|file| file.edited_time.map(|time| time.timestamp_millis())),
+                attempt_count: 0,
+                next_retry_at: None,
+                error_kind: None,
+                remote_result_file_id: None,
+                state_revision: 0,
             };
             let _ = repository::insert_transfer(&conn, &task);
         }

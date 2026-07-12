@@ -899,6 +899,19 @@ pub async fn sync_download_on_demand(
                 upload_id: None,
                 resume_offset: 0,
                 session_url: None,
+                relative_path: Some(dest_rel.clone()),
+                parent_file_id: None,
+                operation: Some(i32::from(
+                    crate::sync::transfer_state::TransferOperation::Download,
+                )),
+                source_mtime: None,
+                source_size: None,
+                expected_cloud_edited_time: cloud_edited_time,
+                attempt_count: 0,
+                next_retry_at: None,
+                error_kind: None,
+                remote_result_file_id: None,
+                state_revision: 0,
             },
         )
         .unwrap_or(0)
@@ -1217,6 +1230,19 @@ async fn sync_folder_recursive_impl(
                     upload_id: None,
                     resume_offset: 0,
                     session_url: None,
+                    relative_path: Some(full_rel.clone()),
+                    parent_file_id: None,
+                    operation: Some(i32::from(
+                        crate::sync::transfer_state::TransferOperation::Download,
+                    )),
+                    source_mtime: None,
+                    source_size: None,
+                    expected_cloud_edited_time: f.edited_time.map(|time| time.timestamp_millis()),
+                    attempt_count: 0,
+                    next_retry_at: None,
+                    error_kind: None,
+                    remote_result_file_id: None,
+                    state_revision: 0,
                 },
             )
             .unwrap_or(0)
@@ -1293,6 +1319,19 @@ async fn sync_folder_recursive_impl(
                     upload_id: None,
                     resume_offset: 0,
                     session_url: None,
+                    relative_path: Some(full_rel.clone()),
+                    parent_file_id: Some(parent_id.to_string()),
+                    operation: Some(i32::from(
+                        crate::sync::transfer_state::TransferOperation::Create,
+                    )),
+                    source_mtime: None,
+                    source_size: Some(file_size),
+                    expected_cloud_edited_time: None,
+                    attempt_count: 0,
+                    next_retry_at: None,
+                    error_kind: None,
+                    remote_result_file_id: None,
+                    state_revision: 0,
                 },
             )
             .unwrap_or(0)
