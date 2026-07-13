@@ -47,6 +47,9 @@ pub struct TaskExecutionOutcome {
 pub enum TaskDisposition {
     #[default]
     Completed,
+    Pending,
+    Running,
+    BlockedByActiveIntent,
     WaitingForNetwork,
     BackingOff,
     VerifyingRemote,
@@ -200,6 +203,81 @@ pub struct EnqueuedTaskOutcome {
     pub outcome: TaskExecutionOutcome,
 }
 
+enum ExistingOrInsertedTask {
+    Existing(Box<TransferTask>),
+    Replanned(Box<TransferTask>),
+    Blocked(i64),
+    Inserted(i64),
+}
+
+enum RunningGateOutcome {
+    Running(Box<TransferTask>),
+    Blocked,
+}
+
+fn is_path_blocking_state(state: TransferState) -> bool {
+    matches!(
+        state,
+        TransferState::Pending
+            | TransferState::Running
+            | TransferState::WaitingForNetwork
+            | TransferState::BackingOff
+            | TransferState::VerifyingRemote
+    )
+}
+
+fn same_transfer_intent(left: &TransferTask, right: &TransferTask) -> bool {
+    if left.relative_path != right.relative_path
+        || left.local_path != right.local_path
+        || left.name != right.name
+        || left.direction != right.direction
+        || left.operation != right.operation
+        || left.file_id != right.file_id
+        || left.total_size != right.total_size
+    {
+        return false;
+    }
+    match left.operation_kind().ok().flatten() {
+        Some(TransferOperation::Create | TransferOperation::Update) => {
+            left.parent_file_id == right.parent_file_id
+                && left.source_mtime == right.source_mtime
+                && left.source_size == right.source_size
+                && (left.operation_kind().ok().flatten() != Some(TransferOperation::Update)
+                    || left.expected_cloud_edited_time == right.expected_cloud_edited_time)
+        }
+        Some(TransferOperation::Download | TransferOperation::DownloadUpdate) => {
+            left.parent_file_id == right.parent_file_id
+                && left.expected_cloud_edited_time == right.expected_cloud_edited_time
+        }
+        _ => false,
+    }
+}
+
+fn has_ambiguous_remote_write_result(task: &TransferTask) -> bool {
+    matches!(
+        task.operation_kind().ok().flatten(),
+        Some(TransferOperation::Create | TransferOperation::Update)
+    ) && has_persisted_remote_result(task)
+}
+
+fn has_persisted_remote_result(task: &TransferTask) -> bool {
+    task.remote_result_file_id
+        .as_deref()
+        .is_some_and(|file_id| !file_id.trim().is_empty())
+}
+
+fn active_task_disposition(state: TransferState) -> Option<TaskDisposition> {
+    match state {
+        TransferState::Pending => Some(TaskDisposition::Pending),
+        TransferState::Running => Some(TaskDisposition::Running),
+        TransferState::WaitingForNetwork => Some(TaskDisposition::WaitingForNetwork),
+        TransferState::BackingOff => Some(TaskDisposition::BackingOff),
+        TransferState::VerifyingRemote => Some(TaskDisposition::VerifyingRemote),
+        TransferState::RestartRequired => Some(TaskDisposition::RestartRequired),
+        TransferState::Completed | TransferState::Failed | TransferState::Canceled => None,
+    }
+}
+
 pub struct TaskRunner {
     db: Arc<Mutex<rusqlite::Connection>>,
     mount_root: PathBuf,
@@ -244,21 +322,95 @@ impl TaskRunner {
                 "新传输意图必须是 id=0/revision=0 的 Pending 任务",
             ));
         }
-        let task_id = match repository::insert_transfer(&self.db.lock(), &task) {
-            Ok(task_id) => task_id,
+        let existing_or_task_id = {
+            let conn = self.db.lock();
+            let path_tasks = match task.relative_path.as_deref() {
+                Some(relative_path) => repository::list_all_transfers(&conn)?
+                    .into_iter()
+                    .filter(|candidate| candidate.relative_path.as_deref() == Some(relative_path))
+                    .collect::<Vec<_>>(),
+                None => Vec::new(),
+            };
+            let blocking = path_tasks
+                .iter()
+                .filter(|candidate| candidate.state_kind().is_ok_and(is_path_blocking_state))
+                .collect::<Vec<_>>();
+            if let Some(inflight) = blocking.iter().find(|candidate| {
+                candidate.state_kind().is_ok_and(|state| {
+                    matches!(
+                        state,
+                        TransferState::Running | TransferState::VerifyingRemote
+                    )
+                })
+            }) {
+                if same_transfer_intent(inflight, &task) {
+                    Ok(ExistingOrInsertedTask::Existing(Box::new(
+                        (*inflight).clone(),
+                    )))
+                } else {
+                    Ok(ExistingOrInsertedTask::Blocked(inflight.id))
+                }
+            } else if let Some(ambiguous_restart) = path_tasks.iter().find(|candidate| {
+                candidate.state_kind() == Ok(TransferState::RestartRequired)
+                    && has_ambiguous_remote_write_result(candidate)
+            }) {
+                self.promote_restart_to_verifying(&conn, ambiguous_restart)
+                    .map(|task| ExistingOrInsertedTask::Existing(Box::new(task)))
+            } else if let Some(existing) = blocking
+                .iter()
+                .find(|candidate| same_transfer_intent(candidate, &task))
+            {
+                Ok(ExistingOrInsertedTask::Existing(Box::new(
+                    (*existing).clone(),
+                )))
+            } else if let Some(replannable) = blocking.first() {
+                self.replan_task(&conn, replannable, &task)
+                    .map(|task| ExistingOrInsertedTask::Replanned(Box::new(task)))
+            } else if let Some(restart) = path_tasks
+                .iter()
+                .find(|candidate| candidate.state_kind() == Ok(TransferState::RestartRequired))
+            {
+                self.replan_task(&conn, restart, &task)
+                    .map(|task| ExistingOrInsertedTask::Replanned(Box::new(task)))
+            } else {
+                repository::insert_transfer(&conn, &task).map(ExistingOrInsertedTask::Inserted)
+            }
+        };
+        let existing_or_task_id = match existing_or_task_id {
+            Ok(value) => value,
             Err(error) => {
                 self.notify_rejection();
                 return Err(error);
             }
         };
         self.notify_best_effort();
-        let outcome = self.run(task_id).await?;
+        let (task_id, outcome) = match existing_or_task_id {
+            ExistingOrInsertedTask::Inserted(task_id) => {
+                let inserted = self.load(task_id)?;
+                (task_id, self.run_existing_or_observe(inserted).await?)
+            }
+            ExistingOrInsertedTask::Existing(existing) => {
+                let task_id = existing.id;
+                (task_id, self.run_existing_or_observe(*existing).await?)
+            }
+            ExistingOrInsertedTask::Replanned(replanned) => {
+                let task_id = replanned.id;
+                (task_id, self.run_existing_or_observe(*replanned).await?)
+            }
+            ExistingOrInsertedTask::Blocked(task_id) => (
+                task_id,
+                TaskExecutionOutcome {
+                    cloud_file: None,
+                    disposition: TaskDisposition::BlockedByActiveIntent,
+                },
+            ),
+        };
         Ok(EnqueuedTaskOutcome { task_id, outcome })
     }
 
     pub async fn retry(&self, task_id: i64) -> AppResult<TaskExecutionOutcome> {
         let pending = self.prepare_retry(task_id).await?;
-        self.run_expected(pending, true).await
+        self.run_expected(pending, false).await
     }
 
     pub async fn prepare_retry(&self, task_id: i64) -> AppResult<TransferTask> {
@@ -271,10 +423,19 @@ impl TaskRunner {
             self.persist_preflight_rejection(&current, failure.clone())?;
             return Err(AppError::generic(failure.message));
         }
-        self.accept_retry(task_id, current.state_revision)
+        if let Err(failure) = self.operations.preflight(&current).await {
+            let failure = PreflightFailure::from(failure);
+            self.persist_preflight_rejection(&current, failure.clone())?;
+            return Err(AppError::generic(failure.message));
+        }
+        self.accept_retry_after_preflight(task_id, current.state_revision)
     }
 
-    pub fn accept_retry(&self, task_id: i64, expected_revision: i64) -> AppResult<TransferTask> {
+    fn accept_retry_after_preflight(
+        &self,
+        task_id: i64,
+        expected_revision: i64,
+    ) -> AppResult<TransferTask> {
         let current = self.load(task_id)?;
         if current.state_revision != expected_revision
             || current.state_kind().map_err(transition_error)? != TransferState::Failed
@@ -322,16 +483,294 @@ impl TaskRunner {
         Ok(pending)
     }
 
+    fn replan_task(
+        &self,
+        conn: &rusqlite::Connection,
+        current: &TransferTask,
+        replacement: &TransferTask,
+    ) -> AppResult<TransferTask> {
+        let transaction = conn
+            .unchecked_transaction()
+            .map_err(|error| AppError::generic(format!("开始任务重规划事务失败：{error}")))?;
+        let current_state = current.state_kind().map_err(transition_error)?;
+        let restart = if current_state == TransferState::RestartRequired {
+            current.clone()
+        } else {
+            repository::transition_transfer_in_transaction(
+                &transaction,
+                current.id,
+                current.state_revision,
+                TransferState::RestartRequired,
+                TransferPatch {
+                    error_kind: ColumnPatch::Set(TransferErrorKind::LocalChanged),
+                    error_message: ColumnPatch::Set(
+                        "新的 planner intent 已取代尚未执行的旧任务".to_string(),
+                    ),
+                    next_retry_at: ColumnPatch::Clear,
+                    finished_at: ColumnPatch::Clear,
+                    ..Default::default()
+                },
+            )
+            .map_err(transition_error)?
+        };
+        let pending = repository::transition_transfer_in_transaction(
+            &transaction,
+            restart.id,
+            restart.state_revision,
+            TransferState::Pending,
+            TransferPatch {
+                error_kind: ColumnPatch::Clear,
+                error_message: ColumnPatch::Clear,
+                next_retry_at: ColumnPatch::Clear,
+                finished_at: ColumnPatch::Clear,
+                remote_result_file_id: ColumnPatch::Clear,
+                session_url: replacement
+                    .session_url
+                    .clone()
+                    .map(ColumnPatch::Set)
+                    .unwrap_or(ColumnPatch::Clear),
+                transferred: Some(replacement.transferred),
+                resume_offset: Some(replacement.resume_offset),
+                attempt_count: Some(replacement.attempt_count),
+            },
+        )
+        .map_err(transition_error)?;
+        let changed = transaction
+            .execute(
+                "UPDATE transfer_queue SET
+                    direction=?1,
+                    file_id=?2,
+                    local_path=?3,
+                    name=?4,
+                    total_size=?5,
+                    transferred=?6,
+                    created_at=?7,
+                    server_id=?8,
+                    upload_id=?9,
+                    resume_offset=?10,
+                    session_url=?11,
+                    relative_path=?12,
+                    parent_file_id=?13,
+                    operation=?14,
+                    source_mtime=?15,
+                    source_size=?16,
+                    expected_cloud_edited_time=?17,
+                    attempt_count=?18
+                 WHERE id=?19 AND state=?20 AND state_revision=?21",
+                rusqlite::params![
+                    replacement.direction,
+                    replacement.file_id.as_deref(),
+                    replacement.local_path.as_deref(),
+                    replacement.name,
+                    replacement.total_size,
+                    replacement.transferred,
+                    replacement.created_at,
+                    replacement.server_id.as_deref(),
+                    replacement.upload_id.as_deref(),
+                    replacement.resume_offset,
+                    replacement.session_url.as_deref(),
+                    replacement.relative_path.as_deref(),
+                    replacement.parent_file_id.as_deref(),
+                    replacement.operation,
+                    replacement.source_mtime,
+                    replacement.source_size,
+                    replacement.expected_cloud_edited_time,
+                    replacement.attempt_count,
+                    pending.id,
+                    i32::from(TransferState::Pending),
+                    pending.state_revision,
+                ],
+            )
+            .map_err(|error| AppError::generic(format!("更新任务重规划意图失败：{error}")))?;
+        if changed != 1 {
+            return Err(AppError::generic(
+                "任务重规划期间状态已变化，请等待下次同步",
+            ));
+        }
+        let replanned = transaction
+            .query_row(
+                "SELECT * FROM transfer_queue WHERE id=?1",
+                [pending.id],
+                TransferTask::from_row,
+            )
+            .map_err(|error| AppError::generic(format!("读取重规划任务失败：{error}")))?;
+        update_compatibility_sync_status(
+            &transaction,
+            &replanned,
+            repository::sync_status::SYNCING,
+            None,
+            None,
+        )?;
+        transaction
+            .commit()
+            .map_err(|error| AppError::generic(format!("提交任务重规划事务失败：{error}")))?;
+        Ok(replanned)
+    }
+
+    fn promote_restart_to_verifying(
+        &self,
+        conn: &rusqlite::Connection,
+        restart: &TransferTask,
+    ) -> AppResult<TransferTask> {
+        repository::transition_transfer(
+            conn,
+            restart.id,
+            restart.state_revision,
+            TransferState::VerifyingRemote,
+            TransferPatch {
+                error_kind: ColumnPatch::Set(TransferErrorKind::RemoteAmbiguous),
+                error_message: ColumnPatch::Set(
+                    "远端写入已返回资源 ID，禁止重放并等待核验".to_string(),
+                ),
+                next_retry_at: ColumnPatch::Clear,
+                finished_at: ColumnPatch::Clear,
+                ..Default::default()
+            },
+        )
+        .map_err(transition_error)
+    }
+
+    fn transition_to_running_or_block(
+        &self,
+        current: &TransferTask,
+    ) -> AppResult<RunningGateOutcome> {
+        let outcome = {
+            let conn = self.db.lock();
+            let transaction = conn.unchecked_transaction().map_err(|error| {
+                AppError::generic(format!("开始 Running 仲裁事务失败：{error}"))
+            })?;
+            let relative_path = current
+                .relative_path
+                .as_deref()
+                .ok_or_else(|| AppError::generic("Running 仲裁缺少 relative_path"))?;
+            let mut blocked = false;
+            for candidate in repository::list_all_transfers(&transaction)?
+                .into_iter()
+                .filter(|candidate| {
+                    candidate.id != current.id
+                        && candidate.relative_path.as_deref() == Some(relative_path)
+                })
+            {
+                match candidate.state_kind().map_err(transition_error)? {
+                    TransferState::Running | TransferState::VerifyingRemote => {
+                        blocked = true;
+                    }
+                    TransferState::RestartRequired if has_persisted_remote_result(&candidate) => {
+                        repository::transition_transfer_in_transaction(
+                            &transaction,
+                            candidate.id,
+                            candidate.state_revision,
+                            TransferState::VerifyingRemote,
+                            TransferPatch {
+                                error_kind: ColumnPatch::Set(TransferErrorKind::RemoteAmbiguous),
+                                error_message: ColumnPatch::Set(
+                                    "远端结果 ID 已存在；Running 仲裁禁止重放并等待核验"
+                                        .to_string(),
+                                ),
+                                next_retry_at: ColumnPatch::Clear,
+                                finished_at: ColumnPatch::Clear,
+                                ..Default::default()
+                            },
+                        )
+                        .map_err(transition_error)?;
+                        blocked = true;
+                    }
+                    _ => {}
+                }
+            }
+            let outcome = if blocked {
+                RunningGateOutcome::Blocked
+            } else {
+                let running = repository::transition_transfer_in_transaction(
+                    &transaction,
+                    current.id,
+                    current.state_revision,
+                    TransferState::Running,
+                    TransferPatch {
+                        error_kind: ColumnPatch::Clear,
+                        error_message: ColumnPatch::Clear,
+                        next_retry_at: ColumnPatch::Clear,
+                        finished_at: ColumnPatch::Clear,
+                        ..Default::default()
+                    },
+                )
+                .map_err(transition_error)?;
+                RunningGateOutcome::Running(Box::new(running))
+            };
+            transaction.commit().map_err(|error| {
+                AppError::generic(format!("提交 Running 仲裁事务失败：{error}"))
+            })?;
+            outcome
+        };
+        self.notify_best_effort();
+        Ok(outcome)
+    }
+
     pub async fn run(&self, task_id: i64) -> AppResult<TaskExecutionOutcome> {
         let current = self.load(task_id)?;
         self.run_expected(current, true).await
     }
 
-    /// Execute an accepted manual retry. Dynamic stability/source preflight runs here in the
-    /// detached worker, before the task may enter Running.
+    async fn run_existing_or_observe(
+        &self,
+        existing: TransferTask,
+    ) -> AppResult<TaskExecutionOutcome> {
+        let state = existing.state_kind().map_err(transition_error)?;
+        if matches!(
+            state,
+            TransferState::Pending | TransferState::WaitingForNetwork | TransferState::BackingOff
+        ) {
+            match self.run_expected(existing.clone(), true).await {
+                Ok(outcome) => return Ok(outcome),
+                Err(error) => {
+                    let observed = self.load(existing.id)?;
+                    if observed.state_revision != existing.state_revision {
+                        return self.observed_concurrent_outcome(&observed);
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        let disposition = active_task_disposition(state)
+            .ok_or_else(|| AppError::generic("自动周期发现的任务已不再活动"))?;
+        Ok(TaskExecutionOutcome {
+            cloud_file: None,
+            disposition,
+        })
+    }
+
+    fn observed_concurrent_outcome(
+        &self,
+        observed: &TransferTask,
+    ) -> AppResult<TaskExecutionOutcome> {
+        let state = observed.state_kind().map_err(transition_error)?;
+        if state == TransferState::Completed {
+            return Ok(TaskExecutionOutcome {
+                cloud_file: None,
+                disposition: TaskDisposition::Completed,
+            });
+        }
+        if let Some(disposition) = active_task_disposition(state) {
+            return Ok(TaskExecutionOutcome {
+                cloud_file: None,
+                disposition,
+            });
+        }
+        Err(AppError::generic(format!(
+            "任务已由并发执行收敛为 {state:?}{}",
+            observed
+                .error_message
+                .as_deref()
+                .map(|message| format!("：{message}"))
+                .unwrap_or_default()
+        )))
+    }
+
+    /// Execute a manual retry accepted only after static and backend preflight. Static identity,
+    /// destination/source snapshot and network state are rechecked immediately before Running.
     pub async fn run_prepared(&self, task_id: i64) -> AppResult<TaskExecutionOutcome> {
         let current = self.load(task_id)?;
-        self.run_expected(current, true).await
+        self.run_expected(current, false).await
     }
 
     pub async fn resume_waiting(&self) -> AppResult<usize> {
@@ -342,21 +781,101 @@ impl TaskRunner {
         let tasks = self.list_states(&[TransferState::WaitingForNetwork])?;
         let mut resumed = 0;
         for task in tasks {
+            let task_id = task.id;
             match self.run_expected(task, true).await {
-                Ok(outcome) if outcome.disposition != TaskDisposition::WaitingForNetwork => {
+                Ok(outcome)
+                    if !matches!(
+                        outcome.disposition,
+                        TaskDisposition::WaitingForNetwork | TaskDisposition::BlockedByActiveIntent
+                    ) =>
+                {
                     resumed += 1;
                 }
                 Ok(_) => {}
-                Err(_) => resumed += 1,
+                Err(error) => {
+                    tracing::warn!(task_id, %error, "等待网络任务恢复失败");
+                }
+            }
+        }
+        Ok(resumed)
+    }
+
+    /// Task 5 consumes this due-task polling seam; it intentionally performs no sleeping.
+    pub async fn resume_due_backoff(&self) -> AppResult<usize> {
+        let now = chrono::Utc::now().timestamp_millis();
+        let tasks = self.list_states(&[TransferState::BackingOff])?;
+        let mut resumed = 0;
+        for task in tasks {
+            if task
+                .next_retry_at
+                .is_some_and(|next_retry_at| next_retry_at > now)
+            {
+                continue;
+            }
+            match self.run_expected(task.clone(), true).await {
+                Ok(outcome)
+                    if !matches!(
+                        outcome.disposition,
+                        TaskDisposition::BackingOff | TaskDisposition::BlockedByActiveIntent
+                    ) =>
+                {
+                    resumed += 1;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(task_id = task.id, %error, "退避任务恢复失败");
+                }
             }
         }
         Ok(resumed)
     }
 
     pub async fn recover_startup(&self) -> AppResult<StartupRecoverySummary> {
-        let tasks = self.list_states(&[TransferState::Pending, TransferState::Running])?;
+        let mut tasks = self.list_states(&[TransferState::Pending, TransferState::Running])?;
+        tasks.sort_by(|left, right| {
+            right
+                .created_at
+                .cmp(&left.created_at)
+                .then_with(|| right.id.cmp(&left.id))
+        });
         let mut summary = StartupRecoverySummary::default();
+        let mut selected_tasks = Vec::new();
+        let mut grouped = std::collections::HashMap::<String, Vec<TransferTask>>::new();
         for task in tasks {
+            match task.relative_path.clone() {
+                Some(relative_path) => grouped.entry(relative_path).or_default().push(task),
+                None => selected_tasks.push(task),
+            }
+        }
+        for (_, mut same_path) in grouped {
+            let has_running_remote_write = same_path.iter().any(|task| {
+                task.state_kind() == Ok(TransferState::Running)
+                    && matches!(
+                        task.operation_kind().ok().flatten(),
+                        Some(TransferOperation::Create | TransferOperation::Update)
+                    )
+            });
+            if has_running_remote_write {
+                for task in same_path {
+                    if self.suppress_startup_duplicate(&task)? {
+                        summary.verifying_remote += 1;
+                    } else {
+                        summary.failed += 1;
+                    }
+                }
+                continue;
+            }
+            let selected = same_path.remove(0);
+            selected_tasks.push(selected);
+            for task in same_path {
+                if self.suppress_startup_duplicate(&task)? {
+                    summary.verifying_remote += 1;
+                } else {
+                    summary.failed += 1;
+                }
+            }
+        }
+        for task in selected_tasks {
             let state = match task.state_kind() {
                 Ok(state) => state,
                 Err(error) => {
@@ -391,9 +910,18 @@ impl TaskRunner {
                         continue;
                     }
                     TransferOperation::Download | TransferOperation::DownloadUpdate => {
-                        if let Some(path) = task.local_path.as_deref() {
-                            let _ = std::fs::remove_file(format!("{path}.tmp"));
+                        if let Err(failure) = self.validate_static(&task) {
+                            self.persist_preflight_rejection(&task, failure)?;
+                            summary.failed += 1;
+                            continue;
                         }
+                        let relative_path = task
+                            .relative_path
+                            .as_deref()
+                            .expect("validated download task has relative path");
+                        let validated_destination = self.mount_root.join(relative_path);
+                        let tmp_path = crate::drive::download_api::tmp_path(&validated_destination);
+                        let _ = std::fs::remove_file(tmp_path);
                         let restart = self.transition_failure(
                             &task,
                             TransferState::RestartRequired,
@@ -435,6 +963,36 @@ impl TaskRunner {
         Ok(summary)
     }
 
+    fn suppress_startup_duplicate(&self, task: &TransferTask) -> AppResult<bool> {
+        let state = task.state_kind().map_err(transition_error)?;
+        let operation = task.operation_kind().map_err(transition_error)?;
+        if state == TransferState::Running
+            && matches!(
+                operation,
+                Some(TransferOperation::Create | TransferOperation::Update)
+            )
+        {
+            self.transition_failure(
+                task,
+                TransferState::VerifyingRemote,
+                TransferErrorKind::RemoteAmbiguous,
+                "启动恢复发现同路径多个活动任务；旧远端写入等待核验",
+            )?;
+            return Ok(true);
+        }
+        self.transition_failure(
+            task,
+            TransferState::RestartRequired,
+            if state == TransferState::Running {
+                TransferErrorKind::SessionExpired
+            } else {
+                TransferErrorKind::LocalChanged
+            },
+            "启动恢复仅保留同路径最新任务，旧任务等待重新规划",
+        )?;
+        Ok(false)
+    }
+
     fn record_startup_outcome(
         &self,
         result: AppResult<TaskExecutionOutcome>,
@@ -443,6 +1001,9 @@ impl TaskRunner {
         match result {
             Ok(outcome) => match outcome.disposition {
                 TaskDisposition::Completed => summary.completed += 1,
+                TaskDisposition::Pending
+                | TaskDisposition::Running
+                | TaskDisposition::BlockedByActiveIntent => {}
                 TaskDisposition::WaitingForNetwork => summary.waiting_network += 1,
                 TaskDisposition::VerifyingRemote => summary.verifying_remote += 1,
                 TaskDisposition::BackingOff => {}
@@ -467,6 +1028,11 @@ impl TaskRunner {
         ) {
             self.notify_rejection();
             return Err(AppError::generic(format!("任务状态 {state:?} 不可执行")));
+        }
+        if state == TransferState::BackingOff && current.next_retry_at.is_none() {
+            let failure = PreflightFailure::validation("退避任务缺少 next_retry_at，拒绝立即重放");
+            self.persist_preflight_rejection(&current, failure.clone())?;
+            return Err(AppError::generic(failure.message));
         }
         if let Err(failure) = self.validate_static(&current) {
             self.persist_preflight_rejection(&current, failure.clone())?;
@@ -522,18 +1088,15 @@ impl TaskRunner {
                 return Err(AppError::generic(failure.message));
             }
         }
-        let running = self.transition(
-            current.id,
-            current.state_revision,
-            TransferState::Running,
-            TransferPatch {
-                error_kind: ColumnPatch::Clear,
-                error_message: ColumnPatch::Clear,
-                next_retry_at: ColumnPatch::Clear,
-                finished_at: ColumnPatch::Clear,
-                ..Default::default()
-            },
-        )?;
+        let running = match self.transition_to_running_or_block(&current)? {
+            RunningGateOutcome::Running(running) => *running,
+            RunningGateOutcome::Blocked => {
+                return Ok(TaskExecutionOutcome {
+                    cloud_file: None,
+                    disposition: TaskDisposition::BlockedByActiveIntent,
+                });
+            }
+        };
         let progress = TaskProgressReporter::new(
             self.db.clone(),
             running.id,
@@ -546,35 +1109,72 @@ impl TaskRunner {
             Ok(mut output) => {
                 progress.ensure_current()?;
                 if output.disposition != TaskDisposition::Completed {
+                    if matches!(
+                        output.disposition,
+                        TaskDisposition::Pending
+                            | TaskDisposition::Running
+                            | TaskDisposition::BlockedByActiveIntent
+                            | TaskDisposition::BackingOff
+                    ) {
+                        return self.settle_error(
+                            &running,
+                            AppError::generic(format!(
+                                "后端返回缺少可持久化恢复条件的状态 {:?}",
+                                output.disposition
+                            )),
+                        );
+                    }
                     self.persist_backend_disposition(&running, &output)?;
                     return Ok(output);
                 }
                 if let Err(failure) = self.validate_success_outcome(&running, &output) {
                     let remote_id = output.cloud_file.as_ref().map(|file| file.id.clone());
+                    let remote_write_is_ambiguous = remote_id
+                        .as_deref()
+                        .is_some_and(|file_id| !file_id.trim().is_empty())
+                        && matches!(
+                            running.operation_kind().map_err(transition_error)?,
+                            Some(TransferOperation::Create | TransferOperation::Update)
+                        );
+                    let (target, kind, message) = if remote_write_is_ambiguous {
+                        (
+                            TransferState::VerifyingRemote,
+                            TransferErrorKind::RemoteAmbiguous,
+                            format!("{}；远端已返回资源 ID，禁止直接重放", failure.message),
+                        )
+                    } else {
+                        (failure.target, failure.kind, failure.message)
+                    };
                     self.transition(
                         running.id,
                         running.state_revision,
-                        failure.target,
+                        target,
                         TransferPatch {
-                            error_kind: ColumnPatch::Set(failure.kind),
-                            error_message: ColumnPatch::Set(failure.message),
+                            error_kind: ColumnPatch::Set(kind),
+                            error_message: ColumnPatch::Set(message),
                             remote_result_file_id: remote_id
                                 .map(ColumnPatch::Set)
                                 .unwrap_or(ColumnPatch::Keep),
                             ..Default::default()
                         },
                     )?;
-                    output.disposition = match failure.target {
+                    output.disposition = match target {
                         TransferState::VerifyingRemote => TaskDisposition::VerifyingRemote,
                         TransferState::RestartRequired => TaskDisposition::RestartRequired,
                         _ => return Err(AppError::generic("非法成功核验目标状态")),
                     };
                     return Ok(output);
                 }
-                let completed = self.settle_success(&running, &output)?;
-                debug_assert_eq!(completed.id, running.id);
-                output.disposition = TaskDisposition::Completed;
-                Ok(output)
+                match self.settle_success(&running, &output) {
+                    Ok(completed) => {
+                        debug_assert_eq!(completed.id, running.id);
+                        output.disposition = TaskDisposition::Completed;
+                        Ok(output)
+                    }
+                    Err(error) => {
+                        self.recover_success_settlement_failure(&running, &mut output, error)
+                    }
+                }
             }
             Err(TaskExecutionError::RestartRequired(message)) => {
                 self.transition_failure(
@@ -693,16 +1293,19 @@ impl TaskRunner {
             TaskDisposition::Completed => {
                 return Err(AppError::generic("Completed 不应走延迟结算"));
             }
+            TaskDisposition::Pending
+            | TaskDisposition::Running
+            | TaskDisposition::BlockedByActiveIntent => {
+                return Err(AppError::generic("活动任务状态不应由后端返回"));
+            }
             TaskDisposition::WaitingForNetwork => (
                 TransferState::WaitingForNetwork,
                 TransferErrorKind::Network,
                 "后端请求等待网络恢复",
             ),
-            TaskDisposition::BackingOff => (
-                TransferState::BackingOff,
-                TransferErrorKind::Server,
-                "后端请求等待退避恢复",
-            ),
+            TaskDisposition::BackingOff => {
+                return Err(AppError::generic("后端 BackingOff 缺少 next_retry_at"));
+            }
             TaskDisposition::VerifyingRemote => (
                 TransferState::VerifyingRemote,
                 TransferErrorKind::RemoteAmbiguous,
@@ -912,6 +1515,49 @@ impl TaskRunner {
         Ok(completed)
     }
 
+    fn recover_success_settlement_failure(
+        &self,
+        running: &TransferTask,
+        output: &mut TaskExecutionOutcome,
+        error: AppError,
+    ) -> AppResult<TaskExecutionOutcome> {
+        let operation = running
+            .operation_kind()
+            .map_err(transition_error)?
+            .ok_or_else(|| AppError::generic("成功结算恢复缺少 operation"))?;
+        let message = format!("后端已完成，但本地同步基线结算失败：{error}");
+        let (target, kind, disposition) = match operation {
+            TransferOperation::Create | TransferOperation::Update => (
+                TransferState::VerifyingRemote,
+                TransferErrorKind::RemoteAmbiguous,
+                TaskDisposition::VerifyingRemote,
+            ),
+            TransferOperation::Download | TransferOperation::DownloadUpdate => (
+                TransferState::RestartRequired,
+                TransferErrorKind::Unknown,
+                TaskDisposition::RestartRequired,
+            ),
+            _ => return Err(error),
+        };
+        self.transition(
+            running.id,
+            running.state_revision,
+            target,
+            TransferPatch {
+                error_kind: ColumnPatch::Set(kind),
+                error_message: ColumnPatch::Set(message),
+                remote_result_file_id: output
+                    .cloud_file
+                    .as_ref()
+                    .map(|cloud| ColumnPatch::Set(cloud.id.clone()))
+                    .unwrap_or(ColumnPatch::Keep),
+                ..Default::default()
+            },
+        )?;
+        output.disposition = disposition;
+        Ok(output.clone())
+    }
+
     fn validate_static(&self, task: &TransferTask) -> Result<TransferOperation, PreflightFailure> {
         let operation = task
             .operation_kind()
@@ -923,6 +1569,11 @@ impl TaskRunner {
             .ok_or_else(|| PreflightFailure::validation("任务缺少相对路径"))?;
         crate::core::paths::validate_relative_path(rel, false)
             .map_err(|error| PreflightFailure::validation(error.to_string()))?;
+        let mount_metadata = std::fs::metadata(&self.mount_root)
+            .map_err(|_| PreflightFailure::validation("挂载根目录不存在或不可访问"))?;
+        if !mount_metadata.is_dir() {
+            return Err(PreflightFailure::validation("挂载根路径不是目录"));
+        }
         let local_path = task
             .local_path
             .as_deref()
@@ -958,6 +1609,11 @@ impl TaskRunner {
                     })
                 {
                     return Err(PreflightFailure::validation("Update 任务缺少真实 fileId"));
+                }
+                if task.resume_offset > 0 && !has_nonempty(&task.session_url) {
+                    return Err(PreflightFailure::validation(
+                        "非零上传断点缺少 session_url，拒绝作为全新请求重放",
+                    ));
                 }
                 if Path::new(rel)
                     .parent()
@@ -999,8 +1655,25 @@ impl TaskRunner {
                 if task.expected_cloud_edited_time.is_none() {
                     return Err(PreflightFailure::validation("下载任务缺少云端版本"));
                 }
-                if local_path.is_dir() {
-                    return Err(PreflightFailure::validation("下载目标不能是目录"));
+                self.ensure_download_parent(local_path)?;
+                match std::fs::metadata(local_path) {
+                    Ok(metadata) if metadata.is_dir() => {
+                        return Err(PreflightFailure::validation("下载目标不能是目录"));
+                    }
+                    Ok(metadata)
+                        if !metadata.is_file()
+                            || metadata.len() != 0
+                            || !crate::mount::manager::is_placeholder_file(local_path) =>
+                    {
+                        return Err(PreflightFailure::local_changed(
+                            "下载目标已出现本地内容，需要重新规划",
+                        ));
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(_) => {
+                        return Err(PreflightFailure::validation("下载目标不可访问"));
+                    }
                 }
             }
             TransferOperation::DownloadUpdate => {
@@ -1012,9 +1685,13 @@ impl TaskRunner {
                 if !has_nonempty(&task.file_id) {
                     return Err(PreflightFailure::validation("更新下载任务缺少 fileId"));
                 }
-                if !local_path.is_file() || task.expected_cloud_edited_time.is_none() {
-                    return Err(PreflightFailure::validation(
-                        "更新下载缺少现有目标或云端版本",
+                if task.expected_cloud_edited_time.is_none() {
+                    return Err(PreflightFailure::validation("更新下载缺少云端版本"));
+                }
+                self.ensure_download_parent(local_path)?;
+                if !local_path.is_file() {
+                    return Err(PreflightFailure::local_changed(
+                        "更新下载目标已不存在，需要重新规划",
                     ));
                 }
             }
@@ -1025,6 +1702,77 @@ impl TaskRunner {
             }
         }
         Ok(operation)
+    }
+
+    fn ensure_download_parent(&self, local_path: &Path) -> Result<(), PreflightFailure> {
+        let parent = local_path
+            .parent()
+            .ok_or_else(|| PreflightFailure::validation("下载目标缺少父目录"))?;
+        let relative_parent = parent
+            .strip_prefix(&self.mount_root)
+            .map_err(|_| PreflightFailure::validation("下载父目录不在配置的挂载根目录之下"))?;
+        let canonical_root = self.mount_root.canonicalize().map_err(|error| {
+            PreflightFailure::validation(format!("挂载根目录无法解析：{error}"))
+        })?;
+        let mut current = self.mount_root.clone();
+        for component in relative_parent.components() {
+            let std::path::Component::Normal(segment) = component else {
+                return Err(PreflightFailure::validation("下载父目录包含非法路径分量"));
+            };
+            current.push(segment);
+            match std::fs::symlink_metadata(&current) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(PreflightFailure::validation(
+                        "下载父目录包含符号链接，拒绝越界文件操作",
+                    ));
+                }
+                Ok(metadata) if !metadata.is_dir() => {
+                    return Err(PreflightFailure::validation("下载父路径不是目录"));
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    std::fs::create_dir(&current).map_err(|error| {
+                        PreflightFailure::validation(format!("创建下载父目录失败：{error}"))
+                    })?;
+                    let metadata = std::fs::symlink_metadata(&current).map_err(|error| {
+                        PreflightFailure::validation(format!("校验下载父目录失败：{error}"))
+                    })?;
+                    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                        return Err(PreflightFailure::validation(
+                            "下载父目录创建后被替换，拒绝继续",
+                        ));
+                    }
+                }
+                Err(error) => {
+                    return Err(PreflightFailure::validation(format!(
+                        "下载父目录不可访问：{error}"
+                    )));
+                }
+            }
+        }
+        let canonical_parent = parent.canonicalize().map_err(|error| {
+            PreflightFailure::validation(format!("下载父目录无法解析：{error}"))
+        })?;
+        if !canonical_parent.starts_with(&canonical_root) {
+            return Err(PreflightFailure::validation(
+                "下载父目录解析到挂载根目录之外",
+            ));
+        }
+        match std::fs::symlink_metadata(local_path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(PreflightFailure::validation(
+                    "下载目标是符号链接，拒绝文件操作",
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(PreflightFailure::validation(format!(
+                    "下载目标不可访问：{error}"
+                )));
+            }
+        }
+        Ok(())
     }
 
     fn persist_preflight_rejection(
@@ -1369,6 +2117,97 @@ mod tests {
         }
     }
 
+    struct BlockingPreflightBackend {
+        preflight_started: tokio::sync::Notify,
+        preflight_release: tokio::sync::Semaphore,
+        execute_calls: AtomicUsize,
+        fail_execute: AtomicBool,
+    }
+
+    impl Default for BlockingPreflightBackend {
+        fn default() -> Self {
+            Self {
+                preflight_started: tokio::sync::Notify::new(),
+                preflight_release: tokio::sync::Semaphore::new(0),
+                execute_calls: AtomicUsize::new(0),
+                fail_execute: AtomicBool::new(false),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl TransferOperations for BlockingPreflightBackend {
+        async fn preflight(&self, _task: &TransferTask) -> Result<(), BackendPreflightFailure> {
+            self.preflight_started.notify_one();
+            self.preflight_release
+                .acquire()
+                .await
+                .expect("preflight gate closed")
+                .forget();
+            Ok(())
+        }
+
+        async fn execute(
+            &self,
+            task: &TransferTask,
+            _progress: &TaskProgressReporter,
+        ) -> Result<TaskExecutionOutcome, TaskExecutionError> {
+            self.execute_calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail_execute.load(Ordering::SeqCst) {
+                return Err(AppError::generic("coordinated winner failed").into());
+            }
+            if matches!(
+                task.operation_kind().unwrap(),
+                Some(TransferOperation::Download | TransferOperation::DownloadUpdate)
+            ) {
+                std::fs::write(
+                    task.local_path.as_deref().unwrap(),
+                    vec![0; task.total_size as usize],
+                )
+                .map_err(|error| AppError::generic(error.to_string()))?;
+            }
+            Ok(TaskExecutionOutcome::default())
+        }
+    }
+
+    struct BlockingExecuteBackend {
+        execute_started: tokio::sync::Notify,
+        execute_release: tokio::sync::Semaphore,
+        calls: Mutex<Vec<i64>>,
+    }
+
+    impl Default for BlockingExecuteBackend {
+        fn default() -> Self {
+            Self {
+                execute_started: tokio::sync::Notify::new(),
+                execute_release: tokio::sync::Semaphore::new(0),
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl TransferOperations for BlockingExecuteBackend {
+        async fn execute(
+            &self,
+            task: &TransferTask,
+            _progress: &TaskProgressReporter,
+        ) -> Result<TaskExecutionOutcome, TaskExecutionError> {
+            self.calls.lock().push(task.id);
+            self.execute_started.notify_one();
+            self.execute_release
+                .acquire()
+                .await
+                .expect("execute gate closed")
+                .forget();
+            if let Some(path) = task.local_path.as_deref() {
+                std::fs::write(path, vec![0; task.total_size as usize])
+                    .map_err(|error| AppError::generic(error.to_string()))?;
+            }
+            Ok(TaskExecutionOutcome::default())
+        }
+    }
+
     struct Fixture {
         root: TempDir,
         db: Arc<Mutex<rusqlite::Connection>>,
@@ -1430,6 +2269,21 @@ mod tests {
         }
     }
 
+    fn runner_with_backend(
+        db: Arc<Mutex<rusqlite::Connection>>,
+        mount_root: &Path,
+        backend: Arc<dyn TransferOperations>,
+    ) -> Arc<TaskRunner> {
+        Arc::new(TaskRunner::new(
+            db,
+            mount_root.to_path_buf(),
+            backend,
+            Arc::new(|| true),
+            Arc::new(|| Ok(())),
+            None,
+        ))
+    }
+
     fn source_snapshot(path: &Path) -> (i64, i64) {
         let metadata = std::fs::metadata(path).unwrap();
         let mtime = metadata
@@ -1463,13 +2317,26 @@ mod tests {
                     Some(size),
                 )
             }
-            TransferOperation::Download | TransferOperation::DownloadUpdate => (
+            TransferOperation::Download => (
                 repository::transfer_direction::DOWNLOAD,
                 Some("remote-id".to_string()),
                 rel.contains('/').then(|| "persisted-parent".to_string()),
                 None,
                 None,
             ),
+            TransferOperation::DownloadUpdate => {
+                if let Some(parent) = Path::new(&local_path).parent() {
+                    std::fs::create_dir_all(parent).unwrap();
+                }
+                std::fs::write(&local_path, b"olddata").unwrap();
+                (
+                    repository::transfer_direction::DOWNLOAD_UPDATE,
+                    Some("remote-id".to_string()),
+                    rel.contains('/').then(|| "persisted-parent".to_string()),
+                    None,
+                    None,
+                )
+            }
             _ => (
                 repository::transfer_direction::DELETE,
                 Some("remote-id".to_string()),
@@ -1683,6 +2550,102 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn download_preflight_rejects_missing_mount_root_and_parent_file() {
+        let missing_mount = Fixture::new();
+        let missing_mount_id = missing_mount.insert(task(
+            &missing_mount,
+            TransferState::Pending,
+            TransferOperation::Download,
+            "missing-mount.bin",
+        ));
+        std::fs::remove_dir_all(missing_mount.root.path()).unwrap();
+
+        assert!(missing_mount.runner.run(missing_mount_id).await.is_err());
+        assert_eq!(
+            missing_mount.get(missing_mount_id).state_kind().unwrap(),
+            TransferState::Failed
+        );
+        assert!(missing_mount.backend.calls().is_empty());
+
+        let parent_file = Fixture::new();
+        std::fs::write(parent_file.root.path().join("blocker"), b"not a dir").unwrap();
+        let parent_file_id = parent_file.insert(task(
+            &parent_file,
+            TransferState::Pending,
+            TransferOperation::Download,
+            "blocker/download.bin",
+        ));
+
+        assert!(parent_file.runner.run(parent_file_id).await.is_err());
+        assert_eq!(
+            parent_file.get(parent_file_id).state_kind().unwrap(),
+            TransferState::Failed
+        );
+        assert!(parent_file.backend.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn download_target_changes_before_running_require_replanning() {
+        let new_download = Fixture::new();
+        let new_download_id = new_download.insert(task(
+            &new_download,
+            TransferState::Pending,
+            TransferOperation::Download,
+            "became-nonempty.bin",
+        ));
+        std::fs::write(
+            new_download.root.path().join("became-nonempty.bin"),
+            b"local",
+        )
+        .unwrap();
+
+        let outcome = new_download.runner.run(new_download_id).await.unwrap();
+        assert_eq!(outcome.disposition, TaskDisposition::RestartRequired);
+        assert_eq!(
+            new_download.get(new_download_id).state_kind().unwrap(),
+            TransferState::RestartRequired
+        );
+        assert!(new_download.backend.calls().is_empty());
+
+        let update = Fixture::new();
+        let update_task = task(
+            &update,
+            TransferState::Pending,
+            TransferOperation::DownloadUpdate,
+            "disappeared.bin",
+        );
+        std::fs::remove_file(update_task.local_path.as_ref().unwrap()).unwrap();
+        let update_id = update.insert(update_task);
+
+        let outcome = update.runner.run(update_id).await.unwrap();
+        assert_eq!(outcome.disposition, TaskDisposition::RestartRequired);
+        assert_eq!(
+            update.get(update_id).state_kind().unwrap(),
+            TransferState::RestartRequired
+        );
+        assert!(update.backend.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn nonzero_upload_resume_without_session_is_rejected_before_api() {
+        let fixture = Fixture::new();
+        let mut malformed = task(
+            &fixture,
+            TransferState::Pending,
+            TransferOperation::Create,
+            "bad-resume.bin",
+        );
+        malformed.resume_offset = 1;
+        malformed.transferred = 1;
+        malformed.session_url = None;
+        let id = fixture.insert(malformed);
+
+        assert!(fixture.runner.run(id).await.is_err());
+        assert_eq!(fixture.get(id).state_kind().unwrap(), TransferState::Failed);
+        assert!(fixture.backend.calls().is_empty());
+    }
+
+    #[tokio::test]
     async fn offline_pending_task_waits_without_calling_backend() {
         let fixture = Fixture::new();
         fixture.online.store(false, Ordering::SeqCst);
@@ -1736,6 +2699,132 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn startup_recovers_only_latest_pending_row_per_path() {
+        let fixture = Fixture::new();
+        let mut older = task(
+            &fixture,
+            TransferState::Pending,
+            TransferOperation::Create,
+            "startup-duplicate.bin",
+        );
+        older.created_at = 1;
+        let older_id = fixture.insert(older);
+        let mut latest = task(
+            &fixture,
+            TransferState::Pending,
+            TransferOperation::Create,
+            "startup-duplicate.bin",
+        );
+        latest.created_at = 2;
+        let latest_id = fixture.insert(latest);
+
+        let summary = fixture.runner.recover_startup().await.unwrap();
+
+        assert_eq!(fixture.backend.calls().len(), 1);
+        assert_eq!(fixture.backend.calls()[0].id, latest_id);
+        assert_eq!(
+            fixture.get(latest_id).state_kind().unwrap(),
+            TransferState::Completed
+        );
+        assert_eq!(
+            fixture.get(older_id).state_kind().unwrap(),
+            TransferState::RestartRequired
+        );
+        assert_eq!(summary.completed, 1);
+        assert_eq!(summary.failed, 1);
+    }
+
+    #[tokio::test]
+    async fn startup_running_remote_write_suppresses_all_same_path_api_replay() {
+        let fixture = Fixture::new();
+        let mut older_running = task(
+            &fixture,
+            TransferState::Running,
+            TransferOperation::Create,
+            "startup-ambiguous-write.bin",
+        );
+        older_running.created_at = 1;
+        let running_id = fixture.insert(older_running);
+        let mut newer_pending = task(
+            &fixture,
+            TransferState::Pending,
+            TransferOperation::Create,
+            "startup-ambiguous-write.bin",
+        );
+        newer_pending.created_at = 2;
+        let pending_id = fixture.insert(newer_pending);
+
+        let summary = fixture.runner.recover_startup().await.unwrap();
+
+        assert!(fixture.backend.calls().is_empty());
+        assert_eq!(
+            fixture.get(running_id).state_kind().unwrap(),
+            TransferState::VerifyingRemote
+        );
+        assert_eq!(
+            fixture.get(pending_id).state_kind().unwrap(),
+            TransferState::RestartRequired
+        );
+        assert_eq!(summary.verifying_remote, 1);
+        assert_eq!(summary.failed, 1);
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_validates_download_path_before_touching_tmp_file() {
+        let fixture = Fixture::new();
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("victim.bin");
+        let victim_tmp = outside.path().join("victim.bin.tmp");
+        std::fs::write(&victim_tmp, b"sentinel").unwrap();
+        let mut malformed = task(
+            &fixture,
+            TransferState::Running,
+            TransferOperation::Download,
+            "safe.bin",
+        );
+        malformed.local_path = Some(victim.to_string_lossy().into_owned());
+        let id = fixture.insert(malformed);
+
+        let summary = fixture.runner.recover_startup().await.unwrap();
+
+        assert_eq!(std::fs::read(&victim_tmp).unwrap(), b"sentinel");
+        assert!(fixture.backend.calls().is_empty());
+        assert_eq!(summary.failed, 1);
+        assert_eq!(fixture.get(id).state_kind().unwrap(), TransferState::Failed);
+        assert_eq!(
+            fixture.get(id).error_kind_typed().unwrap(),
+            Some(TransferErrorKind::Validation)
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn startup_recovery_rejects_symlink_parent_before_touching_outside_tmp() {
+        let fixture = Fixture::new();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_tmp = outside.path().join("victim.bin.tmp");
+        std::fs::write(&outside_tmp, b"outside-sentinel").unwrap();
+        std::os::unix::fs::symlink(outside.path(), fixture.root.path().join("link")).unwrap();
+        let id = fixture.insert(task(
+            &fixture,
+            TransferState::Running,
+            TransferOperation::Download,
+            "link/victim.bin",
+        ));
+
+        let summary = fixture.runner.recover_startup().await.unwrap();
+
+        assert_eq!(std::fs::read(&outside_tmp).unwrap(), b"outside-sentinel");
+        assert!(fixture.backend.calls().is_empty());
+        assert_eq!(summary.failed, 1);
+        assert_eq!(fixture.get(id).state_kind().unwrap(), TransferState::Failed);
+        assert_eq!(
+            fixture.get(id).error_kind_typed().unwrap(),
+            Some(TransferErrorKind::Validation)
+        );
+    }
+
+    #[tokio::test]
     async fn progress_and_settlement_are_isolated_by_task_id_and_revision() {
         let fixture = Fixture::new();
         *fixture.backend.progress_bytes.lock() = Some(4);
@@ -1771,7 +2860,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accepted_retry_increments_attempt_and_stale_revision_cannot_mutate() {
+    async fn accepted_retry_increments_attempt_and_second_prepare_cannot_mutate() {
         let fixture = Fixture::new();
         let id = fixture.insert(task(
             &fixture,
@@ -1780,10 +2869,10 @@ mod tests {
             "retry.bin",
         ));
 
-        let accepted = fixture.runner.accept_retry(id, 0).unwrap();
+        let accepted = fixture.runner.prepare_retry(id).await.unwrap();
         assert_eq!(accepted.state_kind().unwrap(), TransferState::Pending);
         assert_eq!(accepted.attempt_count, 1);
-        assert!(fixture.runner.accept_retry(id, 0).is_err());
+        assert!(fixture.runner.prepare_retry(id).await.is_err());
         assert_eq!(
             fixture.get(id).state_kind().unwrap(),
             TransferState::Pending
@@ -1812,6 +2901,136 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resume_waiting_does_not_count_failed_execution_as_resumed() {
+        let fixture = Fixture::new();
+        fixture.backend.fail_with(AppError::drive_from_response(
+            403,
+            "{}",
+            None,
+            RequestSemantics::Read,
+            true,
+        ));
+        let id = fixture.insert(task(
+            &fixture,
+            TransferState::WaitingForNetwork,
+            TransferOperation::Download,
+            "resume-fails.bin",
+        ));
+
+        assert_eq!(fixture.runner.resume_waiting().await.unwrap(), 0);
+        assert_eq!(fixture.get(id).state_kind().unwrap(), TransferState::Failed);
+    }
+
+    #[tokio::test]
+    async fn running_gate_blocks_resume_waiting_then_allows_progress_after_resolution() {
+        let fixture = Fixture::new();
+        let waiting = task(
+            &fixture,
+            TransferState::WaitingForNetwork,
+            TransferOperation::Create,
+            "gate-waiting.bin",
+        );
+        let mut ambiguous = waiting.clone();
+        ambiguous.state = i32::from(TransferState::RestartRequired);
+        ambiguous.remote_result_file_id = Some("known-remote-id".into());
+        let waiting_id = fixture.insert(waiting);
+        let ambiguous_id = fixture.insert(ambiguous);
+
+        assert_eq!(fixture.runner.resume_waiting().await.unwrap(), 0);
+        assert_eq!(
+            fixture.get(waiting_id).state_kind().unwrap(),
+            TransferState::WaitingForNetwork
+        );
+        assert_eq!(
+            fixture.get(ambiguous_id).state_kind().unwrap(),
+            TransferState::VerifyingRemote
+        );
+        assert!(fixture.backend.calls().is_empty());
+
+        let blocker = fixture.get(ambiguous_id);
+        repository::transition_transfer(
+            &fixture.db.lock(),
+            ambiguous_id,
+            blocker.state_revision,
+            TransferState::Failed,
+            TransferPatch {
+                error_kind: ColumnPatch::Set(TransferErrorKind::RemoteAmbiguous),
+                error_message: ColumnPatch::Set("verification resolved".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(fixture.runner.resume_waiting().await.unwrap(), 1);
+        assert_eq!(
+            fixture.get(waiting_id).state_kind().unwrap(),
+            TransferState::Completed
+        );
+        assert_eq!(fixture.backend.calls().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn running_gate_blocks_due_backoff_behind_ambiguous_restart() {
+        let fixture = Fixture::new();
+        let mut backing_off = task(
+            &fixture,
+            TransferState::BackingOff,
+            TransferOperation::Create,
+            "gate-backoff.bin",
+        );
+        backing_off.next_retry_at = Some(chrono::Utc::now().timestamp_millis() - 1);
+        let mut ambiguous = backing_off.clone();
+        ambiguous.state = i32::from(TransferState::RestartRequired);
+        ambiguous.next_retry_at = None;
+        ambiguous.remote_result_file_id = Some("known-remote-id".into());
+        let backing_off_id = fixture.insert(backing_off);
+        let ambiguous_id = fixture.insert(ambiguous);
+
+        assert_eq!(fixture.runner.resume_due_backoff().await.unwrap(), 0);
+        assert_eq!(
+            fixture.get(backing_off_id).state_kind().unwrap(),
+            TransferState::BackingOff
+        );
+        assert_eq!(
+            fixture.get(ambiguous_id).state_kind().unwrap(),
+            TransferState::VerifyingRemote
+        );
+        assert!(fixture.backend.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn running_gate_blocks_prepared_manual_retry_behind_ambiguous_restart() {
+        let fixture = Fixture::new();
+        let failed = task(
+            &fixture,
+            TransferState::Failed,
+            TransferOperation::Create,
+            "gate-manual.bin",
+        );
+        let mut ambiguous = failed.clone();
+        ambiguous.state = i32::from(TransferState::RestartRequired);
+        ambiguous.error_message = None;
+        ambiguous.finished_at = None;
+        ambiguous.remote_result_file_id = Some("known-remote-id".into());
+        let failed_id = fixture.insert(failed);
+        let ambiguous_id = fixture.insert(ambiguous);
+
+        fixture.runner.prepare_retry(failed_id).await.unwrap();
+        let outcome = fixture.runner.run_prepared(failed_id).await.unwrap();
+
+        assert_eq!(outcome.disposition, TaskDisposition::BlockedByActiveIntent);
+        assert_eq!(
+            fixture.get(failed_id).state_kind().unwrap(),
+            TransferState::Pending
+        );
+        assert_eq!(
+            fixture.get(ambiguous_id).state_kind().unwrap(),
+            TransferState::VerifyingRemote
+        );
+        assert!(fixture.backend.calls().is_empty());
+    }
+
+    #[tokio::test]
     async fn backoff_before_deadline_does_not_call_backend() {
         let fixture = Fixture::new();
         let mut backing_off = task(
@@ -1834,6 +3053,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn backoff_without_deadline_fails_validation_without_backend_call() {
+        let fixture = Fixture::new();
+        let id = fixture.insert(task(
+            &fixture,
+            TransferState::BackingOff,
+            TransferOperation::Download,
+            "missing-deadline.bin",
+        ));
+
+        assert_eq!(fixture.runner.resume_due_backoff().await.unwrap(), 0);
+        let persisted = fixture.get(id);
+        assert_eq!(persisted.state_kind().unwrap(), TransferState::Failed);
+        assert_eq!(
+            persisted.error_kind_typed().unwrap(),
+            Some(TransferErrorKind::Validation)
+        );
+        assert!(fixture.backend.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn backend_cannot_emit_backoff_without_a_persisted_deadline() {
+        let fixture = Fixture::new();
+        *fixture.backend.results.lock() = VecDeque::from([Ok(TaskExecutionOutcome {
+            cloud_file: None,
+            disposition: TaskDisposition::BackingOff,
+        })]);
+        let id = fixture.insert(task(
+            &fixture,
+            TransferState::Pending,
+            TransferOperation::Download,
+            "backend-backoff.bin",
+        ));
+
+        assert!(fixture.runner.run(id).await.is_err());
+        let persisted = fixture.get(id);
+        assert_eq!(persisted.state_kind().unwrap(), TransferState::Failed);
+        assert!(persisted.next_retry_at.is_none());
+        assert_eq!(fixture.backend.calls().len(), 1);
+    }
+
+    #[tokio::test]
     async fn prepare_retry_accepts_without_starting_backend() {
         let fixture = Fixture::new();
         let id = fixture.insert(task(
@@ -1848,6 +3108,36 @@ mod tests {
         assert_eq!(pending.state_kind().unwrap(), TransferState::Pending);
         assert!(fixture.backend.calls().is_empty());
         assert_eq!(pending.attempt_count, 1);
+    }
+
+    #[tokio::test]
+    async fn manual_retry_stays_failed_until_backend_preflight_finishes() {
+        let fixture = Fixture::new();
+        let backend = Arc::new(BlockingPreflightBackend::default());
+        let runner = runner_with_backend(fixture.db.clone(), fixture.root.path(), backend.clone());
+        let id = fixture.insert(task(
+            &fixture,
+            TransferState::Failed,
+            TransferOperation::Download,
+            "preflight-barrier.bin",
+        ));
+
+        let runner_for_retry = runner.clone();
+        let retry = tokio::spawn(async move { runner_for_retry.prepare_retry(id).await });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            backend.preflight_started.notified(),
+        )
+        .await
+        .expect("manual retry must run backend preflight before acceptance");
+
+        assert_eq!(fixture.get(id).state_kind().unwrap(), TransferState::Failed);
+        assert_eq!(backend.execute_calls.load(Ordering::SeqCst), 0);
+
+        backend.preflight_release.add_permits(1);
+        let pending = retry.await.unwrap().unwrap();
+        assert_eq!(pending.state_kind().unwrap(), TransferState::Pending);
+        assert_eq!(backend.execute_calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -2149,6 +3439,586 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn automatic_cycle_reuses_future_and_due_backoff_rows() {
+        let future = Fixture::new();
+        let mut existing = task(
+            &future,
+            TransferState::BackingOff,
+            TransferOperation::Download,
+            "future-backoff.bin",
+        );
+        existing.next_retry_at = Some(chrono::Utc::now().timestamp_millis() + 60_000);
+        let existing_id = future.insert(existing);
+
+        let outcome = future
+            .runner
+            .enqueue_and_run(task(
+                &future,
+                TransferState::Pending,
+                TransferOperation::Download,
+                "future-backoff.bin",
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.task_id, existing_id);
+        assert_eq!(outcome.outcome.disposition, TaskDisposition::BackingOff);
+        assert!(future.backend.calls().is_empty());
+        let count: i64 = future
+            .db
+            .lock()
+            .query_row("SELECT COUNT(*) FROM transfer_queue", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+
+        let due = Fixture::new();
+        let mut existing = task(
+            &due,
+            TransferState::BackingOff,
+            TransferOperation::Download,
+            "due-backoff.bin",
+        );
+        existing.next_retry_at = Some(chrono::Utc::now().timestamp_millis() - 1);
+        let existing_id = due.insert(existing);
+
+        let outcome = due
+            .runner
+            .enqueue_and_run(task(
+                &due,
+                TransferState::Pending,
+                TransferOperation::Download,
+                "due-backoff.bin",
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.task_id, existing_id);
+        assert_eq!(outcome.outcome.disposition, TaskDisposition::Completed);
+        assert_eq!(due.backend.calls()[0].id, existing_id);
+        let count: i64 = due
+            .db
+            .lock()
+            .query_row("SELECT COUNT(*) FROM transfer_queue", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn update_backoff_with_old_cloud_version_is_replanned_not_exactly_reused() {
+        let fixture = Fixture::new();
+        let mut old = task(
+            &fixture,
+            TransferState::BackingOff,
+            TransferOperation::Update,
+            "update-version.bin",
+        );
+        old.expected_cloud_edited_time = Some(100);
+        old.next_retry_at = Some(chrono::Utc::now().timestamp_millis() + 60_000);
+        let mut latest = old.clone();
+        latest.state = i32::from(TransferState::Pending);
+        latest.next_retry_at = None;
+        latest.expected_cloud_edited_time = Some(200);
+        let id = fixture.insert(old);
+
+        let outcome = fixture.runner.enqueue_and_run(latest).await.unwrap();
+
+        assert_eq!(outcome.task_id, id);
+        assert_eq!(outcome.outcome.disposition, TaskDisposition::Completed);
+        assert_eq!(fixture.backend.calls().len(), 1);
+        assert_eq!(
+            fixture.backend.calls()[0].expected_cloud_edited_time,
+            Some(200)
+        );
+    }
+
+    #[tokio::test]
+    async fn unresolved_active_rows_block_duplicate_automatic_attempts() {
+        for (state, expected) in [
+            (TransferState::Running, TaskDisposition::Running),
+            (
+                TransferState::VerifyingRemote,
+                TaskDisposition::VerifyingRemote,
+            ),
+        ] {
+            let fixture = Fixture::new();
+            let existing_id = fixture.insert(task(
+                &fixture,
+                state,
+                TransferOperation::Download,
+                "active.bin",
+            ));
+
+            let outcome = fixture
+                .runner
+                .enqueue_and_run(task(
+                    &fixture,
+                    TransferState::Pending,
+                    TransferOperation::Download,
+                    "active.bin",
+                ))
+                .await
+                .unwrap();
+
+            assert_eq!(outcome.task_id, existing_id, "{state:?}");
+            assert_eq!(outcome.outcome.disposition, expected, "{state:?}");
+            assert!(fixture.backend.calls().is_empty(), "{state:?}");
+            let count: i64 = fixture
+                .db
+                .lock()
+                .query_row("SELECT COUNT(*) FROM transfer_queue", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(count, 1, "{state:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn same_path_different_intent_never_executes_or_reports_the_old_task() {
+        let fixture = Fixture::new();
+        let mut existing = task(
+            &fixture,
+            TransferState::Running,
+            TransferOperation::Download,
+            "identity.bin",
+        );
+        existing.file_id = Some("old-remote".into());
+        let existing_id = fixture.insert(existing);
+        let mut replacement = task(
+            &fixture,
+            TransferState::Pending,
+            TransferOperation::Download,
+            "identity.bin",
+        );
+        replacement.file_id = Some("new-remote".into());
+
+        let outcome = fixture.runner.enqueue_and_run(replacement).await.unwrap();
+
+        assert_eq!(outcome.task_id, existing_id);
+        assert_eq!(
+            outcome.outcome.disposition,
+            TaskDisposition::BlockedByActiveIntent
+        );
+        assert_eq!(
+            fixture.get(existing_id).state_kind().unwrap(),
+            TransferState::Running
+        );
+        assert!(fixture.backend.calls().is_empty());
+        let count: i64 = fixture
+            .db
+            .lock()
+            .query_row("SELECT COUNT(*) FROM transfer_queue", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn different_running_intent_blocks_even_when_an_exact_pending_row_also_exists() {
+        let fixture = Fixture::new();
+        let pending = task(
+            &fixture,
+            TransferState::Pending,
+            TransferOperation::Download,
+            "legacy-multiple.bin",
+        );
+        let pending_id = fixture.insert(pending.clone());
+        let mut running = pending.clone();
+        running.state = i32::from(TransferState::Running);
+        running.file_id = Some("different-running-remote".into());
+        running.created_at = 2;
+        let running_id = fixture.insert(running);
+
+        let outcome = fixture.runner.enqueue_and_run(pending).await.unwrap();
+
+        assert_eq!(outcome.task_id, running_id);
+        assert_eq!(
+            outcome.outcome.disposition,
+            TaskDisposition::BlockedByActiveIntent
+        );
+        assert_eq!(
+            fixture.get(pending_id).state_kind().unwrap(),
+            TransferState::Pending
+        );
+        assert!(fixture.backend.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn different_pending_intent_is_atomically_replanned_before_any_backend_call() {
+        let fixture = Fixture::new();
+        let mut old = task(
+            &fixture,
+            TransferState::Pending,
+            TransferOperation::Download,
+            "pending-replan.bin",
+        );
+        old.file_id = Some("old-remote".into());
+        let id = fixture.insert(old);
+        let mut latest = task(
+            &fixture,
+            TransferState::Pending,
+            TransferOperation::Download,
+            "pending-replan.bin",
+        );
+        latest.file_id = Some("new-remote".into());
+
+        let outcome = fixture.runner.enqueue_and_run(latest).await.unwrap();
+
+        assert_eq!(outcome.task_id, id);
+        assert_eq!(outcome.outcome.disposition, TaskDisposition::Completed);
+        assert_eq!(fixture.backend.calls().len(), 1);
+        assert_eq!(
+            fixture.backend.calls()[0].file_id.as_deref(),
+            Some("new-remote")
+        );
+        let count: i64 = fixture
+            .db
+            .lock()
+            .query_row("SELECT COUNT(*) FROM transfer_queue", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn restart_required_is_replanned_on_same_task_id_without_row_growth() {
+        let fixture = Fixture::new();
+        let existing_id = fixture.insert(task(
+            &fixture,
+            TransferState::RestartRequired,
+            TransferOperation::Download,
+            "restart-replan.bin",
+        ));
+
+        let outcome = fixture
+            .runner
+            .enqueue_and_run(task(
+                &fixture,
+                TransferState::Pending,
+                TransferOperation::Download,
+                "restart-replan.bin",
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.task_id, existing_id);
+        assert_eq!(outcome.outcome.disposition, TaskDisposition::Completed);
+        assert_eq!(fixture.backend.calls()[0].id, existing_id);
+        let count: i64 = fixture
+            .db
+            .lock()
+            .query_row("SELECT COUNT(*) FROM transfer_queue", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn ambiguous_remote_write_restart_promotes_to_verifying_without_second_create() {
+        let fixture = Fixture::new();
+        let mut ambiguous = task(
+            &fixture,
+            TransferState::RestartRequired,
+            TransferOperation::Create,
+            "ambiguous-restart.bin",
+        );
+        ambiguous.remote_result_file_id = Some("known-remote-id".into());
+        let id = fixture.insert(ambiguous);
+
+        let outcome = fixture
+            .runner
+            .enqueue_and_run(task(
+                &fixture,
+                TransferState::Pending,
+                TransferOperation::Create,
+                "ambiguous-restart.bin",
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.task_id, id);
+        assert_eq!(
+            outcome.outcome.disposition,
+            TaskDisposition::VerifyingRemote
+        );
+        assert!(fixture.backend.calls().is_empty());
+        let persisted = fixture.get(id);
+        assert_eq!(
+            persisted.state_kind().unwrap(),
+            TransferState::VerifyingRemote
+        );
+        assert_eq!(
+            persisted.remote_result_file_id.as_deref(),
+            Some("known-remote-id")
+        );
+    }
+
+    #[tokio::test]
+    async fn ambiguous_restart_blocks_existing_exact_pending_row_before_any_replay() {
+        let fixture = Fixture::new();
+        let mut ambiguous = task(
+            &fixture,
+            TransferState::RestartRequired,
+            TransferOperation::Create,
+            "ambiguous-plus-pending.bin",
+        );
+        ambiguous.remote_result_file_id = Some("known-remote-id".into());
+        ambiguous.created_at = 1;
+        let ambiguous_id = fixture.insert(ambiguous);
+        let mut pending = task(
+            &fixture,
+            TransferState::Pending,
+            TransferOperation::Create,
+            "ambiguous-plus-pending.bin",
+        );
+        pending.created_at = 2;
+        let pending_id = fixture.insert(pending.clone());
+
+        let outcome = fixture.runner.enqueue_and_run(pending).await.unwrap();
+
+        assert_eq!(outcome.task_id, ambiguous_id);
+        assert_eq!(
+            outcome.outcome.disposition,
+            TaskDisposition::VerifyingRemote
+        );
+        assert!(fixture.backend.calls().is_empty());
+        assert_eq!(
+            fixture.get(ambiguous_id).state_kind().unwrap(),
+            TransferState::VerifyingRemote
+        );
+        assert_eq!(
+            fixture.get(ambiguous_id).remote_result_file_id.as_deref(),
+            Some("known-remote-id")
+        );
+        assert_eq!(
+            fixture.get(pending_id).state_kind().unwrap(),
+            TransferState::Pending
+        );
+
+        let summary = fixture.runner.recover_startup().await.unwrap();
+        assert!(fixture.backend.calls().is_empty());
+        assert_eq!(summary.completed, 0);
+        assert_eq!(
+            fixture.get(pending_id).state_kind().unwrap(),
+            TransferState::Pending
+        );
+    }
+
+    #[tokio::test]
+    async fn waiting_task_that_restarts_can_be_consumed_by_next_planner_intent() {
+        let fixture = Fixture::new();
+        let id = fixture.insert(task(
+            &fixture,
+            TransferState::WaitingForNetwork,
+            TransferOperation::Download,
+            "waiting-replan.bin",
+        ));
+        std::fs::write(
+            fixture.root.path().join("waiting-replan.bin"),
+            b"local-change",
+        )
+        .unwrap();
+
+        assert_eq!(fixture.runner.resume_waiting().await.unwrap(), 1);
+        assert_eq!(
+            fixture.get(id).state_kind().unwrap(),
+            TransferState::RestartRequired
+        );
+        assert!(fixture.backend.calls().is_empty());
+
+        let outcome = fixture
+            .runner
+            .enqueue_and_run(task(
+                &fixture,
+                TransferState::Pending,
+                TransferOperation::Create,
+                "waiting-replan.bin",
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.task_id, id);
+        assert_eq!(outcome.outcome.disposition, TaskDisposition::Completed);
+        assert_eq!(fixture.backend.calls()[0].id, id);
+        let count: i64 = fixture
+            .db
+            .lock()
+            .query_row("SELECT COUNT(*) FROM transfer_queue", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn automatic_cycle_resumes_waiting_row_instead_of_inserting_duplicate() {
+        let fixture = Fixture::new();
+        let existing_id = fixture.insert(task(
+            &fixture,
+            TransferState::WaitingForNetwork,
+            TransferOperation::Download,
+            "waiting-active.bin",
+        ));
+
+        let outcome = fixture
+            .runner
+            .enqueue_and_run(task(
+                &fixture,
+                TransferState::Pending,
+                TransferOperation::Download,
+                "waiting-active.bin",
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.task_id, existing_id);
+        assert_eq!(outcome.outcome.disposition, TaskDisposition::Completed);
+        assert_eq!(fixture.backend.calls()[0].id, existing_id);
+        let count: i64 = fixture
+            .db
+            .lock()
+            .query_row("SELECT COUNT(*) FROM transfer_queue", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn concurrent_automatic_cycle_reuses_running_row() {
+        let fixture = Fixture::new();
+        let backend = Arc::new(BlockingExecuteBackend::default());
+        let runner = runner_with_backend(fixture.db.clone(), fixture.root.path(), backend.clone());
+        let first_task = task(
+            &fixture,
+            TransferState::Pending,
+            TransferOperation::Download,
+            "concurrent.bin",
+        );
+        let duplicate = first_task.clone();
+        let first_runner = runner.clone();
+        let first = tokio::spawn(async move { first_runner.enqueue_and_run(first_task).await });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            backend.execute_started.notified(),
+        )
+        .await
+        .expect("first automatic cycle must reach backend execution");
+
+        let second = runner.enqueue_and_run(duplicate).await.unwrap();
+        assert_eq!(second.outcome.disposition, TaskDisposition::Running);
+        assert_eq!(&*backend.calls.lock(), &[second.task_id]);
+        let count: i64 = fixture
+            .db
+            .lock()
+            .query_row("SELECT COUNT(*) FROM transfer_queue", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+
+        backend.execute_release.add_permits(1);
+        let first = first.await.unwrap().unwrap();
+        assert_eq!(first.task_id, second.task_id);
+        assert_eq!(first.outcome.disposition, TaskDisposition::Completed);
+    }
+
+    #[tokio::test]
+    async fn cas_loser_observes_winner_completed_instead_of_returning_stale_error() {
+        let fixture = Fixture::new();
+        let backend = Arc::new(BlockingPreflightBackend::default());
+        let runner = runner_with_backend(fixture.db.clone(), fixture.root.path(), backend.clone());
+        let pending = task(
+            &fixture,
+            TransferState::Pending,
+            TransferOperation::Download,
+            "cas-completed.bin",
+        );
+        let duplicate = pending.clone();
+        let first_runner = runner.clone();
+        let first = tokio::spawn(async move { first_runner.enqueue_and_run(pending).await });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            backend.preflight_started.notified(),
+        )
+        .await
+        .unwrap();
+        let second_runner = runner.clone();
+        let second = tokio::spawn(async move { second_runner.enqueue_and_run(duplicate).await });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            backend.preflight_started.notified(),
+        )
+        .await
+        .unwrap();
+
+        backend.preflight_release.add_permits(2);
+        let (first, second) = tokio::join!(first, second);
+        let first = first.unwrap().unwrap();
+        let second = second.unwrap().unwrap();
+
+        assert_eq!(first.task_id, second.task_id);
+        assert_eq!(first.outcome.disposition, TaskDisposition::Completed);
+        assert_eq!(second.outcome.disposition, TaskDisposition::Completed);
+        assert_eq!(backend.execute_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn cas_loser_reports_winner_failed_as_converged_not_stale_revision() {
+        let fixture = Fixture::new();
+        let backend = Arc::new(BlockingPreflightBackend::default());
+        backend.fail_execute.store(true, Ordering::SeqCst);
+        let runner = runner_with_backend(fixture.db.clone(), fixture.root.path(), backend.clone());
+        let pending = task(
+            &fixture,
+            TransferState::Pending,
+            TransferOperation::Download,
+            "cas-failed.bin",
+        );
+        let duplicate = pending.clone();
+        let first_runner = runner.clone();
+        let first = tokio::spawn(async move { first_runner.enqueue_and_run(pending).await });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            backend.preflight_started.notified(),
+        )
+        .await
+        .unwrap();
+        let second_runner = runner.clone();
+        let second = tokio::spawn(async move { second_runner.enqueue_and_run(duplicate).await });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            backend.preflight_started.notified(),
+        )
+        .await
+        .unwrap();
+
+        backend.preflight_release.add_permits(2);
+        let (first, second) = tokio::join!(first, second);
+        let messages = [
+            first.unwrap().unwrap_err().to_string(),
+            second.unwrap().unwrap_err().to_string(),
+        ];
+
+        assert!(messages
+            .iter()
+            .any(|message| message.contains("已由并发执行收敛为 Failed")));
+        assert!(messages
+            .iter()
+            .all(|message| !message.contains("stale transfer revision")));
+        assert_eq!(backend.execute_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn due_backoff_scheduler_seam_resumes_same_row_without_sleeping() {
+        let fixture = Fixture::new();
+        let mut due = task(
+            &fixture,
+            TransferState::BackingOff,
+            TransferOperation::Download,
+            "scheduler-due.bin",
+        );
+        due.next_retry_at = Some(chrono::Utc::now().timestamp_millis() - 1);
+        let id = fixture.insert(due);
+
+        assert_eq!(fixture.runner.resume_due_backoff().await.unwrap(), 1);
+        assert_eq!(fixture.backend.calls()[0].id, id);
+        assert_eq!(
+            fixture.get(id).state_kind().unwrap(),
+            TransferState::Completed
+        );
+    }
+
+    #[tokio::test]
     async fn settled_task_rejects_late_progress_callback() {
         let fixture = Fixture::new();
         let id = fixture.insert(task(
@@ -2281,10 +4151,50 @@ mod tests {
             "rollback.bin",
         ));
 
-        assert!(fixture.runner.run(id).await.is_err());
+        let outcome = fixture.runner.run(id).await.unwrap();
 
         let task = fixture.get(id);
-        assert_eq!(task.state_kind().unwrap(), TransferState::Running);
+        assert_eq!(outcome.disposition, TaskDisposition::RestartRequired);
+        assert_eq!(task.state_kind().unwrap(), TransferState::RestartRequired);
+        let baseline_count: i64 = fixture
+            .db
+            .lock()
+            .query_row("SELECT COUNT(*) FROM sync_items", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(baseline_count, 0);
+    }
+
+    #[tokio::test]
+    async fn upload_baseline_failure_preserves_remote_identity_for_verification() {
+        let fixture = Fixture::new();
+        fixture
+            .db
+            .lock()
+            .execute_batch(
+                "CREATE TRIGGER reject_upload_baseline
+                 BEFORE INSERT ON sync_items
+                 BEGIN SELECT RAISE(FAIL, 'forced upload baseline failure'); END;",
+            )
+            .unwrap();
+        let id = fixture.insert(task(
+            &fixture,
+            TransferState::Pending,
+            TransferOperation::Create,
+            "upload-rollback.bin",
+        ));
+
+        let outcome = fixture.runner.run(id).await.unwrap();
+
+        assert_eq!(outcome.disposition, TaskDisposition::VerifyingRemote);
+        let persisted = fixture.get(id);
+        assert_eq!(
+            persisted.state_kind().unwrap(),
+            TransferState::VerifyingRemote
+        );
+        assert_eq!(
+            persisted.remote_result_file_id.as_deref(),
+            Some("created-id")
+        );
         let baseline_count: i64 = fixture
             .db
             .lock()
@@ -2351,10 +4261,14 @@ mod tests {
 
         let outcome = fixture.runner.run(id).await.unwrap();
 
-        assert_eq!(outcome.disposition, TaskDisposition::RestartRequired);
+        assert_eq!(outcome.disposition, TaskDisposition::VerifyingRemote);
         assert_eq!(
             fixture.get(id).state_kind().unwrap(),
-            TransferState::RestartRequired
+            TransferState::VerifyingRemote
+        );
+        assert_eq!(
+            fixture.get(id).remote_result_file_id.as_deref(),
+            Some("created-id")
         );
         assert!(repository::load_all(&fixture.db.lock()).unwrap().is_empty());
     }

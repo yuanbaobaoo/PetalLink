@@ -183,7 +183,10 @@ pub const fn can_transition(from: TransferState, to: TransferState) -> bool {
                     | Failed
                     | Canceled
             )
-            | (RestartRequired, Pending | Failed | Canceled)
+            | (
+                RestartRequired,
+                Pending | VerifyingRemote | Failed | Canceled
+            )
             | (Failed, Pending | RestartRequired | Canceled)
     )
 }
@@ -301,6 +304,7 @@ mod tests {
             (VerifyingRemote, Failed),
             (VerifyingRemote, Canceled),
             (RestartRequired, Pending),
+            (RestartRequired, VerifyingRemote),
             (RestartRequired, Failed),
             (RestartRequired, Canceled),
             (Failed, Pending),
