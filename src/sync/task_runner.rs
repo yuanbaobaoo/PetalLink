@@ -48,6 +48,13 @@ pub struct TaskExecutionOutcome {
     pub disposition: TaskDisposition,
 }
 
+#[derive(Debug, Clone)]
+pub enum RemoteVerification {
+    Committed(DriveFile),
+    NotCommitted,
+    Ambiguous(String),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TaskDisposition {
     #[default]
@@ -72,6 +79,12 @@ pub trait TransferOperations: Send + Sync {
         task: &TransferTask,
         progress: &TaskProgressReporter,
     ) -> Result<TaskExecutionOutcome, TaskExecutionError>;
+
+    async fn verify_remote(&self, _task: &TransferTask) -> AppResult<RemoteVerification> {
+        Ok(RemoteVerification::Ambiguous(
+            "当前后端不支持远端结果核验".to_string(),
+        ))
+    }
 }
 
 #[derive(Debug)]
@@ -838,6 +851,144 @@ impl TaskRunner {
         self.run_expected(current, false).await
     }
 
+    /// Resolve post-submit upload ambiguity before any replay. A committed result is settled
+    /// atomically; an explicitly absent result is the only case allowed to return to Pending.
+    pub async fn resume_verifying(&self) -> AppResult<usize> {
+        if !(self.online_check)() {
+            return Ok(0);
+        }
+        let tasks = self.list_states(&[TransferState::VerifyingRemote])?;
+        let mut resolved = 0usize;
+        for task in tasks {
+            let verification = {
+                let _activity = self.begin_activity()?;
+                self.operations.verify_remote(&task).await
+            };
+            match verification {
+                Ok(RemoteVerification::Committed(file)) => {
+                    let mut outcome = TaskExecutionOutcome {
+                        cloud_file: Some(file.clone()),
+                        disposition: TaskDisposition::Completed,
+                    };
+                    if let Err(failure) = self.validate_success_outcome(&task, &outcome) {
+                        self.transition(
+                            task.id,
+                            task.state_revision,
+                            TransferState::RestartRequired,
+                            TransferPatch {
+                                error_kind: ColumnPatch::Set(failure.kind),
+                                error_message: ColumnPatch::Set(format!(
+                                    "远端写入已确认，但本地源无法安全结算：{}",
+                                    failure.message
+                                )),
+                                remote_result_file_id: ColumnPatch::Set(file.id),
+                                ..Default::default()
+                            },
+                        )?;
+                        continue;
+                    }
+                    match self.settle_success(&task, &outcome) {
+                        Ok(_) => resolved += 1,
+                        Err(error) => {
+                            self.recover_success_settlement_failure(&task, &mut outcome, error)?;
+                        }
+                    }
+                }
+                Ok(RemoteVerification::NotCommitted) => {
+                    let restart = self.transition(
+                        task.id,
+                        task.state_revision,
+                        TransferState::RestartRequired,
+                        TransferPatch {
+                            error_kind: ColumnPatch::Set(TransferErrorKind::RemoteAmbiguous),
+                            error_message: ColumnPatch::Set(
+                                "远端核验确认写入未提交，可以安全重放".to_string(),
+                            ),
+                            next_retry_at: ColumnPatch::Clear,
+                            finished_at: ColumnPatch::Clear,
+                            remote_result_file_id: ColumnPatch::Clear,
+                            ..Default::default()
+                        },
+                    )?;
+                    let pending = self.transition(
+                        restart.id,
+                        restart.state_revision,
+                        TransferState::Pending,
+                        TransferPatch {
+                            error_kind: ColumnPatch::Clear,
+                            error_message: ColumnPatch::Clear,
+                            next_retry_at: ColumnPatch::Clear,
+                            finished_at: ColumnPatch::Clear,
+                            ..Default::default()
+                        },
+                    )?;
+                    match self.run_expected(pending, true).await {
+                        Ok(outcome)
+                            if !matches!(
+                                outcome.disposition,
+                                TaskDisposition::VerifyingRemote
+                                    | TaskDisposition::WaitingForNetwork
+                                    | TaskDisposition::BackingOff
+                                    | TaskDisposition::BlockedByActiveIntent
+                            ) =>
+                        {
+                            resolved += 1;
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            tracing::warn!(task_id = task.id, %error, "核验后安全重放失败");
+                        }
+                    }
+                }
+                Ok(RemoteVerification::Ambiguous(message)) => {
+                    {
+                        let conn = self.db.lock();
+                        repository::patch_transfer_in_state(
+                            &conn,
+                            task.id,
+                            task.state_revision,
+                            TransferState::VerifyingRemote,
+                            TransferPatch {
+                                error_kind: ColumnPatch::Set(TransferErrorKind::RemoteAmbiguous),
+                                error_message: ColumnPatch::Set(message),
+                                next_retry_at: ColumnPatch::Set(
+                                    (self.now_ms)().saturating_add(60_000),
+                                ),
+                                ..Default::default()
+                            },
+                        )
+                        .map_err(transition_error)?;
+                    }
+                    self.notify_best_effort();
+                }
+                Err(error) => {
+                    tracing::warn!(task_id = task.id, %error, "远端写入核验暂不可用，保留歧义状态");
+                    {
+                        let conn = self.db.lock();
+                        repository::patch_transfer_in_state(
+                            &conn,
+                            task.id,
+                            task.state_revision,
+                            TransferState::VerifyingRemote,
+                            TransferPatch {
+                                error_message: ColumnPatch::Set(format!(
+                                    "远端核验暂不可用：{error}"
+                                )),
+                                next_retry_at: ColumnPatch::Set(
+                                    (self.now_ms)().saturating_add(15_000),
+                                ),
+                                ..Default::default()
+                            },
+                        )
+                        .map_err(transition_error)?;
+                    }
+                    self.notify_best_effort();
+                }
+            }
+        }
+        Ok(resolved)
+    }
+
     pub async fn resume_waiting(&self) -> AppResult<usize> {
         if !(self.online_check)() {
             self.notify_rejection();
@@ -896,10 +1047,11 @@ impl TaskRunner {
     }
 
     pub fn next_backoff_deadline_ms(&self) -> AppResult<Option<i64>> {
+        let now = (self.now_ms)();
         Ok(self
-            .list_states(&[TransferState::BackingOff])?
+            .list_states(&[TransferState::BackingOff, TransferState::VerifyingRemote])?
             .into_iter()
-            .filter_map(|task| task.next_retry_at)
+            .map(|task| task.next_retry_at.unwrap_or(now))
             .min())
     }
 
@@ -1318,7 +1470,7 @@ impl TaskRunner {
             RecoveryDecision::VerifyRemote => (
                 TransferState::VerifyingRemote,
                 Some(TaskDisposition::VerifyingRemote),
-                None,
+                Some((self.now_ms)().saturating_add(3_000)),
             ),
             // DriveClient owns the one authenticated replay. A first 401 reaching this boundary
             // is not replayed blindly by the runner.
@@ -1413,6 +1565,11 @@ impl TaskRunner {
             TransferPatch {
                 error_kind: ColumnPatch::Set(kind),
                 error_message: ColumnPatch::Set(message.to_string()),
+                next_retry_at: if output.disposition == TaskDisposition::VerifyingRemote {
+                    ColumnPatch::Set((self.now_ms)().saturating_add(3_000))
+                } else {
+                    ColumnPatch::Clear
+                },
                 remote_result_file_id: output
                     .cloud_file
                     .as_ref()
@@ -1577,6 +1734,16 @@ impl TaskRunner {
                     ],
                 )
                 .map_err(|error| AppError::generic(format!("清理待确认同步基线失败：{error}")))?;
+            if operation == TransferOperation::Update {
+                transaction
+                    .execute(
+                        "DELETE FROM sync_items WHERE file_id=?1 AND local_path<>?2",
+                        rusqlite::params![file_id, relative_path],
+                    )
+                    .map_err(|error| {
+                        AppError::generic(format!("清理改名/移动旧基线路径失败：{error}"))
+                    })?;
+            }
             repository::upsert(
                 &transaction,
                 &repository::SyncItem {

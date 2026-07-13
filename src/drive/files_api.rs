@@ -179,6 +179,15 @@ impl FilesApi {
     /// 要实现软删除（进"最近删除"），必须用 PATCH 更新 `recycled: true`。
     /// 对齐华为官方文档 Files:update → recycled 字段。
     pub async fn delete(&self, id: &str) -> AppResult<()> {
+        self.delete_verified(id).await.map(|_| ())
+    }
+
+    /// 软删除并返回已经核验的 File 响应。
+    ///
+    /// 华为 Files:update 的软删除成功合同是 `200 + File JSON`。只有响应资源仍是同一个
+    /// fileId 且明确返回 `recycled=true` 才能驱动后续本地删除和成功结算。
+    pub async fn delete_verified(&self, id: &str) -> AppResult<DriveFile> {
+        validate_file_id(id)?;
         let path = delete_path(id);
         let mut body = serde_json::Map::new();
         body.insert("recycled".into(), Value::Bool(true));
@@ -187,9 +196,44 @@ impl FilesApi {
             .client
             .patch(&path, encoded.into_bytes(), "application/json")
             .await?;
-        // 消费 body
-        let _ = resp.text().await;
-        Ok(())
+        let auth_already_replayed = require_official_write_ok(&resp, "delete")?;
+        let body_json: Value =
+            parse_json_response_with_semantics(resp, "delete", RequestSemantics::Write).await?;
+        let file = parse_verified_written_drive_file(&body_json, "delete", auth_already_replayed)?;
+        verify_written_file_id(&file, id, "delete", auth_already_replayed)?;
+        if body_json.get("recycled") != Some(&Value::Bool(true)) {
+            return Err(write_protocol_error(
+                "delete",
+                auth_already_replayed,
+                "响应未明确确认 recycled=true",
+            ));
+        }
+        Ok(file)
+    }
+
+    /// Verify an ambiguous delete by stable fileId. A hard 404 or a File that explicitly reports
+    /// `recycled=true` proves success; an existing non-recycled File proves the write is not yet
+    /// committed and must not trigger local deletion.
+    pub async fn verify_deleted(&self, id: &str) -> AppResult<bool> {
+        validate_file_id(id)?;
+        let path = format!("{}?fields=*", file_path(id));
+        let response = match self.client.get(&path).await {
+            Ok(response) => response,
+            Err(error) if error.drive_status() == Some(404) => return Ok(true),
+            Err(error) => return Err(error),
+        };
+        let body: Value = parse_json_response(response, "verify delete").await?;
+        let file = parse_verified_written_drive_file(&body, "verify delete", false)?;
+        verify_file_id(&file, id, "verify delete", RequestSemantics::Read, false)?;
+        match body.get("recycled") {
+            Some(Value::Bool(recycled)) => Ok(*recycled),
+            _ => Err(protocol_error(
+                "verify delete",
+                RequestSemantics::Read,
+                false,
+                "响应缺少明确 recycled 布尔值",
+            )),
+        }
     }
 
     /// 更新文件（重命名/移动/改描述）。
@@ -203,28 +247,108 @@ impl FilesApi {
         new_parent_folder: Option<&str>,
         description: Option<&str>,
     ) -> AppResult<DriveFile> {
+        validate_file_id(id)?;
+        if let Some(target_parent) = new_parent_folder {
+            validate_file_id_value(target_parent, "目标 parentFolder")?;
+            // Files:update 移动必须同时提交旧、新 parent。先读当前 parent 也让重复调用具备
+            // fileId 级幂等性：若响应曾丢失但移动已经提交，则不再次发送移动 PATCH。
+            let current = self.get(id).await?;
+            verify_file_id(
+                &current,
+                id,
+                "move preflight",
+                RequestSemantics::Read,
+                false,
+            )?;
+            let current_parent =
+                single_parent(&current, "move preflight", RequestSemantics::Read, false)?;
+            if current_parent == target_parent {
+                if new_name.is_none() && description.is_none() {
+                    return Ok(current);
+                }
+                return self.update_verified(id, new_name, None, description).await;
+            }
+            return self
+                .update_verified(
+                    id,
+                    new_name,
+                    Some((current_parent, target_parent)),
+                    description,
+                )
+                .await;
+        }
+        self.update_verified(id, new_name, None, description).await
+    }
+
+    /// 使用官方成对 parent query 参数移动文件，并核验响应仍是同一个 fileId 且目标父目录
+    /// 已生效。调用方已经持有可信旧 parent 时可直接使用，避免额外 GET。
+    pub async fn move_file(
+        &self,
+        id: &str,
+        old_parent_folder: &str,
+        new_parent_folder: &str,
+    ) -> AppResult<DriveFile> {
+        validate_file_id(id)?;
+        validate_file_id_value(old_parent_folder, "旧 parentFolder")?;
+        validate_file_id_value(new_parent_folder, "目标 parentFolder")?;
+        if old_parent_folder == new_parent_folder {
+            let current = self.get(id).await?;
+            verify_file_id(&current, id, "move", RequestSemantics::Read, false)?;
+            verify_parent(
+                &current,
+                new_parent_folder,
+                "move",
+                RequestSemantics::Read,
+                false,
+            )?;
+            return Ok(current);
+        }
+        self.update_verified(id, None, Some((old_parent_folder, new_parent_folder)), None)
+            .await
+    }
+
+    /// 重命名并核验 Huawei 返回的 File 身份和最终名称。
+    pub async fn rename_file(&self, id: &str, new_name: &str) -> AppResult<DriveFile> {
+        self.update(id, Some(new_name), None, None).await
+    }
+
+    async fn update_verified(
+        &self,
+        id: &str,
+        new_name: Option<&str>,
+        move_parents: Option<(&str, &str)>,
+        description: Option<&str>,
+    ) -> AppResult<DriveFile> {
         let mut body = serde_json::Map::new();
         if let Some(name) = new_name {
             body.insert("fileName".into(), Value::String(name.to_string()));
-        }
-        if let Some(parent) = new_parent_folder {
-            body.insert(
-                "parentFolder".into(),
-                Value::Array(vec![Value::String(parent.to_string())]),
-            );
         }
         if let Some(desc) = description {
             body.insert("description".into(), Value::String(desc.to_string()));
         }
         let encoded = ascii_json_encode(&Value::Object(body));
-        let path = format!("{}?fields=*", file_path(id));
+        let path = update_path(id, move_parents);
         let resp = self
             .send_patch(&path, encoded.into_bytes(), "application/json")
             .await?;
-        let metadata = response_metadata(&resp, RequestSemantics::Write);
+        let auth_already_replayed = require_official_write_ok(&resp, "update")?;
         let body_json: Value =
             parse_json_response_with_semantics(resp, "update", RequestSemantics::Write).await?;
-        parse_written_drive_file(&body_json, "update", metadata.auth_already_replayed)
+        let file = parse_verified_written_drive_file(&body_json, "update", auth_already_replayed)?;
+        verify_written_file_id(&file, id, "update", auth_already_replayed)?;
+        if let Some(expected_name) = new_name {
+            if file.name != expected_name {
+                return Err(write_protocol_error(
+                    "rename",
+                    auth_already_replayed,
+                    "响应 fileName 与目标名称不一致",
+                ));
+            }
+        }
+        if let Some((_, target_parent)) = move_parents {
+            verify_written_parent(&file, target_parent, "move", auth_already_replayed)?;
+        }
+        Ok(file)
     }
 
     /// 搜索文件。对齐 dart `FilesApi.search(keyword, {parentId?, ...})`。
@@ -552,6 +676,17 @@ fn delete_path(id: &str) -> String {
     file_path(id)
 }
 
+fn update_path(id: &str, move_parents: Option<(&str, &str)>) -> String {
+    let mut path = format!("{}?fields=*", file_path(id));
+    if let Some((old_parent, new_parent)) = move_parents {
+        path.push_str("&addParentFolder=");
+        path.push_str(&urlencoding(new_parent));
+        path.push_str("&removeParentFolder=");
+        path.push_str(&urlencoding(old_parent));
+    }
+    path
+}
+
 fn file_path(id: &str) -> String {
     let encoded_id = percent_encoding::utf8_percent_encode(id, &URL_PATH_SEGMENT_ENCODE_SET);
     format!("/files/{encoded_id}")
@@ -668,6 +803,185 @@ fn parse_written_drive_file(
             "响应缺少文件必填字段",
         )
     })
+}
+
+/// 写接口使用 `fields=*`，因此成功结果必须是可识别、非空的 Huawei File，而不能只凭
+/// 任意 JSON/任意 2xx 推进本地状态。
+fn parse_verified_written_drive_file(
+    body: &Value,
+    ctx: &str,
+    auth_already_replayed: bool,
+) -> AppResult<DriveFile> {
+    let object = body.as_object().ok_or_else(|| {
+        write_protocol_error(ctx, auth_already_replayed, "响应顶层不是 File 对象")
+    })?;
+    if object
+        .get("category")
+        .is_some_and(|category| category.as_str() != Some("drive#file"))
+    {
+        return Err(write_protocol_error(
+            ctx,
+            auth_already_replayed,
+            "响应 category 不是 drive#file",
+        ));
+    }
+    let file = parse_written_drive_file(body, ctx, auth_already_replayed)?;
+    if file.id.trim().is_empty()
+        || file.name.trim().is_empty()
+        || !file
+            .mime_type
+            .as_deref()
+            .is_some_and(|mime_type| !mime_type.trim().is_empty())
+    {
+        return Err(write_protocol_error(
+            ctx,
+            auth_already_replayed,
+            "File 缺少非空 id/fileName/mimeType",
+        ));
+    }
+    if let Some(parent_folder) = object.get("parentFolder") {
+        match parent_folder {
+            Value::Null => {}
+            Value::Array(parents)
+                if parents
+                    .iter()
+                    .all(|parent| parent.as_str().is_some_and(|id| !id.is_empty())) => {}
+            _ => {
+                return Err(write_protocol_error(
+                    ctx,
+                    auth_already_replayed,
+                    "File.parentFolder 不是非空字符串数组或 null",
+                ));
+            }
+        }
+    }
+    Ok(file)
+}
+
+fn require_official_write_ok(resp: &reqwest::Response, ctx: &str) -> AppResult<bool> {
+    let metadata = response_metadata(resp, RequestSemantics::Write);
+    if resp.status() != reqwest::StatusCode::OK {
+        return Err(response_decode_error(
+            ctx,
+            metadata.semantics,
+            metadata.auth_already_replayed,
+            &format!(
+                "Huawei Files:update 成功状态必须是 200，实际为 {}",
+                resp.status().as_u16()
+            ),
+        ));
+    }
+    Ok(metadata.auth_already_replayed)
+}
+
+fn validate_file_id(id: &str) -> AppResult<()> {
+    validate_file_id_value(id, "fileId")
+}
+
+fn validate_file_id_value(id: &str, field: &str) -> AppResult<()> {
+    if id.trim().is_empty() {
+        Err(AppError::generic(format!("{field} 不能为空")))
+    } else {
+        Ok(())
+    }
+}
+
+fn protocol_error(
+    ctx: &str,
+    semantics: RequestSemantics,
+    auth_already_replayed: bool,
+    cause: &str,
+) -> AppError {
+    response_decode_error(ctx, semantics, auth_already_replayed, cause)
+}
+
+fn write_protocol_error(ctx: &str, auth_already_replayed: bool, cause: &str) -> AppError {
+    protocol_error(ctx, RequestSemantics::Write, auth_already_replayed, cause)
+}
+
+fn verify_file_id(
+    file: &DriveFile,
+    expected_id: &str,
+    ctx: &str,
+    semantics: RequestSemantics,
+    auth_already_replayed: bool,
+) -> AppResult<()> {
+    if file.id == expected_id {
+        Ok(())
+    } else {
+        Err(protocol_error(
+            ctx,
+            semantics,
+            auth_already_replayed,
+            "响应 File.id 与请求 fileId 不一致",
+        ))
+    }
+}
+
+fn verify_written_file_id(
+    file: &DriveFile,
+    expected_id: &str,
+    ctx: &str,
+    auth_already_replayed: bool,
+) -> AppResult<()> {
+    verify_file_id(
+        file,
+        expected_id,
+        ctx,
+        RequestSemantics::Write,
+        auth_already_replayed,
+    )
+}
+
+fn single_parent<'a>(
+    file: &'a DriveFile,
+    ctx: &str,
+    semantics: RequestSemantics,
+    auth_already_replayed: bool,
+) -> AppResult<&'a str> {
+    match file.parent_folder.as_deref() {
+        Some([parent]) if !parent.is_empty() => Ok(parent),
+        _ => Err(protocol_error(
+            ctx,
+            semantics,
+            auth_already_replayed,
+            "当前只支持一个非空 parentFolder，响应无法安全用于移动",
+        )),
+    }
+}
+
+fn verify_parent(
+    file: &DriveFile,
+    expected_parent: &str,
+    ctx: &str,
+    semantics: RequestSemantics,
+    auth_already_replayed: bool,
+) -> AppResult<()> {
+    if single_parent(file, ctx, semantics, auth_already_replayed)? == expected_parent {
+        Ok(())
+    } else {
+        Err(protocol_error(
+            ctx,
+            semantics,
+            auth_already_replayed,
+            "响应 parentFolder 与目标父目录不一致",
+        ))
+    }
+}
+
+fn verify_written_parent(
+    file: &DriveFile,
+    expected_parent: &str,
+    ctx: &str,
+    auth_already_replayed: bool,
+) -> AppResult<()> {
+    verify_parent(
+        file,
+        expected_parent,
+        ctx,
+        RequestSemantics::Write,
+        auth_already_replayed,
+    )
 }
 
 #[cfg(test)]

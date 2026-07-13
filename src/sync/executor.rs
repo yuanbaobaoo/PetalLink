@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures_util::{stream, StreamExt};
+use futures_util::{stream, FutureExt, StreamExt};
 use tokio::sync::Semaphore;
 
 use crate::data::repository::{self, sync_status, transfer_direction, SyncItem, TransferTask};
@@ -24,7 +24,7 @@ use crate::sync::conflict::ConflictResolver;
 use crate::sync::stability::StabilityChecker;
 use crate::sync::state::{ActionResult, SyncAction, SyncActionType};
 use crate::sync::task_runner::{
-    BackendPreflightFailure, OnlineCheck, TaskDisposition, TaskExecutionError,
+    BackendPreflightFailure, OnlineCheck, RemoteVerification, TaskDisposition, TaskExecutionError,
     TaskExecutionOutcome, TaskProgressReporter, TaskRunner, TaskStateSink, TransferOperations,
 };
 use crate::sync::transfer_state::{TransferOperation, TransferState};
@@ -75,6 +75,13 @@ impl TransferOperations for ExecutorTransferOperations {
             })?);
         verify_source_snapshot(task, &path)
             .map_err(|error| BackendPreflightFailure::restart_required(error.to_string()))?;
+        if operation == Some(TransferOperation::Update)
+            && task.total_size as u64 > crate::drive::upload_api::SAFE_EXISTING_UPDATE_MAX_BYTES
+        {
+            return Err(BackendPreflightFailure::restart_required(
+                "现有云端文件超过 20 MiB，Huawei 当前接口不支持安全替换；已保留远端原文件",
+            ));
+        }
         let Some(stability) = &self.stability else {
             return Ok(());
         };
@@ -117,6 +124,28 @@ impl TransferOperations for ExecutorTransferOperations {
                 // issuing any remote write and refuse if the persisted snapshot changed.
                 verify_source_snapshot(task, &local_path)
                     .map_err(|error| TaskExecutionError::RestartRequired(error.to_string()))?;
+                if operation == TransferOperation::Update {
+                    let file_id = task.file_id.as_deref().expect("preflight requires file id");
+                    let current = self.files_api.get(file_id).await?;
+                    let current_edited = current.edited_time.map(|time| time.timestamp_millis());
+                    if current.id != file_id || current_edited != task.expected_cloud_edited_time {
+                        return Err(TaskExecutionError::RestartRequired(
+                            "远端文件已在规划后变化，拒绝用旧任务覆盖".to_string(),
+                        ));
+                    }
+                } else {
+                    let collision = self
+                        .files_api
+                        .list_all(task.parent_file_id.as_deref())
+                        .await?
+                        .into_iter()
+                        .any(|file| file.name == task.name);
+                    if collision {
+                        return Err(TaskExecutionError::RestartRequired(
+                            "目标目录已存在同名远端文件，拒绝重复创建".to_string(),
+                        ));
+                    }
+                }
                 let total = task.total_size;
                 let progress_reporter = progress.clone();
                 let on_progress: crate::drive::upload_api::ProgressFn = Box::new(move |ratio| {
@@ -254,6 +283,113 @@ impl TransferOperations for ExecutorTransferOperations {
             _ => Err(TaskExecutionError::App(AppError::generic(
                 "该 operation 不支持传输执行",
             ))),
+        }
+    }
+
+    async fn verify_remote(&self, task: &TransferTask) -> AppResult<RemoteVerification> {
+        let operation = task
+            .operation_kind()
+            .map_err(|error| AppError::generic(error.to_string()))?
+            .ok_or_else(|| AppError::generic("远端核验缺少 operation"))?;
+        match operation {
+            TransferOperation::Create => {
+                if let Some(remote_id) = task
+                    .remote_result_file_id
+                    .as_deref()
+                    .filter(|id| !id.trim().is_empty())
+                {
+                    return match self.files_api.get(remote_id).await {
+                        Ok(file)
+                            if file.id == remote_id
+                                && file.name == task.name
+                                && file.size == task.source_size.unwrap_or(task.total_size) =>
+                        {
+                            Ok(RemoteVerification::Committed(file))
+                        }
+                        Ok(_) => Ok(RemoteVerification::Ambiguous(
+                            "远端结果 ID 存在，但名称或大小与创建任务不一致".to_string(),
+                        )),
+                        Err(error) if error.drive_status() == Some(404) => {
+                            Ok(RemoteVerification::Ambiguous(
+                                "上传曾返回远端 ID，但该资源当前不可见；禁止重复创建".to_string(),
+                            ))
+                        }
+                        Err(error) => Err(error),
+                    };
+                }
+
+                let expected_size = task.source_size.unwrap_or(task.total_size);
+                let mut candidates = Vec::new();
+                let mut missing_time_identity = false;
+                let lower_bound = task.created_at.saturating_sub(120_000);
+                let upper_bound = chrono::Utc::now()
+                    .timestamp_millis()
+                    .saturating_add(120_000);
+                for file in self
+                    .files_api
+                    .list_all(task.parent_file_id.as_deref())
+                    .await?
+                {
+                    let parent_matches = task.parent_file_id.as_deref().map_or(true, |parent| {
+                        file.parent_folder
+                            .as_deref()
+                            .is_some_and(|parents| parents.len() == 1 && parents[0] == parent)
+                    });
+                    if file.name != task.name || file.size != expected_size || !parent_matches {
+                        continue;
+                    }
+                    match file.created_time.map(|time| time.timestamp_millis()) {
+                        Some(created_at) if (lower_bound..=upper_bound).contains(&created_at) => {
+                            candidates.push(file)
+                        }
+                        None => missing_time_identity = true,
+                        Some(_) => {}
+                    }
+                }
+                match candidates.len() {
+                    0 if missing_time_identity => Ok(RemoteVerification::Ambiguous(
+                        "发现同名同大小资源但缺少创建时间，无法排除重复文件".to_string(),
+                    )),
+                    0 => Ok(RemoteVerification::NotCommitted),
+                    1 => Ok(RemoteVerification::Committed(candidates.remove(0))),
+                    _ => Ok(RemoteVerification::Ambiguous(
+                        "父目录内存在多个符合创建任务的远端资源".to_string(),
+                    )),
+                }
+            }
+            TransferOperation::Update => {
+                let file_id = task
+                    .file_id
+                    .as_deref()
+                    .ok_or_else(|| AppError::generic("Update 核验缺少 fileId"))?;
+                let file = match self.files_api.get(file_id).await {
+                    Ok(file) => file,
+                    Err(error) if error.drive_status() == Some(404) => {
+                        return Ok(RemoteVerification::Ambiguous(
+                            "待更新的既有远端文件已不可见，禁止降级创建".to_string(),
+                        ))
+                    }
+                    Err(error) => return Err(error),
+                };
+                let edited_time = file.edited_time.map(|time| time.timestamp_millis());
+                if edited_time == task.expected_cloud_edited_time {
+                    return Ok(RemoteVerification::NotCommitted);
+                }
+                if file.id == file_id
+                    && file.name == task.name
+                    && file.size == task.source_size.unwrap_or(task.total_size)
+                    && edited_time.is_some()
+                {
+                    Ok(RemoteVerification::Committed(file))
+                } else {
+                    Ok(RemoteVerification::Ambiguous(
+                        "远端版本已变化，但内容身份与本次更新不一致".to_string(),
+                    ))
+                }
+            }
+            _ => Ok(RemoteVerification::Ambiguous(
+                "该任务不是可核验的上传写入".to_string(),
+            )),
         }
     }
 }
@@ -406,34 +542,56 @@ impl SyncExecutor {
 
         let concurrency = self.concurrency.max(1) as usize;
         let semaphore = Arc::new(Semaphore::new(concurrency));
-        stream::iter(actions.iter().cloned())
-            .map(|action| {
-                let sem = semaphore.clone();
-                let executor = self.clone_executor();
-                async move {
-                    let _slot = match sem.acquire_owned().await {
-                        Ok(slot) => slot,
-                        Err(error) => {
-                            return ActionResult {
+        let mut indexed_results: Vec<(usize, ActionResult)> =
+            stream::iter(actions.iter().cloned().enumerate())
+                .map(|(action_id, action)| {
+                    let sem = semaphore.clone();
+                    let executor = self.clone_executor();
+                    async move {
+                        let execution = std::panic::AssertUnwindSafe(async {
+                            let _slot = match sem.acquire_owned().await {
+                                Ok(slot) => slot,
+                                Err(error) => {
+                                    return ActionResult {
+                                        success: false,
+                                        error_message: Some(format!("执行器已关闭：{error}")),
+                                        deferred: true,
+                                        cloud_file: None,
+                                    }
+                                }
+                            };
+                            // This is the action linearization point: shutdown closes the gate before it
+                            // waits for old work, so queued actions cannot start callbacks afterwards.
+                            let _activity = match executor.begin_action_activity() {
+                                Ok(activity) => activity,
+                                Err(error) => return Self::engine_stopped_result(&error),
+                            };
+                            executor.execute_one(&action).await
+                        })
+                        .catch_unwind()
+                        .await;
+                        let result = match execution {
+                            Ok(result) => result,
+                            Err(_) => ActionResult {
                                 success: false,
-                                error_message: Some(format!("执行器已关闭：{error}")),
-                                deferred: true,
+                                error_message: Some(format!(
+                                    "动作 {action_id} 执行 panic，已按原身份记录失败"
+                                )),
+                                deferred: false,
                                 cloud_file: None,
-                            }
-                        }
-                    };
-                    // This is the action linearization point: shutdown closes the gate before it
-                    // waits for old work, so queued actions cannot start callbacks afterwards.
-                    let _activity = match executor.begin_action_activity() {
-                        Ok(activity) => activity,
-                        Err(error) => return Self::engine_stopped_result(&error),
-                    };
-                    executor.execute_one(&action).await
-                }
-            })
-            .buffered(concurrency)
+                            },
+                        };
+                        (action_id, result)
+                    }
+                })
+                .buffer_unordered(concurrency)
+                .collect()
+                .await;
+        indexed_results.sort_by_key(|(action_id, _)| *action_id);
+        indexed_results
+            .into_iter()
+            .map(|(_, result)| result)
             .collect()
-            .await
     }
 
     fn begin_action_activity(&self) -> AppResult<Option<Box<dyn Send>>> {
@@ -885,25 +1043,33 @@ impl SyncExecutor {
                 deferred: false,
                 cloud_file: None,
             },
-            Err(e) => {
-                // 404 表示云端已不存在（可能已被前序操作删除），视为成功
-                if e.drive_status() == Some(404) {
-                    tracing::info!(rel, file_id, "云端文件已不存在（404），视为删除成功");
+            Err(e) => match self.files_api.verify_deleted(&file_id).await {
+                Ok(true) => {
+                    tracing::info!(
+                        rel,
+                        file_id,
+                        "删除响应不确定，但 fileId 核验已确认回收/不存在"
+                    );
                     ActionResult {
                         success: true,
                         error_message: None,
                         deferred: false,
                         cloud_file: None,
                     }
-                } else {
-                    ActionResult {
-                        success: false,
-                        error_message: Some(e.to_string()),
-                        deferred: false,
-                        cloud_file: None,
-                    }
                 }
-            }
+                Ok(false) => ActionResult {
+                    success: false,
+                    error_message: Some(format!("{e}；远端核验显示文件仍未回收")),
+                    deferred: false,
+                    cloud_file: None,
+                },
+                Err(verification_error) => ActionResult {
+                    success: false,
+                    error_message: Some(format!("{e}；删除结果核验失败：{verification_error}")),
+                    deferred: true,
+                    cloud_file: None,
+                },
+            },
         };
         Self::log_action_result(rel, "删除云端文件成功", "删除云端文件失败", &result);
         result

@@ -533,108 +533,301 @@ pub async fn drive_delete_file(app: AppHandle, id: String) -> AppResult<()> {
     // ★ 查询 DB 中是否有本地同步记录（用于同步删除本地文件）
     let local_info: Option<(String, bool)> = {
         let conn = DB.lock();
-        repository::find_by_file_id(&conn, &id)
-            .ok()
-            .flatten()
-            .map(|r| (r.local_path.clone(), r.is_folder))
+        repository::find_by_file_id(&conn, &id)?.map(|r| (r.local_path.clone(), r.is_folder))
     };
-    match FILES_API.delete(&id).await {
-        Ok(()) => {
-            tracing::info!(file_id = %id, "删除云端文件成功");
-            if let Some((local_path, is_folder)) = local_info {
-                if let Ok(m) = mount() {
-                    let abs_path =
-                        crate::core::paths::safe_join_under(m.mount_dir(), &local_path, false)?;
-                    if abs_path.exists() && !is_folder {
-                        // ★ 文件：删除本地副本 + 标记 DB 为 DELETED（tombstone 防云端重建）
-                        if let Err(e) = m.delete_local(&abs_path).await {
-                            tracing::warn!(path = %local_path, error = %e, "删除本地文件失败（云端已删除）");
-                        } else {
-                            tracing::info!(path = %local_path, "已同步删除本地文件");
-                        }
-                        let conn = DB.lock();
-                        let _ = conn.execute(
-                            "UPDATE sync_items SET status=?1 WHERE file_id=?2",
-                            rusqlite::params![repository::sync_status::DELETED, id],
-                        );
-                        if let Some(eng) = try_sync_engine() {
-                            eng.cloud_tree_remove(&local_path);
-                            eng.path_to_id_remove(&local_path);
-                            eng.add_recently_deleted(&local_path);
-                        }
-                    } else if is_folder {
-                        // ★ 目录：删除本地目录 + 标记 DB 为 DELETED
-                        if let Err(e) = tokio::fs::remove_dir_all(&abs_path).await {
-                            tracing::warn!(path = %local_path, error = %e, "删除本地目录失败");
-                        } else {
-                            tracing::info!(path = %local_path, "已同步删除本地目录");
-                        }
-                        let conn = DB.lock();
-                        let _ = conn.execute(
-                            "UPDATE sync_items SET status=?1 WHERE local_path=?2 OR local_path LIKE ?3",
-                            rusqlite::params![repository::sync_status::DELETED, local_path, format!("{local_path}/%")],
-                        );
-                        if let Some(eng) = try_sync_engine() {
-                            let mut ct = eng.cloud_tree_lock();
-                            let mut p2i = eng.path_to_id_lock();
-                            ct.retain(|k, _| {
-                                k != &local_path && !k.starts_with(&format!("{local_path}/"))
-                            });
-                            p2i.retain(|k, _| {
-                                k != &local_path && !k.starts_with(&format!("{local_path}/"))
-                            });
-                            drop(ct);
-                            drop(p2i);
-                            eng.add_recently_deleted(&local_path);
-                            tracing::info!(path = %local_path, "目录已从云端+本地删除，缓存已清理");
-                        }
-                    }
-                }
+    if let Err(write_error) = FILES_API.delete(&id).await {
+        match FILES_API.verify_deleted(&id).await {
+            Ok(true) => tracing::info!(file_id = %id, "删除响应丢失，但 fileId 核验确认已回收"),
+            Ok(false) => return Err(write_error),
+            Err(verification_error) => {
+                return Err(crate::error::AppError::generic(format!(
+                    "删除结果不确定：{write_error}；核验失败：{verification_error}"
+                )))
             }
-            // ★ 通知前端刷新目录树
-            emit_folder_content_changed(&app);
-            Ok(())
-        }
-        Err(e) => {
-            tracing::warn!(file_id = %id, error = %e, "删除云端文件失败");
-            Err(e)
         }
     }
+
+    tracing::info!(file_id = %id, "删除云端文件已核验");
+    if let Some((local_path, is_folder)) = local_info {
+        let mount = mount()?;
+        let absolute_path =
+            crate::core::paths::safe_join_under(mount.mount_dir(), &local_path, false)?;
+        if absolute_path.exists() {
+            if is_folder {
+                tokio::fs::remove_dir_all(&absolute_path)
+                    .await
+                    .map_err(|error| {
+                        crate::error::AppError::generic(format!(
+                            "云端已回收，但本地目录删除失败：{error}"
+                        ))
+                    })?;
+            } else {
+                mount.delete_local(&absolute_path).await.map_err(|error| {
+                    crate::error::AppError::generic(format!(
+                        "云端已回收，但本地文件删除失败：{error}"
+                    ))
+                })?;
+            }
+        }
+
+        {
+            let conn = DB.lock();
+            if is_folder {
+                let prefix = format!("{local_path}/");
+                conn.execute(
+                    "UPDATE sync_items SET status=?1
+                     WHERE local_path=?2 OR substr(local_path, 1, length(?3))=?3",
+                    rusqlite::params![repository::sync_status::DELETED, local_path, prefix],
+                )
+            } else {
+                conn.execute(
+                    "UPDATE sync_items SET status=?1 WHERE file_id=?2",
+                    rusqlite::params![repository::sync_status::DELETED, id],
+                )
+            }
+            .map_err(|error| {
+                crate::error::AppError::generic(format!("结算删除基线失败：{error}"))
+            })?;
+        }
+
+        if let Some(engine) = try_sync_engine() {
+            if is_folder {
+                let prefix = format!("{local_path}/");
+                engine
+                    .cloud_tree_lock()
+                    .retain(|path, _| path != &local_path && !path.starts_with(&prefix));
+                engine
+                    .path_to_id_lock()
+                    .retain(|path, _| path != &local_path && !path.starts_with(&prefix));
+            } else {
+                engine.cloud_tree_remove(&local_path);
+                engine.path_to_id_remove(&local_path);
+            }
+            engine.add_recently_deleted(&local_path);
+        }
+    }
+    emit_folder_content_changed(&app);
+    Ok(())
+}
+
+async fn settle_verified_remote_path_change(
+    file_id: &str,
+    new_relative_path: &str,
+    verified: &DriveFile,
+) -> AppResult<()> {
+    crate::core::paths::validate_relative_path(new_relative_path, false)?;
+    let old_record = {
+        let conn = DB.lock();
+        repository::find_by_file_id(&conn, file_id)?
+    };
+    let Some(old_record) = old_record else {
+        return Ok(());
+    };
+    let old_relative_path = old_record.local_path.clone();
+    if old_relative_path == new_relative_path {
+        return Ok(());
+    }
+
+    let mount = mount()?;
+    let old_absolute =
+        crate::core::paths::safe_join_under(mount.mount_dir(), &old_relative_path, false)?;
+    let new_absolute =
+        crate::core::paths::safe_join_under(mount.mount_dir(), new_relative_path, false)?;
+    if let Some(parent) = new_absolute.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|error| AppError::generic(format!("创建目标父目录失败：{error}")))?;
+    }
+    if old_absolute.exists() {
+        if new_absolute.exists() {
+            return Err(AppError::generic("目标本地路径已存在，拒绝覆盖"));
+        }
+        tokio::fs::rename(&old_absolute, &new_absolute)
+            .await
+            .map_err(|error| AppError::generic(format!("同步本地路径变更失败：{error}")))?;
+    } else if new_absolute.exists() {
+        let target_id = xattr::get(&new_absolute, crate::mount::manager::XATTR_FILE_ID)
+            .ok()
+            .flatten()
+            .and_then(|bytes| String::from_utf8(bytes).ok());
+        if target_id.as_deref() != Some(file_id) {
+            return Err(AppError::generic("目标路径已存在且无法证明是同一云端文件"));
+        }
+    }
+
+    let affected = {
+        let conn = DB.lock();
+        let prefix = format!("{old_relative_path}/");
+        repository::load_all(&conn)?
+            .into_iter()
+            .filter(|record| {
+                record.local_path == old_relative_path || record.local_path.starts_with(&prefix)
+            })
+            .collect::<Vec<_>>()
+    };
+    {
+        let conn = DB.lock();
+        let transaction = conn
+            .unchecked_transaction()
+            .map_err(|error| AppError::generic(format!("开始路径结算事务失败：{error}")))?;
+        for record in &affected {
+            transaction
+                .execute(
+                    "DELETE FROM sync_items WHERE file_id=?1 AND local_path=?2",
+                    rusqlite::params![record.file_id, record.local_path],
+                )
+                .map_err(|error| AppError::generic(format!("删除旧路径基线失败：{error}")))?;
+        }
+        for mut record in affected {
+            let suffix = record
+                .local_path
+                .strip_prefix(&old_relative_path)
+                .unwrap_or_default();
+            record.local_path = format!("{new_relative_path}{suffix}");
+            if record.file_id == file_id {
+                record.name = verified.name.clone();
+                record.parent_folder_id = verified
+                    .parent_folder
+                    .as_ref()
+                    .and_then(|parents| parents.first().cloned());
+                record.cloud_edited_time = verified
+                    .edited_time
+                    .map(|edited_time| edited_time.timestamp_millis());
+            }
+            repository::upsert(&transaction, &record)?;
+        }
+        transaction
+            .commit()
+            .map_err(|error| AppError::generic(format!("提交路径结算事务失败：{error}")))?;
+    }
+
+    if let Some(engine) = try_sync_engine() {
+        let prefix = format!("{old_relative_path}/");
+        let mut cloud = engine.cloud_tree_lock();
+        let mut path_to_id = engine.path_to_id_lock();
+        let stale_paths: Vec<String> = cloud
+            .keys()
+            .filter(|path| *path == &old_relative_path || path.starts_with(&prefix))
+            .cloned()
+            .collect();
+        let mut moved = Vec::with_capacity(stale_paths.len());
+        for old_path in stale_paths {
+            if let Some(file) = cloud.remove(&old_path) {
+                path_to_id.remove(&old_path);
+                let suffix = old_path
+                    .strip_prefix(&old_relative_path)
+                    .unwrap_or_default();
+                moved.push((format!("{new_relative_path}{suffix}"), file));
+            }
+        }
+        for (path, mut file) in moved {
+            if file.id == file_id {
+                file = verified.clone();
+            }
+            path_to_id.insert(path.clone(), file.id.clone());
+            cloud.insert(path, file);
+        }
+        drop(path_to_id);
+        drop(cloud);
+        engine.add_recently_deleted(&old_relative_path);
+    }
+    Ok(())
 }
 
 #[tauri::command]
 pub async fn drive_rename_file(id: String, new_name: String) -> AppResult<DriveFile> {
     // 索引中拒绝：同 drive_delete_file，避免与重建中的 cloud_tree 冲突。
     ensure_not_indexing()?;
-    match FILES_API.update(&id, Some(&new_name), None, None).await {
-        Ok(f) => {
-            tracing::info!(file_id = %id, new_name = %new_name, "重命名成功");
-            Ok(f)
-        }
-        Err(e) => {
-            tracing::warn!(file_id = %id, new_name = %new_name, error = %e, "重命名失败");
-            Err(e)
-        }
+    crate::core::paths::validate_path_segment(&new_name)?;
+    let old_relative_path = {
+        let conn = DB.lock();
+        repository::find_by_file_id(&conn, &id)?.map(|record| record.local_path)
+    };
+    let file = match FILES_API.rename_file(&id, &new_name).await {
+        Ok(file) => file,
+        Err(write_error) => match FILES_API.get(&id).await {
+            Ok(file) if file.id == id && file.name == new_name => file,
+            Ok(_) => return Err(write_error),
+            Err(verification_error) => {
+                return Err(AppError::generic(format!(
+                    "重命名结果不确定：{write_error}；核验失败：{verification_error}"
+                )))
+            }
+        },
+    };
+    if let Some(old_relative_path) = old_relative_path {
+        let new_relative_path = std::path::Path::new(&old_relative_path)
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(|parent| parent.join(&new_name))
+            .unwrap_or_else(|| std::path::PathBuf::from(&new_name));
+        settle_verified_remote_path_change(&id, &new_relative_path.to_string_lossy(), &file)
+            .await?;
     }
+    tracing::info!(file_id = %id, new_name = %new_name, "重命名已核验并结算");
+    Ok(file)
 }
 
 #[tauri::command]
 pub async fn drive_move_file(id: String, new_parent_folder: String) -> AppResult<DriveFile> {
     // 索引中拒绝：移动改 parentFolder，与重建中的 path_to_id/cloud_tree 冲突。
     ensure_not_indexing()?;
-    match FILES_API
+    let old_relative_path = {
+        let conn = DB.lock();
+        repository::find_by_file_id(&conn, &id)?.map(|record| record.local_path)
+    };
+    let file = match FILES_API
         .update(&id, None, Some(&new_parent_folder), None)
         .await
     {
-        Ok(f) => {
-            tracing::info!(file_id = %id, target_folder = %new_parent_folder, "移动成功");
-            Ok(f)
+        Ok(file) => file,
+        Err(write_error) => match FILES_API.get(&id).await {
+            Ok(file)
+                if file.id == id
+                    && file.parent_folder.as_deref().is_some_and(|parents| {
+                        parents.len() == 1 && parents[0] == new_parent_folder
+                    }) =>
+            {
+                file
+            }
+            Ok(_) => return Err(write_error),
+            Err(verification_error) => {
+                return Err(AppError::generic(format!(
+                    "移动结果不确定：{write_error}；核验失败：{verification_error}"
+                )))
+            }
+        },
+    };
+    if let Some(old_relative_path) = old_relative_path {
+        let target_parent_path = if let Some(engine) = try_sync_engine() {
+            engine
+                .path_to_id_lock()
+                .iter()
+                .find_map(|(path, file_id)| (file_id == &new_parent_folder).then_some(path.clone()))
+        } else {
+            None
         }
-        Err(e) => {
-            tracing::warn!(file_id = %id, target_folder = %new_parent_folder, error = %e, "移动失败");
-            Err(e)
-        }
+        .or_else(|| {
+            let conn = DB.lock();
+            repository::find_by_file_id(&conn, &new_parent_folder)
+                .ok()
+                .flatten()
+                .map(|record| record.local_path)
+        })
+        .ok_or_else(|| AppError::generic("无法解析目标云端目录的本地路径"))?;
+        let name = std::path::Path::new(&old_relative_path)
+            .file_name()
+            .ok_or_else(|| AppError::generic("移动源路径缺少文件名"))?;
+        let new_relative_path = if target_parent_path.is_empty() {
+            std::path::PathBuf::from(name)
+        } else {
+            std::path::Path::new(&target_parent_path).join(name)
+        };
+        settle_verified_remote_path_change(&id, &new_relative_path.to_string_lossy(), &file)
+            .await?;
     }
+    tracing::info!(file_id = %id, target_folder = %new_parent_folder, "移动已核验并结算");
+    Ok(file)
 }
 
 #[tauri::command]
@@ -904,26 +1097,9 @@ pub async fn sync_check_safe_free_up(rel_path: String, file_id: String) -> AppRe
         }
         .to_string());
     }
-    // 引擎未启动：DB 兜底
-    let conn = DB.lock();
-    if let Ok(Some(record)) = repository::find_by_file_id(&conn, &file_id) {
-        let local_path = std::path::Path::new(&record.local_path);
-        if local_path.exists() {
-            if let Ok(meta) = std::fs::metadata(local_path) {
-                let mtime = meta
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_millis() as i64);
-                if record.local_mtime != mtime || record.local_size != Some(meta.len() as i64) {
-                    return Ok("not_synced".to_string());
-                }
-            }
-        }
-        Ok("safe".to_string())
-    } else {
-        Ok("not_synced".to_string())
-    }
+    // Without the engine there is no trusted cloud checkpoint or activity gate. Fail closed.
+    let _ = (rel_path, file_id);
+    Ok("not_synced".to_string())
 }
 
 #[tauri::command]
@@ -934,6 +1110,8 @@ pub async fn sync_free_up_space(
     _name: String,
     size: i64,
 ) -> AppResult<()> {
+    let engine = sync_engine()?;
+    let _activity = engine.begin_external_activity()?;
     let m = mount()?;
     let frontend_rel = crate::core::paths::relative_path_from_mount(
         m.mount_dir(),
@@ -946,10 +1124,116 @@ pub async fn sync_free_up_space(
     }
     let lp = crate::core::paths::safe_join_under(m.mount_dir(), &rel_path, false)?;
 
-    // 删除本地文件
-    if lp.exists() {
-        m.delete_local(&lp).await?;
+    if size < 0 || !engine.cloud_tree_is_trusted() {
+        return Err(AppError::generic("云端索引尚未追平，拒绝释放本地唯一副本"));
     }
+
+    let metadata_snapshot = std::fs::symlink_metadata(&lp)
+        .map_err(|error| AppError::generic(format!("读取待释放文件失败：{error}")))?;
+    if !metadata_snapshot.file_type().is_file() || crate::mount::manager::is_placeholder_file(&lp) {
+        return Err(AppError::generic("待释放目标不是已下载的普通文件"));
+    }
+    let source_mtime = metadata_snapshot
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis() as i64)
+        .ok_or_else(|| AppError::generic("无法读取待释放文件修改时间"))?;
+    let source_size = metadata_snapshot.len() as i64;
+    if source_size != size {
+        return Err(AppError::generic("待释放文件大小已变化，请刷新后重试"));
+    }
+
+    let baseline = {
+        let conn = DB.lock();
+        let active = repository::list_all_transfers(&conn)?
+            .into_iter()
+            .any(|task| {
+                (task.relative_path.as_deref() == Some(rel_path.as_str())
+                    || task.file_id.as_deref() == Some(file_id.as_str()))
+                    && task.state_kind().is_ok_and(|state| {
+                        !matches!(
+                            state,
+                            crate::sync::transfer_state::TransferState::Completed
+                                | crate::sync::transfer_state::TransferState::Failed
+                                | crate::sync::transfer_state::TransferState::Canceled
+                        )
+                    })
+            });
+        if active {
+            return Err(AppError::generic("该文件存在活动传输任务，暂不能释放空间"));
+        }
+        repository::find_by_file_id(&conn, &file_id)?
+            .filter(|record| record.local_path == rel_path)
+            .ok_or_else(|| AppError::generic("找不到与路径匹配的成功同步基线"))?
+    };
+    if baseline.status != repository::sync_status::SYNCED
+        || baseline.local_mtime != Some(source_mtime)
+        || baseline.local_size != Some(source_size)
+        || baseline.size != size
+    {
+        return Err(AppError::generic(
+            "本地内容与最后成功同步基线不一致，拒绝释放",
+        ));
+    }
+    {
+        let cloud = engine.cloud_tree_lock();
+        if cloud.get(&rel_path).map(|file| file.id.as_str()) != Some(file_id.as_str()) {
+            return Err(AppError::generic("可信云树中不存在同一 fileId"));
+        }
+    }
+
+    // Remote verification is intentionally between two local/DB checks. If the network call is
+    // slow, any local edit or new transfer intent invalidates the lease before unlink.
+    let remote = FILES_API.get(&file_id).await?;
+    if remote.id != file_id || remote.size != size || FILES_API.verify_deleted(&file_id).await? {
+        return Err(AppError::generic("远端副本不存在、已回收或大小不一致"));
+    }
+
+    let current_metadata = std::fs::symlink_metadata(&lp)
+        .map_err(|error| AppError::generic(format!("释放前复核本地文件失败：{error}")))?;
+    let current_mtime = current_metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis() as i64);
+    if !current_metadata.file_type().is_file()
+        || current_metadata.len() as i64 != source_size
+        || current_mtime != Some(source_mtime)
+    {
+        return Err(AppError::generic("远端核验期间本地文件已变化，拒绝删除"));
+    }
+    {
+        let conn = DB.lock();
+        let active = repository::list_all_transfers(&conn)?
+            .into_iter()
+            .any(|task| {
+                (task.relative_path.as_deref() == Some(rel_path.as_str())
+                    || task.file_id.as_deref() == Some(file_id.as_str()))
+                    && task.state_kind().is_ok_and(|state| {
+                        !matches!(
+                            state,
+                            crate::sync::transfer_state::TransferState::Completed
+                                | crate::sync::transfer_state::TransferState::Failed
+                                | crate::sync::transfer_state::TransferState::Canceled
+                        )
+                    })
+            });
+        let current = repository::find_by_file_id(&conn, &file_id)?;
+        if active
+            || current.as_ref().is_none_or(|record| {
+                record.local_path != baseline.local_path
+                    || record.status != baseline.status
+                    || record.local_mtime != baseline.local_mtime
+                    || record.local_size != baseline.local_size
+                    || record.cloud_edited_time != baseline.cloud_edited_time
+            })
+        {
+            return Err(AppError::generic("释放租约已失效，请刷新后重试"));
+        }
+    }
+
+    m.delete_local(&lp).await?;
 
     // 创建占位符
     m.create_placeholder_if_needed(&rel_path, &file_id, size)
@@ -957,10 +1241,27 @@ pub async fn sync_free_up_space(
 
     // 更新 DB
     let conn = DB.lock();
-    let _ = conn.execute(
-        "UPDATE sync_items SET status = ?1, local_size = 0, error_message = NULL WHERE file_id = ?2",
-        rusqlite::params![repository::sync_status::CLOUD_ONLY, file_id],
-    );
+    let changed = conn
+        .execute(
+            "UPDATE sync_items
+             SET status=?1, local_size=0, error_message=NULL
+             WHERE file_id=?2 AND local_path=?3 AND status=?4
+               AND local_mtime=?5 AND local_size=?6",
+            rusqlite::params![
+                repository::sync_status::CLOUD_ONLY,
+                file_id,
+                rel_path,
+                repository::sync_status::SYNCED,
+                source_mtime,
+                source_size,
+            ],
+        )
+        .map_err(|error| AppError::generic(format!("提交释放空间基线失败：{error}")))?;
+    if changed != 1 {
+        return Err(AppError::generic(
+            "释放空间后基线发生并发变化，请立即重新同步",
+        ));
+    }
 
     Ok(())
 }
