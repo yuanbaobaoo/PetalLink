@@ -54,6 +54,14 @@ pub fn classify_transfer_error(error: &AppError, context: RecoveryContext) -> Cl
             ..
         } => permanent(TransferErrorKind::Quota),
         AppError::DriveApi {
+            error_code: Some(error_code),
+            ..
+        } if error_code == "upload_session_expired" => ClassifiedRecovery {
+            kind: TransferErrorKind::SessionExpired,
+            decision: RecoveryDecision::VerifyRemote,
+            consumes_retry_budget: false,
+        },
+        AppError::DriveApi {
             status_code,
             retry_after,
             transport_kind,

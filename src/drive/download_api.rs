@@ -37,6 +37,16 @@ pub struct DownloadExpectation {
     pub edited_time_ms: Option<i64>,
     pub size: Option<u64>,
     pub content_hash: Option<String>,
+    /// Existing downloaded file that may be replaced only while its local version is unchanged.
+    pub destination_snapshot: Option<LocalDestinationSnapshot>,
+    /// Fresh download may replace only an absent path or this fileId's untouched placeholder.
+    pub placeholder_file_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalDestinationSnapshot {
+    pub mtime_ms: i64,
+    pub size: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -132,7 +142,7 @@ impl DownloadApi {
         // 上次响应已经写完，但在最终核验或 rename 前断网/崩溃：不重复下载。
         if tmp.exists() && offset == remote.resume.size {
             return self
-                .verify_and_install(file_id, dest_path, &remote.resume)
+                .verify_and_install(file_id, dest_path, &remote.resume, expectation)
                 .await;
         }
 
@@ -145,7 +155,7 @@ impl DownloadApi {
                 .await
                 .map_err(|error| AppError::generic(format!("同步临时文件失败：{error}")))?;
             return self
-                .verify_and_install(file_id, dest_path, &remote.resume)
+                .verify_and_install(file_id, dest_path, &remote.resume, expectation)
                 .await;
         }
 
@@ -271,7 +281,7 @@ impl DownloadApi {
             }
 
             return self
-                .verify_and_install(file_id, dest_path, &remote.resume)
+                .verify_and_install(file_id, dest_path, &remote.resume, expectation)
                 .await;
         }
     }
@@ -417,6 +427,7 @@ impl DownloadApi {
         file_id: &str,
         dest_path: &Path,
         downloaded_version: &ResumeMetadata,
+        expectation: Option<&DownloadExpectation>,
     ) -> AppResult<()> {
         let tmp = tmp_path(dest_path);
         let actual_size = tokio::fs::metadata(&tmp)
@@ -453,6 +464,8 @@ impl DownloadApi {
             ));
         }
 
+        verify_local_destination(dest_path, expectation)?;
+
         // POSIX rename 在同一文件系统内原子替换旧目标；失败时保留 .tmp 供重试。
         tokio::fs::rename(&tmp, dest_path)
             .await
@@ -460,6 +473,61 @@ impl DownloadApi {
         remove_resume_metadata(dest_path);
         Ok(())
     }
+}
+
+fn verify_local_destination(
+    dest_path: &Path,
+    expectation: Option<&DownloadExpectation>,
+) -> AppResult<()> {
+    let Some(expectation) = expectation else {
+        return Ok(());
+    };
+    if let Some(snapshot) = expectation.destination_snapshot.as_ref() {
+        let metadata = std::fs::symlink_metadata(dest_path)
+            .map_err(|error| AppError::generic(format!("安装下载结果前读取原文件失败：{error}")))?;
+        let mtime_ms = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_millis() as i64);
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || metadata.len() != snapshot.size
+            || mtime_ms != Some(snapshot.mtime_ms)
+        {
+            return Err(AppError::generic(
+                "下载期间本地目标已被修改，已保留用户内容和下载临时文件",
+            ));
+        }
+        return Ok(());
+    }
+    if let Some(file_id) = expectation.placeholder_file_id.as_deref() {
+        let metadata = match std::fs::symlink_metadata(dest_path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(AppError::generic(format!(
+                    "安装下载结果前读取目标路径失败：{error}"
+                )))
+            }
+        };
+        let owner = xattr::get(dest_path, crate::mount::manager::XATTR_FILE_ID)
+            .map_err(|error| AppError::generic(format!("读取下载占位身份失败：{error}")))?
+            .map(String::from_utf8)
+            .transpose()
+            .map_err(|_| AppError::generic("下载占位 fileId 标记损坏"))?;
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || metadata.len() != 0
+            || !crate::mount::manager::is_placeholder_file(dest_path)
+            || owner.as_deref() != Some(file_id)
+        {
+            return Err(AppError::generic(
+                "下载期间目标路径出现用户内容，已拒绝覆盖并保留下载临时文件",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn matches_expectation(remote: &ResumeMetadata, expectation: &DownloadExpectation) -> bool {

@@ -76,7 +76,7 @@ pub mod transfer_state {
 pub struct SyncItem {
     /// 云端文件 ID（主键之一）
     pub file_id: String,
-    /// 本地绝对路径（主键之二）
+    /// 相对挂载根的规范 UTF-8 路径（主键之二）
     pub local_path: String,
     /// 父目录 fileId
     pub parent_folder_id: Option<String>,
@@ -233,14 +233,21 @@ impl SyncItem {
 pub fn find_by_file_id(conn: &Connection, file_id: &str) -> AppResult<Option<SyncItem>> {
     let mut stmt = db_err!(
         "查询",
-        conn.prepare("SELECT * FROM sync_items WHERE file_id = ?1 LIMIT 1")
+        conn.prepare("SELECT * FROM sync_items WHERE file_id = ?1 LIMIT 2")
     );
     let mut rows = db_err!("查询", stmt.query_map(params![file_id], SyncItem::from_row));
-    match rows.next() {
-        Some(Ok(item)) => Ok(Some(item)),
-        Some(Err(_)) => Ok(None),
-        None => Ok(None),
+    let first = match rows.next() {
+        Some(Ok(item)) => item,
+        Some(Err(error)) => return Err(AppError::generic(format!("读取同步记录失败：{error}"))),
+        None => return Ok(None),
+    };
+    if let Some(second) = rows.next() {
+        second.map_err(|error| AppError::generic(format!("读取同步记录失败：{error}")))?;
+        return Err(AppError::generic(format!(
+            "fileId {file_id} 对应多条本地路径，拒绝使用歧义同步基线"
+        )));
     }
+    Ok(Some(first))
 }
 
 /// 加载全部同步记录（按 local_path 索引）。对齐 dart `_loadDbRecords`。
@@ -249,7 +256,8 @@ pub fn load_all(conn: &Connection) -> AppResult<Vec<SyncItem>> {
     let mut stmt = db_err!("查询", conn.prepare("SELECT * FROM sync_items"));
     let rows = db_err!("查询", stmt.query_map([], SyncItem::from_row));
     let mut items = Vec::new();
-    for item in rows.flatten() {
+    for item in rows {
+        let item = item.map_err(|error| AppError::generic(format!("读取同步记录失败：{error}")))?;
         // 过滤内部文件（对齐 _loadDbRecords 跳过 .hwcloud_ 前缀）
         let basename = std::path::Path::new(&item.local_path)
             .file_name()
@@ -460,6 +468,52 @@ pub fn transition_transfer(
         next_state,
         patch,
     )?;
+    transaction.commit()?;
+    Ok(updated)
+}
+
+/// Atomically invalidate every durable resumable-upload identity while applying a lifecycle
+/// transition. A caller may use this only after remote verification has proved the target write
+/// absent; keeping this as one transaction prevents a fresh attempt from observing a half-cleared
+/// session.
+pub fn transition_transfer_clearing_upload_session(
+    conn: &Connection,
+    task_id: i64,
+    expected_revision: i64,
+    next_state: TransferState,
+    mut patch: TransferPatch,
+) -> Result<TransferTask, TransitionError> {
+    patch.session_url = ColumnPatch::Clear;
+    patch.transferred = Some(0);
+    patch.resume_offset = Some(0);
+
+    let transaction = conn.unchecked_transaction()?;
+    let transitioned = transition_transfer_in_transaction(
+        &transaction,
+        task_id,
+        expected_revision,
+        next_state,
+        patch,
+    )?;
+    let changed = transaction.execute(
+        "UPDATE transfer_queue
+         SET server_id=NULL, upload_id=NULL
+         WHERE id=?1 AND state_revision=?2 AND state=?3",
+        params![task_id, transitioned.state_revision, i32::from(next_state)],
+    )?;
+    if changed != 1 {
+        return Err(TransitionError::Database {
+            message: format!("清理上传会话失败：task {task_id} 未保持目标状态"),
+        });
+    }
+    let updated = transaction
+        .query_row(
+            "SELECT * FROM transfer_queue WHERE id=?1",
+            params![task_id],
+            TransferTask::from_row,
+        )
+        .optional()?
+        .ok_or(TransitionError::NotFound { task_id })?;
     transaction.commit()?;
     Ok(updated)
 }
@@ -730,7 +784,7 @@ pub fn list_transfers(
     }
 }
 
-/// 收集迭代结果为 Vec<TransferTask>，跳过解析失败的行。
+/// 收集迭代结果为 Vec<TransferTask>；任一行损坏时整体失败，禁止把活动任务漏读为空闲。
 /// 接收 query_map 返回的 MappedRows（迭代产出 rusqlite::Result<TransferTask>）。
 fn collect_tasks<I>(rows_result: rusqlite::Result<I>) -> AppResult<Vec<TransferTask>>
 where
@@ -738,8 +792,8 @@ where
 {
     let rows = db_err!("查询", rows_result);
     let mut tasks = Vec::new();
-    for t in rows.flatten() {
-        tasks.push(t);
+    for task in rows {
+        tasks.push(task.map_err(|error| AppError::generic(format!("读取传输任务失败：{error}")))?);
     }
     Ok(tasks)
 }

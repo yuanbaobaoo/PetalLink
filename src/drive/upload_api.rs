@@ -1146,14 +1146,18 @@ fn remote_ambiguity(cause: &str, auth_already_replayed: bool) -> AppError {
 }
 
 fn is_remote_ambiguity(error: &AppError) -> bool {
-    matches!(
-        error,
+    match error {
         AppError::DriveApi {
             request_may_have_reached_server: true,
             transport_kind: Some(_),
             ..
-        }
-    )
+        } => true,
+        AppError::DriveApi {
+            error_code: Some(error_code),
+            ..
+        } => error_code == "upload_session_expired",
+        _ => false,
+    }
 }
 
 /// 只在请求明确未到服务端的连接失败上做短暂本地重试。401 已在 `put_chunk` 内完成
@@ -1200,12 +1204,7 @@ async fn upload_response_error(
             || upper.contains("CONTENT_NOT_FOUND")
             || upper.contains("UPLOAD_ID_NOT_FOUND"))
     {
-        return remote_ambiguity(
-            &format!(
-                "断点上传会话已失效或结果未知（HTTP {status}）；必须先核验远端目标，禁止直接新建会话"
-            ),
-            auth_already_replayed,
-        );
+        return AppError::drive_upload_session_expired(status, auth_already_replayed);
     }
     AppError::drive_from_response(status, &body, retry_after, semantics, auth_already_replayed)
 }

@@ -21,6 +21,8 @@ pub const XATTR_FILE_ID: &str = "com.hwcloud.fileId";
 pub const XATTR_STATE: &str = "com.hwcloud.state";
 /// xattr 键：文件大小
 pub const XATTR_SIZE: &str = "com.hwcloud.size";
+/// 释放空间事务暂存文件携带的原始相对路径，用于进程退出后的恢复。
+pub const XATTR_FREE_UP_RELATIVE_PATH: &str = "com.hwcloud.freeUpRelativePath";
 
 /// xattr 值常量
 pub const STATE_PLACEHOLDER: &str = "placeholder";
@@ -73,6 +75,75 @@ impl MountManager {
         Ok(())
     }
 
+    /// 收敛上次进程在“原文件暂存 → 占位符/DB 结算”之间退出留下的文件。
+    /// 数据库已提交且占位符身份匹配时完成释放；其余情况优先恢复原内容。
+    pub fn recover_interrupted_free_up(&self, conn: &rusqlite::Connection) -> AppResult<usize> {
+        let mut staging_paths = Vec::new();
+        collect_free_up_staging(&self.mount_dir, &mut staging_paths)?;
+        let mut recovered = 0;
+        for staging_path in staging_paths {
+            let relative_path = read_xattr_string(&staging_path, XATTR_FREE_UP_RELATIVE_PATH);
+            let file_id = read_xattr_string(&staging_path, XATTR_FILE_ID);
+            let (Some(relative_path), Some(file_id)) = (relative_path, file_id) else {
+                surface_free_up_recovery(&staging_path)?;
+                recovered += 1;
+                continue;
+            };
+            let target =
+                match crate::core::paths::safe_join_under(&self.mount_dir, &relative_path, false) {
+                    Ok(target) if target.parent() == staging_path.parent() => target,
+                    _ => {
+                        surface_free_up_recovery(&staging_path)?;
+                        recovered += 1;
+                        continue;
+                    }
+                };
+            let baseline = crate::data::repository::find_by_file_id(conn, &file_id)?
+                .filter(|record| record.local_path == relative_path);
+            match std::fs::symlink_metadata(&target) {
+                Ok(_) if is_placeholder_file(&target) => {
+                    let owner = read_xattr_string(&target, XATTR_FILE_ID);
+                    let committed = owner.as_deref() == Some(file_id.as_str())
+                        && baseline.as_ref().is_some_and(|record| {
+                            record.status == crate::data::repository::sync_status::CLOUD_ONLY
+                                && record.local_size == Some(0)
+                        });
+                    if committed {
+                        std::fs::remove_file(&staging_path).map_err(|error| {
+                            AppError::generic(format!("完成释放空间恢复清理失败：{error}"))
+                        })?;
+                    } else {
+                        std::fs::remove_file(&target).map_err(|error| {
+                            AppError::generic(format!("移除未提交占位符失败：{error}"))
+                        })?;
+                        restore_free_up_staging(
+                            conn,
+                            &staging_path,
+                            &target,
+                            &file_id,
+                            &relative_path,
+                        )?;
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    restore_free_up_staging(
+                        conn,
+                        &staging_path,
+                        &target,
+                        &file_id,
+                        &relative_path,
+                    )?;
+                }
+                Ok(_) | Err(_) => {
+                    // 原路径已有用户内容或无法可靠读取时，不覆盖；把旧内容显式恢复为副本。
+                    surface_free_up_recovery(&staging_path)?;
+                }
+            }
+            recovered += 1;
+        }
+        Ok(recovered)
+    }
+
     /// 确保文件夹存在（递归创建）。
     pub fn ensure_folder(&self, rel_path: &str) -> AppResult<PathBuf> {
         let full = crate::core::paths::safe_join_under(&self.mount_dir, rel_path, true)?;
@@ -106,36 +177,112 @@ impl MountManager {
 
         tokio::task::spawn_blocking(move || -> AppResult<()> {
             let local_path = Path::new(&fp);
-            // 文件已存在 → 检查 xattr 状态决定行为
-            if local_path.exists() {
-                if let Ok(state) = get_xattr(local_path, XATTR_STATE) {
-                    if state == STATE_DOWNLOADED || state == STATE_PLACEHOLDER {
-                        return Ok(()); // 已有状态，跳过
+            // Existing-path checks must fail closed. `Path::exists` hides permission/IO errors,
+            // and a later `write` could truncate a user file created in the race window.
+            match std::fs::symlink_metadata(local_path) {
+                Ok(metadata) => {
+                    if metadata.file_type().is_symlink() || !metadata.is_file() {
+                        return Err(AppError::generic("占位目标已存在且不是普通文件"));
                     }
-                } else {
-                    // 无 xattr → 用户文件，不覆盖
-                    return Ok(());
+                    let state = get_xattr(local_path, XATTR_STATE).ok();
+                    let owner = get_xattr(local_path, XATTR_FILE_ID).ok();
+                    if matches!(
+                        state.as_deref(),
+                        Some(STATE_DOWNLOADED) | Some(STATE_PLACEHOLDER)
+                    ) && owner.as_deref() == Some(file_id.as_str())
+                    {
+                        return Ok(());
+                    }
+                    return Err(AppError::generic(
+                        "占位目标已有用户内容或属于其他 fileId，拒绝覆盖",
+                    ));
                 }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(AppError::generic(format!("读取占位目标失败：{error}"))),
             }
             // 确保父目录存在
             if let Some(parent) = local_path.parent() {
-                let _ = std::fs::create_dir_all(parent);
+                std::fs::create_dir_all(parent)
+                    .map_err(|error| AppError::generic(format!("创建占位父目录失败：{error}")))?;
             }
-            // 创建 0 字节文件
-            std::fs::write(local_path, [])
+            // create_new closes the check-to-create race and never truncates an existing path.
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(local_path)
                 .map_err(|e| AppError::generic(format!("创建占位符失败：{e}")))?;
             // 写 3 个状态 xattr + Finder 灰标（占位即打标，含批量 BFS）
-            set_xattr_sync(&fp, XATTR_FILE_ID, &file_id)
-                .map_err(|e| AppError::generic(format!("写 xattr fileId 失败：{e}")))?;
-            set_xattr_sync(&fp, XATTR_STATE, STATE_PLACEHOLDER)
-                .map_err(|e| AppError::generic(format!("写 xattr state 失败：{e}")))?;
-            set_xattr_sync(&fp, XATTR_SIZE, &size_str)
-                .map_err(|e| AppError::generic(format!("写 xattr size 失败：{e}")))?;
+            let initialized = (|| -> AppResult<()> {
+                set_xattr_sync(&fp, XATTR_FILE_ID, &file_id)
+                    .map_err(|e| AppError::generic(format!("写 xattr fileId 失败：{e}")))?;
+                set_xattr_sync(&fp, XATTR_STATE, STATE_PLACEHOLDER)
+                    .map_err(|e| AppError::generic(format!("写 xattr state 失败：{e}")))?;
+                set_xattr_sync(&fp, XATTR_SIZE, &size_str)
+                    .map_err(|e| AppError::generic(format!("写 xattr size 失败：{e}")))?;
+                file.sync_all()
+                    .map_err(|e| AppError::generic(format!("持久化占位符失败：{e}")))?;
+                Ok(())
+            })();
+            if let Err(error) = initialized {
+                drop(file);
+                let _ = std::fs::remove_file(local_path);
+                return Err(error);
+            }
             let _ = set_finder_label_sync(local_path, true); // 灰标失败不阻断（仅 Finder 无灰标）
             Ok(())
         })
         .await
         .map_err(|e| AppError::generic(format!("占位创建线程异常：{e}")))?
+    }
+
+    /// Create a placeholder only when the destination is still absent.
+    ///
+    /// Destructive flows use this stricter variant after atomically staging the original file.
+    /// It never treats an existing user file as success, and removes a partially initialized
+    /// placeholder if any required xattr write fails.
+    pub async fn create_placeholder_strict(
+        &self,
+        file_name: &str,
+        file_id: &str,
+        size: i64,
+    ) -> AppResult<()> {
+        let local_path = crate::core::paths::safe_join_under(&self.mount_dir, file_name, false)?;
+        let fp = local_path.to_string_lossy().to_string();
+        let file_id = file_id.to_string();
+        let size_str = size.to_string();
+
+        tokio::task::spawn_blocking(move || -> AppResult<()> {
+            let local_path = Path::new(&fp);
+            if let Some(parent) = local_path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| AppError::generic(format!("创建占位父目录失败：{e}")))?;
+            }
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(local_path)
+                .map_err(|e| AppError::generic(format!("占位目标已存在或无法创建：{e}")))?;
+            let initialize = || -> AppResult<()> {
+                set_xattr_sync(&fp, XATTR_FILE_ID, &file_id)
+                    .map_err(|e| AppError::generic(format!("写 xattr fileId 失败：{e}")))?;
+                set_xattr_sync(&fp, XATTR_STATE, STATE_PLACEHOLDER)
+                    .map_err(|e| AppError::generic(format!("写 xattr state 失败：{e}")))?;
+                set_xattr_sync(&fp, XATTR_SIZE, &size_str)
+                    .map_err(|e| AppError::generic(format!("写 xattr size 失败：{e}")))?;
+                file.sync_all()
+                    .map_err(|e| AppError::generic(format!("持久化占位符失败：{e}")))?;
+                Ok(())
+            };
+            if let Err(error) = initialize() {
+                drop(file);
+                let _ = std::fs::remove_file(local_path);
+                return Err(error);
+            }
+            let _ = set_finder_label_sync(local_path, true);
+            Ok(())
+        })
+        .await
+        .map_err(|e| AppError::generic(format!("严格占位创建线程异常：{e}")))?
     }
 
     /// 标记文件为已下载（更新 xattr + 清除灰标）。
@@ -294,6 +441,135 @@ impl MountManager {
         }
         Ok(())
     }
+
+    /// 删除一个已经由同步执行器完成远端与本地版本复核的路径。
+    ///
+    /// 与面向普通调用方的 `delete_local` 不同，此入口允许删除真实的 0 字节文件；
+    /// 调用方必须先证明它仍与持久化同步基线一致。路径边界仍在此处再次校验。
+    pub(crate) async fn delete_local_confirmed(&self, local_path: &Path) -> AppResult<()> {
+        crate::core::paths::relative_path_from_mount(&self.mount_dir, local_path)?;
+        let metadata = match tokio::fs::symlink_metadata(local_path).await {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(AppError::generic(format!("读取待删除路径失败：{error}"))),
+        };
+        if metadata.file_type().is_symlink() {
+            return Err(AppError::generic("拒绝删除符号链接"));
+        }
+        if metadata.is_dir() {
+            tokio::fs::remove_dir_all(local_path)
+                .await
+                .map_err(|error| AppError::generic(format!("删除目录失败：{error}")))?;
+        } else if metadata.is_file() {
+            tokio::fs::remove_file(local_path)
+                .await
+                .map_err(|error| AppError::generic(format!("删除文件失败：{error}")))?;
+        } else {
+            return Err(AppError::generic("拒绝删除非普通文件类型"));
+        }
+        let legacy = legacy_placeholder_path(local_path);
+        match tokio::fs::remove_file(&legacy).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => tracing::warn!(path = %legacy.display(), %error, "清理旧版占位符失败"),
+        }
+        Ok(())
+    }
+}
+
+fn read_xattr_string(path: &Path, key: &str) -> Option<String> {
+    xattr::get(path, key)
+        .ok()
+        .flatten()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .filter(|value| !value.is_empty())
+}
+
+fn collect_free_up_staging(current: &Path, output: &mut Vec<PathBuf>) -> AppResult<()> {
+    for entry in std::fs::read_dir(current)
+        .map_err(|error| AppError::generic(format!("扫描释放空间恢复项失败：{error}")))?
+    {
+        let entry =
+            entry.map_err(|error| AppError::generic(format!("读取释放空间恢复项失败：{error}")))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| AppError::generic(format!("读取恢复项类型失败：{error}")))?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        let name = entry.file_name();
+        if name.to_string_lossy().starts_with(".hwcloud_freeup-") {
+            output.push(entry.path());
+        } else if file_type.is_dir() {
+            collect_free_up_staging(&entry.path(), output)?;
+        }
+    }
+    Ok(())
+}
+
+fn clear_free_up_marker(path: &Path) {
+    let _ = xattr::remove(path, XATTR_FREE_UP_RELATIVE_PATH);
+}
+
+fn restore_free_up_staging(
+    conn: &rusqlite::Connection,
+    staging_path: &Path,
+    target: &Path,
+    file_id: &str,
+    relative_path: &str,
+) -> AppResult<()> {
+    let metadata = std::fs::metadata(staging_path)
+        .map_err(|error| AppError::generic(format!("读取待恢复原文件失败：{error}")))?;
+    let local_mtime = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis() as i64);
+    std::fs::rename(staging_path, target)
+        .map_err(|error| AppError::generic(format!("恢复释放空间原文件失败：{error}")))?;
+    clear_free_up_marker(target);
+    conn.execute(
+        "UPDATE sync_items
+         SET status=?1, local_size=?2, local_mtime=?3, error_message=NULL
+         WHERE file_id=?4 AND local_path=?5",
+        rusqlite::params![
+            crate::data::repository::sync_status::SYNCED,
+            metadata.len() as i64,
+            local_mtime,
+            file_id,
+            relative_path,
+        ],
+    )
+    .map_err(|error| AppError::generic(format!("恢复释放空间同步基线失败：{error}")))?;
+    tracing::warn!(path = %target.display(), "检测到中断的释放空间操作，已恢复原文件");
+    Ok(())
+}
+
+fn surface_free_up_recovery(staging_path: &Path) -> AppResult<PathBuf> {
+    let parent = staging_path
+        .parent()
+        .ok_or_else(|| AppError::generic("释放空间恢复项缺少父目录"))?;
+    for _ in 0..16 {
+        let target = parent.join(format!("释放空间恢复-{:016x}", rand::random::<u64>()));
+        match std::fs::symlink_metadata(&target) {
+            Ok(_) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(AppError::generic(format!(
+                    "检查释放空间恢复副本路径失败：{error}"
+                )))
+            }
+        }
+        std::fs::rename(staging_path, &target)
+            .map_err(|error| AppError::generic(format!("显式恢复暂存内容失败：{error}")))?;
+        clear_free_up_marker(&target);
+        let _ = xattr::remove(&target, XATTR_FILE_ID);
+        let _ = xattr::remove(&target, XATTR_STATE);
+        let _ = xattr::remove(&target, XATTR_SIZE);
+        tracing::warn!(path = %target.display(), "释放空间恢复无法覆盖原路径，已保留为可见副本");
+        return Ok(target);
+    }
+    Err(AppError::generic("无法分配释放空间恢复副本路径"))
 }
 
 // ===== 平台相关实现（xattr + osascript） =====

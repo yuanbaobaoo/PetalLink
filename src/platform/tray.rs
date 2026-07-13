@@ -234,8 +234,10 @@ fn load_active_transfers() -> AppResult<Vec<repository::TransferTask>> {
         )
         .map_err(|e| crate::error::AppError::generic(format!("查询传输任务失败：{e}")))?;
     let mut tasks = Vec::new();
-    for row in rows.flatten() {
-        tasks.push(row);
+    for row in rows {
+        tasks.push(row.map_err(|error| {
+            crate::error::AppError::generic(format!("读取传输任务失败：{error}"))
+        })?);
     }
     Ok(tasks)
 }

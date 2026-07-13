@@ -5,7 +5,8 @@
 //! 并发数默认 6（可配置 1-20），使用 tokio Semaphore 限流。
 //! 传输队列（TransferQueue 表）记录进度，修剪历史（保留最近 100 条已结束任务）。
 
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -14,11 +15,13 @@ use tokio::sync::Semaphore;
 
 use crate::data::repository::{self, sync_status, transfer_direction, SyncItem, TransferTask};
 use crate::drive::{
-    download_api::{DownloadApi, DownloadExpectation},
+    download_api::{DownloadApi, DownloadExpectation, LocalDestinationSnapshot},
     files_api::FilesApi,
+    models::DriveFile,
     upload_api::{ResumeSession, UploadApi},
 };
 use crate::error::{AppError, AppResult};
+use crate::mount::file_hasher::FileHasher;
 use crate::mount::manager::MountManager;
 use crate::sync::conflict::ConflictResolver;
 use crate::sync::stability::StabilityChecker;
@@ -55,6 +58,167 @@ fn verify_source_snapshot(task: &TransferTask, path: &std::path::Path) -> AppRes
         return Err(AppError::generic("本地上传源在执行前发生变化"));
     }
     Ok(())
+}
+
+fn metadata_mtime_ms(metadata: &std::fs::Metadata) -> Option<i64> {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis() as i64)
+}
+
+/// Prove that every entry about to be removed still matches the durable sync baseline.
+/// Unknown descendants and unreadable paths fail closed so a cloud deletion cannot erase a
+/// local edit that arrived after planning.
+pub(crate) fn verify_local_delete_snapshot(
+    path: &Path,
+    relative_path: &str,
+    baselines: &HashMap<String, SyncItem>,
+    allow_orphan_placeholder: bool,
+) -> AppResult<()> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| AppError::generic(format!("读取待删除路径失败：{error}")))?;
+    if metadata.file_type().is_symlink() {
+        return Err(AppError::generic(format!(
+            "待删除路径已变为符号链接：{relative_path}"
+        )));
+    }
+
+    if metadata.is_dir() {
+        let baseline = baselines
+            .get(relative_path)
+            .ok_or_else(|| AppError::generic(format!("目录不在同步基线中：{relative_path}")))?;
+        if !baseline.is_folder
+            || baseline.local_mtime != metadata_mtime_ms(&metadata)
+            || baseline.local_size != Some(metadata.len() as i64)
+        {
+            return Err(AppError::generic(format!(
+                "目录在删除执行前发生变化：{relative_path}"
+            )));
+        }
+        for entry in std::fs::read_dir(path)
+            .map_err(|error| AppError::generic(format!("读取目录失败：{error}")))?
+        {
+            let entry =
+                entry.map_err(|error| AppError::generic(format!("读取目录项失败：{error}")))?;
+            let name = entry.file_name();
+            let name = name.to_str().ok_or_else(|| {
+                AppError::generic(format!("目录包含非 UTF-8 名称：{relative_path}"))
+            })?;
+            let child_relative = if relative_path.is_empty() {
+                name.to_string()
+            } else {
+                format!("{relative_path}/{name}")
+            };
+            verify_local_delete_snapshot(&entry.path(), &child_relative, baselines, false)?;
+        }
+        return Ok(());
+    }
+
+    if !metadata.is_file() {
+        return Err(AppError::generic(format!(
+            "拒绝删除非普通文件：{relative_path}"
+        )));
+    }
+    if crate::mount::manager::is_placeholder_file(path) {
+        if allow_orphan_placeholder {
+            return Ok(());
+        }
+        let baseline = baselines
+            .get(relative_path)
+            .ok_or_else(|| AppError::generic(format!("占位符不在同步基线中：{relative_path}")))?;
+        if baseline.is_folder {
+            return Err(AppError::generic(format!(
+                "占位符类型与同步基线不一致：{relative_path}"
+            )));
+        }
+        return Ok(());
+    }
+
+    let baseline = baselines
+        .get(relative_path)
+        .ok_or_else(|| AppError::generic(format!("文件不在同步基线中：{relative_path}")))?;
+    if baseline.is_folder
+        || baseline.local_mtime != metadata_mtime_ms(&metadata)
+        || baseline.local_size != Some(metadata.len() as i64)
+    {
+        return Err(AppError::generic(format!(
+            "文件在删除执行前发生变化：{relative_path}"
+        )));
+    }
+    Ok(())
+}
+
+fn comparable_sha256(file: &DriveFile) -> Option<&str> {
+    file.content_hash
+        .as_deref()
+        .map(str::trim)
+        .filter(|hash| hash.len() == 64 && hash.as_bytes().iter().all(u8::is_ascii_hexdigit))
+}
+
+fn content_hash_matches(file: &DriveFile, local_sha256: Option<&str>) -> bool {
+    match (comparable_sha256(file), local_sha256) {
+        (Some(remote), Some(local)) => remote.eq_ignore_ascii_case(local),
+        _ => true,
+    }
+}
+
+impl ExecutorTransferOperations {
+    /// Hash only a source that still represents the persisted task snapshot. A second snapshot
+    /// check prevents a hash calculated across a concurrent edit from becoming remote identity.
+    async fn source_sha256_if_current(&self, task: &TransferTask) -> AppResult<Option<String>> {
+        let Some(local_path) = task.local_path.as_deref() else {
+            return Ok(None);
+        };
+        let local_path = PathBuf::from(local_path);
+        if verify_source_snapshot(task, &local_path).is_err() {
+            return Ok(None);
+        }
+        let sha256 = FileHasher::new()
+            .hash_file(&local_path)
+            .await
+            .map_err(|error| AppError::generic(format!("计算上传源 SHA256 失败：{error}")))?;
+        if verify_source_snapshot(task, &local_path).is_err() {
+            return Ok(None);
+        }
+        Ok(Some(sha256))
+    }
+
+    /// Attach remote identity only while the local file is still the exact source snapshot that
+    /// produced this upload. A changed source is left for TaskRunner's existing restart check.
+    async fn set_upload_file_id_if_current(
+        &self,
+        task: &TransferTask,
+        file_id: &str,
+    ) -> AppResult<bool> {
+        let Some(local_path) = task.local_path.as_deref() else {
+            return Ok(false);
+        };
+        let local_path = PathBuf::from(local_path);
+        if let Err(error) = verify_source_snapshot(task, &local_path) {
+            tracing::info!(task_id = task.id, %error, "上传源已变化，跳过 fileId xattr 写入");
+            return Ok(false);
+        }
+        self.mount.set_file_id_xattr(&local_path, file_id).await?;
+        Ok(true)
+    }
+
+    async fn committed_upload(
+        &self,
+        task: &TransferTask,
+        file: DriveFile,
+    ) -> AppResult<RemoteVerification> {
+        if let Err(error) = self.set_upload_file_id_if_current(task, &file.id).await {
+            tracing::warn!(
+                task_id = task.id,
+                remote_id = %file.id,
+                %error,
+                "远端上传已确认，fileId xattr 补写失败但不阻塞基线结算"
+            );
+        }
+        Ok(RemoteVerification::Committed(file))
+    }
 }
 
 #[async_trait]
@@ -167,6 +331,8 @@ impl TransferOperations for ExecutorTransferOperations {
                         }
                     });
                 let parent_id = task.parent_file_id.as_deref();
+                // A persisted session URL is authoritative even at offset zero. Re-entering the
+                // resume path forces a server status query before any byte is sent.
                 let upload_result = if operation == TransferOperation::Update {
                     self.upload_api
                         .upload_update(
@@ -176,11 +342,10 @@ impl TransferOperations for ExecutorTransferOperations {
                             Some(&on_progress),
                         )
                         .await
-                } else if task.resume_offset > 0
-                    && task
-                        .session_url
-                        .as_deref()
-                        .is_some_and(|url| !url.is_empty())
+                } else if task
+                    .session_url
+                    .as_deref()
+                    .is_some_and(|url| !url.trim().is_empty())
                 {
                     let session = ResumeSession {
                         server_id: task.server_id.clone().unwrap_or_default(),
@@ -239,6 +404,22 @@ impl TransferOperations for ExecutorTransferOperations {
                 } else {
                     (uploaded, TaskDisposition::Completed)
                 };
+                if disposition == TaskDisposition::Completed {
+                    match self
+                        .set_upload_file_id_if_current(task, &cloud_file.id)
+                        .await
+                    {
+                        Ok(_) => {}
+                        Err(error) => {
+                            tracing::warn!(
+                                task_id = task.id,
+                                remote_id = %cloud_file.id,
+                                %error,
+                                "上传已提交但 fileId xattr 写入失败；继续按已上传源快照结算"
+                            );
+                        }
+                    }
+                }
                 Ok(TaskExecutionOutcome {
                     cloud_file: Some(cloud_file),
                     disposition,
@@ -267,6 +448,21 @@ impl TransferOperations for ExecutorTransferOperations {
                     edited_time_ms: task.expected_cloud_edited_time,
                     size: u64::try_from(task.total_size).ok(),
                     content_hash: None,
+                    destination_snapshot: if operation == TransferOperation::DownloadUpdate {
+                        Some(LocalDestinationSnapshot {
+                            mtime_ms: task.source_mtime.ok_or_else(|| {
+                                AppError::generic("更新下载缺少本地目标修改时间快照")
+                            })?,
+                            size: u64::try_from(task.source_size.ok_or_else(|| {
+                                AppError::generic("更新下载缺少本地目标大小快照")
+                            })?)
+                            .map_err(|_| AppError::generic("更新下载本地目标大小非法"))?,
+                        })
+                    } else {
+                        None
+                    },
+                    placeholder_file_id: (operation == TransferOperation::Download)
+                        .then(|| file_id.to_string()),
                 };
                 self.download_api
                     .download_with_expectation(
@@ -298,33 +494,47 @@ impl TransferOperations for ExecutorTransferOperations {
                     .as_deref()
                     .filter(|id| !id.trim().is_empty())
                 {
-                    return match self.files_api.get(remote_id).await {
-                        Ok(file)
-                            if file.id == remote_id
-                                && file.name == task.name
-                                && file.size == task.source_size.unwrap_or(task.total_size) =>
-                        {
-                            Ok(RemoteVerification::Committed(file))
-                        }
-                        Ok(_) => Ok(RemoteVerification::Ambiguous(
-                            "远端结果 ID 存在，但名称或大小与创建任务不一致".to_string(),
-                        )),
+                    let file = match self.files_api.get(remote_id).await {
+                        Ok(file) => file,
                         Err(error) if error.drive_status() == Some(404) => {
-                            Ok(RemoteVerification::Ambiguous(
+                            return Ok(RemoteVerification::Ambiguous(
                                 "上传曾返回远端 ID，但该资源当前不可见；禁止重复创建".to_string(),
                             ))
                         }
-                        Err(error) => Err(error),
+                        Err(error) => return Err(error),
                     };
+                    if file.id != remote_id
+                        || file.name != task.name
+                        || file.size != task.source_size.unwrap_or(task.total_size)
+                    {
+                        return Ok(RemoteVerification::Ambiguous(
+                            "远端结果 ID 存在，但名称或大小与创建任务不一致".to_string(),
+                        ));
+                    }
+                    let local_sha256 = if comparable_sha256(&file).is_some() {
+                        self.source_sha256_if_current(task).await?
+                    } else {
+                        None
+                    };
+                    if !content_hash_matches(&file, local_sha256.as_deref()) {
+                        return Ok(RemoteVerification::Ambiguous(
+                            "远端结果 ID 的 content_hash 与上传源不一致".to_string(),
+                        ));
+                    }
+                    return self.committed_upload(task, file).await;
                 }
 
                 let expected_size = task.source_size.unwrap_or(task.total_size);
                 let mut candidates = Vec::new();
-                let mut missing_time_identity = false;
+                let mut missing_time_candidates = Vec::new();
                 let lower_bound = task.created_at.saturating_sub(120_000);
-                let upper_bound = chrono::Utc::now()
-                    .timestamp_millis()
-                    .saturating_add(120_000);
+                // Keep the window anchored to the durable task rather than verification-time
+                // `now`, but allow slow/interrupted resumable uploads to finish well after the
+                // task was enqueued. Uniqueness, parent, size and (when available) SHA-256 still
+                // have to match before the result can be committed.
+                let upper_bound = task
+                    .created_at
+                    .saturating_add(30_i64 * 24 * 60 * 60 * 1_000);
                 for file in self
                     .files_api
                     .list_all(task.parent_file_id.as_deref())
@@ -342,16 +552,30 @@ impl TransferOperations for ExecutorTransferOperations {
                         Some(created_at) if (lower_bound..=upper_bound).contains(&created_at) => {
                             candidates.push(file)
                         }
-                        None => missing_time_identity = true,
+                        None => missing_time_candidates.push(file),
                         Some(_) => {}
                     }
                 }
+                let needs_local_sha256 = candidates
+                    .iter()
+                    .chain(missing_time_candidates.iter())
+                    .any(|file| comparable_sha256(file).is_some());
+                let local_sha256 = if needs_local_sha256 {
+                    self.source_sha256_if_current(task).await?
+                } else {
+                    None
+                };
+                candidates.retain(|file| content_hash_matches(file, local_sha256.as_deref()));
+                missing_time_candidates
+                    .retain(|file| content_hash_matches(file, local_sha256.as_deref()));
+                if candidates.len() == 1 {
+                    return self.committed_upload(task, candidates.remove(0)).await;
+                }
                 match candidates.len() {
-                    0 if missing_time_identity => Ok(RemoteVerification::Ambiguous(
+                    0 if !missing_time_candidates.is_empty() => Ok(RemoteVerification::Ambiguous(
                         "发现同名同大小资源但缺少创建时间，无法排除重复文件".to_string(),
                     )),
                     0 => Ok(RemoteVerification::NotCommitted),
-                    1 => Ok(RemoteVerification::Committed(candidates.remove(0))),
                     _ => Ok(RemoteVerification::Ambiguous(
                         "父目录内存在多个符合创建任务的远端资源".to_string(),
                     )),
@@ -371,6 +595,25 @@ impl TransferOperations for ExecutorTransferOperations {
                     }
                     Err(error) => return Err(error),
                 };
+                if let Some(remote_result_id) = task
+                    .remote_result_file_id
+                    .as_deref()
+                    .filter(|id| !id.trim().is_empty())
+                {
+                    if remote_result_id == file_id
+                        && file.id == file_id
+                        && file.name == task.name
+                        && file.size == task.source_size.unwrap_or(task.total_size)
+                    {
+                        // This ID is persisted only after UploadApi returned a completed File. It
+                        // is stronger evidence than editedTime, whose resolution/visibility may
+                        // lag, and lets xattr-only recovery finish without replaying the update.
+                        return self.committed_upload(task, file).await;
+                    }
+                    return Ok(RemoteVerification::Ambiguous(
+                        "更新已返回远端结果 ID，但当前资源身份不一致".to_string(),
+                    ));
+                }
                 let edited_time = file.edited_time.map(|time| time.timestamp_millis());
                 if edited_time == task.expected_cloud_edited_time {
                     return Ok(RemoteVerification::NotCommitted);
@@ -380,7 +623,7 @@ impl TransferOperations for ExecutorTransferOperations {
                     && file.size == task.source_size.unwrap_or(task.total_size)
                     && edited_time.is_some()
                 {
-                    Ok(RemoteVerification::Committed(file))
+                    self.committed_upload(task, file).await
                 } else {
                     Ok(RemoteVerification::Ambiguous(
                         "远端版本已变化，但内容身份与本次更新不一致".to_string(),
@@ -527,7 +770,7 @@ impl SyncExecutor {
         // permit. This permit does not admit any action; every action rechecks after it wins a
         // concurrency slot below.
         if self.db.is_some() {
-            let prune_activity = match self.begin_action_activity() {
+            let prune_activity = match self.begin_action_activity(None) {
                 Ok(activity) => activity,
                 Err(error) => {
                     return actions
@@ -562,7 +805,9 @@ impl SyncExecutor {
                             };
                             // This is the action linearization point: shutdown closes the gate before it
                             // waits for old work, so queued actions cannot start callbacks afterwards.
-                            let _activity = match executor.begin_action_activity() {
+                            let _activity = match executor
+                                .begin_action_activity(action.relative_path.as_deref())
+                            {
                                 Ok(activity) => activity,
                                 Err(error) => return Self::engine_stopped_result(&error),
                             };
@@ -594,10 +839,13 @@ impl SyncExecutor {
             .collect()
     }
 
-    fn begin_action_activity(&self) -> AppResult<Option<Box<dyn Send>>> {
+    fn begin_action_activity(
+        &self,
+        relative_path: Option<&str>,
+    ) -> AppResult<Option<Box<dyn Send>>> {
         self.action_activity_gate
             .as_ref()
-            .map(|gate| gate.begin())
+            .map(|gate| gate.begin(relative_path))
             .transpose()
     }
 
@@ -645,6 +893,7 @@ impl SyncExecutor {
             SyncActionType::Upload | SyncActionType::Download => unreachable!(),
             SyncActionType::CreatePlaceholder => self.do_create_placeholder(action).await,
             SyncActionType::CreateFolder => self.do_create_folder(action).await,
+            SyncActionType::MoveInCloud => self.do_move_in_cloud(action).await,
             SyncActionType::DeleteFromCloud => self.do_delete_from_cloud(action).await,
             SyncActionType::DeleteFromLocal => self.do_delete_from_local(action).await,
             SyncActionType::CreateConflictCopy => self.do_conflict(action).await,
@@ -707,8 +956,16 @@ impl SyncExecutor {
                 let has_existing_content = action
                     .local_path
                     .as_deref()
-                    .and_then(|path| std::fs::metadata(path).ok())
-                    .is_some_and(|metadata| metadata.is_file() && metadata.len() > 0);
+                    .and_then(|path| {
+                        std::fs::symlink_metadata(path)
+                            .ok()
+                            .map(|metadata| (path, metadata))
+                    })
+                    .is_some_and(|(path, metadata)| {
+                        metadata.is_file()
+                            && !(metadata.len() == 0
+                                && crate::mount::manager::is_placeholder_file(Path::new(path)))
+                    });
                 if has_existing_content {
                     TransferOperation::DownloadUpdate
                 } else {
@@ -725,7 +982,9 @@ impl SyncExecutor {
         };
         let source_metadata = matches!(
             operation,
-            TransferOperation::Create | TransferOperation::Update
+            TransferOperation::Create
+                | TransferOperation::Update
+                | TransferOperation::DownloadUpdate
         )
         .then(|| {
             action
@@ -744,13 +1003,18 @@ impl SyncExecutor {
         let source_size = source_metadata
             .as_ref()
             .map(|metadata| metadata.len() as i64);
-        let total_size = source_size.unwrap_or_else(|| {
+        let total_size = if matches!(
+            operation,
+            TransferOperation::Create | TransferOperation::Update
+        ) {
+            source_size.unwrap_or(0)
+        } else {
             action
                 .cloud_file
                 .as_ref()
                 .map(|file| file.size)
                 .unwrap_or(0)
-        });
+        };
         TransferTask {
             id: 0,
             direction,
@@ -936,31 +1200,8 @@ impl SyncExecutor {
             let full = action.relative_path.as_deref().unwrap_or("新建文件夹");
             let name = full.rsplit('/').next().unwrap_or(full);
 
-            // ★ 创建前先检查云端是否已存在同名目录。
-            // 场景：目录被删除（cloud_tree 已清）→ 用户从回收站恢复 → watcher 先于
-            // 云端刷新触发 → planner 生成 CreateFolder → 若不检查，华为 API 会创建
-            // "name(1)" 后缀副本，而非复用已有目录。
-            // parent_file_id 为 None 表示根目录，同样需要检查。
-            {
-                let pid = action.parent_file_id.as_deref();
-                if let Ok(list) = self.files_api.list_all(pid).await {
-                    if let Some(existing) = list.iter().find(|f| f.is_folder() && f.name == name) {
-                        tracing::info!(
-                            rel,
-                            existing_id = %existing.id,
-                            parent = pid.unwrap_or("root"),
-                            "CreateFolder 跳过：云端已存在同名文件夹，复用已有 ID"
-                        );
-                        return ActionResult {
-                            success: true,
-                            error_message: None,
-                            deferred: false,
-                            cloud_file: Some(existing.clone()),
-                        };
-                    }
-                }
-            }
-
+            // FilesApi 内部统一执行父目录范围查重、严格响应核验和响应丢失后的唯一收敛；
+            // 列表失败时会 fail closed，绝不会继续发送非幂等 POST。
             match self
                 .files_api
                 .create_folder(name, action.parent_file_id.as_deref())
@@ -972,45 +1213,6 @@ impl SyncExecutor {
                     deferred: false,
                     cloud_file: Some(f),
                 },
-                // 对齐 dart：400/409 时查同名已存在文件夹，存在则视为成功
-                // （同样用末段 name 匹配，与云端真名一致才能命中）
-                Err(ref e) if matches!(e.drive_status(), Some(400 | 409)) => {
-                    if let Some(pid) = action.parent_file_id.as_deref() {
-                        if let Ok(list) = self.files_api.list_all(Some(pid)).await {
-                            if let Some(existing) =
-                                list.iter().find(|f| f.is_folder() && f.name == name)
-                            {
-                                ActionResult {
-                                    success: true,
-                                    error_message: None,
-                                    deferred: false,
-                                    cloud_file: Some(existing.clone()),
-                                }
-                            } else {
-                                ActionResult {
-                                    success: false,
-                                    error_message: Some(format!("{e}")),
-                                    deferred: false,
-                                    cloud_file: None,
-                                }
-                            }
-                        } else {
-                            ActionResult {
-                                success: false,
-                                error_message: Some(format!("{e}")),
-                                deferred: false,
-                                cloud_file: None,
-                            }
-                        }
-                    } else {
-                        ActionResult {
-                            success: false,
-                            error_message: Some(format!("{e}")),
-                            deferred: false,
-                            cloud_file: None,
-                        }
-                    }
-                }
                 Err(e) => ActionResult {
                     success: false,
                     error_message: Some(e.to_string()),
@@ -1020,6 +1222,114 @@ impl SyncExecutor {
             }
         };
         Self::log_action_result(rel, "创建目录成功", "创建目录失败", &result);
+        result
+    }
+
+    async fn do_move_in_cloud(&self, action: &SyncAction) -> ActionResult {
+        let deferred = |message: String| ActionResult {
+            success: false,
+            error_message: Some(message),
+            deferred: true,
+            cloud_file: None,
+        };
+        let Some(file_id) = action.file_id.as_deref() else {
+            return deferred("跨目录移动缺少 fileId，等待重新规划".to_string());
+        };
+        let Some(target_parent) = action.parent_file_id.as_deref() else {
+            return deferred("跨目录移动的目标父目录尚未取得 fileId，等待重新规划".to_string());
+        };
+        let Some(relative_path) = action.relative_path.as_deref() else {
+            return deferred("跨目录移动缺少目标相对路径，等待重新规划".to_string());
+        };
+        let Some(local_path) = action.local_path.as_deref().map(PathBuf::from) else {
+            return deferred("跨目录移动缺少本地路径，等待重新规划".to_string());
+        };
+
+        // Close the scan-to-write race: the destination must still be the local file carrying the
+        // same remote identity. If the user moved it again, leave the remote untouched and replan.
+        let local_identity = std::fs::metadata(&local_path)
+            .ok()
+            .filter(|metadata| metadata.is_file())
+            .and_then(|_| {
+                xattr::get(&local_path, crate::mount::manager::XATTR_FILE_ID)
+                    .ok()
+                    .flatten()
+            })
+            .and_then(|bytes| String::from_utf8(bytes).ok());
+        if local_identity.as_deref() != Some(file_id) {
+            return deferred("跨目录移动执行前本地路径或 fileId 已变化，等待重新规划".to_string());
+        }
+
+        let target_name = relative_path
+            .rsplit('/')
+            .next()
+            .filter(|name| !name.is_empty())
+            .unwrap_or(relative_path);
+        let target_files = match self.files_api.list_all(Some(target_parent)).await {
+            Ok(files) => files,
+            Err(error) => {
+                return deferred(format!("核验移动目标目录失败，未发送远端写入：{error}"))
+            }
+        };
+        if target_files
+            .iter()
+            .any(|file| file.id.as_str() != file_id && file.name.as_str() == target_name)
+        {
+            return deferred(format!(
+                "目标目录已存在同名云端文件 {target_name}，拒绝覆盖并等待重新规划"
+            ));
+        }
+
+        // FilesApi::update first GETs the current parent. If a previous response was lost but the
+        // move committed, retry converges through an idempotent rename-only PATCH. Otherwise it
+        // submits addParentFolder/removeParentFolder and fileName in one verified request.
+        let result = match self
+            .files_api
+            .update(file_id, Some(target_name), Some(target_parent), None)
+            .await
+        {
+            Ok(file) => ActionResult {
+                success: true,
+                error_message: None,
+                deferred: false,
+                cloud_file: Some(file),
+            },
+            Err(error) => match self.files_api.get(file_id).await {
+                Ok(file)
+                    if file.id.as_str() == file_id
+                        && file.name.as_str() == target_name
+                        && file.parent_folder.as_deref().is_some_and(|parents| {
+                            parents.len() == 1 && parents[0].as_str() == target_parent
+                        }) =>
+                {
+                    tracing::info!(
+                        file_id,
+                        target_parent,
+                        target_name,
+                        %error,
+                        "移动响应不确定，但 fileId GET 已确认目标名称与父目录"
+                    );
+                    ActionResult {
+                        success: true,
+                        error_message: None,
+                        deferred: false,
+                        cloud_file: Some(file),
+                    }
+                }
+                Ok(_) => deferred(format!(
+                    "远端跨目录移动尚未生效，保留原基线等待重新规划：{error}"
+                )),
+                Err(verification_error) => deferred(format!(
+                    "远端跨目录移动结果不确定，保留原基线等待重新规划：{error}；核验失败：{verification_error}"
+                )),
+            },
+        };
+        Self::log_action_result(
+            relative_path,
+            "移动云端文件成功",
+            "移动云端文件失败",
+            &result,
+        );
         result
     }
 
@@ -1088,27 +1398,119 @@ impl SyncExecutor {
             } // DB 清理场景
         };
         let rel = action.relative_path.as_deref().unwrap_or("?");
-        let result = if let Some(m) = &self.mount {
-            match m.delete_local(&path).await {
+        let fail = |message: String, deferred: bool| ActionResult {
+            success: false,
+            error_message: Some(message),
+            deferred,
+            cloud_file: None,
+        };
+        let Some(mount) = &self.mount else {
+            return fail("mount manager 未初始化，拒绝删除本地内容".into(), false);
+        };
+
+        let baselines = match &self.db {
+            Some(db) => {
+                let conn = db.lock();
+                match repository::load_all(&conn) {
+                    Ok(items) => {
+                        let mut by_path = HashMap::with_capacity(items.len());
+                        let mut duplicate = None;
+                        for item in items {
+                            let path = item.local_path.clone();
+                            if by_path.insert(path.clone(), item).is_some() {
+                                duplicate = Some(path);
+                                break;
+                            }
+                        }
+                        if let Some(path) = duplicate {
+                            return fail(format!("同步基线存在重复路径，拒绝删除：{path}"), true);
+                        }
+                        by_path
+                    }
+                    Err(error) => {
+                        return fail(format!("读取同步基线失败，保留本地内容：{error}"), true)
+                    }
+                }
+            }
+            None => return fail("同步数据库未初始化，拒绝删除本地内容".into(), false),
+        };
+
+        let mut path_exists = match std::fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return fail(format!("无法读取待删除路径，保留本地内容：{error}"), true),
+            Ok(_) => {
+                let allow_orphan_placeholder = action.file_id.is_none();
+                if let Err(error) =
+                    verify_local_delete_snapshot(&path, rel, &baselines, allow_orphan_placeholder)
+                {
+                    return fail(error.to_string(), true);
+                }
+                true
+            }
+        };
+
+        // Keep the remote proof as close as possible to the irreversible unlink. Network or
+        // protocol uncertainty is retryable, never permission to remove local content.
+        if let Some(file_id) = action.file_id.as_deref() {
+            if file_id.starts_with(repository::PENDING_FILE_ID_PREFIX) {
+                return fail("待上传记录没有可核验的远端删除事实".into(), true);
+            }
+            match self.files_api.verify_deleted(file_id).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    return fail("云端文件仍存在，取消本地删除并等待重新规划".into(), true)
+                }
+                Err(error) => {
+                    return fail(format!("无法确认云端已删除，保留本地内容：{error}"), true)
+                }
+            }
+        }
+
+        // The remote proof above can block on the network. Re-read the complete persisted local
+        // snapshot after it returns so an edit made during that wait is never unlinked.
+        if path_exists {
+            path_exists = match std::fs::symlink_metadata(&path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => {
+                    return fail(
+                        format!("远端核验后无法读取待删除路径，保留本地内容：{error}"),
+                        true,
+                    )
+                }
+                Ok(_) => {
+                    let allow_orphan_placeholder = action.file_id.is_none();
+                    if let Err(error) = verify_local_delete_snapshot(
+                        &path,
+                        rel,
+                        &baselines,
+                        allow_orphan_placeholder,
+                    ) {
+                        return fail(
+                            format!("远端核验期间本地内容发生变化，已取消删除：{error}"),
+                            true,
+                        );
+                    }
+                    true
+                }
+            };
+        }
+
+        let result = if !path_exists {
+            ActionResult {
+                success: true,
+                error_message: None,
+                deferred: false,
+                cloud_file: None,
+            }
+        } else {
+            match mount.delete_local_confirmed(&path).await {
                 Ok(()) => ActionResult {
                     success: true,
                     error_message: None,
                     deferred: false,
                     cloud_file: None,
                 },
-                Err(e) => ActionResult {
-                    success: false,
-                    error_message: Some(e.to_string()),
-                    deferred: false,
-                    cloud_file: None,
-                },
-            }
-        } else {
-            ActionResult {
-                success: true,
-                error_message: None,
-                deferred: false,
-                cloud_file: None,
+                Err(error) => fail(error.to_string(), true),
             }
         };
         Self::log_action_result(rel, "删除本地文件成功", "删除本地文件失败", &result);
@@ -1188,9 +1590,21 @@ impl SyncExecutor {
                         cloud_file: None,
                     }
                 } else {
+                    let expectation = DownloadExpectation {
+                        edited_time_ms: cloud_file.edited_time.map(|time| time.timestamp_millis()),
+                        size: u64::try_from(cloud_file.size).ok(),
+                        content_hash: cloud_file.content_hash.clone(),
+                        destination_snapshot: None,
+                        placeholder_file_id: Some(cloud_file.id.clone()),
+                    };
                     match self
                         .download_api
-                        .download(&cloud_file.id, &local_path, None)
+                        .download_with_expectation(
+                            &cloud_file.id,
+                            &local_path,
+                            Some(&expectation),
+                            None,
+                        )
                         .await
                     {
                         Ok(()) => {
@@ -1221,9 +1635,21 @@ impl SyncExecutor {
             }
             crate::sync::conflict::ConflictSide::Local => {
                 // 本地获胜：下载云端旧版 → copyPath（败方副本），上传本地覆盖云端。
+                let expectation = DownloadExpectation {
+                    edited_time_ms: cloud_file.edited_time.map(|time| time.timestamp_millis()),
+                    size: u64::try_from(cloud_file.size).ok(),
+                    content_hash: cloud_file.content_hash.clone(),
+                    destination_snapshot: None,
+                    placeholder_file_id: Some(cloud_file.id.clone()),
+                };
                 if let Err(e) = self
                     .download_api
-                    .download(&cloud_file.id, &resolution.copy_path, None)
+                    .download_with_expectation(
+                        &cloud_file.id,
+                        &resolution.copy_path,
+                        Some(&expectation),
+                        None,
+                    )
                     .await
                 {
                     ActionResult {

@@ -158,19 +158,108 @@ impl FilesApi {
 
     /// 创建文件夹。对齐 dart `FilesApi.createFolder({name, parentId?})`。
     ///
-    /// 关键：body 用 [`ascii_json_encode`] 编码（中文名必须 ASCII 转义）。
+    /// 这是非幂等 POST，因此必须先在目标父目录内查重；写请求失败后也必须再次按
+    /// `parentFolder + fileName` 唯一核验。唯一匹配视为已经提交，零匹配把原错误返回给
+    /// 调用方决定何时重试，多匹配或核验失败则拒绝再次 POST。
     pub async fn create_folder(&self, name: &str, parent_id: Option<&str>) -> AppResult<DriveFile> {
+        if name.trim().is_empty() {
+            return Err(AppError::generic("文件夹名称不能为空"));
+        }
+        let expected_parent = canonical_parent_id(parent_id)?;
+
+        if let Some(existing) = self
+            .find_unique_folder_in_parent(name, expected_parent)
+            .await?
+        {
+            tracing::info!(
+                folder_id = %existing.id,
+                folder_name = name,
+                parent_id = expected_parent,
+                "创建文件夹前核验命中唯一同名目录，跳过 POST"
+            );
+            return Ok(existing);
+        }
+
+        let submitted = self
+            .create_folder_once(name, parent_id, expected_parent)
+            .await;
+        match submitted {
+            Ok(file) => Ok(file),
+            Err(submit_error) => {
+                match self
+                    .find_unique_folder_in_parent(name, expected_parent)
+                    .await
+                {
+                    Ok(Some(existing)) => {
+                        tracing::info!(
+                            folder_id = %existing.id,
+                            folder_name = name,
+                            parent_id = expected_parent,
+                            error = %submit_error,
+                            "创建文件夹响应不确定，父目录唯一核验确认已提交"
+                        );
+                        Ok(existing)
+                    }
+                    // 只有明确的零匹配才把原错误交还调用方，允许稍后显式重试。
+                    Ok(None) => Err(submit_error),
+                    Err(verification_error) => Err(AppError::generic(format!(
+                        "创建文件夹结果不确定：{submit_error}；父目录唯一核验失败：{verification_error}"
+                    ))),
+                }
+            }
+        }
+    }
+
+    async fn create_folder_once(
+        &self,
+        name: &str,
+        parent_id: Option<&str>,
+        expected_parent: &str,
+    ) -> AppResult<DriveFile> {
         let body = build_create_folder_body(name, parent_id);
         let encoded = ascii_json_encode(&body);
         let path = "/files?fields=*";
         let resp = self
             .send_post(path, encoded.into_bytes(), "application/json")
             .await?;
-        let metadata = response_metadata(&resp, RequestSemantics::Write);
+        let auth_already_replayed = require_official_write_ok(&resp, "createFolder")?;
         let body_json: Value =
             parse_json_response_with_semantics(resp, "createFolder", RequestSemantics::Write)
                 .await?;
-        parse_written_drive_file(&body_json, "createFolder", metadata.auth_already_replayed)
+        let file =
+            parse_verified_written_drive_file(&body_json, "createFolder", auth_already_replayed)?;
+        verify_created_folder(
+            &file,
+            name,
+            expected_parent,
+            RequestSemantics::Write,
+            auth_already_replayed,
+        )?;
+        Ok(file)
+    }
+
+    async fn find_unique_folder_in_parent(
+        &self,
+        name: &str,
+        expected_parent: &str,
+    ) -> AppResult<Option<DriveFile>> {
+        let request_parent = (expected_parent != "root").then_some(expected_parent);
+        let listed = self.list_all(request_parent).await?;
+        let mut matches = Vec::new();
+        for file in listed {
+            if file.name != name || !file.is_folder() {
+                continue;
+            }
+            verify_created_folder(&file, name, expected_parent, RequestSemantics::Read, false)?;
+            matches.push(file);
+        }
+        match matches.len() {
+            0 => Ok(None),
+            1 => Ok(matches.pop()),
+            count => Err(AppError::generic(format!(
+                "父目录 {expected_parent} 中存在 {count} 个同名文件夹，创建结果有歧义"
+            ))),
+        }
     }
 
     /// 删除文件（软删除，移入回收站"最近删除"）。
@@ -866,7 +955,7 @@ fn require_official_write_ok(resp: &reqwest::Response, ctx: &str) -> AppResult<b
             metadata.semantics,
             metadata.auth_already_replayed,
             &format!(
-                "Huawei Files:update 成功状态必须是 200，实际为 {}",
+                "Huawei Files 写操作成功状态必须是 200，实际为 {}",
                 resp.status().as_u16()
             ),
         ));
@@ -883,6 +972,16 @@ fn validate_file_id_value(id: &str, field: &str) -> AppResult<()> {
         Err(AppError::generic(format!("{field} 不能为空")))
     } else {
         Ok(())
+    }
+}
+
+fn canonical_parent_id(parent_id: Option<&str>) -> AppResult<&str> {
+    match parent_id {
+        None | Some("") | Some("root") => Ok("root"),
+        Some(parent_id) => {
+            validate_file_id_value(parent_id, "parentFolder")?;
+            Ok(parent_id)
+        }
     }
 }
 
@@ -929,6 +1028,46 @@ fn verify_written_file_id(
         expected_id,
         ctx,
         RequestSemantics::Write,
+        auth_already_replayed,
+    )
+}
+
+fn verify_created_folder(
+    file: &DriveFile,
+    expected_name: &str,
+    expected_parent: &str,
+    semantics: RequestSemantics,
+    auth_already_replayed: bool,
+) -> AppResult<()> {
+    if file.id.trim().is_empty() {
+        return Err(protocol_error(
+            "createFolder",
+            semantics,
+            auth_already_replayed,
+            "响应 File.id 为空",
+        ));
+    }
+    if file.name != expected_name {
+        return Err(protocol_error(
+            "createFolder",
+            semantics,
+            auth_already_replayed,
+            "响应 fileName 与请求名称不一致",
+        ));
+    }
+    if file.mime_type.as_deref() != Some(FOLDER_MIME_TYPE) {
+        return Err(protocol_error(
+            "createFolder",
+            semantics,
+            auth_already_replayed,
+            "响应 mimeType 不是 Huawei 文件夹类型",
+        ));
+    }
+    verify_parent(
+        file,
+        expected_parent,
+        "createFolder",
+        semantics,
         auth_already_replayed,
     )
 }

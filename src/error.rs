@@ -364,6 +364,23 @@ impl AppError {
         .with_cause_body(body)
     }
 
+    /// Resumable-upload session is definitively unavailable, while the target write still needs
+    /// remote verification before a fresh session may be created.
+    pub fn drive_upload_session_expired(status_code: u16, auth_already_replayed: bool) -> Self {
+        Self::DriveApi {
+            code: DriveApiErrorCode::FromStatus,
+            message: format!("断点上传会话已失效 ({status_code})"),
+            status_code: Some(status_code),
+            error_code: Some("upload_session_expired".to_string()),
+            retry_after: None,
+            transport_kind: None,
+            // The expired session may have accepted an earlier chunk or final write. The runner
+            // must verify the target before it discards the durable session identity.
+            request_may_have_reached_server: true,
+            auth_already_replayed,
+        }
+    }
+
     /// 配额不足
     pub fn drive_quota_exceeded() -> Self {
         Self::DriveApi {

@@ -239,6 +239,14 @@ impl ChangesApi {
             let final_cursor = page.new_start_cursor.ok_or_else(|| {
                 protocol_error("Changes:list 终页缺少非空 newStartCursor，无法提交 checkpoint")
             })?;
+            if (final_cursor == cursor && page_count > 0)
+                || (final_cursor != cursor && seen.contains(&final_cursor))
+            {
+                return Err(protocol_error(format!(
+                    "Changes:list 已累计 {} 条变更，但 newStartCursor 未推进或形成循环：{final_cursor}",
+                    all.len()
+                )));
+            }
             tracing::info!(
                 pages = page_number,
                 total = all.len(),

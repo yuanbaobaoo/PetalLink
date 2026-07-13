@@ -33,6 +33,7 @@ use crate::sync::engine::SyncEngine;
 use crate::sync::executor::SyncExecutor;
 use crate::sync::state::{FreeUpCheckResult, SyncGlobalState};
 use crate::sync::status_aggregator::{RuntimeStatus, StatusAggregator};
+use crate::sync::transfer_state::TransferState;
 
 // ===== 全局单例 =====
 
@@ -277,6 +278,13 @@ fn ensure_engine_started_owned(app: &AppHandle) -> AppResult<()> {
     }
 
     let mount = mount()?;
+    let recovered_free_up = {
+        let conn = DB.lock();
+        mount.recover_interrupted_free_up(&conn)?
+    };
+    if recovered_free_up > 0 {
+        tracing::warn!(count = recovered_free_up, "启动前已收敛中断的释放空间操作");
+    }
 
     // 构造 SyncExecutor
     let mut executor = SyncExecutor::new(
@@ -522,7 +530,66 @@ pub async fn drive_get_file(id: String) -> AppResult<DriveFile> {
 
 #[tauri::command]
 pub async fn drive_create_folder(name: String, parent_id: Option<String>) -> AppResult<DriveFile> {
+    // FilesApi 保证创建前查重、严格写响应合同和丢响应后的 parent+name 唯一收敛。
     FILES_API.create_folder(&name, parent_id.as_deref()).await
+}
+
+fn ensure_no_active_transfer_for_identity(
+    file_id: Option<&str>,
+    relative_path: Option<&str>,
+) -> AppResult<()> {
+    let active = repository::list_all_transfers(&DB.lock())?
+        .into_iter()
+        .any(|task| {
+            (file_id.is_some_and(|id| task.file_id.as_deref() == Some(id))
+                || relative_path.is_some_and(|path| {
+                    task.relative_path.as_deref().is_some_and(|task_path| {
+                        task_path == path
+                            || task_path
+                                .strip_prefix(path)
+                                .is_some_and(|suffix| suffix.starts_with('/'))
+                            || path
+                                .strip_prefix(task_path)
+                                .is_some_and(|suffix| suffix.starts_with('/'))
+                    })
+                }))
+                && task.state_kind().is_ok_and(|state| {
+                    !matches!(
+                        state,
+                        TransferState::Completed | TransferState::Failed | TransferState::Canceled
+                    )
+                })
+        });
+    if active {
+        return Err(AppError::generic("该文件存在活动或待恢复任务，请稍后重试"));
+    }
+    Ok(())
+}
+
+fn is_path_in_subtree(path: &str, root: &str) -> bool {
+    path == root
+        || path
+            .strip_prefix(root)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+fn ensure_no_db_path_collision(old_root: &str, new_root: &str) -> AppResult<()> {
+    crate::core::paths::validate_relative_path(old_root, false)?;
+    crate::core::paths::validate_relative_path(new_root, false)?;
+    if old_root == new_root {
+        return Ok(());
+    }
+    if is_path_in_subtree(new_root, old_root) {
+        return Err(AppError::generic("拒绝把目录移动到自身子树"));
+    }
+    let collision = repository::load_all(&DB.lock())?.into_iter().any(|record| {
+        !is_path_in_subtree(&record.local_path, old_root)
+            && is_path_in_subtree(&record.local_path, new_root)
+    });
+    if collision {
+        return Err(AppError::generic("目标同步基线已被其他文件或目录占用"));
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -531,10 +598,20 @@ pub async fn drive_delete_file(app: AppHandle, id: String) -> AppResult<()> {
     // 无法正确反映删除后的状态 → 拒绝，等索引完成。
     ensure_not_indexing()?;
     // ★ 查询 DB 中是否有本地同步记录（用于同步删除本地文件）
-    let local_info: Option<(String, bool)> = {
+    let local_info = {
         let conn = DB.lock();
-        repository::find_by_file_id(&conn, &id)?.map(|r| (r.local_path.clone(), r.is_folder))
+        repository::find_by_file_id(&conn, &id)?
     };
+    let _path_lease = match (try_sync_engine(), local_info.as_ref()) {
+        (Some(engine), Some(record)) => {
+            Some(engine.begin_exclusive_path_activity(&record.local_path)?)
+        }
+        _ => None,
+    };
+    ensure_no_active_transfer_for_identity(
+        Some(&id),
+        local_info.as_ref().map(|record| record.local_path.as_str()),
+    )?;
     if let Err(write_error) = FILES_API.delete(&id).await {
         match FILES_API.verify_deleted(&id).await {
             Ok(true) => tracing::info!(file_id = %id, "删除响应丢失，但 fileId 核验确认已回收"),
@@ -548,25 +625,74 @@ pub async fn drive_delete_file(app: AppHandle, id: String) -> AppResult<()> {
     }
 
     tracing::info!(file_id = %id, "删除云端文件已核验");
-    if let Some((local_path, is_folder)) = local_info {
+    if let Some(engine) = try_sync_engine() {
+        let roots = {
+            let cloud = engine.cloud_tree_lock();
+            cloud
+                .iter()
+                .filter(|(_, file)| file.id == id)
+                .map(|(path, file)| (path.clone(), file.is_folder()))
+                .collect::<Vec<_>>()
+        };
+        for (root, is_folder) in roots {
+            if is_folder {
+                let prefix = format!("{root}/");
+                engine
+                    .cloud_tree_lock()
+                    .retain(|path, _| path != &root && !path.starts_with(&prefix));
+                engine
+                    .path_to_id_lock()
+                    .retain(|path, _| path != &root && !path.starts_with(&prefix));
+            } else {
+                engine.cloud_tree_remove(&root);
+                engine.path_to_id_remove(&root);
+            }
+        }
+    }
+    if let Some(record) = local_info {
+        let local_path = record.local_path;
+        let is_folder = record.is_folder;
         let mount = mount()?;
         let absolute_path =
             crate::core::paths::safe_join_under(mount.mount_dir(), &local_path, false)?;
-        if absolute_path.exists() {
-            if is_folder {
-                tokio::fs::remove_dir_all(&absolute_path)
-                    .await
-                    .map_err(|error| {
-                        crate::error::AppError::generic(format!(
-                            "云端已回收，但本地目录删除失败：{error}"
-                        ))
-                    })?;
-            } else {
-                mount.delete_local(&absolute_path).await.map_err(|error| {
-                    crate::error::AppError::generic(format!(
-                        "云端已回收，但本地文件删除失败：{error}"
+        match std::fs::symlink_metadata(&absolute_path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(AppError::generic(format!(
+                    "云端已回收，但无法安全读取本地路径，已保留内容：{error}"
+                )))
+            }
+            Ok(_) => {
+                let baselines = {
+                    let conn = DB.lock();
+                    let mut by_path = HashMap::new();
+                    for item in repository::load_all(&conn)? {
+                        let path = item.local_path.clone();
+                        if by_path.insert(path.clone(), item).is_some() {
+                            return Err(AppError::generic(format!(
+                                "云端已回收，但同步基线存在重复路径，已保留本地内容：{path}"
+                            )));
+                        }
+                    }
+                    by_path
+                };
+                crate::sync::executor::verify_local_delete_snapshot(
+                    &absolute_path,
+                    &local_path,
+                    &baselines,
+                    false,
+                )
+                .map_err(|error| {
+                    AppError::generic(format!(
+                        "云端已回收，但本地内容在操作期间发生变化，已保留并等待冲突救援：{error}"
                     ))
                 })?;
+                mount
+                    .delete_local_confirmed(&absolute_path)
+                    .await
+                    .map_err(|error| {
+                        AppError::generic(format!("云端已回收，但本地删除失败：{error}"))
+                    })?;
             }
         }
 
@@ -591,18 +717,6 @@ pub async fn drive_delete_file(app: AppHandle, id: String) -> AppResult<()> {
         }
 
         if let Some(engine) = try_sync_engine() {
-            if is_folder {
-                let prefix = format!("{local_path}/");
-                engine
-                    .cloud_tree_lock()
-                    .retain(|path, _| path != &local_path && !path.starts_with(&prefix));
-                engine
-                    .path_to_id_lock()
-                    .retain(|path, _| path != &local_path && !path.starts_with(&prefix));
-            } else {
-                engine.cloud_tree_remove(&local_path);
-                engine.path_to_id_remove(&local_path);
-            }
             engine.add_recently_deleted(&local_path);
         }
     }
@@ -627,29 +741,26 @@ async fn settle_verified_remote_path_change(
     if old_relative_path == new_relative_path {
         return Ok(());
     }
+    ensure_no_db_path_collision(&old_relative_path, new_relative_path)?;
 
     let mount = mount()?;
     let old_absolute =
         crate::core::paths::safe_join_under(mount.mount_dir(), &old_relative_path, false)?;
     let new_absolute =
         crate::core::paths::safe_join_under(mount.mount_dir(), new_relative_path, false)?;
-    if let Some(parent) = new_absolute.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|error| AppError::generic(format!("创建目标父目录失败：{error}")))?;
-    }
-    if old_absolute.exists() {
-        if new_absolute.exists() {
+    crate::sync::path_recovery::ensure_safe_target_parent(mount.mount_dir(), new_relative_path)?;
+    let old_metadata = crate::sync::path_recovery::optional_metadata(&old_absolute)?;
+    let new_metadata = crate::sync::path_recovery::optional_metadata(&new_absolute)?;
+    if let Some(metadata) = old_metadata.as_ref() {
+        crate::sync::path_recovery::validate_local_type(metadata, &old_record, &old_absolute)?;
+        if new_metadata.is_some() {
             return Err(AppError::generic("目标本地路径已存在，拒绝覆盖"));
         }
-        tokio::fs::rename(&old_absolute, &new_absolute)
-            .await
+        crate::sync::path_recovery::rename_no_replace(&old_absolute, &new_absolute)
             .map_err(|error| AppError::generic(format!("同步本地路径变更失败：{error}")))?;
-    } else if new_absolute.exists() {
-        let target_id = xattr::get(&new_absolute, crate::mount::manager::XATTR_FILE_ID)
-            .ok()
-            .flatten()
-            .and_then(|bytes| String::from_utf8(bytes).ok());
+    } else if let Some(metadata) = new_metadata.as_ref() {
+        crate::sync::path_recovery::validate_local_type(metadata, &old_record, &new_absolute)?;
+        let target_id = crate::sync::path_recovery::read_file_id(&new_absolute)?;
         if target_id.as_deref() != Some(file_id) {
             return Err(AppError::generic("目标路径已存在且无法证明是同一云端文件"));
         }
@@ -734,6 +845,41 @@ async fn settle_verified_remote_path_change(
     Ok(())
 }
 
+/// Persist local identity before a non-idempotent remote path write. The xattr follows the inode
+/// across a rename and lets the next trusted cloud cycle distinguish recovery from an unrelated
+/// target path. Directories support the same xattr on macOS.
+async fn persist_remote_path_change_identity(
+    file_id: &str,
+    old_relative_path: &str,
+) -> AppResult<()> {
+    let mount = mount()?;
+    let local_path =
+        crate::core::paths::safe_join_under(mount.mount_dir(), old_relative_path, false)?;
+    match std::fs::symlink_metadata(&local_path) {
+        Ok(metadata)
+            if !metadata.file_type().is_symlink()
+                && (metadata.file_type().is_file() || metadata.file_type().is_dir()) =>
+        {
+            let existing_id = xattr::get(&local_path, crate::mount::manager::XATTR_FILE_ID)
+                .map_err(|error| AppError::generic(format!("读取路径变更源身份失败：{error}")))?
+                .map(String::from_utf8)
+                .transpose()
+                .map_err(|_| AppError::generic("路径变更源 fileId 标记损坏，拒绝修改远端"))?;
+            if existing_id.as_deref().is_some_and(|id| id != file_id) {
+                return Err(AppError::generic(
+                    "路径变更源属于另一云端文件，拒绝修改远端",
+                ));
+            }
+            mount.set_file_id_xattr(&local_path, file_id).await
+        }
+        Ok(_) => Err(AppError::generic("远端路径变更源不是安全的文件或目录")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(AppError::generic(format!(
+            "持久化路径变更源身份失败：{error}"
+        ))),
+    }
+}
+
 #[tauri::command]
 pub async fn drive_rename_file(id: String, new_name: String) -> AppResult<DriveFile> {
     // 索引中拒绝：同 drive_delete_file，避免与重建中的 cloud_tree 冲突。
@@ -743,6 +889,51 @@ pub async fn drive_rename_file(id: String, new_name: String) -> AppResult<DriveF
         let conn = DB.lock();
         repository::find_by_file_id(&conn, &id)?.map(|record| record.local_path)
     };
+    let new_relative_path = old_relative_path.as_ref().map(|old_relative_path| {
+        std::path::Path::new(old_relative_path)
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(|parent| parent.join(&new_name))
+            .unwrap_or_else(|| std::path::PathBuf::from(&new_name))
+            .to_string_lossy()
+            .into_owned()
+    });
+    let engine_for_lease = try_sync_engine();
+    let _source_lease = match (engine_for_lease.as_ref(), old_relative_path.as_deref()) {
+        (Some(engine), Some(path)) => Some(engine.begin_exclusive_path_activity(path)?),
+        _ => None,
+    };
+    let _target_lease = match (
+        engine_for_lease.as_ref(),
+        old_relative_path.as_deref(),
+        new_relative_path.as_deref(),
+    ) {
+        (Some(engine), Some(old), Some(new)) if old != new => {
+            Some(engine.begin_exclusive_path_activity(new)?)
+        }
+        _ => None,
+    };
+    ensure_no_active_transfer_for_identity(Some(&id), old_relative_path.as_deref())?;
+    if new_relative_path.as_deref() != old_relative_path.as_deref() {
+        ensure_no_active_transfer_for_identity(None, new_relative_path.as_deref())?;
+    }
+    if let (Some(old), Some(new)) = (old_relative_path.as_deref(), new_relative_path.as_deref()) {
+        ensure_no_db_path_collision(old, new)?;
+        let mount = mount()?;
+        let old_absolute = crate::core::paths::safe_join_under(mount.mount_dir(), old, false)?;
+        let new_absolute = crate::core::paths::safe_join_under(mount.mount_dir(), new, false)?;
+        let old_metadata = crate::sync::path_recovery::optional_metadata(&old_absolute)?;
+        let new_metadata = crate::sync::path_recovery::optional_metadata(&new_absolute)?;
+        if old_absolute != new_absolute && new_metadata.is_some() {
+            let target_id = crate::sync::path_recovery::read_file_id(&new_absolute)?;
+            if old_metadata.is_some() || target_id.as_deref() != Some(id.as_str()) {
+                return Err(AppError::generic("目标本地路径已存在，拒绝先修改云端"));
+            }
+        }
+    }
+    if let Some(old_relative_path) = old_relative_path.as_deref() {
+        persist_remote_path_change_identity(&id, old_relative_path).await?;
+    }
     let file = match FILES_API.rename_file(&id, &new_name).await {
         Ok(file) => file,
         Err(write_error) => match FILES_API.get(&id).await {
@@ -755,14 +946,8 @@ pub async fn drive_rename_file(id: String, new_name: String) -> AppResult<DriveF
             }
         },
     };
-    if let Some(old_relative_path) = old_relative_path {
-        let new_relative_path = std::path::Path::new(&old_relative_path)
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .map(|parent| parent.join(&new_name))
-            .unwrap_or_else(|| std::path::PathBuf::from(&new_name));
-        settle_verified_remote_path_change(&id, &new_relative_path.to_string_lossy(), &file)
-            .await?;
+    if let Some(new_relative_path) = new_relative_path {
+        settle_verified_remote_path_change(&id, &new_relative_path, &file).await?;
     }
     tracing::info!(file_id = %id, new_name = %new_name, "重命名已核验并结算");
     Ok(file)
@@ -772,10 +957,91 @@ pub async fn drive_rename_file(id: String, new_name: String) -> AppResult<DriveF
 pub async fn drive_move_file(id: String, new_parent_folder: String) -> AppResult<DriveFile> {
     // 索引中拒绝：移动改 parentFolder，与重建中的 path_to_id/cloud_tree 冲突。
     ensure_not_indexing()?;
+    let new_parent_folder = if new_parent_folder == "root" {
+        try_sync_engine()
+            .and_then(|engine| engine.root_folder_id())
+            .unwrap_or(new_parent_folder)
+    } else {
+        new_parent_folder
+    };
     let old_relative_path = {
         let conn = DB.lock();
         repository::find_by_file_id(&conn, &id)?.map(|record| record.local_path)
     };
+    let target_parent_path = if old_relative_path.is_some() {
+        let mut resolved = (new_parent_folder == "root").then(String::new);
+        if let Some(engine) = try_sync_engine() {
+            if new_parent_folder == "root"
+                || engine.root_folder_id().as_deref() == Some(new_parent_folder.as_str())
+            {
+                resolved = Some(String::new());
+            } else {
+                resolved = engine.path_to_id_lock().iter().find_map(|(path, file_id)| {
+                    (file_id == &new_parent_folder).then_some(path.clone())
+                });
+            }
+        }
+        if resolved.is_none() && new_parent_folder != "root" {
+            let conn = DB.lock();
+            resolved = repository::find_by_file_id(&conn, &new_parent_folder)?
+                .filter(|record| record.is_folder)
+                .map(|record| record.local_path);
+        }
+        resolved.ok_or_else(|| AppError::generic("无法解析目标云端目录的本地路径"))?
+    } else {
+        String::new()
+    };
+    let new_relative_path = old_relative_path
+        .as_deref()
+        .map(|old_relative_path| -> AppResult<String> {
+            let name = std::path::Path::new(old_relative_path)
+                .file_name()
+                .ok_or_else(|| AppError::generic("移动源路径缺少文件名"))?;
+            Ok(if target_parent_path.is_empty() {
+                std::path::PathBuf::from(name)
+            } else {
+                std::path::Path::new(&target_parent_path).join(name)
+            }
+            .to_string_lossy()
+            .into_owned())
+        })
+        .transpose()?;
+    let engine_for_lease = try_sync_engine();
+    let _source_lease = match (engine_for_lease.as_ref(), old_relative_path.as_deref()) {
+        (Some(engine), Some(path)) => Some(engine.begin_exclusive_path_activity(path)?),
+        _ => None,
+    };
+    let _target_lease = match (
+        engine_for_lease.as_ref(),
+        old_relative_path.as_deref(),
+        new_relative_path.as_deref(),
+    ) {
+        (Some(engine), Some(old), Some(new)) if old != new => {
+            Some(engine.begin_exclusive_path_activity(new)?)
+        }
+        _ => None,
+    };
+    ensure_no_active_transfer_for_identity(Some(&id), old_relative_path.as_deref())?;
+    if new_relative_path.as_deref() != old_relative_path.as_deref() {
+        ensure_no_active_transfer_for_identity(None, new_relative_path.as_deref())?;
+    }
+    if let (Some(old), Some(new)) = (old_relative_path.as_deref(), new_relative_path.as_deref()) {
+        ensure_no_db_path_collision(old, new)?;
+        let mount = mount()?;
+        let old_absolute = crate::core::paths::safe_join_under(mount.mount_dir(), old, false)?;
+        let new_absolute = crate::core::paths::safe_join_under(mount.mount_dir(), new, false)?;
+        let old_metadata = crate::sync::path_recovery::optional_metadata(&old_absolute)?;
+        let new_metadata = crate::sync::path_recovery::optional_metadata(&new_absolute)?;
+        if old_absolute != new_absolute && new_metadata.is_some() {
+            let target_id = crate::sync::path_recovery::read_file_id(&new_absolute)?;
+            if old_metadata.is_some() || target_id.as_deref() != Some(id.as_str()) {
+                return Err(AppError::generic("目标本地路径已存在，拒绝先修改云端"));
+            }
+        }
+    }
+    if let Some(old_relative_path) = old_relative_path.as_deref() {
+        persist_remote_path_change_identity(&id, old_relative_path).await?;
+    }
     let file = match FILES_API
         .update(&id, None, Some(&new_parent_folder), None)
         .await
@@ -798,33 +1064,8 @@ pub async fn drive_move_file(id: String, new_parent_folder: String) -> AppResult
             }
         },
     };
-    if let Some(old_relative_path) = old_relative_path {
-        let target_parent_path = if let Some(engine) = try_sync_engine() {
-            engine
-                .path_to_id_lock()
-                .iter()
-                .find_map(|(path, file_id)| (file_id == &new_parent_folder).then_some(path.clone()))
-        } else {
-            None
-        }
-        .or_else(|| {
-            let conn = DB.lock();
-            repository::find_by_file_id(&conn, &new_parent_folder)
-                .ok()
-                .flatten()
-                .map(|record| record.local_path)
-        })
-        .ok_or_else(|| AppError::generic("无法解析目标云端目录的本地路径"))?;
-        let name = std::path::Path::new(&old_relative_path)
-            .file_name()
-            .ok_or_else(|| AppError::generic("移动源路径缺少文件名"))?;
-        let new_relative_path = if target_parent_path.is_empty() {
-            std::path::PathBuf::from(name)
-        } else {
-            std::path::Path::new(&target_parent_path).join(name)
-        };
-        settle_verified_remote_path_change(&id, &new_relative_path.to_string_lossy(), &file)
-            .await?;
+    if let Some(new_relative_path) = new_relative_path {
+        settle_verified_remote_path_change(&id, &new_relative_path, &file).await?;
     }
     tracing::info!(file_id = %id, target_folder = %new_parent_folder, "移动已核验并结算");
     Ok(file)
@@ -994,33 +1235,25 @@ pub async fn sync_manual_refresh(_app: AppHandle) -> AppResult<()> {
 #[tauri::command]
 pub fn sync_check_file_local_status(file_id: String) -> AppResult<String> {
     let conn = DB.lock();
-    let record = repository::find_by_file_id(&conn, &file_id).ok().flatten();
+    let record = repository::find_by_file_id(&conn, &file_id)?;
     let Some(record) = record else {
         return Ok("not_synced".to_string());
     };
     if record.is_folder {
         return Ok("folder".to_string());
     }
-    // 检查本地文件是否存在且有真实内容（非占位符）
+    // 占位状态只以 xattr 为准；真实的 0 字节文件不能按长度误判成占位符。
     if let Ok(m) = mount() {
         let abs_path = m.mount_dir().join(&record.local_path);
-        if abs_path.exists() {
-            if let Ok(meta) = std::fs::metadata(&abs_path) {
-                if meta.len() > 0 {
-                    // 进一步确认不是占位符（占位符 0 字节已过滤，但检查 xattr 更严谨）
-                    let is_placeholder = xattr::get(&abs_path, crate::mount::manager::XATTR_STATE)
-                        .ok()
-                        .flatten()
-                        .map(|b| {
-                            String::from_utf8_lossy(&b) == crate::mount::manager::STATE_PLACEHOLDER
-                        })
-                        .unwrap_or(false);
-                    if !is_placeholder {
-                        return Ok("synced".to_string());
-                    }
+        match std::fs::symlink_metadata(&abs_path) {
+            Ok(_) => {
+                if crate::mount::manager::is_placeholder_file(&abs_path) {
+                    return Ok("placeholder".to_string());
                 }
+                return Ok("synced".to_string());
             }
-            return Ok("placeholder".to_string());
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(AppError::generic(format!("读取本地同步状态失败：{error}"))),
         }
     }
     Ok("not_synced".to_string())
@@ -1036,39 +1269,22 @@ pub fn sync_batch_file_status(file_ids: Vec<String>) -> AppResult<HashMap<String
     let mut result: HashMap<String, String> = HashMap::with_capacity(file_ids.len());
 
     for file_id in &file_ids {
-        let status = match repository::find_by_file_id(&conn, file_id).ok().flatten() {
+        let status = match repository::find_by_file_id(&conn, file_id)? {
             None => "not_synced",
             Some(record) => {
                 if record.is_folder {
                     "folder"
                 } else if let Some(ref m) = mount_opt {
                     let abs_path = m.mount_dir().join(&record.local_path);
-                    if abs_path.exists() {
-                        if let Ok(meta) = std::fs::metadata(&abs_path) {
-                            if meta.len() > 0 {
-                                // 进一步确认不是占位符（占位符 0 字节已过滤，但 xattr 更严谨）
-                                let is_placeholder =
-                                    xattr::get(&abs_path, crate::mount::manager::XATTR_STATE)
-                                        .ok()
-                                        .flatten()
-                                        .map(|b| {
-                                            String::from_utf8_lossy(&b)
-                                                == crate::mount::manager::STATE_PLACEHOLDER
-                                        })
-                                        .unwrap_or(false);
-                                if !is_placeholder {
-                                    "synced"
-                                } else {
-                                    "placeholder"
-                                }
-                            } else {
-                                "placeholder"
-                            }
-                        } else {
+                    match std::fs::symlink_metadata(&abs_path) {
+                        Ok(_) if crate::mount::manager::is_placeholder_file(&abs_path) => {
                             "placeholder"
                         }
-                    } else {
-                        "not_synced"
+                        Ok(_) => "synced",
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => "not_synced",
+                        Err(error) => {
+                            return Err(AppError::generic(format!("读取本地同步状态失败：{error}")))
+                        }
                     }
                 } else {
                     // 未配置挂载目录：仅从 DB 状态判定
@@ -1102,6 +1318,92 @@ pub async fn sync_check_safe_free_up(rel_path: String, file_id: String) -> AppRe
     Ok("not_synced".to_string())
 }
 
+fn allocate_free_up_staging_path(local_path: &std::path::Path) -> AppResult<std::path::PathBuf> {
+    let parent = local_path
+        .parent()
+        .ok_or_else(|| AppError::generic("待释放文件缺少父目录"))?;
+    for _ in 0..16 {
+        let candidate = parent.join(format!(
+            ".hwcloud_freeup-{}-{:016x}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        match crate::sync::path_recovery::optional_metadata(&candidate)? {
+            None => return Ok(candidate),
+            Some(_) => continue,
+        }
+    }
+    Err(AppError::generic("无法分配释放空间临时路径"))
+}
+
+async fn restore_staged_free_up(
+    local_path: &std::path::Path,
+    staging_path: &std::path::Path,
+    file_id: &str,
+) -> AppResult<()> {
+    if let Some(metadata) = crate::sync::path_recovery::optional_metadata(local_path)? {
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(AppError::generic(format!(
+                "原路径已出现非普通文件，已保留旧内容于 {}",
+                staging_path.display()
+            )));
+        }
+        let state = xattr::get(local_path, crate::mount::manager::XATTR_STATE)
+            .map_err(|error| AppError::generic(format!("读取回滚占位状态失败：{error}")))?;
+        let owner = xattr::get(local_path, crate::mount::manager::XATTR_FILE_ID)
+            .map_err(|error| AppError::generic(format!("读取回滚占位身份失败：{error}")))?;
+        let is_owned_placeholder = state.as_deref()
+            == Some(crate::mount::manager::STATE_PLACEHOLDER.as_bytes())
+            && owner.as_deref() == Some(file_id.as_bytes());
+        if !is_owned_placeholder {
+            return Err(AppError::generic(format!(
+                "原路径已出现新的用户文件，已保留旧内容于 {}",
+                staging_path.display()
+            )));
+        }
+        tokio::fs::remove_file(local_path)
+            .await
+            .map_err(|error| AppError::generic(format!("移除回滚占位符失败：{error}")))?;
+    }
+    tokio::fs::rename(staging_path, local_path)
+        .await
+        .map_err(|error| AppError::generic(format!("恢复释放空间原文件失败：{error}")))?;
+    let _ = xattr::remove(
+        local_path,
+        crate::mount::manager::XATTR_FREE_UP_RELATIVE_PATH,
+    );
+    Ok(())
+}
+
+fn rollback_free_up_baseline(
+    file_id: &str,
+    rel_path: &str,
+    source_mtime: i64,
+    source_size: i64,
+) -> AppResult<()> {
+    let conn = DB.lock();
+    let changed = conn
+        .execute(
+            "UPDATE sync_items
+             SET status=?1, local_size=?2, error_message=NULL
+             WHERE file_id=?3 AND local_path=?4 AND status=?5
+               AND local_mtime=?6 AND local_size=0",
+            rusqlite::params![
+                repository::sync_status::SYNCED,
+                source_size,
+                file_id,
+                rel_path,
+                repository::sync_status::CLOUD_ONLY,
+                source_mtime,
+            ],
+        )
+        .map_err(|error| AppError::generic(format!("回滚释放空间基线失败：{error}")))?;
+    if changed != 1 {
+        return Err(AppError::generic("释放空间基线已并发变化，无法自动回滚"));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn sync_free_up_space(
     file_id: String,
@@ -1111,7 +1413,6 @@ pub async fn sync_free_up_space(
     size: i64,
 ) -> AppResult<()> {
     let engine = sync_engine()?;
-    let _activity = engine.begin_external_activity()?;
     let m = mount()?;
     let frontend_rel = crate::core::paths::relative_path_from_mount(
         m.mount_dir(),
@@ -1123,6 +1424,7 @@ pub async fn sync_free_up_space(
         )));
     }
     let lp = crate::core::paths::safe_join_under(m.mount_dir(), &rel_path, false)?;
+    let _path_lease = engine.begin_exclusive_path_activity(&rel_path)?;
 
     if size < 0 || !engine.cloud_tree_is_trusted() {
         return Err(AppError::generic("云端索引尚未追平，拒绝释放本地唯一副本"));
@@ -1186,8 +1488,18 @@ pub async fn sync_free_up_space(
     // Remote verification is intentionally between two local/DB checks. If the network call is
     // slow, any local edit or new transfer intent invalidates the lease before unlink.
     let remote = FILES_API.get(&file_id).await?;
-    if remote.id != file_id || remote.size != size || FILES_API.verify_deleted(&file_id).await? {
-        return Err(AppError::generic("远端副本不存在、已回收或大小不一致"));
+    let remote_edited_time = remote
+        .edited_time
+        .map(|edited_time| edited_time.timestamp_millis());
+    if remote.id != file_id
+        || remote.size != size
+        || baseline.cloud_edited_time.is_none()
+        || remote_edited_time != baseline.cloud_edited_time
+        || FILES_API.verify_deleted(&file_id).await?
+    {
+        return Err(AppError::generic(
+            "远端副本不存在、已回收、大小或版本与成功基线不一致",
+        ));
     }
 
     let current_metadata = std::fs::symlink_metadata(&lp)
@@ -1233,16 +1545,35 @@ pub async fn sync_free_up_space(
         }
     }
 
-    m.delete_local(&lp).await?;
-
-    // 创建占位符
-    m.create_placeholder_if_needed(&rel_path, &file_id, size)
-        .await?;
+    // 原文件先原子移入 watcher 忽略的同目录 staging；占位或 DB 结算失败时可恢复，
+    // 同时正确处理真实的 0 字节文件（delete_local 会有意保留这类文件，不能用于此处）。
+    let staging_path = allocate_free_up_staging_path(&lp)?;
+    xattr::set(
+        &lp,
+        crate::mount::manager::XATTR_FREE_UP_RELATIVE_PATH,
+        rel_path.as_bytes(),
+    )
+    .map_err(|error| AppError::generic(format!("写入释放空间恢复标记失败：{error}")))?;
+    std::fs::File::open(&lp)
+        .and_then(|file| file.sync_all())
+        .map_err(|error| AppError::generic(format!("持久化释放空间恢复标记失败：{error}")))?;
+    tokio::fs::rename(&lp, &staging_path)
+        .await
+        .map_err(|error| AppError::generic(format!("暂存待释放文件失败：{error}")))?;
+    if let Err(error) = m.create_placeholder_strict(&rel_path, &file_id, size).await {
+        let rollback = restore_staged_free_up(&lp, &staging_path, &file_id).await;
+        return Err(AppError::generic(format!(
+            "创建占位符失败：{error}；文件恢复结果：{}",
+            rollback
+                .map(|_| "已恢复".to_string())
+                .unwrap_or_else(|rollback_error| rollback_error.to_string())
+        )));
+    }
 
     // 更新 DB
-    let conn = DB.lock();
-    let changed = conn
-        .execute(
+    let changed_result = {
+        let conn = DB.lock();
+        conn.execute(
             "UPDATE sync_items
              SET status=?1, local_size=0, error_message=NULL
              WHERE file_id=?2 AND local_path=?3 AND status=?4
@@ -1256,11 +1587,46 @@ pub async fn sync_free_up_space(
                 source_size,
             ],
         )
-        .map_err(|error| AppError::generic(format!("提交释放空间基线失败：{error}")))?;
+        .map_err(|error| AppError::generic(format!("提交释放空间基线失败：{error}")))
+    };
+    let changed = match changed_result {
+        Ok(changed) => changed,
+        Err(error) => {
+            let rollback = restore_staged_free_up(&lp, &staging_path, &file_id).await;
+            return Err(AppError::generic(format!(
+                "{error}；文件恢复结果：{}",
+                rollback
+                    .map(|_| "已恢复".to_string())
+                    .unwrap_or_else(|rollback_error| rollback_error.to_string())
+            )));
+        }
+    };
     if changed != 1 {
-        return Err(AppError::generic(
-            "释放空间后基线发生并发变化，请立即重新同步",
-        ));
+        let rollback = restore_staged_free_up(&lp, &staging_path, &file_id).await;
+        return Err(AppError::generic(format!(
+            "释放空间后基线发生并发变化；文件恢复结果：{}",
+            rollback
+                .map(|_| "已恢复".to_string())
+                .unwrap_or_else(|rollback_error| rollback_error.to_string())
+        )));
+    }
+
+    if let Err(remove_error) = tokio::fs::remove_file(&staging_path).await {
+        let restore_result = restore_staged_free_up(&lp, &staging_path, &file_id).await;
+        let baseline_result = if restore_result.is_ok() {
+            rollback_free_up_baseline(&file_id, &rel_path, source_mtime, source_size)
+        } else {
+            Ok(())
+        };
+        return Err(AppError::generic(format!(
+            "清理释放空间暂存文件失败：{remove_error}；文件恢复：{}；基线恢复：{}",
+            restore_result
+                .map(|_| "成功".to_string())
+                .unwrap_or_else(|error| error.to_string()),
+            baseline_result
+                .map(|_| "成功".to_string())
+                .unwrap_or_else(|error| error.to_string())
+        )));
     }
 
     Ok(())
@@ -1285,7 +1651,7 @@ pub async fn sync_download_on_demand(
     let frontend_rel = crate::core::paths::relative_path_from_mount(m.mount_dir(), &frontend_dest)?;
     let record = {
         let conn = DB.lock();
-        repository::find_by_file_id(&conn, &file_id).ok().flatten()
+        repository::find_by_file_id(&conn, &file_id)?
     };
     let dest_rel = match record.as_ref().map(|record| record.local_path.clone()) {
         Some(rel) => {
@@ -1308,20 +1674,55 @@ pub async fn sync_download_on_demand(
     // - editedTime 必须写真实值，写 None 会让 is_cloud_changed 永远判"云端已变"
     //   → watcher 触发的 cycle 重复下载 → 同步循环（恶性 bug 根因）
     // - size 用于传输队列进度条显示（避免 0/0 显示 0%）
-    // 云端查询失败时回退查库既有 editedTime；size 缺失则 0（进度条不显示）
-    let cloud_file = FILES_API.get(&file_id).await.ok();
+    // 云端查询失败时仅允许回退到具备完整版本信息的可信 DB 缓存；缓存也不完整时必须
+    // 传播原始 GET 错误，不能构造 size=0 / editedTime=None 的不可执行任务。
+    let cached_metadata = record
+        .as_ref()
+        .filter(|record| record.size >= 0 && record.cloud_edited_time.is_some());
+    let cloud_file = match FILES_API.get(&file_id).await {
+        Ok(file) => Some(file),
+        Err(error) if cached_metadata.is_some() => {
+            tracing::warn!(
+                file_id,
+                error = %error,
+                "按需下载获取实时元数据失败，使用可信同步基线"
+            );
+            None
+        }
+        Err(error) => return Err(error),
+    };
     let cloud_edited_time = cloud_file
         .as_ref()
         .and_then(|f| f.edited_time.map(|t| t.timestamp_millis()))
-        .or_else(|| record.as_ref().and_then(|record| record.cloud_edited_time));
+        .or_else(|| cached_metadata.and_then(|record| record.cloud_edited_time))
+        .ok_or_else(|| AppError::generic("按需下载缺少可信云端 editedTime，拒绝创建任务"))?;
     let cloud_size = cloud_file
         .as_ref()
         .map(|file| file.size)
-        .or_else(|| record.as_ref().map(|record| record.size))
-        .unwrap_or(0);
-    let is_update = std::fs::metadata(&dest)
-        .ok()
-        .is_some_and(|metadata| metadata.is_file() && metadata.len() > 0);
+        .filter(|size| *size >= 0)
+        .or_else(|| cached_metadata.map(|record| record.size))
+        .ok_or_else(|| AppError::generic("按需下载缺少可信云端文件大小，拒绝创建任务"))?;
+    let destination_snapshot = match std::fs::symlink_metadata(&dest) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(AppError::generic("按需下载目标不是安全的普通文件"));
+            }
+            if metadata.len() == 0 && crate::mount::manager::is_placeholder_file(&dest) {
+                None
+            } else {
+                let mtime = metadata
+                    .modified()
+                    .ok()
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|duration| duration.as_millis() as i64)
+                    .ok_or_else(|| AppError::generic("无法读取按需下载目标修改时间"))?;
+                Some((mtime, metadata.len() as i64))
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(AppError::generic(format!("读取按需下载目标失败：{error}"))),
+    };
+    let is_update = destination_snapshot.is_some();
     let operation = if is_update {
         crate::sync::transfer_state::TransferOperation::DownloadUpdate
     } else {
@@ -1352,11 +1753,12 @@ pub async fn sync_download_on_demand(
         parent_file_id: cloud_file
             .as_ref()
             .and_then(|file| file.parent_folder.as_ref())
-            .and_then(|parents| parents.first().cloned()),
+            .and_then(|parents| parents.first().cloned())
+            .or_else(|| cached_metadata.and_then(|record| record.parent_folder_id.clone())),
         operation: Some(i32::from(operation)),
-        source_mtime: None,
-        source_size: None,
-        expected_cloud_edited_time: cloud_edited_time,
+        source_mtime: destination_snapshot.map(|snapshot| snapshot.0),
+        source_size: destination_snapshot.map(|snapshot| snapshot.1),
+        expected_cloud_edited_time: Some(cloud_edited_time),
         attempt_count: 0,
         next_retry_at: None,
         error_kind: None,
@@ -1972,8 +2374,8 @@ pub fn sync_items_by_folder(folder_local_path: String) -> AppResult<Vec<reposito
         .query_map(rusqlite::params![pattern], repository::SyncItem::from_row)
         .map_err(|e| AppError::generic(format!("查询失败：{e}")))?;
     let mut items = Vec::new();
-    for item in rows.flatten() {
-        items.push(item);
+    for item in rows {
+        items.push(item.map_err(|error| AppError::generic(format!("读取同步项失败：{error}")))?);
     }
     Ok(items)
 }

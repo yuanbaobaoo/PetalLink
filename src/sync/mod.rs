@@ -6,6 +6,7 @@ pub mod cloud_tree;
 pub mod conflict;
 pub mod engine;
 pub mod executor;
+pub mod path_recovery;
 pub mod planner;
 pub mod retry_policy;
 pub mod stability;

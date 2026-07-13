@@ -23,7 +23,7 @@ pub type OnlineCheck = Arc<dyn Fn() -> bool + Send + Sync>;
 pub type NowMs = Arc<dyn Fn() -> i64 + Send + Sync>;
 
 pub trait TaskActivityGate: Send + Sync {
-    fn begin(&self) -> AppResult<Box<dyn Send>>;
+    fn begin(&self, relative_path: Option<&str>) -> AppResult<Box<dyn Send>>;
 }
 
 /// Rebuild and publish the complete authoritative state after every accepted or rejected task
@@ -378,11 +378,11 @@ impl TaskRunner {
         *self.activity_gate.write() = Some(activity_gate);
     }
 
-    fn begin_activity(&self) -> AppResult<Option<Box<dyn Send>>> {
+    fn begin_activity(&self, task: &TransferTask) -> AppResult<Option<Box<dyn Send>>> {
         self.activity_gate
             .read()
             .clone()
-            .map(|gate| gate.begin())
+            .map(|gate| gate.begin(task.relative_path.as_deref()))
             .transpose()
     }
 
@@ -397,6 +397,9 @@ impl TaskRunner {
                 "新传输意图必须是 id=0/revision=0 的 Pending 任务",
             ));
         }
+        // Admission precedes the durable insert so an execution-time exclusive path lease cannot
+        // be bypassed by queuing a Pending row that would run immediately after the lease drops.
+        let _enqueue_activity = self.begin_activity(&task)?;
         let existing_or_task_id = {
             let conn = self.db.lock();
             let path_tasks = match task.relative_path.as_deref() {
@@ -447,6 +450,13 @@ impl TaskRunner {
             {
                 self.replan_task(&conn, restart, &task)
                     .map(|task| ExistingOrInsertedTask::Replanned(Box::new(task)))
+            } else if let Some(failed) = path_tasks
+                .iter()
+                .find(|candidate| candidate.state_kind() == Ok(TransferState::Failed))
+            {
+                // Failed is terminal for automatic work. Keep the row and its visible error as a
+                // path barrier; an explicit retry goes through prepare_retry and reuses this ID.
+                Ok(ExistingOrInsertedTask::Blocked(failed.id))
             } else {
                 repository::insert_transfer(&conn, &task).map(ExistingOrInsertedTask::Inserted)
             }
@@ -492,7 +502,7 @@ impl TaskRunner {
         let current = self.load(task_id)?;
         // Retry validation can persist a rejection, so shutdown admission must precede it and
         // stay held through the accepted Pending transition.
-        let _activity = self.begin_activity()?;
+        let _activity = self.begin_activity(&current)?;
         if current.state_kind().map_err(transition_error)? != TransferState::Failed {
             self.notify_rejection();
             return Err(AppError::generic("任务不存在或非失败状态"));
@@ -861,7 +871,7 @@ impl TaskRunner {
         let mut resolved = 0usize;
         for task in tasks {
             let verification = {
-                let _activity = self.begin_activity()?;
+                let _activity = self.begin_activity(&task)?;
                 self.operations.verify_remote(&task).await
             };
             match verification {
@@ -895,21 +905,39 @@ impl TaskRunner {
                     }
                 }
                 Ok(RemoteVerification::NotCommitted) => {
-                    let restart = self.transition(
-                        task.id,
-                        task.state_revision,
-                        TransferState::RestartRequired,
-                        TransferPatch {
-                            error_kind: ColumnPatch::Set(TransferErrorKind::RemoteAmbiguous),
-                            error_message: ColumnPatch::Set(
-                                "远端核验确认写入未提交，可以安全重放".to_string(),
-                            ),
-                            next_retry_at: ColumnPatch::Clear,
-                            finished_at: ColumnPatch::Clear,
-                            remote_result_file_id: ColumnPatch::Clear,
-                            ..Default::default()
-                        },
-                    )?;
+                    let session_expired = task.error_kind_typed().map_err(transition_error)?
+                        == Some(TransferErrorKind::SessionExpired);
+                    let restart_patch = TransferPatch {
+                        error_kind: ColumnPatch::Set(if session_expired {
+                            TransferErrorKind::SessionExpired
+                        } else {
+                            TransferErrorKind::RemoteAmbiguous
+                        }),
+                        error_message: ColumnPatch::Set(if session_expired {
+                            "远端核验确认写入未提交，已清理失效会话，可以安全新建会话".to_string()
+                        } else {
+                            "远端核验确认写入未提交，可以安全重放".to_string()
+                        }),
+                        next_retry_at: ColumnPatch::Clear,
+                        finished_at: ColumnPatch::Clear,
+                        remote_result_file_id: ColumnPatch::Clear,
+                        ..Default::default()
+                    };
+                    let restart = if session_expired {
+                        self.transition_clearing_upload_session(
+                            task.id,
+                            task.state_revision,
+                            TransferState::RestartRequired,
+                            restart_patch,
+                        )?
+                    } else {
+                        self.transition(
+                            task.id,
+                            task.state_revision,
+                            TransferState::RestartRequired,
+                            restart_patch,
+                        )?
+                    };
                     let pending = self.transition(
                         restart.id,
                         restart.state_revision,
@@ -941,6 +969,13 @@ impl TaskRunner {
                     }
                 }
                 Ok(RemoteVerification::Ambiguous(message)) => {
+                    let error_kind = if task.error_kind_typed().map_err(transition_error)?
+                        == Some(TransferErrorKind::SessionExpired)
+                    {
+                        TransferErrorKind::SessionExpired
+                    } else {
+                        TransferErrorKind::RemoteAmbiguous
+                    };
                     {
                         let conn = self.db.lock();
                         repository::patch_transfer_in_state(
@@ -949,7 +984,9 @@ impl TaskRunner {
                             task.state_revision,
                             TransferState::VerifyingRemote,
                             TransferPatch {
-                                error_kind: ColumnPatch::Set(TransferErrorKind::RemoteAmbiguous),
+                                // Preserve the expired-session marker until a conclusive absence
+                                // lets us atomically discard the old session identity.
+                                error_kind: ColumnPatch::Set(error_kind),
                                 error_message: ColumnPatch::Set(message),
                                 next_retry_at: ColumnPatch::Set(
                                     (self.now_ms)().saturating_add(60_000),
@@ -1107,7 +1144,7 @@ impl TaskRunner {
         for task in selected_tasks {
             // Startup recovery is a stream of independent row operations. Acquire per row so a
             // close between rows leaves every not-yet-admitted row byte-for-byte unchanged.
-            let _activity = self.begin_activity()?;
+            let _activity = self.begin_activity(&task)?;
             let state = match task.state_kind() {
                 Ok(state) => state,
                 Err(error) => {
@@ -1200,7 +1237,7 @@ impl TaskRunner {
     }
 
     fn suppress_startup_duplicate(&self, task: &TransferTask) -> AppResult<bool> {
-        let _activity = self.begin_activity()?;
+        let _activity = self.begin_activity(task)?;
         let state = task.state_kind().map_err(transition_error)?;
         let operation = task.operation_kind().map_err(transition_error)?;
         if state == TransferState::Running
@@ -1262,7 +1299,7 @@ impl TaskRunner {
         // This is the per-row linearization point. It intentionally precedes static validation:
         // validation failures are persisted, and download validation may create a parent folder.
         // An admitted permit remains alive through backend settlement, including ambiguous writes.
-        let _activity = self.begin_activity()?;
+        let _activity = self.begin_activity(&current)?;
         if !matches!(
             state,
             TransferState::Pending | TransferState::WaitingForNetwork | TransferState::BackingOff
@@ -1593,25 +1630,8 @@ impl TaskRunner {
             .local_path
             .as_deref()
             .ok_or_else(|| PreflightFailure::validation("成功核验缺少本地路径"))?;
-        let metadata = std::fs::metadata(local_path)
-            .map_err(|_| PreflightFailure::local_changed("成功核验时本地文件不存在"))?;
-        if !metadata.is_file() {
-            return Err(PreflightFailure::local_changed(
-                "成功核验时本地目标不是普通文件",
-            ));
-        }
         match operation {
             TransferOperation::Create | TransferOperation::Update => {
-                let mtime = metadata
-                    .modified()
-                    .ok()
-                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|duration| duration.as_millis() as i64);
-                if running.source_mtime != mtime
-                    || running.source_size != Some(metadata.len() as i64)
-                {
-                    return Err(PreflightFailure::local_changed("上传过程中本地源发生变化"));
-                }
                 let cloud = output
                     .cloud_file
                     .as_ref()
@@ -1630,6 +1650,13 @@ impl TaskRunner {
                 }
             }
             TransferOperation::Download | TransferOperation::DownloadUpdate => {
+                let metadata = std::fs::metadata(local_path)
+                    .map_err(|_| PreflightFailure::local_changed("成功核验时下载文件不存在"))?;
+                if !metadata.is_file() {
+                    return Err(PreflightFailure::local_changed(
+                        "成功核验时下载目标不是普通文件",
+                    ));
+                }
                 if running.expected_cloud_edited_time.is_none()
                     || metadata.len() as i64 != running.total_size
                 {
@@ -1660,18 +1687,36 @@ impl TaskRunner {
             .local_path
             .as_deref()
             .ok_or_else(|| AppError::generic("任务缺少本地路径"))?;
-        let metadata = std::fs::metadata(local_path)
-            .map_err(|error| AppError::generic(format!("成功结算读取本地文件失败：{error}")))?;
-        if !metadata.is_file() {
-            return Err(AppError::generic("成功结算目标不是普通文件"));
-        }
-        let local_mtime = metadata
-            .modified()
-            .ok()
-            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|duration| duration.as_millis() as i64)
-            .ok_or_else(|| AppError::generic("成功结算无法读取本地修改时间"))?;
-        let local_size = metadata.len() as i64;
+        // Upload settlement records the exact source snapshot that reached Huawei, not whatever
+        // currently occupies the path. If the user edited/replaced it during upload, the next
+        // planner pass sees that delta and issues a version-checked Update instead of looping the
+        // already-committed task through remote verification.
+        let (local_mtime, local_size) = if matches!(
+            operation,
+            TransferOperation::Create | TransferOperation::Update
+        ) {
+            (
+                running
+                    .source_mtime
+                    .ok_or_else(|| AppError::generic("上传成功结算缺少源修改时间快照"))?,
+                running
+                    .source_size
+                    .ok_or_else(|| AppError::generic("上传成功结算缺少源大小快照"))?,
+            )
+        } else {
+            let metadata = std::fs::metadata(local_path)
+                .map_err(|error| AppError::generic(format!("成功结算读取下载文件失败：{error}")))?;
+            if !metadata.is_file() {
+                return Err(AppError::generic("成功结算下载目标不是普通文件"));
+            }
+            let local_mtime = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_millis() as i64)
+                .ok_or_else(|| AppError::generic("成功结算无法读取下载文件修改时间"))?;
+            (local_mtime, metadata.len() as i64)
+        };
         let (file_id, name, size, cloud_edited_time, parent_folder_id) = match operation {
             TransferOperation::Create | TransferOperation::Update => {
                 let cloud = output
@@ -1945,9 +1990,23 @@ impl TaskRunner {
                     return Err(PreflightFailure::validation("更新下载缺少云端版本"));
                 }
                 self.ensure_download_parent(local_path)?;
-                if !local_path.is_file() {
+                let metadata = std::fs::symlink_metadata(local_path).map_err(|_| {
+                    PreflightFailure::local_changed("更新下载目标已不存在，需要重新规划")
+                })?;
+                let mtime = metadata
+                    .modified()
+                    .ok()
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|duration| duration.as_millis() as i64);
+                if metadata.file_type().is_symlink()
+                    || !metadata.is_file()
+                    || task.source_mtime.is_none()
+                    || task.source_size.is_none()
+                    || task.source_mtime != mtime
+                    || task.source_size != Some(metadata.len() as i64)
+                {
                     return Err(PreflightFailure::local_changed(
-                        "更新下载目标已不存在，需要重新规划",
+                        "更新下载目标已变化或缺少版本快照，需要重新规划",
                     ));
                 }
             }
@@ -2095,6 +2154,28 @@ impl TaskRunner {
             let conn = self.db.lock();
             repository::transition_transfer(&conn, task_id, expected_revision, state, patch)
                 .map_err(transition_error)?
+        };
+        self.notify_best_effort();
+        Ok(task)
+    }
+
+    fn transition_clearing_upload_session(
+        &self,
+        task_id: i64,
+        expected_revision: i64,
+        state: TransferState,
+        patch: TransferPatch,
+    ) -> AppResult<TransferTask> {
+        let task = {
+            let conn = self.db.lock();
+            repository::transition_transfer_clearing_upload_session(
+                &conn,
+                task_id,
+                expected_revision,
+                state,
+                patch,
+            )
+            .map_err(transition_error)?
         };
         self.notify_best_effort();
         Ok(task)
@@ -2449,7 +2530,7 @@ mod tests {
     }
 
     impl TaskActivityGate for ClosableActivityGate {
-        fn begin(&self) -> AppResult<Box<dyn Send>> {
+        fn begin(&self, _relative_path: Option<&str>) -> AppResult<Box<dyn Send>> {
             if self.accepting.load(Ordering::SeqCst) {
                 Ok(Box::new(()))
             } else {
