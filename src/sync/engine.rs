@@ -1176,6 +1176,10 @@ impl SyncEngine {
         let loaded_from_cache = if let Some(cache) = cloud_tree::load_persisted_cloud_tree(&abs_dir)
         {
             self.install_cloud_checkpoint(cache);
+            // The serialized checkpoint is a complete incremental baseline, but it is not the
+            // current cloud fact until Changes catch-up succeeds. Keep it available for replay
+            // while blocking every planner/write decision that requires current remote state.
+            self.set_cloud_tree_trusted(false);
             true
         } else {
             self.set_cloud_tree_trusted(false);
@@ -1196,38 +1200,40 @@ impl SyncEngine {
             reset_result?;
             false
         };
-        // ★ 清理无效墓碑：云端树里已不存在的 DELETED 记录可以真删了
-        if self.cloud_tree_is_trusted() {
-            let conn = self.db.lock();
-            let ct = self.cloud_tree.lock();
-            // 收集所有 DELETED 但云端已不存在的路径
-            let to_purge: Vec<String> = {
-                let mut stmt = conn
-                    .prepare("SELECT local_path FROM sync_items WHERE status=?1")
-                    .map_err(|e| AppError::generic(format!("查询失败：{e}")))?;
-                let rows = stmt
-                    .query_map(rusqlite::params![repository::sync_status::DELETED], |r| {
-                        r.get::<_, String>(0)
-                    })
-                    .map_err(|e| AppError::generic(format!("查询失败：{e}")))?;
-                rows.filter_map(|r| r.ok())
-                    .filter(|p| !ct.contains_key(p))
-                    .collect()
-            };
-            drop(ct);
-            if !to_purge.is_empty() {
-                for p in &to_purge {
-                    let _ = conn.execute(
-                        "DELETE FROM sync_items WHERE local_path=?1 AND status=?2",
-                        rusqlite::params![p, repository::sync_status::DELETED],
-                    );
-                }
-                tracing::info!(count = to_purge.len(), "已清理无效墓碑（云端已不存在）");
-            }
-        } else {
-            tracing::warn!("云端树不可信，跳过墓碑清理");
-        }
         Ok(loaded_from_cache)
+    }
+
+    fn purge_deleted_tombstones_if_trusted(&self) -> AppResult<()> {
+        if !self.cloud_tree_is_trusted() {
+            return Err(AppError::generic("云端树尚未 catch-up，拒绝清理墓碑"));
+        }
+        let conn = self.db.lock();
+        let cloud = self.cloud_tree.lock();
+        let to_purge: Vec<String> = {
+            let mut statement = conn
+                .prepare("SELECT local_path FROM sync_items WHERE status=?1")
+                .map_err(|error| AppError::generic(format!("查询墓碑失败：{error}")))?;
+            let rows = statement
+                .query_map(rusqlite::params![repository::sync_status::DELETED], |row| {
+                    row.get::<_, String>(0)
+                })
+                .map_err(|error| AppError::generic(format!("读取墓碑失败：{error}")))?;
+            rows.filter_map(Result::ok)
+                .filter(|path| !cloud.contains_key(path))
+                .collect()
+        };
+        drop(cloud);
+        for path in &to_purge {
+            conn.execute(
+                "DELETE FROM sync_items WHERE local_path=?1 AND status=?2",
+                rusqlite::params![path, repository::sync_status::DELETED],
+            )
+            .map_err(|error| AppError::generic(format!("清理墓碑失败：{error}")))?;
+        }
+        if !to_purge.is_empty() {
+            tracing::info!(count = to_purge.len(), "已清理可信云树中不存在的墓碑");
+        }
+        Ok(())
     }
 
     async fn start_watcher(self: &Arc<Self>) {
@@ -1629,30 +1635,11 @@ impl SyncEngine {
                     let _ = repository::reset_stale_statuses(&conn);
                 }
                 self.ensure_cycle_active()?;
-                self.recover_interrupted_transfers().await;
             }
 
-            if request.contains(CycleRequest::ONLINE_RECOVERY) {
-                if !self.is_online() {
-                    self.cycle.restore(
-                        CycleRequest::LOCAL_RESCAN
-                            | CycleRequest::CLOUD_INCREMENTAL
-                            | CycleRequest::ONLINE_RECOVERY,
-                    );
-                    if !request.contains(CycleRequest::STARTUP) {
-                        return Ok(());
-                    }
-                } else {
-                    self.ensure_cycle_active()?;
-                    if let Some(task_runner) = &self.task_runner {
-                        (self.cycle_observer)("resume-waiting");
-                        task_runner.resume_waiting().await?;
-                        self.ensure_cycle_active()?;
-                        (self.cycle_observer)("resume-due");
-                        task_runner.resume_due_backoff().await?;
-                    }
-                }
-            }
+            // Startup installs a complete serialized baseline first, but deliberately keeps it
+            // untrusted until Changes catch-up. No interrupted upload/download may be resumed
+            // before current cloud state is known.
             if request.contains(CycleRequest::STARTUP)
                 && request.contains(CycleRequest::CLOUD_INCREMENTAL)
             {
@@ -1668,6 +1655,9 @@ impl SyncEngine {
                                 | CycleRequest::CLOUD_INCREMENTAL
                                 | CycleRequest::ONLINE_RECOVERY,
                         );
+                        if !self.is_online() {
+                            return Ok(());
+                        }
                         return Err(error);
                     }
                 }
@@ -1690,6 +1680,7 @@ impl SyncEngine {
                             | CycleRequest::CLOUD_INCREMENTAL
                             | CycleRequest::ONLINE_RECOVERY,
                     );
+                    return Ok(());
                 } else {
                     (self.cycle_observer)("cloud-refresh");
                     if let Err(error) = self.refresh_cloud_incremental_for_cycle().await {
@@ -1704,9 +1695,48 @@ impl SyncEngine {
                             self.cycle.restore(
                                 CycleRequest::LOCAL_RESCAN | CycleRequest::CLOUD_INCREMENTAL,
                             );
-                            return Err(error);
                         }
+                        return Err(error);
                     }
+                }
+            }
+
+            // A stale or failed checkpoint is display-only. Blocking the whole planner here also
+            // blocks non-delete uploads/updates that could overwrite a newer remote version.
+            if !self.cloud_tree_is_trusted() {
+                self.cycle.restore(
+                    CycleRequest::LOCAL_RESCAN
+                        | CycleRequest::CLOUD_INCREMENTAL
+                        | CycleRequest::ONLINE_RECOVERY,
+                );
+                tracing::warn!("云端 checkpoint 尚未追平，跳过任务恢复与同步规划");
+                return Ok(());
+            }
+            self.purge_deleted_tombstones_if_trusted()?;
+
+            if request.contains(CycleRequest::STARTUP) {
+                self.ensure_cycle_active()?;
+                self.recover_interrupted_transfers().await;
+            }
+
+            // Stable-online recovery is ordered after cloud catch-up. This prevents a queued
+            // update from replaying against a checkpoint that predates a remote edit.
+            if request.contains(CycleRequest::ONLINE_RECOVERY) {
+                if !self.is_online() {
+                    self.cycle.restore(
+                        CycleRequest::LOCAL_RESCAN
+                            | CycleRequest::CLOUD_INCREMENTAL
+                            | CycleRequest::ONLINE_RECOVERY,
+                    );
+                    return Ok(());
+                }
+                self.ensure_cycle_active()?;
+                if let Some(task_runner) = &self.task_runner {
+                    (self.cycle_observer)("resume-waiting");
+                    task_runner.resume_waiting().await?;
+                    self.ensure_cycle_active()?;
+                    (self.cycle_observer)("resume-due");
+                    task_runner.resume_due_backoff().await?;
                 }
             }
             self.ensure_cycle_active()?;
@@ -2647,7 +2677,10 @@ impl SyncEngine {
             );
         }
 
-        if !force_full && self.cloud_tree_is_trusted() {
+        // A loaded checkpoint may be stale for planning but is still a structurally validated
+        // baseline for Changes replay. `cloud_cursor` exists only after validated checkpoint
+        // installation, so catch-up is allowed while destructive trust remains false.
+        if !force_full {
             if let Some(cursor) = saved_cursor.filter(|cursor| !cursor.trim().is_empty()) {
                 self.set_phase("querying-changes")?;
                 let incremental = async {
@@ -2740,17 +2773,16 @@ impl SyncEngine {
                         ))
                     })?;
                     crate::core::paths::validate_path_segment(&file.name)?;
-                    let parent_id = file
-                        .parent_folder
-                        .as_ref()
-                        .and_then(|parents| parents.first())
-                        .filter(|id| !id.trim().is_empty())
-                        .ok_or_else(|| {
-                            AppError::generic(format!(
-                                "Change {} 缺少可解析 parentFolder",
-                                change.file_id()
-                            ))
-                        })?;
+                    let parents = file.parent_folder.as_ref().ok_or_else(|| {
+                        AppError::generic(format!("Change {} 缺少 parentFolder", change.file_id()))
+                    })?;
+                    if parents.len() != 1 || parents[0].trim().is_empty() {
+                        return Err(AppError::generic(format!(
+                            "Change {} 的多父目录/空父目录语义不受支持",
+                            change.file_id()
+                        )));
+                    }
+                    let parent_id = &parents[0];
                     if parent_id == change.file_id() {
                         return Err(AppError::generic("Change 的 parentFolder 指向自身"));
                     }

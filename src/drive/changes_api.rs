@@ -87,6 +87,17 @@ impl Change {
                 "非删除 change 缺少可完整解析的 file：{file_id}"
             )));
         }
+        if kind == ChangeKind::Modified {
+            let parent_count = file
+                .as_ref()
+                .and_then(|file| file.parent_folder.as_ref())
+                .map_or(0, Vec::len);
+            if parent_count != 1 {
+                return Err(protocol_error(format!(
+                    "非删除 change 必须且只能有一个 parentFolder：{file_id}"
+                )));
+            }
+        }
 
         Ok(Self {
             kind,

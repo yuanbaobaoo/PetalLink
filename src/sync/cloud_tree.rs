@@ -117,7 +117,7 @@ impl CloudTreeCache {
 /// 返回 (tree: rel_path→DriveFile, path_to_id: rel_path→file_id, root_folder_id)。
 pub async fn refresh_cloud_tree(
     files_api: &Arc<FilesApi>,
-    mount: &Option<Arc<MountManager>>,
+    _mount: &Option<Arc<MountManager>>,
     _abs_mount_dir: &str,
 ) -> AppResult<(
     HashMap<String, DriveFile>,
@@ -187,26 +187,9 @@ pub async fn refresh_cloud_tree(
                         tree.insert(rel_path.clone(), f.clone());
                         path_to_id.insert(rel_path.clone(), f.id.clone());
 
-                        // #6 BFS 渐进建本地目录+占位符（对齐 dart _ensureLocalChildren）
-                        if let Some(ref m) = mount {
-                            if f.is_folder() {
-                                // ensure_folder 只建目录不写 xattr，需补写 cloud folderId。
-                                // reconcile_db_records 无 xattr 则无法为目录建 DB 记录 →
-                                // 用户随后删本地目录时 planner 看「本地无/云端有/DB 无」
-                                // → 误判为「云端文件夹→本地创建」把目录复原回来。
-                                // 设 xattr 后 reconcile 能建 DB 记录 → 删除走 skip 分支
-                                // （文件夹级联删除禁用），不再误复原。
-                                if let Ok(abs) = m.ensure_folder(&rel_path) {
-                                    if !f.id.is_empty() {
-                                        let _ = m.set_file_id_xattr(&abs, &f.id).await;
-                                    }
-                                }
-                            } else {
-                                let _ = m
-                                    .create_placeholder_if_needed(&rel_path, &f.id, f.size)
-                                    .await;
-                            }
-                        }
+                        // 候选扫描必须无本地副作用。目录/占位符只能由可信 checkpoint
+                        // 安装后的 planner/executor 创建，否则扫描失败或 replay 删除会在
+                        // 本地留下半棵树，并把已删除的远端对象反向上传复活。
 
                         if f.is_folder() && !visited.contains(&f.id) {
                             visited.insert(f.id.clone());
