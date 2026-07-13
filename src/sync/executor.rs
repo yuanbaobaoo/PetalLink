@@ -353,6 +353,14 @@ impl SyncExecutor {
             .ok_or_else(|| AppError::generic("TaskRunner 未初始化"))
     }
 
+    /// Deterministic engine-chain tests inject a fake durable backend while retaining the real
+    /// planner/executor/TaskRunner path. Production initializes this field through
+    /// `initialize_task_runner`.
+    #[cfg(test)]
+    pub(crate) fn set_task_runner_for_test(&mut self, task_runner: Arc<TaskRunner>) {
+        self.task_runner = Some(task_runner);
+    }
+
     /// 并发执行全部动作。
     /// 对齐 dart `executor.executeAll`。
     pub async fn execute_all(&self, actions: &[SyncAction]) -> Vec<ActionResult> {

@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use once_cell::sync::Lazy;
@@ -91,6 +92,51 @@ pub fn mount() -> AppResult<Arc<MountManager>> {
 /// 全局 SyncEngine（setup 或首次配置时注入；运行期共享同一实例）
 static SYNC_ENGINE: Mutex<Option<Arc<SyncEngine>>> = Mutex::new(None);
 
+struct EngineOwnershipProtocol {
+    gate: Mutex<()>,
+    replacements: AtomicUsize,
+}
+
+impl EngineOwnershipProtocol {
+    const fn new() -> Self {
+        Self {
+            gate: Mutex::new(()),
+            replacements: AtomicUsize::new(0),
+        }
+    }
+
+    fn install<R>(&self, install: impl FnOnce() -> AppResult<R>) -> AppResult<R> {
+        let _gate = self.gate.lock();
+        if self.replacements.load(Ordering::SeqCst) != 0 {
+            return Err(AppError::generic("同步引擎正在替换，请稍后重试"));
+        }
+        install()
+    }
+
+    fn begin_replacement(&self) -> EngineReplacementGuard<'_> {
+        let _gate = self.gate.lock();
+        self.replacements.fetch_add(1, Ordering::SeqCst);
+        EngineReplacementGuard { protocol: self }
+    }
+
+    fn finish_replacement(&self) {
+        let _gate = self.gate.lock();
+        self.replacements.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+struct EngineReplacementGuard<'a> {
+    protocol: &'a EngineOwnershipProtocol,
+}
+
+impl Drop for EngineReplacementGuard<'_> {
+    fn drop(&mut self) {
+        self.protocol.finish_replacement();
+    }
+}
+
+static ENGINE_OWNERSHIP: EngineOwnershipProtocol = EngineOwnershipProtocol::new();
+
 /// 设置 SyncEngine。
 pub fn set_sync_engine(e: Arc<SyncEngine>) {
     *SYNC_ENGINE.lock() = Some(e);
@@ -160,6 +206,22 @@ pub fn drop_runtime() {
     *MOUNT_MANAGER.lock() = None;
 }
 
+/// Replacement/cleanup path: publish cancellation, stop the actual watcher generation, and wait
+/// for the old cycle owner (including an already-submitted TaskRunner settlement) before callers
+/// clear shared DB/cache state or permit a replacement to start.
+pub async fn drop_runtime_async() {
+    let _replacement = ENGINE_OWNERSHIP.begin_replacement();
+    let engine = {
+        let _gate = ENGINE_OWNERSHIP.gate.lock();
+        let engine = SYNC_ENGINE.lock().take();
+        *MOUNT_MANAGER.lock() = None;
+        engine
+    };
+    if let Some(engine) = engine {
+        engine.shutdown().await;
+    }
+}
+
 /// 清除账号相关同步缓存：DB 行 + 所有 syncstate_*/cloudtree_*。
 ///
 /// 用于 fresh 登录（auth_login）成功后——token 可能是被删除后重新登录、或换账号，
@@ -202,6 +264,10 @@ pub fn relaunch(app: &AppHandle) {
 /// 若已配置同步目录且引擎未启动，则构造并启动 SyncEngine + 状态桥接。
 /// setup 与 config_save（首次配置）共用。
 pub fn ensure_engine_started(app: &AppHandle) -> AppResult<()> {
+    ENGINE_OWNERSHIP.install(|| ensure_engine_started_owned(app))
+}
+
+fn ensure_engine_started_owned(app: &AppHandle) -> AppResult<()> {
     if try_sync_engine().is_some() {
         return Ok(());
     }
@@ -273,7 +339,9 @@ pub fn ensure_engine_started(app: &AppHandle) -> AppResult<()> {
             let engine = weak_engine
                 .upgrade()
                 .ok_or_else(|| AppError::generic("同步引擎已停止"))?;
-            engine.recompute_and_broadcast_state().map(|_| ())
+            let result = engine.recompute_and_broadcast_state().map(|_| ());
+            engine.note_transfer_state_changed();
+            result
         }));
     }
     set_sync_engine(engine.clone());
@@ -366,7 +434,7 @@ pub async fn auth_login(app: AppHandle, port: u16) -> AppResult<TokenPair> {
     // 路径打不开，会导致进程退出却不重启。不清 token（刚保存）；其余设置（并发/
     // debounce/skip_patterns/排序/OAuth）保留。
     // 覆盖场景：① token 过期重登；② 换账号登录（旧目录/fileId/cloudtree 残留会污染新账号同步）。
-    drop_runtime();
+    drop_runtime_async().await;
     clear_account_caches();
     let _ = reset_account_config();
     tracing::info!("登录成功，已彻底清空上一账号同步缓存与目录配置，等待用户重新配置");
@@ -415,7 +483,7 @@ pub async fn auth_logout() -> AppResult<()> {
     //   ④ 清 token
     // 之前仅清 token 导致退出登录后 token.json 消失但其他缓存残留，
     // 随后换账号登录时仍带着旧目录/fileId/cloudtree 污染新会话。
-    drop_runtime();
+    drop_runtime_async().await;
     clear_account_caches();
     let _ = reset_account_config();
     AUTH_SERVICE.logout().await
@@ -602,6 +670,8 @@ pub async fn drive_get_about() -> AppResult<DriveAbout> {
 
 #[tauri::command]
 pub async fn drive_download_file(file_id: String, dest_path: String) -> AppResult<()> {
+    let engine = sync_engine()?;
+    let _activity = engine.begin_external_activity()?;
     let m = mount()?;
     let dest = std::path::PathBuf::from(&dest_path);
     let rel = crate::core::paths::relative_path_from_mount(m.mount_dir(), &dest)?;
@@ -613,7 +683,7 @@ pub async fn drive_download_file(file_id: String, dest_path: String) -> AppResul
     } else {
         crate::sync::transfer_state::TransferOperation::Download
     };
-    let result = sync_engine()?
+    let result = engine
         .task_runner()?
         .enqueue_and_run(repository::TransferTask {
             id: 0,
@@ -666,6 +736,8 @@ pub async fn drive_upload_file(
     local_path: String,
     parent_id: Option<String>,
 ) -> AppResult<DriveFile> {
+    let engine = sync_engine()?;
+    let _activity = engine.begin_external_activity()?;
     let m = mount()?;
     let path = std::path::PathBuf::from(&local_path);
     let rel = crate::core::paths::relative_path_from_mount(m.mount_dir(), &path)?;
@@ -678,7 +750,7 @@ pub async fn drive_upload_file(
         .ok()
         .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|duration| duration.as_millis() as i64);
-    let result = sync_engine()?
+    let result = engine
         .task_runner()?
         .enqueue_and_run(repository::TransferTask {
             id: 0,
@@ -909,13 +981,13 @@ pub async fn sync_download_on_demand(
     file_id: String,
     dest_path: String,
 ) -> AppResult<bool> {
+    let engine = sync_engine()?;
+    let _activity = engine.begin_external_activity()?;
     // 全局索引读取中：禁止按需下载（同 sync_folder_recursive，cloud_tree 构建中）
-    if let Some(e) = try_sync_engine() {
-        if e.current_state().is_indexing {
-            return Err(AppError::generic(
-                "正在读取云端索引，请稍后再试".to_string(),
-            ));
-        }
+    if engine.current_state().is_indexing {
+        return Err(AppError::generic(
+            "正在读取云端索引，请稍后再试".to_string(),
+        ));
     }
     let m = mount()?;
     let frontend_dest = PathBuf::from(&dest_path);
@@ -1000,7 +1072,7 @@ pub async fn sync_download_on_demand(
         remote_result_file_id: None,
         state_revision: 0,
     };
-    let result = sync_engine()?.task_runner()?.enqueue_and_run(task).await?;
+    let result = engine.task_runner()?.enqueue_and_run(task).await?;
     match result.outcome.disposition {
         crate::sync::task_runner::TaskDisposition::Completed => Ok(true),
         disposition => Err(AppError::generic(format!(
@@ -1025,6 +1097,7 @@ pub async fn sync_folder_recursive(
     rel_path: String,
 ) -> AppResult<i64> {
     let eng = sync_engine()?;
+    let activity = eng.begin_external_activity()?;
     // 全局索引读取中（云端树 BFS 重建中）：选择目录同步会基于不完整的 cloud_tree/path_to_id，
     // 且与全局 BFS 并发拉取易冲突 → 拒绝，等索引完成。
     if eng.current_state().is_indexing {
@@ -1032,19 +1105,20 @@ pub async fn sync_folder_recursive(
             "正在读取云端索引，请稍后再试".to_string(),
         ));
     }
-    if !eng.try_begin_folder_sync() {
-        tracing::info!("sync_folder_recursive: 已有目录同步进行中，跳过");
-        return Ok(0);
-    }
+    let Some(folder_guard) = eng.try_begin_folder_sync_guard() else {
+        return Err(AppError::generic(
+            "已有同步周期或目录同步正在运行，本次请求未开始",
+        ));
+    };
     // 后台异步执行：立即返回，不阻塞前端。传输项实时进传输队列（菜单栏/弹窗可见）。
     // spawn 内 finally 释放 folder_syncing 锁 + 广播 contentChanged（前端目录刷新）。
     let eng_clone = eng.clone();
     let app_clone = app.clone();
     tauri::async_runtime::spawn(async move {
+        let _activity = activity;
+        let _folder = folder_guard;
         let result =
             sync_folder_recursive_impl(&app_clone, &eng_clone, &folder_id, &rel_path).await;
-        // 无论成功失败都释放锁（防 panic 泄漏 → 放在 spawn 任务收尾，确定性释放）
-        eng_clone.end_folder_sync();
         // 完成后广播 contentChanged 让前端目录刷新
         if let Err(error) = eng_clone.update_runtime_and_broadcast(|runtime| {
             runtime.content_changed = true;
@@ -1082,6 +1156,8 @@ async fn sync_folder_recursive_impl(
     let mut queue: Vec<(String, String)> = vec![(folder_id.to_string(), String::new())];
     while !queue.is_empty() {
         let (id, path) = queue.remove(0);
+        eng.ensure_cycle_active()?;
+        let _operation = eng.begin_external_activity()?;
         let children = FILES_API.list_all(Some(id.as_str())).await?;
         for f in children {
             if f.name.starts_with(crate::constants::INTERNAL_FILE_PREFIX) {
@@ -1176,7 +1252,12 @@ async fn sync_folder_recursive_impl(
             } else {
                 folder_rel_to_id.get(&parent_rel).map(|s| s.as_str())
             };
-            match FILES_API.create_folder(dir_name, parent_id).await {
+            let create_result = {
+                eng.ensure_cycle_active()?;
+                let _operation = eng.begin_external_activity()?;
+                FILES_API.create_folder(dir_name, parent_id).await
+            };
+            match create_result {
                 Ok(f) => {
                     folder_rel_to_id.insert(dir_rel.clone(), f.id.clone());
                     // 本地也建目录（确保后续 scan 能看到）
@@ -1187,6 +1268,8 @@ async fn sync_folder_recursive_impl(
                     // 409/400 时查同名已存在目录，存在则视为成功
                     if matches!(e.drive_status(), Some(400 | 409)) {
                         if let Some(pid) = parent_id {
+                            eng.ensure_cycle_active()?;
+                            let _operation = eng.begin_external_activity()?;
                             if let Ok(list) = FILES_API.list_all(Some(pid)).await {
                                 if let Some(existing) =
                                     list.iter().find(|c| c.is_folder() && c.name == dir_name)
@@ -1207,6 +1290,7 @@ async fn sync_folder_recursive_impl(
 
     // 6. 下载
     for (subrel, f) in &to_download {
+        eng.ensure_cycle_active()?;
         let dest = crate::core::paths::safe_join_under(&dest_dir, subrel, false)?;
         let full_rel = if rel_path.is_empty() {
             subrel.clone()
@@ -1281,6 +1365,7 @@ async fn sync_folder_recursive_impl(
     }
     // 7. 上传
     for (subrel, local_path) in &to_upload {
+        eng.ensure_cycle_active()?;
         let parent_subrel = parent_subrel_of(subrel);
         let parent_id = folder_rel_to_id
             .get(&parent_subrel)
@@ -1444,11 +1529,11 @@ pub async fn config_save(app: AppHandle, config: AppConfig) -> AppResult<()> {
 
     // 换目录 / 取消配置：清缓存 + relaunch（setup 按新 config 重建引擎+watcher）
     if old_configured && (!config.mount_configured || dir_changed) {
+        drop_runtime_async().await;
         if let Some(old_abs) = old_abs {
             crate::core::cache_paths::clear_cache_files(&old_abs.to_string_lossy());
         }
         crate::core::cache_paths::clear_cache_files(&new_abs.to_string_lossy());
-        drop_runtime();
         tracing::info!("挂载目录变更，relaunch");
         relaunch(&app);
         return Ok(());
@@ -1643,7 +1728,7 @@ pub fn launch_at_login_set_enabled(enabled: bool) -> bool {
 #[tauri::command]
 pub async fn app_clear_cache(app: AppHandle) -> AppResult<()> {
     // 停引擎 + 释放 mount（relaunch 后 setup 会重建）
-    drop_runtime();
+    drop_runtime_async().await;
     // 登出
     let _ = crate::auth::token_store::global_store().clear();
     // 删 DB：先清行（兜底，文件删不掉时至少数据没了），再删文件（彻底）。
@@ -1723,7 +1808,11 @@ pub fn logs_export(path: String) -> AppResult<()> {
     if out.is_empty() {
         return Err(AppError::generic("日志目录为空，无可导出内容"));
     }
-    tracing::info!(out_bytes = out.len(), file_count = files.len(), "logs_export 完成");
+    tracing::info!(
+        out_bytes = out.len(),
+        file_count = files.len(),
+        "logs_export 完成"
+    );
     std::fs::write(&path, out)?;
     Ok(())
 }
@@ -1770,7 +1859,7 @@ fn ensure_not_indexing() -> AppResult<()> {
 
 #[cfg(test)]
 mod status_command_tests {
-    use super::clear_transfer_history_and_snapshot;
+    use super::{clear_transfer_history_and_snapshot, EngineOwnershipProtocol};
     use crate::data::repository::{self, SyncItem};
     use crate::sync::status_aggregator::{RuntimeStatus, StatusAggregator};
     use crate::sync::transfer_state::TransferState;
@@ -1824,5 +1913,44 @@ mod status_command_tests {
         assert_eq!(after.transfer_failed, 0);
         assert_eq!(after.failed, 1);
         assert_eq!(after.failed_items.len(), 1);
+    }
+
+    #[test]
+    fn concurrent_replacement_rejects_install_until_old_owner_quiesces() {
+        let protocol = std::sync::Arc::new(EngineOwnershipProtocol::new());
+        let replacement_started = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let release_replacement = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let replacement = {
+            let protocol = protocol.clone();
+            let replacement_started = replacement_started.clone();
+            let release_replacement = release_replacement.clone();
+            std::thread::spawn(move || {
+                let _replacement = protocol.begin_replacement();
+                replacement_started.wait();
+                release_replacement.wait();
+            })
+        };
+        replacement_started.wait();
+
+        let live_installs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let blocked = {
+            let live_installs = live_installs.clone();
+            protocol.install(|| {
+                live_installs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            })
+        };
+        assert!(blocked.is_err());
+        assert_eq!(live_installs.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        release_replacement.wait();
+        replacement.join().unwrap();
+        protocol
+            .install(|| {
+                live_installs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(live_installs.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }

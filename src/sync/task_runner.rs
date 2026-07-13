@@ -20,6 +20,11 @@ const MAX_AUTOMATIC_ATTEMPTS: u32 = 5;
 const PROGRESS_THROTTLE_MS: i64 = 500;
 
 pub type OnlineCheck = Arc<dyn Fn() -> bool + Send + Sync>;
+pub type NowMs = Arc<dyn Fn() -> i64 + Send + Sync>;
+
+pub trait TaskActivityGate: Send + Sync {
+    fn begin(&self) -> AppResult<Box<dyn Send>>;
+}
 
 /// Rebuild and publish the complete authoritative state after every accepted or rejected task
 /// mutation. The runner owns only this interface and never depends on SyncEngine.
@@ -283,8 +288,10 @@ pub struct TaskRunner {
     mount_root: PathBuf,
     operations: Arc<dyn TransferOperations>,
     online_check: OnlineCheck,
+    now_ms: NowMs,
     state_sink: Arc<RwLock<Arc<dyn TaskStateSink>>>,
     transfer_update_tx: Option<tokio::sync::broadcast::Sender<()>>,
+    activity_gate: Arc<RwLock<Option<Arc<dyn TaskActivityGate>>>>,
 }
 
 impl TaskRunner {
@@ -297,18 +304,45 @@ impl TaskRunner {
         state_sink: Arc<dyn TaskStateSink>,
         transfer_update_tx: Option<tokio::sync::broadcast::Sender<()>>,
     ) -> Self {
+        Self::new_with_clock(
+            db,
+            mount_root,
+            operations,
+            online_check,
+            state_sink,
+            transfer_update_tx,
+            Arc::new(|| chrono::Utc::now().timestamp_millis()),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_clock(
+        db: Arc<Mutex<rusqlite::Connection>>,
+        mount_root: PathBuf,
+        operations: Arc<dyn TransferOperations>,
+        online_check: OnlineCheck,
+        state_sink: Arc<dyn TaskStateSink>,
+        transfer_update_tx: Option<tokio::sync::broadcast::Sender<()>>,
+        now_ms: NowMs,
+    ) -> Self {
         Self {
             db,
             mount_root,
             operations,
             online_check,
+            now_ms,
             state_sink: Arc::new(RwLock::new(state_sink)),
             transfer_update_tx,
+            activity_gate: Arc::new(RwLock::new(None)),
         }
     }
 
     pub fn set_state_sink(&self, state_sink: Arc<dyn TaskStateSink>) {
         *self.state_sink.write() = state_sink;
+    }
+
+    pub fn set_activity_gate(&self, activity_gate: Arc<dyn TaskActivityGate>) {
+        *self.activity_gate.write() = Some(activity_gate);
     }
 
     /// Persist a Pending intent before any backend call, then execute that exact task row.
@@ -802,7 +836,7 @@ impl TaskRunner {
 
     /// Task 5 consumes this due-task polling seam; it intentionally performs no sleeping.
     pub async fn resume_due_backoff(&self) -> AppResult<usize> {
-        let now = chrono::Utc::now().timestamp_millis();
+        let now = (self.now_ms)();
         let tasks = self.list_states(&[TransferState::BackingOff])?;
         let mut resumed = 0;
         for task in tasks {
@@ -828,6 +862,18 @@ impl TaskRunner {
             }
         }
         Ok(resumed)
+    }
+
+    pub fn next_backoff_deadline_ms(&self) -> AppResult<Option<i64>> {
+        Ok(self
+            .list_states(&[TransferState::BackingOff])?
+            .into_iter()
+            .filter_map(|task| task.next_retry_at)
+            .min())
+    }
+
+    pub(crate) fn current_time_ms(&self) -> i64 {
+        (self.now_ms)()
     }
 
     pub async fn recover_startup(&self) -> AppResult<StartupRecoverySummary> {
@@ -1067,7 +1113,7 @@ impl TaskRunner {
         if state == TransferState::BackingOff
             && current
                 .next_retry_at
-                .is_some_and(|next_retry_at| next_retry_at > chrono::Utc::now().timestamp_millis())
+                .is_some_and(|next_retry_at| next_retry_at > (self.now_ms)())
         {
             self.notify_rejection();
             return Ok(TaskExecutionOutcome {
@@ -1075,6 +1121,14 @@ impl TaskRunner {
                 disposition: TaskDisposition::BackingOff,
             });
         }
+        // Linearization point for every backend interaction. Engine shutdown closes this gate
+        // before it waits for quiescence; an accepted permit is held through final settlement.
+        let _activity = self
+            .activity_gate
+            .read()
+            .clone()
+            .map(|gate| gate.begin())
+            .transpose()?;
         if run_backend_preflight {
             if let Err(failure) = self.operations.preflight(&current).await {
                 let failure = PreflightFailure::from(failure);
@@ -1206,7 +1260,7 @@ impl TaskRunner {
             RecoveryContext {
                 operation,
                 attempt_count: running.attempt_count.max(0) as u32,
-                now_ms: chrono::Utc::now().timestamp_millis(),
+                now_ms: (self.now_ms)(),
                 jitter_ms: 0,
                 auth_already_replayed: false,
                 max_attempts: MAX_AUTOMATIC_ATTEMPTS,
@@ -1244,7 +1298,7 @@ impl TaskRunner {
                 .map(ColumnPatch::Set)
                 .unwrap_or(ColumnPatch::Clear),
             finished_at: if state == TransferState::Failed {
-                ColumnPatch::Set(chrono::Utc::now().timestamp_millis())
+                ColumnPatch::Set((self.now_ms)())
             } else {
                 ColumnPatch::Clear
             },
@@ -4016,6 +4070,74 @@ mod tests {
             fixture.get(id).state_kind().unwrap(),
             TransferState::Completed
         );
+    }
+
+    #[tokio::test]
+    async fn closed_engine_activity_gate_prevents_running_and_backend_submission() {
+        struct ClosedGate;
+        impl super::TaskActivityGate for ClosedGate {
+            fn begin(&self) -> AppResult<Box<dyn Send>> {
+                Err(AppError::generic("engine shutdown"))
+            }
+        }
+
+        let fixture = Fixture::new();
+        fixture.runner.set_activity_gate(Arc::new(ClosedGate));
+        let id = fixture.insert(task(
+            &fixture,
+            TransferState::Pending,
+            TransferOperation::Download,
+            "shutdown-gate.bin",
+        ));
+
+        let error = fixture.runner.run(id).await.unwrap_err();
+
+        assert!(error.to_string().contains("shutdown"));
+        assert!(fixture.backend.calls().is_empty());
+        assert_eq!(
+            fixture.get(id).state_kind().unwrap(),
+            TransferState::Pending
+        );
+    }
+
+    #[tokio::test]
+    async fn injected_clock_resumes_due_backoff_at_exact_deadline_with_same_id() {
+        let fixture = Fixture::new();
+        let now = Arc::new(AtomicI64::new(10_000));
+        let clock = {
+            let now = now.clone();
+            Arc::new(move || now.load(Ordering::SeqCst)) as super::NowMs
+        };
+        let runner = TaskRunner::new_with_clock(
+            fixture.db.clone(),
+            fixture.root.path().to_path_buf(),
+            fixture.backend.clone(),
+            Arc::new(|| true),
+            Arc::new(|| Ok(())),
+            None,
+            clock,
+        );
+        let mut due = task(
+            &fixture,
+            TransferState::BackingOff,
+            TransferOperation::Download,
+            "clock-due.bin",
+        );
+        due.next_retry_at = Some(12_000);
+        let id = fixture.insert(due);
+
+        assert_eq!(runner.next_backoff_deadline_ms().unwrap(), Some(12_000));
+        assert_eq!(runner.resume_due_backoff().await.unwrap(), 0);
+        now.store(11_999, Ordering::SeqCst);
+        assert_eq!(runner.resume_due_backoff().await.unwrap(), 0);
+        now.store(12_000, Ordering::SeqCst);
+        assert_eq!(runner.resume_due_backoff().await.unwrap(), 1);
+        assert_eq!(fixture.backend.calls()[0].id, id);
+        assert_eq!(
+            fixture.get(id).state_kind().unwrap(),
+            TransferState::Completed
+        );
+        assert_eq!(runner.next_backoff_deadline_ms().unwrap(), None);
     }
 
     #[tokio::test]

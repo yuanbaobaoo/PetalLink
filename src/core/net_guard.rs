@@ -33,24 +33,24 @@ pub enum NetworkTransition {
 }
 
 #[derive(Debug)]
-struct NetworkStateMachine {
+pub(crate) struct NetworkStateMachine {
     online: bool,
     consecutive_successes: u8,
 }
 
 impl NetworkStateMachine {
-    fn new(online: bool) -> Self {
+    pub(crate) fn new(online: bool) -> Self {
         Self {
             online,
             consecutive_successes: 0,
         }
     }
 
-    fn is_online(&self) -> bool {
+    pub(crate) fn is_online(&self) -> bool {
         self.online
     }
 
-    fn observe(&mut self, probe_succeeded: bool) -> Option<NetworkTransition> {
+    pub(crate) fn observe(&mut self, probe_succeeded: bool) -> Option<NetworkTransition> {
         if !probe_succeeded {
             self.consecutive_successes = 0;
             if self.online {
@@ -155,6 +155,27 @@ pub fn is_online() -> bool {
 /// 订阅稳定网络转换；只会收到真实 Offline/Online 状态变化。
 pub fn subscribe() -> broadcast::Receiver<NetworkTransition> {
     TRANSITIONS.subscribe()
+}
+
+/// Feed a real request-layer transport failure into the same stable level machine used by TCP
+/// probes. This produces at most one Online→Offline edge; recovery still requires two successful
+/// probes, preventing a WaitingForNetwork transition from immediately retrying in a hot loop.
+pub fn report_request_network_failure() -> bool {
+    let mut runtime = PROBE_RUNTIME.lock();
+    publish_request_network_failure(&mut runtime.network, &ONLINE, &TRANSITIONS)
+}
+
+fn publish_request_network_failure(
+    network: &mut NetworkStateMachine,
+    online_mirror: &AtomicBool,
+    transitions: &broadcast::Sender<NetworkTransition>,
+) -> bool {
+    let Some(transition) = network.observe(false) else {
+        return false;
+    };
+    online_mirror.store(false, Ordering::SeqCst);
+    let _ = transitions.send(transition);
+    true
 }
 
 /// 启动后台探测任务（幂等，重复调用安全）。
@@ -406,5 +427,30 @@ mod tests {
             receiver.try_recv(),
             Err(broadcast::error::TryRecvError::Empty)
         ));
+    }
+
+    #[test]
+    fn request_layer_failure_reports_offline_once_then_uses_stable_recovery() {
+        let mut network = NetworkStateMachine::new(true);
+        let online = AtomicBool::new(true);
+        let (sender, mut receiver) = broadcast::channel(4);
+
+        assert!(publish_request_network_failure(
+            &mut network,
+            &online,
+            &sender
+        ));
+        assert_eq!(receiver.try_recv(), Ok(NetworkTransition::Offline));
+        assert!(!publish_request_network_failure(
+            &mut network,
+            &online,
+            &sender
+        ));
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        assert_eq!(network.observe(true), None);
+        assert_eq!(network.observe(true), Some(NetworkTransition::Online));
     }
 }

@@ -17,6 +17,7 @@
 //! 内的事件。窗口到期后转 `false`，开始正常监听用户改动。
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -41,16 +42,24 @@ pub struct LocalWatcher {
     /// debounce 定时器（tokio timer handle）
     debounce_secs: u32,
     /// 当前待冲刷的路径集合
-    pending: Mutex<Vec<String>>,
+    pending: Arc<Mutex<Vec<String>>>,
     /// 定时器取消句柄
-    timer_cancel: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    timer_cancel: Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
     /// 变更通知发送端（每次 flushed 发送一批相对路径）
     change_tx: tokio::sync::broadcast::Sender<ChangeSet>,
     /// notify watcher 句柄
     #[allow(dead_code)]
     watcher: Mutex<Option<RecommendedWatcher>>,
     /// 是否正在运行
-    running: Mutex<bool>,
+    running: Arc<Mutex<bool>>,
+    /// 每次 start/stop 都推进 generation；旧 worker/timer 在发布前必须匹配当前代。
+    generation: Arc<AtomicU64>,
+    /// 取消当前实际 worker/warmup generation。
+    stop_tx: Mutex<Option<tokio::sync::watch::Sender<bool>>>,
+    worker_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    warmup_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    timer_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    lifecycle: Mutex<()>,
 }
 
 impl LocalWatcher {
@@ -62,11 +71,17 @@ impl LocalWatcher {
             mount_dir: mount_dir.to_path_buf(),
             skip_patterns,
             debounce_secs,
-            pending: Mutex::new(Vec::new()),
-            timer_cancel: Mutex::new(None),
+            pending: Arc::new(Mutex::new(Vec::new())),
+            timer_cancel: Arc::new(Mutex::new(None)),
             change_tx,
             watcher: Mutex::new(None),
-            running: Mutex::new(false),
+            running: Arc::new(Mutex::new(false)),
+            generation: Arc::new(AtomicU64::new(0)),
+            stop_tx: Mutex::new(None),
+            worker_handle: Mutex::new(None),
+            warmup_handle: Mutex::new(None),
+            timer_handle: Arc::new(Mutex::new(None)),
+            lifecycle: Mutex::new(()),
         }
     }
 
@@ -78,40 +93,18 @@ impl LocalWatcher {
     /// 启动 watcher（创建 FSEvents 监听）。
     /// **必须在 BFS 完成后才调用**。
     pub async fn start(&self) -> Result<(), notify::Error> {
+        let _lifecycle = self.lifecycle.lock().await;
         if *self.running.lock().await {
             return Ok(());
         }
 
         let mount = self.mount_dir.clone();
-        let skip_patterns = self.skip_patterns.clone();
-        let debounce_secs = self.debounce_secs;
-        let change_tx = self.change_tx.clone();
-
-        // 共享的待冲刷路径集合（watcher 回调 + flush timer 之间共享）
-        let pending: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-
-        // warmup 标志：注册后 WARMUP_SECS 内丢弃所有事件（FSEvents 历史回放防护）
-        let warming_up: Arc<Mutex<bool>> = Arc::new(Mutex::new(true));
-
-        // 定时器取消通道（用于重置计时器）
-        let timer_cancel: Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>> =
-            Arc::new(Mutex::new(None));
 
         // 创建 notify watcher
-        let (tx, mut rx) = mpsc::channel(256);
-        let warming_up_clone = warming_up.clone();
+        let (tx, rx) = mpsc::channel(256);
         let mut watcher = RecommendedWatcher::new(
             move |res: Result<Event, notify::Error>| {
                 if let Ok(event) = res {
-                    // warmup 期间的事件视为 FSEvents 历史回放（含 BFS/首次 cycle 建的
-                    // 目录/占位符），直接丢弃。此处是 fsevents 线程，用 try_lock 非阻塞。
-                    // 锁竞争（极少）时不丢，保守放行。
-                    if let Ok(g) = warming_up_clone.try_lock() {
-                        if *g {
-                            tracing::debug!(kind = ?event.kind, paths = ?event.paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(), "warmup: 丢弃事件");
-                            return;
-                        }
-                    }
                     let _ = tx.blocking_send(event);
                 }
             },
@@ -122,95 +115,167 @@ impl LocalWatcher {
         watcher.watch(&mount, RecursiveMode::Recursive)?;
 
         *self.watcher.lock().await = Some(watcher);
-        *self.running.lock().await = true;
+        self.start_event_loop_for_receiver(rx, true).await;
 
-        let mount_clone = mount.clone();
+        tracing::info!(dir = %self.mount_dir.display(), debounce = self.debounce_secs, "本地文件监视器已启动");
+        Ok(())
+    }
 
-        // warmup 计时器：WARMUP_SECS 后关闭 warming_up，开始正常监听
-        let warming_up_timer = warming_up.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(WARMUP_SECS)).await;
-            *warming_up_timer.lock().await = false;
-        });
+    /// Start the real event/debounce worker from an event receiver. Keeping this seam independent
+    /// of FSEvents makes generation, warmup and cancellation behavior deterministic to exercise.
+    pub(crate) async fn start_event_loop_for_receiver(
+        &self,
+        mut rx: mpsc::Receiver<Event>,
+        warmup: bool,
+    ) {
+        {
+            let mut running = self.running.lock().await;
+            if *running {
+                return;
+            }
+            *running = true;
+        }
+        let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
+        *self.stop_tx.lock().await = Some(stop_tx);
 
-        // 后台任务：消费 notify 事件 → 维护 pending + 重置 timer → 到期后冲刷
-        tokio::spawn(async move {
+        let warming_up = Arc::new(AtomicBool::new(warmup));
+        if warmup {
+            let warming_up = warming_up.clone();
+            let change_tx = self.change_tx.clone();
+            let current_generation = self.generation.clone();
+            let mut warmup_stop = stop_rx.clone();
+            let warmup_handle = tokio::spawn(async move {
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(WARMUP_SECS)) => {
+                        if current_generation.load(Ordering::Acquire) == generation {
+                            warming_up.store(false, Ordering::Release);
+                            // Empty ChangeSet is an intentional full-rescan request compensating
+                            // for the scan-to-watch arm gap and discarded historical replay.
+                            let _ = change_tx.send(Vec::new());
+                        }
+                    }
+                    changed = warmup_stop.changed() => {
+                        let _ = changed;
+                    }
+                }
+            });
+            *self.warmup_handle.lock().await = Some(warmup_handle);
+        }
+
+        let mount = self.mount_dir.clone();
+        let skip_patterns = self.skip_patterns.clone();
+        let debounce_secs = self.debounce_secs;
+        let pending = self.pending.clone();
+        let timer_cancel = self.timer_cancel.clone();
+        let timer_handle = self.timer_handle.clone();
+        let change_tx = self.change_tx.clone();
+        let current_generation = self.generation.clone();
+        let running = self.running.clone();
+        let worker_handle = tokio::spawn(async move {
             loop {
                 tokio::select! {
+                    changed = stop_rx.changed() => {
+                        let _ = changed;
+                        break;
+                    }
                     event = rx.recv() => {
-                        let Some(event) = event else {
-                            // channel closed → 停止
+                        let Some(event) = event else { break; };
+                        if warming_up.load(Ordering::Acquire) {
+                            tracing::debug!(kind = ?event.kind, "watcher warmup: 丢弃历史事件");
+                            continue;
+                        }
+                        if current_generation.load(Ordering::Acquire) != generation {
                             break;
-                        };
-                        let paths = extract_relative_paths(&event, &mount_clone, &skip_patterns);
+                        }
+                        let paths = extract_relative_paths(&event, &mount, &skip_patterns);
                         if paths.is_empty() {
                             continue;
                         }
-                        tracing::debug!(
-                            kind = ?event.kind,
-                            paths = ?paths,
-                            "watcher: 检测到本地文件变更"
-                        );
-                        // 追加到 pending
                         let mut guard = pending.lock().await;
-                        for p in paths {
-                            if !guard.contains(&p) {
-                                guard.push(p);
+                        if current_generation.load(Ordering::Acquire) != generation {
+                            break;
+                        }
+                        for path in paths {
+                            if !guard.contains(&path) {
+                                guard.push(path);
                             }
                         }
                         drop(guard);
 
-                        // 重置 debounce 计时器
                         let mut cancel_guard = timer_cancel.lock().await;
-                        // 取消旧定时器
-                        if let Some(tx) = cancel_guard.take() {
-                            let _ = tx.send(());
+                        if let Some(cancel) = cancel_guard.take() {
+                            let _ = cancel.send(());
                         }
-                        // 新建定时器
-                        let (new_tx, new_rx) = tokio::sync::oneshot::channel();
-                        *cancel_guard = Some(new_tx);
+                        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+                        *cancel_guard = Some(cancel_tx);
                         drop(cancel_guard);
 
-                        let pending_clone = pending.clone();
-                        let change_tx_clone = change_tx.clone();
-                        tokio::spawn(async move {
+                        let previous = timer_handle.lock().await.take();
+                        if let Some(previous) = previous {
+                            let _ = previous.await;
+                        }
+
+                        let pending = pending.clone();
+                        let change_tx = change_tx.clone();
+                        let current_generation = current_generation.clone();
+                        let handle = tokio::spawn(async move {
                             tokio::select! {
-                                _ = new_rx => {
-                                    // 定时器被取消（新事件到达），不冲刷
-                                }
+                                _ = cancel_rx => {}
                                 _ = tokio::time::sleep(Duration::from_secs(debounce_secs as u64)) => {
-                                    // 定时器到期 → 冲刷
-                                    let mut guard = pending_clone.lock().await;
+                                    if current_generation.load(Ordering::Acquire) != generation {
+                                        return;
+                                    }
+                                    let mut guard = pending.lock().await;
                                     if !guard.is_empty() {
-                                        let paths: Vec<String> = guard.drain(..).collect();
+                                        let paths = guard.drain(..).collect();
                                         drop(guard);
-                                        let _ = change_tx_clone.send(paths);
+                                        let _ = change_tx.send(paths);
                                     }
                                 }
                             }
                         });
+                        *timer_handle.lock().await = Some(handle);
                     }
                 }
             }
+            if current_generation.load(Ordering::Acquire) == generation {
+                *running.lock().await = false;
+            }
         });
-
-        tracing::info!(dir = %self.mount_dir.display(), debounce = debounce_secs, "本地文件监视器已启动");
-        Ok(())
+        *self.worker_handle.lock().await = Some(worker_handle);
     }
 
     /// 停止监视：释放 FSEvents 句柄（drop watcher），清空 pending。
     /// drop RecommendedWatcher 会关闭底层 FSEvents stream，之后不再有事件回调。
     /// 这确保引擎被替换/退出后，旧 watcher 不会继续向 detached 任务喂事件。
     pub async fn stop(&self) {
+        let _lifecycle = self.lifecycle.lock().await;
         // 关闭 FSEvents：drop watcher 即停止底层 stream
         if let Some(w) = self.watcher.lock().await.take() {
             drop(w);
         }
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        if let Some(stop) = self.stop_tx.lock().await.take() {
+            let _ = stop.send(true);
+        }
+        let worker_handle = self.worker_handle.lock().await.take();
+        if let Some(worker_handle) = worker_handle {
+            let _ = worker_handle.await;
+        }
+        let warmup_handle = self.warmup_handle.lock().await.take();
+        if let Some(warmup_handle) = warmup_handle {
+            let _ = warmup_handle.await;
+        }
         *self.running.lock().await = false;
-        self.pending.lock().await.clear();
         if let Some(tx) = self.timer_cancel.lock().await.take() {
             let _ = tx.send(());
         }
+        let timer_handle = self.timer_handle.lock().await.take();
+        if let Some(timer_handle) = timer_handle {
+            let _ = timer_handle.await;
+        }
+        self.pending.lock().await.clear();
         tracing::info!("本地文件监视器已停止");
     }
 }
@@ -282,5 +347,58 @@ mod tests {
         let paths = extract_relative_paths(&event, &dir, &[]);
         // Access 事件应被忽略（不触发同步）
         assert!(paths.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn warmup_end_forces_one_compensating_scan() {
+        let dir = tempdir().unwrap();
+        let watcher = LocalWatcher::new(dir.path(), vec![], 3);
+        let mut changes = watcher.subscribe();
+        let (_event_tx, event_rx) = mpsc::channel(4);
+
+        watcher.start_event_loop_for_receiver(event_rx, true).await;
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(WARMUP_SECS)).await;
+        tokio::task::yield_now().await;
+
+        assert_eq!(changes.try_recv().unwrap(), Vec::<String>::new());
+        watcher.stop().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stop_cancels_the_actual_generation_debounce() {
+        let dir = tempdir().unwrap();
+        let watcher = LocalWatcher::new(dir.path(), vec![], 3);
+        let mut changes = watcher.subscribe();
+        let (event_tx, event_rx) = mpsc::channel(4);
+        watcher.start_event_loop_for_receiver(event_rx, false).await;
+        event_tx
+            .send(
+                Event::new(EventKind::Create(notify::event::CreateKind::File))
+                    .add_path(dir.path().join("old.txt")),
+            )
+            .await
+            .unwrap();
+
+        watcher.stop().await;
+        tokio::time::advance(Duration::from_secs(4)).await;
+        tokio::task::yield_now().await;
+        assert!(changes.try_recv().is_err());
+
+        let (new_tx, new_rx) = mpsc::channel(4);
+        watcher.start_event_loop_for_receiver(new_rx, false).await;
+        new_tx
+            .send(
+                Event::new(EventKind::Create(notify::event::CreateKind::File))
+                    .add_path(dir.path().join("new.txt")),
+            )
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(3)).await;
+        tokio::task::yield_now().await;
+
+        assert_eq!(changes.try_recv().unwrap(), vec!["new.txt".to_string()]);
+        watcher.stop().await;
     }
 }

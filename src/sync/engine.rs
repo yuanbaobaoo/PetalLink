@@ -7,10 +7,307 @@ use parking_lot::Mutex;
 use rusqlite::OptionalExtension;
 use rusqlite::{params, Connection};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct CycleRequest(u32);
+
+impl CycleRequest {
+    const LOCAL_RESCAN: Self = Self(1 << 0);
+    const CLOUD_INCREMENTAL: Self = Self(1 << 1);
+    const CLOUD_FULL: Self = Self(1 << 2);
+    const ONLINE_RECOVERY: Self = Self(1 << 3);
+    const STARTUP: Self = Self(1 << 4);
+    const RETRY: Self = Self(1 << 5);
+
+    fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+}
+
+impl std::ops::BitOr for CycleRequest {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self(self.0 | rhs.0)
+    }
+}
+
+/// Per-engine single owner for every source of scan/recovery work. Requests are recorded before
+/// ownership is awaited, so an edge arriving while a cycle is active (or in its release window)
+/// remains sticky and is consumed by the current owner or the next waiter.
+#[derive(Default)]
+struct CycleCoordinator {
+    state: Mutex<CycleCoordinatorState>,
+    owner: tokio::sync::Mutex<()>,
+}
+
+#[derive(Default)]
+struct CycleCoordinatorState {
+    pending: u32,
+    requested: u64,
+    completed: u64,
+    failures: Vec<(u64, u64, String)>,
+}
+
+impl CycleCoordinator {
+    fn request(&self, request: CycleRequest) -> u64 {
+        let mut state = self.state.lock();
+        state.requested = state.requested.wrapping_add(1).max(1);
+        state.pending |= request.0;
+        state.requested
+    }
+
+    async fn lock_owner(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.owner.lock().await
+    }
+
+    #[cfg(test)]
+    fn take_pending(&self) -> CycleRequest {
+        self.take_pending_with_sequence().0
+    }
+
+    fn take_pending_with_sequence(&self) -> (CycleRequest, u64) {
+        let mut state = self.state.lock();
+        let request = CycleRequest(state.pending);
+        state.pending = 0;
+        (request, state.requested)
+    }
+
+    fn restore(&self, request: CycleRequest) {
+        self.state.lock().pending |= request.0;
+    }
+
+    #[cfg(test)]
+    fn requested_sequence(&self) -> u64 {
+        self.state.lock().requested
+    }
+
+    fn complete(&self, through: u64, error: Option<&AppError>) {
+        let mut state = self.state.lock();
+        let previous = state.completed;
+        state.completed = state.completed.max(through);
+        if let Some(error) = error {
+            state
+                .failures
+                .push((previous.saturating_add(1), through, error.to_string()));
+            if state.failures.len() > 128 {
+                let excess = state.failures.len() - 128;
+                state.failures.drain(..excess);
+            }
+        }
+    }
+
+    fn result_if_completed(&self, sequence: u64) -> Option<AppResult<()>> {
+        let state = self.state.lock();
+        if state.completed < sequence {
+            return None;
+        }
+        let failure = state
+            .failures
+            .iter()
+            .find(|(start, end, _)| *start <= sequence && sequence <= *end)
+            .map(|(_, _, message)| message.clone());
+        Some(match failure {
+            Some(message) => Err(AppError::generic(message)),
+            None => Ok(()),
+        })
+    }
+
+    fn is_idle(&self) -> bool {
+        self.state.lock().pending == 0 && self.owner.try_lock().is_ok()
+    }
+
+    fn has_pending(&self) -> bool {
+        self.state.lock().pending != 0
+    }
+
+    #[cfg(test)]
+    async fn run<F, Fut>(&self, request: CycleRequest, mut execute: F)
+    where
+        F: FnMut(CycleRequest) -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        self.request(request);
+        let _owner = self.lock_owner().await;
+        loop {
+            let pending = self.take_pending();
+            if pending.is_empty() {
+                break;
+            }
+            execute(pending).await;
+        }
+    }
+}
+
+#[derive(Default)]
+struct ActivityState {
+    accepting: bool,
+    count: usize,
+}
+
+struct ActivityTracker {
+    state: Mutex<ActivityState>,
+    idle: tokio::sync::Notify,
+}
+
+impl Default for ActivityTracker {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(ActivityState {
+                accepting: true,
+                count: 0,
+            }),
+            idle: tokio::sync::Notify::new(),
+        }
+    }
+}
+
+impl ActivityTracker {
+    fn begin(self: &Arc<Self>) -> AppResult<ActivityGuard> {
+        let mut state = self.state.lock();
+        if !state.accepting {
+            return Err(AppError::generic("同步引擎已停止，拒绝新传输活动"));
+        }
+        state.count += 1;
+        Ok(ActivityGuard {
+            tracker: self.clone(),
+        })
+    }
+
+    fn close(&self) {
+        self.state.lock().accepting = false;
+    }
+
+    async fn wait_idle(&self) {
+        loop {
+            let notified = self.idle.notified();
+            if self.state.lock().count == 0 {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+pub(crate) struct ActivityGuard {
+    tracker: Arc<ActivityTracker>,
+}
+
+pub(crate) struct FolderSyncGuard {
+    engine: Arc<SyncEngine>,
+}
+
+impl Drop for FolderSyncGuard {
+    fn drop(&mut self) {
+        self.engine.end_folder_sync();
+    }
+}
+
+impl Drop for ActivityGuard {
+    fn drop(&mut self) {
+        let mut state = self.tracker.state.lock();
+        state.count = state.count.saturating_sub(1);
+        if state.count == 0 {
+            self.tracker.idle.notify_one();
+        }
+    }
+}
+
+struct TaskRunnerActivityGate(Arc<ActivityTracker>);
+
+impl crate::sync::task_runner::TaskActivityGate for TaskRunnerActivityGate {
+    fn begin(&self) -> AppResult<Box<dyn Send>> {
+        Ok(Box::new(self.0.begin()?))
+    }
+}
+
+async fn network_listener_loop<L, R>(
+    mut transitions: broadcast::Receiver<crate::core::net_guard::NetworkTransition>,
+    is_online: L,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+    reconcile_initial: bool,
+    mut request_recovery: R,
+) where
+    L: Fn() -> bool,
+    R: FnMut(),
+{
+    if *shutdown.borrow() {
+        return;
+    }
+    // The caller creates the subscription before reading the current level. Reconcile the level
+    // once here so an Online edge sent before listener startup is never required for progress.
+    if reconcile_initial && is_online() {
+        request_recovery();
+    }
+    loop {
+        tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    break;
+                }
+            }
+            transition = transitions.recv() => {
+                match transition {
+                    Ok(crate::core::net_guard::NetworkTransition::Online) => {
+                        if is_online() {
+                            request_recovery();
+                        }
+                    }
+                    Ok(crate::core::net_guard::NetworkTransition::Offline) => {}
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!(skipped, "网络转换 listener 滞后，按当前 level 收敛");
+                        if is_online() {
+                            request_recovery();
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }
+    }
+}
+
+/// Long-lived watcher receiver. A lagged broadcast means path-level details were lost, so the
+/// only safe convergence action is one coalesced full rescan; unlike `Closed`, it must not kill
+/// the listener because later filesystem batches are still authoritative triggers.
+async fn watcher_listener_loop<R>(
+    mut changes: broadcast::Receiver<crate::mount::local_watcher::ChangeSet>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+    mut request_rescan: R,
+) where
+    R: FnMut(),
+{
+    if *shutdown.borrow() {
+        return;
+    }
+    loop {
+        tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    break;
+                }
+            }
+            change = changes.recv() => {
+                match change {
+                    Ok(_) => request_rescan(),
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!(skipped, "watcher listener 滞后，请求完整补偿扫描");
+                        request_rescan();
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }
+    }
+}
 
 use crate::data::repository;
 use crate::drive::download_api::DownloadApi;
@@ -33,6 +330,12 @@ use crate::sync::transfer_state::TransferState;
 /// 增量 merge 无法处理"已知 id 但 rel_path 变了"（改名/移动）和"全新文件"，需定期全量收敛。
 /// 配合自动刷新间隔（默认 60s）：300 次 × 60s = 5 小时强制一次全量纠偏。
 const INCREMENTAL_FORCED_FULL_THRESHOLD: u32 = 300;
+const RECOVERABLE_CYCLE_RETRY_MAX_SECS: u64 = 32;
+
+fn recoverable_cycle_retry_delay(consecutive_failures: u32) -> Duration {
+    let exponent = consecutive_failures.saturating_sub(1).min(5);
+    Duration::from_secs((1_u64 << exponent).min(RECOVERABLE_CYCLE_RETRY_MAX_SECS))
+}
 
 /// Resets a lifecycle gate on every return path, including cancellation and panic unwind.
 struct ResetFlag<'a> {
@@ -65,10 +368,8 @@ pub struct SyncEngine {
     conflict: Arc<Mutex<ConflictResolver>>,
     executor: Option<SyncExecutor>,
     task_runner: Option<Arc<TaskRunner>>,
+    cycle: CycleCoordinator,
     syncing: Mutex<bool>,
-    /// 手动同步（trigger_manual_sync）互斥锁：防重复点击触发并发 BFS。
-    /// 与 syncing 区分：syncing 守护 run_sync_cycle；manual_syncing 守护整段手动同步。
-    manual_syncing: Mutex<bool>,
     /// 目录递归同步（sync_folder_recursive）互斥锁。
     /// 独立于 syncing：folder sync 不被启动/常规 sync cycle 的 syncing 锁阻塞
     /// （启动 scan 可能耗时几十秒，不该挡住用户点目录同步）；run_sync_cycle 会检查本锁跳过，
@@ -94,6 +395,18 @@ pub struct SyncEngine {
     /// 是否已 shutdown。detached watcher 任务每次 cycle 前检查此标志，
     /// 置位后退出循环，防止引擎被替换后旧 watcher 仍触发 sync cycle（误判上传）。
     shutdown: Mutex<bool>,
+    shutdown_tx: tokio::sync::watch::Sender<bool>,
+    backoff_changed: tokio::sync::Notify,
+    schedule_revision: AtomicU64,
+    started: AtomicBool,
+    online_check: Arc<dyn Fn() -> bool + Send + Sync>,
+    cycle_observer: Arc<dyn Fn(&'static str) + Send + Sync>,
+    #[cfg(test)]
+    incremental_refresh_hook: Option<Arc<dyn Fn() -> AppResult<()> + Send + Sync>>,
+    #[cfg(test)]
+    startup_cloud_hook: Option<Arc<dyn Fn() -> AppResult<()> + Send + Sync>>,
+    activity: Arc<ActivityTracker>,
+    background_scheduled: AtomicBool,
     /// 连续增量刷新计数。达 INCREMENTAL_FORCED_FULL_THRESHOLD 后强制一次全量 BFS，
     /// 纠正增量无法处理的改名/移动/新建文件累积偏差。全量后归零。
     incremental_since_full: AtomicU32,
@@ -113,6 +426,7 @@ impl SyncEngine {
         poll_interval_secs: u32,
     ) -> Self {
         let (state_tx, _) = broadcast::channel(256);
+        let (shutdown_tx, _) = tokio::sync::watch::channel(false);
         Self {
             files_api,
             changes_api,
@@ -124,8 +438,8 @@ impl SyncEngine {
             conflict: Arc::new(Mutex::new(ConflictResolver::new())),
             executor: None,
             task_runner: None,
+            cycle: CycleCoordinator::default(),
             syncing: Mutex::new(false),
-            manual_syncing: Mutex::new(false),
             folder_syncing: Mutex::new(false),
             cloud_tree: Mutex::new(HashMap::new()),
             path_to_id: Mutex::new(HashMap::new()),
@@ -142,6 +456,18 @@ impl SyncEngine {
             is_first_time: Mutex::new(true),
             watcher: Mutex::new(None),
             shutdown: Mutex::new(false),
+            shutdown_tx,
+            backoff_changed: tokio::sync::Notify::new(),
+            schedule_revision: AtomicU64::new(0),
+            started: AtomicBool::new(false),
+            online_check: Arc::new(crate::core::net_guard::is_online),
+            cycle_observer: Arc::new(|_| {}),
+            #[cfg(test)]
+            incremental_refresh_hook: None,
+            #[cfg(test)]
+            startup_cloud_hook: None,
+            activity: Arc::new(ActivityTracker::default()),
+            background_scheduled: AtomicBool::new(false),
             incremental_since_full: AtomicU32::new(0),
         }
     }
@@ -153,13 +479,68 @@ impl SyncEngine {
 
     pub fn set_executor(&mut self, executor: SyncExecutor) {
         self.task_runner = executor.task_runner().ok();
+        if let Some(task_runner) = &self.task_runner {
+            task_runner.set_activity_gate(Arc::new(TaskRunnerActivityGate(self.activity.clone())));
+        }
         self.executor = Some(executor);
+    }
+
+    pub fn set_online_check(&mut self, online_check: Arc<dyn Fn() -> bool + Send + Sync>) {
+        self.online_check = online_check;
+    }
+
+    pub fn set_cycle_observer(&mut self, cycle_observer: Arc<dyn Fn(&'static str) + Send + Sync>) {
+        self.cycle_observer = cycle_observer;
+    }
+
+    #[cfg(test)]
+    fn set_incremental_refresh_hook_for_test(
+        &mut self,
+        hook: Arc<dyn Fn() -> AppResult<()> + Send + Sync>,
+    ) {
+        self.incremental_refresh_hook = Some(hook);
+    }
+
+    #[cfg(test)]
+    fn set_startup_cloud_hook_for_test(
+        &mut self,
+        hook: Arc<dyn Fn() -> AppResult<()> + Send + Sync>,
+    ) {
+        self.startup_cloud_hook = Some(hook);
+    }
+
+    fn is_online(&self) -> bool {
+        (self.online_check)()
+    }
+
+    pub(crate) fn begin_external_activity(&self) -> AppResult<ActivityGuard> {
+        self.activity.begin()
     }
 
     pub(crate) fn task_runner(&self) -> AppResult<Arc<TaskRunner>> {
         self.task_runner
             .clone()
             .ok_or_else(|| AppError::generic("TaskRunner 未初始化"))
+    }
+
+    pub(crate) fn notify_backoff_schedule_changed(&self) {
+        self.schedule_revision.fetch_add(1, Ordering::AcqRel);
+        self.backoff_changed.notify_one();
+    }
+
+    pub(crate) fn note_transfer_state_changed(&self) {
+        self.notify_backoff_schedule_changed();
+        if !self.is_online() {
+            return;
+        }
+        let has_waiting = repository::list_all_transfers(&self.db.lock()).is_ok_and(|tasks| {
+            tasks
+                .into_iter()
+                .any(|task| task.state_kind() == Ok(TransferState::WaitingForNetwork))
+        });
+        if has_waiting {
+            crate::core::net_guard::report_request_network_failure();
+        }
     }
     pub fn state_receiver(&self) -> broadcast::Receiver<SyncGlobalState> {
         self.state_tx.subscribe()
@@ -456,15 +837,24 @@ impl SyncEngine {
     /// 已有目录同步进行中 → false；否则置 true 并返回 true。调用方负责在 finally 调 end_folder_sync。
     pub fn try_begin_folder_sync(&self) -> bool {
         let mut g = self.folder_syncing.lock();
-        if *g {
+        if *g || *self.syncing.lock() || *self.shutdown.lock() {
             return false;
         }
         *g = true;
         true
     }
+
+    pub(crate) fn try_begin_folder_sync_guard(self: &Arc<Self>) -> Option<FolderSyncGuard> {
+        self.try_begin_folder_sync().then(|| FolderSyncGuard {
+            engine: self.clone(),
+        })
+    }
     /// 释放 folder_syncing 锁（与 try_begin_folder_sync 配对）。
-    pub fn end_folder_sync(&self) {
+    pub fn end_folder_sync(self: &Arc<Self>) {
         *self.folder_syncing.lock() = false;
+        if !self.cycle.is_idle() {
+            self.request_cycle_background("local-watcher");
+        }
     }
 
     /// 停止引擎：停 watcher（释放 FSEvents）+ 置 shutdown 标志（detached watcher 任务退出）。
@@ -474,11 +864,19 @@ impl SyncEngine {
     /// 持续监听 FSEvents，向旧（cloud_tree 已过时的）引擎触发 sync cycle → 误判「本地新建」
     /// 疯狂上传。本方法确保旧 watcher 真正停止。
     pub async fn shutdown(&self) {
+        let watcher = self.watcher.lock().take();
+        self.activity.close();
         self.shutdown_sync();
-        // stop 内含 await（清 running/pending），async 路径用
-        let watcher_opt = self.watcher.lock().clone();
-        if let Some(watcher) = watcher_opt {
+        if let Some(watcher) = watcher {
             watcher.stop().await;
+        }
+        // If a remote call was already submitted, TaskRunner owns its settlement. Waiting for the
+        // cycle owner here prevents a replacement from starting until that settlement converges.
+        let _quiesced = self.cycle.lock_owner().await;
+        self.activity.wait_idle().await;
+        let late_watcher = self.watcher.lock().take();
+        if let Some(late_watcher) = late_watcher {
+            late_watcher.stop().await;
         }
     }
 
@@ -491,6 +889,7 @@ impl SyncEngine {
     }
 
     fn shutdown_sync_with_contention_hook(&self, on_publication_contention: impl FnOnce()) {
+        self.activity.close();
         // 与状态发布共用同一屏障：先开始的发布可以完成；本方法返回后，旧引擎的
         // 后续 closure 只能在屏障内看到 shutdown=true，并在分配 revision 前失败。
         {
@@ -499,6 +898,8 @@ impl SyncEngine {
                 .lock_publication_with_contention_hook(on_publication_contention);
             *self.shutdown.lock() = true;
         }
+        let _ = self.shutdown_tx.send(true);
+        self.backoff_changed.notify_waiters();
         // take 出 watcher 并 drop（同步释放 FSEvents 句柄）
         let taken = self.watcher.lock().take();
         drop(taken);
@@ -538,6 +939,18 @@ impl SyncEngine {
 
     /// 启动引擎。
     pub async fn start(self: &Arc<Self>) -> AppResult<()> {
+        // Subscribe before reading current network level. The receiver is started after startup
+        // reconciliation so buffered edges cannot race the initial cloud snapshot.
+        let network_transitions = crate::core::net_guard::subscribe();
+        self.start_with_network_receiver(network_transitions, true)
+            .await
+    }
+
+    async fn start_with_network_receiver(
+        self: &Arc<Self>,
+        network_transitions: broadcast::Receiver<crate::core::net_guard::NetworkTransition>,
+        start_probe: bool,
+    ) -> AppResult<()> {
         // 启动前检查 shutdown 标志
         if *self.shutdown.lock() {
             tracing::info!("引擎已 shutdown，跳过启动");
@@ -552,57 +965,47 @@ impl SyncEngine {
 
         // ★ 启动网络探测任务 + 初始化睡眠处理（必须在 tokio 运行时上下文中，
         //   start_probe_task 内部 tokio::spawn 需要 reactor，不能在同步 setup 闭包中调用）。
-        crate::core::net_guard::start_probe_task();
-        crate::core::net_guard::init_sleep_handling();
-
-        let mount_dir = self.mount_dir.lock().clone().unwrap_or_default();
-
-        // 尝试缓存加载 → 回退全量 BFS。
-        // ★ BFS 失败（如离线/网络抖动）不阻断启动：降级为空 cloud_tree，
-        // 后续 startup-resume cycle 由 planner 启动守卫 + validate_delete_from_local
-        // 双重防线挡住误删，等网络恢复后定时器自动重新拉取完整 cloud_tree。
-        match self.load_or_refresh_cloud_tree(&mount_dir).await {
-            Ok(_) => {}
-            Err(e) => {
-                tracing::warn!(error = %e, "启动时云端树加载失败（降级为空 cloud_tree，不阻断启动）");
-            }
-        }
-        if *self.shutdown.lock() {
-            tracing::info!("引擎在 BFS 后被 shutdown，跳过 startup-resume cycle");
-            return Ok(());
+        if start_probe {
+            crate::core::net_guard::start_probe_task();
+            crate::core::net_guard::init_sleep_handling();
         }
 
-        // 全量 BFS 后尝试建立 changes 增量基线 cursor（失败静默，不影响启动）
-        let _ = self.try_init_changes_cursor(&mount_dir).await;
-
-        // 重置过期状态
-        {
-            let conn = self.db.lock();
-            let _ = repository::reset_stale_statuses(&conn);
-        }
-
-        // ★ 恢复/清理所有中断的传输任务（kill 后重启用）
-        self.recover_interrupted_transfers().await;
-
-        // 首次全量 sync
+        // Startup recovery, cloud refresh and first local reconciliation use the same owner as
+        // every later trigger. Requests arriving before this point remain pending and are folded
+        // into the startup or its single follow-up.
         self.run_sync_cycle("startup-resume").await?;
+        self.ensure_cycle_active()?;
 
-        // BFS 后启动 watcher
-        self.start_watcher().await;
-
-        // 启动云端定时刷新任务（poll_interval_secs=0 时内部不启动）
-        self.start_cloud_refresh_timer().await;
-
-        // 启动完成，复位运行/索引状态
+        // Publish startup idle before arming any source that can enqueue a new cycle. Buffered
+        // network edges are preserved by the already-created receiver and run after this point.
         self.update_runtime_and_broadcast(|runtime| {
             runtime.is_running = false;
-            // 启动全程（BFS + 首次 cycle）已结束，确保 is_indexing 也复位，
-            // 防止 BFS 设的 true 因后续交错未被清，卡住状态条。
             runtime.is_indexing = false;
             runtime.sync_phase = None;
         })?;
+        self.started.store(true, Ordering::Release);
+
+        self.start_network_listener(network_transitions);
+        self.ensure_cycle_active()?;
+
+        // BFS 后启动 watcher
+        self.start_watcher().await;
+        self.ensure_cycle_active()?;
+
+        // 启动云端定时刷新任务（poll_interval_secs=0 时内部不启动）
+        self.start_cloud_refresh_timer().await;
+        self.start_backoff_scheduler();
 
         Ok(())
+    }
+
+    #[cfg(test)]
+    async fn start_with_network_receiver_for_test(
+        self: &Arc<Self>,
+        network_transitions: broadcast::Receiver<crate::core::net_guard::NetworkTransition>,
+    ) -> AppResult<()> {
+        self.start_with_network_receiver(network_transitions, false)
+            .await
     }
 
     /// 恢复/清理所有中断的传输任务（kill 后重启时调用）。
@@ -627,6 +1030,11 @@ impl SyncEngine {
         }
     }
     async fn load_or_refresh_cloud_tree(&self, mount_dir: &str) -> AppResult<()> {
+        let _activity = self.begin_external_activity()?;
+        #[cfg(test)]
+        if let Some(hook) = &self.startup_cloud_hook {
+            return hook();
+        }
         let abs_dir = crate::core::paths::expand_tilde(mount_dir);
         let loaded = cloud_tree::load_persisted_cloud_tree(&abs_dir).map(|cache| {
             *self.cloud_tree.lock() = cache.tree;
@@ -634,9 +1042,7 @@ impl SyncEngine {
             *self.root_folder_id.lock() = cache.root_folder_id;
         });
         if loaded.is_none() {
-            *self.syncing.lock() = true;
             let refresh_result = {
-                let _syncing_reset = ResetFlag::new(&self.syncing);
                 async {
                     // 广播 is_indexing=true（对齐 dart BFS 期间的状态广播）
                     self.update_runtime_and_broadcast(|runtime| {
@@ -646,6 +1052,7 @@ impl SyncEngine {
                     let (tree, p2i, root) =
                         cloud_tree::refresh_cloud_tree(&self.files_api, &self.mount, &abs_dir)
                             .await?;
+                    self.ensure_cycle_active()?;
                     *self.cloud_tree.lock() = tree;
                     *self.path_to_id.lock() = p2i;
                     *self.root_folder_id.lock() = root;
@@ -695,6 +1102,13 @@ impl SyncEngine {
     }
 
     async fn start_watcher(self: &Arc<Self>) {
+        let _activity = match self.begin_external_activity() {
+            Ok(activity) => activity,
+            Err(_) => return,
+        };
+        if *self.shutdown.lock() {
+            return;
+        }
         if let Some(ref m) = self.mount {
             let watcher = Arc::new(LocalWatcher::new(
                 m.mount_dir(),
@@ -704,33 +1118,218 @@ impl SyncEngine {
             if let Err(e) = watcher.start().await {
                 tracing::error!("watcher启动失败: {e}");
             } else {
-                let mut rx = watcher.subscribe();
-                // 保活：存入字段，防止 Arc<LocalWatcher> 块结束即 drop → FSEvents 句柄释放
-                *self.watcher.lock() = Some(watcher);
+                let installed = {
+                    let shutdown_guard = self.shutdown.lock();
+                    if *shutdown_guard {
+                        false
+                    } else {
+                        *self.watcher.lock() = Some(watcher.clone());
+                        true
+                    }
+                };
+                if !installed {
+                    watcher.stop().await;
+                    return;
+                }
+                let rx = watcher.subscribe();
                 // 持 Arc<SyncEngine> 共享实时 cloud_tree/syncing（不再用冻结快照克隆）
                 let engine = self.clone();
                 tokio::spawn(async move {
-                    loop {
-                        // 收到事件前先检查 shutdown（引擎被替换/退出 → 停止喂事件）
-                        if *engine.shutdown.lock() {
-                            tracing::info!("watcher 任务检测到 shutdown，退出循环");
-                            break;
-                        }
-                        if rx.recv().await.is_err() {
-                            // broadcast 发送端关闭（watcher 被 drop）→ 退出
-                            break;
-                        }
-                        if *engine.shutdown.lock() {
-                            tracing::info!("watcher 任务检测到 shutdown，退出循环");
-                            break;
-                        }
-                        if let Err(e) = engine.run_sync_cycle("local-watcher").await {
-                            tracing::warn!(error = %e, "watcher 触发的同步周期失败");
-                        }
-                    }
+                    let shutdown = engine.shutdown_tx.subscribe();
+                    let request_engine = engine.clone();
+                    watcher_listener_loop(rx, shutdown, move || {
+                        request_engine.request_cycle_background("local-watcher")
+                    })
+                    .await;
                 });
             }
         }
+    }
+
+    fn request_cycle_background(self: &Arc<Self>, triggered_by: &'static str) {
+        self.cycle
+            .request(Self::cycle_request_for_trigger(triggered_by));
+        self.schedule_background_drain();
+    }
+
+    fn schedule_background_drain(self: &Arc<Self>) {
+        if self
+            .background_scheduled
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let engine = self.clone();
+        tokio::spawn(async move {
+            let mut recoverable_failures = 0_u32;
+            loop {
+                let (failed, retryable_failure) = match engine.drain_cycle_requests_for(None).await
+                {
+                    Ok(()) => (false, false),
+                    Err(error) => {
+                        tracing::warn!(%error, "后台协调周期失败");
+                        (true, SyncEngine::is_recoverable_cycle_error(&error))
+                    }
+                };
+                if retryable_failure && engine.cycle.has_pending() {
+                    recoverable_failures = recoverable_failures.saturating_add(1);
+                    let delay = recoverable_cycle_retry_delay(recoverable_failures);
+                    let mut shutdown = engine.shutdown_tx.subscribe();
+                    if *shutdown.borrow() {
+                        engine.background_scheduled.store(false, Ordering::Release);
+                        break;
+                    }
+                    tokio::select! {
+                        changed = shutdown.changed() => {
+                            if changed.is_err() || *shutdown.borrow() {
+                                engine.background_scheduled.store(false, Ordering::Release);
+                                break;
+                            }
+                        }
+                        _ = tokio::time::sleep(delay) => {}
+                    }
+                    if engine.is_online() && !*engine.shutdown.lock() {
+                        continue;
+                    }
+                }
+                if !failed {
+                    recoverable_failures = 0;
+                }
+                engine.background_scheduled.store(false, Ordering::Release);
+                let can_continue = !failed
+                    && engine.started.load(Ordering::Acquire)
+                    && engine.is_online()
+                    && !*engine.folder_syncing.lock()
+                    && !*engine.shutdown.lock()
+                    && engine.cycle.has_pending();
+                if !can_continue
+                    || engine
+                        .background_scheduled
+                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                        .is_err()
+                {
+                    break;
+                }
+            }
+        });
+    }
+
+    fn is_recoverable_cycle_error(error: &AppError) -> bool {
+        match error {
+            AppError::DriveApi {
+                status_code,
+                transport_kind,
+                ..
+            } => {
+                transport_kind.is_some()
+                    || status_code.is_some_and(|status| status == 429 || status >= 500)
+            }
+            _ => false,
+        }
+    }
+
+    fn start_network_listener(
+        self: &Arc<Self>,
+        transitions: broadcast::Receiver<crate::core::net_guard::NetworkTransition>,
+    ) {
+        let engine = self.clone();
+        let shutdown = self.shutdown_tx.subscribe();
+        tokio::spawn(async move {
+            let request_engine = engine.clone();
+            let level_engine = engine.clone();
+            network_listener_loop(
+                transitions,
+                move || level_engine.is_online(),
+                shutdown,
+                false,
+                move || request_engine.request_cycle_background("network-recovery"),
+            )
+            .await;
+        });
+    }
+
+    fn start_backoff_scheduler(self: &Arc<Self>) {
+        let Some(task_runner) = self.task_runner.clone() else {
+            return;
+        };
+        let engine = self.clone();
+        let mut shutdown = self.shutdown_tx.subscribe();
+        tokio::spawn(async move {
+            loop {
+                if *shutdown.borrow() {
+                    break;
+                }
+                let deadline = match task_runner.next_backoff_deadline_ms() {
+                    Ok(deadline) => deadline,
+                    Err(error) => {
+                        tracing::warn!(%error, "读取退避 deadline 失败");
+                        None
+                    }
+                };
+                match deadline {
+                    Some(deadline) => {
+                        let remaining_ms = deadline
+                            .saturating_sub(task_runner.current_time_ms())
+                            .max(0) as u64;
+                        if remaining_ms == 0 {
+                            if !engine.is_online() {
+                                tokio::select! {
+                                    changed = shutdown.changed() => {
+                                        if changed.is_err() || *shutdown.borrow() { break; }
+                                    }
+                                    _ = engine.backoff_changed.notified() => {}
+                                }
+                                continue;
+                            }
+                            if let Err(error) = engine.run_sync_cycle("backoff-deadline").await {
+                                tracing::warn!(%error, "退避 deadline 恢复周期失败");
+                            }
+                            let still_blocked = task_runner
+                                .next_backoff_deadline_ms()
+                                .ok()
+                                .flatten()
+                                .is_some_and(|next| next <= task_runner.current_time_ms());
+                            if still_blocked {
+                                let observed = engine.schedule_revision.load(Ordering::Acquire);
+                                loop {
+                                    tokio::select! {
+                                        changed = shutdown.changed() => {
+                                            if changed.is_err() || *shutdown.borrow() { return; }
+                                        }
+                                        _ = engine.backoff_changed.notified() => {
+                                            if engine.schedule_revision.load(Ordering::Acquire) != observed {
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                        tokio::select! {
+                            changed = shutdown.changed() => {
+                                if changed.is_err() || *shutdown.borrow() { break; }
+                            }
+                            _ = engine.backoff_changed.notified() => {}
+                            _ = tokio::time::sleep(Duration::from_millis(remaining_ms)) => {
+                                if let Err(error) = engine.run_sync_cycle("backoff-deadline").await {
+                                    tracing::warn!(%error, "退避 deadline 恢复周期失败");
+                                }
+                            }
+                        }
+                    }
+                    None => {
+                        tokio::select! {
+                            changed = shutdown.changed() => {
+                                if changed.is_err() || *shutdown.borrow() { break; }
+                            }
+                            _ = engine.backoff_changed.notified() => {}
+                        }
+                    }
+                }
+            }
+        });
     }
 
     /// 启动云端定时刷新后台任务（shutdown-aware）。
@@ -748,31 +1347,22 @@ impl SyncEngine {
             interval_secs = engine.poll_interval_secs,
             "启动云端定时刷新任务"
         );
+        let mut shutdown = self.shutdown_tx.subscribe();
         tokio::spawn(async move {
             loop {
-                if *engine.shutdown.lock() {
-                    tracing::info!("云端定时刷新任务检测到 shutdown，退出循环");
+                if *shutdown.borrow() {
                     break;
                 }
-                // ★ 网络离线时阻塞等待恢复（替代盲目 sleep），避免断网时瞎跑 BFS
-                {
-                    let engine_for_shutdown = engine.clone();
-                    crate::core::net_guard::wait_until_online(|| {
-                        *engine_for_shutdown.shutdown.lock()
-                    })
-                    .await;
+                tokio::select! {
+                    changed = shutdown.changed() => {
+                        if changed.is_err() || *shutdown.borrow() { break; }
+                    }
+                    _ = tokio::time::sleep(Duration::from_secs(engine.poll_interval_secs as u64)) => {}
                 }
-                if *engine.shutdown.lock() {
-                    tracing::info!("云端定时刷新任务检测到 shutdown，退出循环");
+                if *shutdown.borrow() {
                     break;
                 }
-                tokio::time::sleep(Duration::from_secs(engine.poll_interval_secs as u64)).await;
-                if *engine.shutdown.lock() {
-                    tracing::info!("云端定时刷新任务检测到 shutdown，退出循环");
-                    break;
-                }
-                // 二次确认：sleep 期间网络可能又断了
-                if !crate::core::net_guard::is_online() {
+                if !engine.is_online() {
                     tracing::info!("网络离线，跳过本次云端刷新");
                     continue;
                 }
@@ -783,24 +1373,91 @@ impl SyncEngine {
 
     /// 执行一次同步周期。
     pub async fn run_sync_cycle(&self, triggered_by: &str) -> AppResult<()> {
-        if *self.syncing.lock() || *self.folder_syncing.lock() {
-            return Ok(());
+        if triggered_by != "startup-resume" && !self.started.load(Ordering::Acquire) {
+            return Err(AppError::generic("同步引擎正在启动，请稍后重试"));
         }
-        // ★ 网络离线时跳过同步周期（本地变更累积，网络恢复后统一处理）
-        // startup-resume 放行：启动首次同步需完成本地扫描部分
-        if triggered_by != "startup-resume" && !crate::core::net_guard::is_online() {
-            tracing::info!(triggered_by, "网络离线，跳过同步周期");
-            return Ok(());
+        let sequence = self
+            .cycle
+            .request(Self::cycle_request_for_trigger(triggered_by));
+        if triggered_by == "manual-refresh" {
+            (self.cycle_observer)("request-manual");
         }
-        if self.is_indexing() && triggered_by != "startup-resume" && triggered_by != "retry-failed"
-        {
-            tracing::info!(triggered_by, "索引进行中，跳过同步周期");
-            return Ok(());
+        self.drain_cycle_requests_for(Some(sequence)).await?;
+        self.cycle
+            .result_if_completed(sequence)
+            .unwrap_or_else(|| Err(AppError::generic("同步请求已排队，等待恢复条件")))
+    }
+
+    fn cycle_request_for_trigger(triggered_by: &str) -> CycleRequest {
+        match triggered_by {
+            "manual-refresh" => CycleRequest::LOCAL_RESCAN | CycleRequest::CLOUD_FULL,
+            "auto-cloud-refresh" => CycleRequest::LOCAL_RESCAN | CycleRequest::CLOUD_INCREMENTAL,
+            "network-recovery" => {
+                CycleRequest::LOCAL_RESCAN
+                    | CycleRequest::CLOUD_INCREMENTAL
+                    | CycleRequest::ONLINE_RECOVERY
+            }
+            "startup-resume" => {
+                CycleRequest::LOCAL_RESCAN
+                    | CycleRequest::CLOUD_INCREMENTAL
+                    | CycleRequest::ONLINE_RECOVERY
+                    | CycleRequest::STARTUP
+            }
+            "retry-failed" => CycleRequest::LOCAL_RESCAN | CycleRequest::RETRY,
+            "backoff-deadline" => CycleRequest::LOCAL_RESCAN | CycleRequest::ONLINE_RECOVERY,
+            _ => CycleRequest::LOCAL_RESCAN,
+        }
+    }
+
+    async fn drain_cycle_requests_for(&self, awaited: Option<u64>) -> AppResult<()> {
+        let _owner = self.cycle.lock_owner().await;
+        if let Some(sequence) = awaited {
+            if let Some(result) = self.cycle.result_if_completed(sequence) {
+                return result;
+            }
         }
         *self.syncing.lock() = true;
         let _syncing_reset = ResetFlag::new(&self.syncing);
-        // ★ 周期开始 → 立即通知前端"同步中" + 设置 phase（auto-cloud-refresh
-        //   由上层调用方已设好 phase，此处不覆盖；其余按 triggered_by 设对应 phase）
+        loop {
+            let (request, cycle_sequence) = self.cycle.take_pending_with_sequence();
+            if request.is_empty() {
+                return Ok(());
+            }
+            if *self.shutdown.lock() {
+                return Ok(());
+            }
+            if *self.folder_syncing.lock() {
+                self.cycle.restore(request);
+                return Ok(());
+            }
+            if !request.contains(CycleRequest::STARTUP) && !self.is_online() {
+                self.cycle.restore(request);
+                tracing::info!("网络离线，保留同步请求等待 level recovery");
+                return Ok(());
+            }
+            if let Err(error) = self.run_coordinated_cycle(request).await {
+                self.cycle.complete(cycle_sequence, Some(&error));
+                self.restore_idle_runtime_after_error();
+                return Err(error);
+            }
+            self.cycle.complete(cycle_sequence, None);
+        }
+    }
+
+    async fn run_coordinated_cycle(&self, request: CycleRequest) -> AppResult<()> {
+        let triggered_by = if request.contains(CycleRequest::STARTUP) {
+            "startup-resume"
+        } else if request.contains(CycleRequest::CLOUD_FULL) {
+            "manual-refresh"
+        } else if request.contains(CycleRequest::ONLINE_RECOVERY) {
+            "network-recovery"
+        } else if request.contains(CycleRequest::CLOUD_INCREMENTAL) {
+            "auto-cloud-refresh"
+        } else if request.contains(CycleRequest::RETRY) {
+            "retry-failed"
+        } else {
+            "local-watcher"
+        };
         let result = async {
             self.update_runtime_and_broadcast(|runtime| {
                 runtime.is_running = true;
@@ -814,18 +1471,116 @@ impl SyncEngine {
                     };
                 }
             })?;
+
+            if request.contains(CycleRequest::RETRY) {
+                let _activity = self.begin_external_activity()?;
+                {
+                    let conn = self.db.lock();
+                    conn.execute(
+                        "UPDATE sync_items SET status=?1, error_message=NULL WHERE status=?2",
+                        rusqlite::params![
+                            repository::sync_status::SYNCING,
+                            repository::sync_status::FAILED
+                        ],
+                    )
+                    .map_err(|error| AppError::generic(format!("接受失败项重试失败：{error}")))?;
+                }
+                self.recompute_and_broadcast_state()?;
+            }
+
+            if request.contains(CycleRequest::STARTUP) {
+                {
+                    let conn = self.db.lock();
+                    let _ = repository::reset_stale_statuses(&conn);
+                }
+                self.ensure_cycle_active()?;
+                self.recover_interrupted_transfers().await;
+            }
+
+            if request.contains(CycleRequest::ONLINE_RECOVERY) {
+                if !self.is_online() {
+                    self.cycle.restore(
+                        CycleRequest::LOCAL_RESCAN
+                            | CycleRequest::CLOUD_INCREMENTAL
+                            | CycleRequest::ONLINE_RECOVERY,
+                    );
+                    if !request.contains(CycleRequest::STARTUP) {
+                        return Ok(());
+                    }
+                } else {
+                    self.ensure_cycle_active()?;
+                    if let Some(task_runner) = &self.task_runner {
+                        (self.cycle_observer)("resume-waiting");
+                        task_runner.resume_waiting().await?;
+                        self.ensure_cycle_active()?;
+                        (self.cycle_observer)("resume-due");
+                        task_runner.resume_due_backoff().await?;
+                    }
+                }
+            }
+            if request.contains(CycleRequest::STARTUP)
+                && request.contains(CycleRequest::CLOUD_INCREMENTAL)
+            {
+                let mount_dir = self.mount_dir.lock().clone().unwrap_or_default();
+                if let Err(error) = self.load_or_refresh_cloud_tree(&mount_dir).await {
+                    tracing::warn!(%error, "启动 owner 云端树刷新失败，保留恢复请求");
+                    self.cycle.restore(
+                        CycleRequest::LOCAL_RESCAN
+                            | CycleRequest::CLOUD_INCREMENTAL
+                            | CycleRequest::ONLINE_RECOVERY,
+                    );
+                }
+                self.ensure_cycle_active()?;
+                self.try_init_changes_cursor(&mount_dir).await;
+            }
+            self.ensure_cycle_active()?;
+            if request.contains(CycleRequest::CLOUD_FULL) {
+                (self.cycle_observer)("cloud-refresh");
+                if let Err(error) = self.refresh_cloud_full_for_cycle().await {
+                    self.cycle
+                        .restore(CycleRequest::LOCAL_RESCAN | CycleRequest::CLOUD_FULL);
+                    return Err(error);
+                }
+            } else if request.contains(CycleRequest::CLOUD_INCREMENTAL) {
+                if !self.is_online() {
+                    self.cycle.restore(
+                        CycleRequest::LOCAL_RESCAN
+                            | CycleRequest::CLOUD_INCREMENTAL
+                            | CycleRequest::ONLINE_RECOVERY,
+                    );
+                } else {
+                    (self.cycle_observer)("cloud-refresh");
+                    if let Err(error) = self.refresh_cloud_incremental_for_cycle().await {
+                        if request.contains(CycleRequest::STARTUP) {
+                            tracing::warn!(%error, "启动 owner 云端刷新失败，等待稳定 Online 补跑");
+                            self.cycle.restore(
+                                CycleRequest::LOCAL_RESCAN
+                                    | CycleRequest::CLOUD_INCREMENTAL
+                                    | CycleRequest::ONLINE_RECOVERY,
+                            );
+                        } else {
+                            self.cycle.restore(
+                                CycleRequest::LOCAL_RESCAN | CycleRequest::CLOUD_INCREMENTAL,
+                            );
+                            return Err(error);
+                        }
+                    }
+                }
+            }
+            self.ensure_cycle_active()?;
+            (self.cycle_observer)("local-rescan");
             self.run_sync_cycle_inner(triggered_by).await
         }
         .await;
-        if result.is_err() {
-            self.restore_idle_runtime_after_error();
-        }
         result
     }
 
-    /// 当前是否处于索引中（cloud_tree BFS 重建）。读取 state 副本判断。
-    fn is_indexing(&self) -> bool {
-        self.state.lock().is_indexing
+    pub(crate) fn ensure_cycle_active(&self) -> AppResult<()> {
+        if *self.shutdown.lock() {
+            Err(AppError::generic("同步引擎已停止，拒绝开始新副作用"))
+        } else {
+            Ok(())
+        }
     }
 
     /// 设置当前同步阶段并广播（供前端状态条精确显示）。
@@ -838,6 +1593,9 @@ impl SyncEngine {
 
     async fn run_sync_cycle_inner(&self, triggered_by: &str) -> AppResult<()> {
         let local = self.scan_local().await;
+        (self.cycle_observer)("local-scan-complete");
+        self.ensure_cycle_active()?;
+        let planning_activity = self.begin_external_activity()?;
         let cloud = self.cloud_tree.lock().clone();
         let db = self.load_db_snapshot();
 
@@ -890,7 +1648,7 @@ impl SyncEngine {
         // ★ 仅 startup-resume 启用：启动期 cloud_tree 可能不可信；会话内 cloud_tree 是
         // 上轮 BFS 的可信基线，复核冗余且会拖慢批量删除（每个删除串行一次 GET）。
         if triggered_by == "startup-resume" {
-            self.validate_delete_from_local(&mut actions).await;
+            self.validate_delete_from_local(&mut actions).await?;
         }
 
         // §2.12 目录级联删除去重：删除一个目录时，华为 API 对目录设置 recycled=true
@@ -935,11 +1693,17 @@ impl SyncEngine {
             "sync cycle: 开始执行动作"
         );
 
+        drop(planning_activity);
+        self.ensure_cycle_active()?;
         let results = if let Some(ref exec) = self.executor {
-            self.execute_actions_ordered(exec, &mut actions).await
+            self.execute_actions_ordered(exec, &mut actions).await?
         } else {
             Vec::new()
         };
+        // Submitted remote writes are allowed to settle through TaskRunner. An engine that was
+        // replaced while awaiting them must not begin the later engine-level DB/cache mutations.
+        self.ensure_cycle_active()?;
+        let _apply_activity = self.begin_external_activity()?;
 
         // 执行后回写：cloud_tree/path_to_id + DB（对齐 dart _updateDbFromResults + syncFolderRecursive）
         self.apply_results(&actions, &results);
@@ -990,7 +1754,7 @@ impl SyncEngine {
         &self,
         exec: &SyncExecutor,
         actions: &mut [crate::sync::state::SyncAction],
-    ) -> Vec<crate::sync::state::ActionResult> {
+    ) -> AppResult<Vec<crate::sync::state::ActionResult>> {
         use crate::sync::state::{ActionResult, SyncActionType};
         let n = actions.len();
         let mut results: Vec<Option<ActionResult>> = (0..n).map(|_| None).collect();
@@ -1012,6 +1776,8 @@ impl SyncEngine {
 
         // 阶段 1：顺序执行本地新建目录，成功后回填 path_to_id/cloud_tree
         for &i in &folder_idxs {
+            self.ensure_cycle_active()?;
+            let _activity = self.begin_external_activity()?;
             // 重新填充 parent（父目录可能刚被创建并回填到 path_to_id）
             fill_parent_file_ids(&mut actions[i..=i], &self.path_to_id.lock());
             let res = exec
@@ -1025,6 +1791,7 @@ impl SyncEngine {
                     deferred: false,
                     cloud_file: None,
                 });
+            self.ensure_cycle_active()?;
             if res.success {
                 if let (Some(rel), Some(cf)) =
                     (actions[i].relative_path.clone(), res.cloud_file.clone())
@@ -1055,6 +1822,8 @@ impl SyncEngine {
         let other_results = if other_actions.is_empty() {
             Vec::new()
         } else {
+            self.ensure_cycle_active()?;
+            let _activity = self.begin_external_activity()?;
             exec.execute_all(&other_actions).await
         };
         for (k, &i) in other_idxs.iter().enumerate() {
@@ -1063,7 +1832,7 @@ impl SyncEngine {
             }
         }
 
-        results
+        Ok(results
             .into_iter()
             .map(|r| {
                 r.unwrap_or_else(|| ActionResult {
@@ -1073,7 +1842,7 @@ impl SyncEngine {
                     cloud_file: None,
                 })
             })
-            .collect()
+            .collect())
     }
 
     /// 执行后回写：cloud_tree/path_to_id + DB。
@@ -1570,26 +2339,17 @@ impl SyncEngine {
     }
 
     pub async fn trigger_manual_sync(&self) -> AppResult<()> {
-        // 防重复点击：manual_syncing 锁覆盖整段手动同步（BFS + cycle），
-        // 避免重复点击触发并发 BFS（前端按钮也 disable，此处兜底）。
-        {
-            let mut guard = self.manual_syncing.lock();
-            if *guard {
-                tracing::info!("trigger_manual_sync: 已在手动同步中，跳过");
-                return Ok(());
-            }
-            *guard = true;
-        }
-        let _manual_reset = ResetFlag::new(&self.manual_syncing);
-        let result = self.trigger_manual_sync_impl().await;
-        if result.is_err() {
-            self.restore_idle_runtime_after_error();
+        let result = self.run_sync_cycle("manual-refresh").await;
+        (self.cycle_observer)("manual-cycle-returned");
+        if result.is_ok() {
+            self.update_runtime_and_broadcast(|runtime| runtime.content_changed = true)?;
         }
         result
     }
 
-    /// 手动同步实现：刷新云端树 + 同步周期（持有 manual_syncing 锁时调用）。
-    async fn trigger_manual_sync_impl(&self) -> AppResult<()> {
+    /// Full refresh stage owned by the cycle coordinator.
+    async fn refresh_cloud_full_for_cycle(&self) -> AppResult<()> {
+        let _activity = self.begin_external_activity()?;
         // 对齐 dart triggerManualSync：先刷新云端树获取最新状态，再跑同步周期
         let mount_dir = self.mount_dir.lock().clone().unwrap_or_default();
         let abs_dir = crate::core::paths::expand_tilde(&mount_dir);
@@ -1604,6 +2364,7 @@ impl SyncEngine {
         // 无论成功失败都要复位 is_indexing，避免 BFS 出错后状态条卡在索引态
         let refresh_result =
             cloud_tree::refresh_cloud_tree(&self.files_api, &self.mount, &abs_dir).await;
+        self.ensure_cycle_active()?;
         let reset_result = self.update_runtime_and_broadcast(|runtime| {
             runtime.is_indexing = false;
             runtime.sync_phase = None;
@@ -1621,9 +2382,6 @@ impl SyncEngine {
         *self.cloud_tree.lock() = tree;
         *self.path_to_id.lock() = p2i;
         *self.root_folder_id.lock() = root;
-        self.run_sync_cycle("manual-refresh").await?;
-        // 强制 contentChanged=true（用户主动刷新就是要看新内容）
-        self.update_runtime_and_broadcast(|runtime| runtime.content_changed = true)?;
         Ok(())
     }
 
@@ -1634,32 +2392,20 @@ impl SyncEngine {
     ///   `folder_content_changed` 事件驱动前端刷新，避免每 15 分钟无谓全量重拉 UI）；
     /// - 失败仅 `warn` 不传播，后台任务不应因单次失败终止循环。
     async fn run_auto_cloud_refresh(self: &Arc<Self>) {
-        // 索引中（含手动刷新/启动 BFS/其他自动刷新的 BFS 阶段）→ 跳过本次，等下次定时
-        if self.is_indexing() {
-            tracing::info!("自动云端刷新：索引进行中，跳过本次");
-            return;
-        }
-        // 与手动刷新互斥：若手动刷新进行中，跳过本次自动刷新
-        {
-            let mut guard = self.manual_syncing.lock();
-            if *guard {
-                tracing::info!("自动云端刷新：手动同步进行中，跳过本次");
-                return;
-            }
-            *guard = true;
-        }
-        let _manual_reset = ResetFlag::new(&self.manual_syncing);
-        let result = self.run_auto_cloud_refresh_impl().await;
-        if result.is_err() {
-            self.restore_idle_runtime_after_error();
-        }
+        let result = self.run_sync_cycle("auto-cloud-refresh").await;
+        (self.cycle_observer)("auto-cycle-returned");
         if let Err(e) = result {
             tracing::warn!(error = %e, "自动云端刷新失败（忽略，下次定时重试）");
         }
     }
 
-    /// 自动云端刷新实现：有 cursor 走增量 changes，无/失效走全量 BFS（持有 manual_syncing 锁时调用）。
-    async fn run_auto_cloud_refresh_impl(&self) -> AppResult<()> {
+    /// Incremental-preferred cloud refresh stage owned by the cycle coordinator.
+    async fn refresh_cloud_incremental_for_cycle(&self) -> AppResult<()> {
+        let _activity = self.begin_external_activity()?;
+        #[cfg(test)]
+        if let Some(hook) = &self.incremental_refresh_hook {
+            return hook();
+        }
         let mount_dir = self.mount_dir.lock().clone().unwrap_or_default();
         let abs_dir = crate::core::paths::expand_tilde(&mount_dir);
 
@@ -1687,10 +2433,8 @@ impl SyncEngine {
                 return Err(error);
             }
         }
-        // 增量 merge 完成后，cycle 阶段显示"同步云端变更"（try_incremental 设了 querying，
-        // 此处 cycle 前覆盖为 syncing；run_sync_cycle 对 auto-cloud-refresh 不覆盖 phase）
+        // 增量 merge 完成后，cycle 阶段显示"同步云端变更"。
         self.set_phase("syncing-auto-incremental")?;
-        self.run_sync_cycle("auto-cloud-refresh").await?;
         Ok(())
     }
 
@@ -1718,6 +2462,7 @@ impl SyncEngine {
                 self.set_phase("querying-changes")?;
                 match self.changes_api.list_all_changes(Some(cursor)).await {
                     Ok((changes, new_cursor)) => {
+                        self.ensure_cycle_active()?;
                         tracing::info!(
                             count = changes.len(),
                             "增量 changes 拉取成功，merge 进 cloud_tree"
@@ -1753,6 +2498,7 @@ impl SyncEngine {
         self.set_phase("indexing-auto-full")?;
         let (tree, p2i, root) =
             cloud_tree::refresh_cloud_tree(&self.files_api, &self.mount, abs_dir).await?;
+        self.ensure_cycle_active()?;
         *self.cloud_tree.lock() = tree;
         *self.path_to_id.lock() = p2i;
         *self.root_folder_id.lock() = root;
@@ -1766,6 +2512,10 @@ impl SyncEngine {
     /// 全量 BFS 后尝试取 changes 首页游标建立增量基线。失败静默。
     /// 已有 cursor 则不重复初始化；不支持时退化为「首次自动刷新走全量」，不报错。
     async fn try_init_changes_cursor(&self, mount_dir: &str) {
+        #[cfg(test)]
+        if self.startup_cloud_hook.is_some() {
+            return;
+        }
         let abs_dir = crate::core::paths::expand_tilde(mount_dir);
         self.try_init_changes_cursor_abs(&abs_dir).await;
     }
@@ -1948,7 +2698,10 @@ impl SyncEngine {
     /// 删除本地文件前的云端复核（不可逆操作的最后一道防线）。
     /// 对有真实 fileId 的 DeleteFromLocal 动作，调 GET /files/{id} 确认云端确实不存在。
     /// 与 validate_delete_from_cloud 对称——删云端有 stat 校验，删本地更应有云端复核。
-    async fn validate_delete_from_local(&self, actions: &mut [crate::sync::state::SyncAction]) {
+    async fn validate_delete_from_local(
+        &self,
+        actions: &mut [crate::sync::state::SyncAction],
+    ) -> AppResult<()> {
         use crate::data::repository::PENDING_FILE_ID_PREFIX;
         for a in actions.iter_mut() {
             if a.action_type != crate::sync::state::SyncActionType::DeleteFromLocal {
@@ -1965,6 +2718,8 @@ impl SyncEngine {
                 continue;
             };
 
+            self.ensure_cycle_active()?;
+            let _activity = self.begin_external_activity()?;
             match self.files_api.get(file_id).await {
                 Ok(_) => {
                     // 云端仍存在 → cloud_exists=false 是误判（cloud_tree 残缺）→ 拦截删除
@@ -1996,6 +2751,7 @@ impl SyncEngine {
                 }
             }
         }
+        Ok(())
     }
 
     /// 清理残余 DB 记录：删除 local 和 cloud 都不再存在的 DB 行。
@@ -2034,28 +2790,17 @@ impl SyncEngine {
     }
 
     pub async fn retry_failed(&self) -> AppResult<()> {
-        // 块作用域确保 MutexGuard 在 await 前释放
-        {
-            let conn = self.db.lock();
-            conn.execute(
-                "UPDATE sync_items SET status=?1, error_message=NULL WHERE status=?2",
-                rusqlite::params![
-                    repository::sync_status::SYNCING,
-                    repository::sync_status::FAILED
-                ],
-            )
-            .map_err(|error| AppError::generic(format!("接受失败项重试失败：{error}")))?;
-        }
-        self.recompute_and_broadcast_state()?;
         self.run_sync_cycle("retry-failed").await
     }
 
     /// Retry one durable transfer through the same runner used by automatic/startup work.
     pub async fn retry_transfer(self: &Arc<Self>, task_id: i64) -> AppResult<()> {
+        let activity = self.begin_external_activity()?;
         let task_runner = self.task_runner()?;
         let pending = task_runner.prepare_retry(task_id).await?;
         let engine = self.clone();
         tauri::async_runtime::spawn(async move {
+            let _activity = activity;
             match task_runner.run_prepared(pending.id).await {
                 Ok(outcome) => {
                     if let Some(cloud_file) = outcome.cloud_file {
@@ -2074,6 +2819,7 @@ impl SyncEngine {
                 }
                 Err(error) => tracing::warn!(task_id, %error, "后台重试任务失败"),
             }
+            engine.notify_backoff_schedule_changed();
         });
         Ok(())
     }
@@ -2492,7 +3238,10 @@ fn dedupe_local_descendants(actions: &mut Vec<crate::sync::state::SyncAction>) {
 #[cfg(test)]
 mod tests {
     //! apply_results 回归测试：覆盖本地新增/删除后 DB 与 cloud_tree 的回写。
-    use super::SyncEngine;
+    use super::{
+        network_listener_loop, watcher_listener_loop, ActivityTracker, CycleCoordinator,
+        CycleRequest, SyncEngine,
+    };
     use crate::auth::service::AuthService;
     use crate::data::repository;
     use crate::drive::client::DriveClient;
@@ -2502,6 +3251,1906 @@ mod tests {
     use crate::drive::upload_api::UploadApi;
     use crate::sync::state::{ActionResult, SyncAction, SyncActionType};
     use tempfile::tempdir;
+
+    struct SchedulerBackend {
+        calls: std::sync::Mutex<Vec<i64>>,
+    }
+
+    struct ArmGapBackend {
+        calls: std::sync::Mutex<Vec<i64>>,
+        submitted: tokio::sync::Notify,
+    }
+
+    struct RequestRecoveryBackend {
+        calls: std::sync::Mutex<Vec<i64>>,
+        attempts: std::sync::atomic::AtomicUsize,
+        completed_attempt: tokio::sync::Notify,
+    }
+
+    struct AmbiguousBarrierBackend {
+        calls: std::sync::Mutex<Vec<i64>>,
+        submitted: tokio::sync::Notify,
+        release_response: tokio::sync::Notify,
+    }
+
+    struct BatchShutdownBackend {
+        calls: std::sync::Mutex<Vec<i64>>,
+        first_submitted: tokio::sync::Notify,
+        release_first: tokio::sync::Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::sync::task_runner::TransferOperations for SchedulerBackend {
+        async fn execute(
+            &self,
+            task: &repository::TransferTask,
+            _progress: &crate::sync::task_runner::TaskProgressReporter,
+        ) -> Result<
+            crate::sync::task_runner::TaskExecutionOutcome,
+            crate::sync::task_runner::TaskExecutionError,
+        > {
+            self.calls.lock().unwrap().push(task.id);
+            if let Some(path) = task.local_path.as_deref() {
+                std::fs::write(path, b"payload")
+                    .map_err(|error| crate::error::AppError::generic(error.to_string()))?;
+            }
+            Ok(crate::sync::task_runner::TaskExecutionOutcome::default())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::sync::task_runner::TransferOperations for ArmGapBackend {
+        async fn execute(
+            &self,
+            task: &repository::TransferTask,
+            _progress: &crate::sync::task_runner::TaskProgressReporter,
+        ) -> Result<
+            crate::sync::task_runner::TaskExecutionOutcome,
+            crate::sync::task_runner::TaskExecutionError,
+        > {
+            self.calls.lock().unwrap().push(task.id);
+            self.submitted.notify_one();
+            Ok(crate::sync::task_runner::TaskExecutionOutcome {
+                cloud_file: Some(DriveFile {
+                    id: format!("uploaded-{}", task.id),
+                    name: task.name.clone(),
+                    size: task.total_size,
+                    edited_time: chrono::DateTime::from_timestamp_millis(20_000),
+                    ..Default::default()
+                }),
+                disposition: crate::sync::task_runner::TaskDisposition::Completed,
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::sync::task_runner::TransferOperations for RequestRecoveryBackend {
+        async fn execute(
+            &self,
+            task: &repository::TransferTask,
+            _progress: &crate::sync::task_runner::TaskProgressReporter,
+        ) -> Result<
+            crate::sync::task_runner::TaskExecutionOutcome,
+            crate::sync::task_runner::TaskExecutionError,
+        > {
+            self.calls.lock().unwrap().push(task.id);
+            let attempt = self
+                .attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if attempt == 0 {
+                return Err(crate::sync::task_runner::TaskExecutionError::App(
+                    crate::error::AppError::drive_transport(
+                        crate::error::DriveTransportKind::Connect,
+                        crate::error::RequestSemantics::Read,
+                        false,
+                        Some("request layer disconnected"),
+                    ),
+                ));
+            }
+            if let Some(path) = task.local_path.as_deref() {
+                std::fs::write(path, b"payload")
+                    .map_err(|error| crate::error::AppError::generic(error.to_string()))?;
+            }
+            self.completed_attempt.notify_one();
+            Ok(crate::sync::task_runner::TaskExecutionOutcome::default())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::sync::task_runner::TransferOperations for AmbiguousBarrierBackend {
+        async fn execute(
+            &self,
+            task: &repository::TransferTask,
+            _progress: &crate::sync::task_runner::TaskProgressReporter,
+        ) -> Result<
+            crate::sync::task_runner::TaskExecutionOutcome,
+            crate::sync::task_runner::TaskExecutionError,
+        > {
+            self.calls.lock().unwrap().push(task.id);
+            self.submitted.notify_one();
+            self.release_response.notified().await;
+            Ok(crate::sync::task_runner::TaskExecutionOutcome {
+                cloud_file: Some(DriveFile {
+                    id: format!("ambiguous-remote-{}", task.id),
+                    name: task.name.clone(),
+                    size: task.total_size,
+                    ..Default::default()
+                }),
+                disposition: crate::sync::task_runner::TaskDisposition::VerifyingRemote,
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::sync::task_runner::TransferOperations for BatchShutdownBackend {
+        async fn execute(
+            &self,
+            task: &repository::TransferTask,
+            _progress: &crate::sync::task_runner::TaskProgressReporter,
+        ) -> Result<
+            crate::sync::task_runner::TaskExecutionOutcome,
+            crate::sync::task_runner::TaskExecutionError,
+        > {
+            let first = {
+                let mut calls = self.calls.lock().unwrap();
+                calls.push(task.id);
+                calls.len() == 1
+            };
+            if first {
+                self.first_submitted.notify_one();
+                self.release_first.notified().await;
+            }
+            if let Some(path) = task.local_path.as_deref() {
+                std::fs::write(path, b"payload")
+                    .map_err(|error| crate::error::AppError::generic(error.to_string()))?;
+            }
+            Ok(crate::sync::task_runner::TaskExecutionOutcome::default())
+        }
+    }
+
+    #[tokio::test]
+    async fn watcher_and_manual_barrier_run_one_plus_one_followup() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let coordinator = std::sync::Arc::new(CycleCoordinator::default());
+        let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let cycles = std::sync::Arc::new(AtomicUsize::new(0));
+        let in_flight = std::sync::Arc::new(AtomicUsize::new(0));
+        let max_in_flight = std::sync::Arc::new(AtomicUsize::new(0));
+
+        let owner = {
+            let coordinator = coordinator.clone();
+            let entered = entered.clone();
+            let release = release.clone();
+            let cycles = cycles.clone();
+            let in_flight = in_flight.clone();
+            let max_in_flight = max_in_flight.clone();
+            tokio::spawn(async move {
+                coordinator
+                    .run(CycleRequest::LOCAL_RESCAN, |request| {
+                        let entered = entered.clone();
+                        let release = release.clone();
+                        let cycles = cycles.clone();
+                        let in_flight = in_flight.clone();
+                        let max_in_flight = max_in_flight.clone();
+                        async move {
+                            assert!(request.contains(CycleRequest::LOCAL_RESCAN));
+                            let active = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                            max_in_flight.fetch_max(active, Ordering::SeqCst);
+                            let turn = cycles.fetch_add(1, Ordering::SeqCst);
+                            if turn == 0 {
+                                entered.notify_one();
+                                release.notified().await;
+                            }
+                            in_flight.fetch_sub(1, Ordering::SeqCst);
+                        }
+                    })
+                    .await;
+            })
+        };
+        entered.notified().await;
+
+        let follower = {
+            let coordinator = coordinator.clone();
+            tokio::spawn(async move {
+                coordinator
+                    .run(
+                        CycleRequest::LOCAL_RESCAN | CycleRequest::CLOUD_FULL,
+                        |_| async {},
+                    )
+                    .await;
+            })
+        };
+        tokio::task::yield_now().await;
+        release.notify_one();
+        owner.await.unwrap();
+        follower.await.unwrap();
+
+        assert_eq!(cycles.load(Ordering::SeqCst), 2);
+        assert_eq!(max_in_flight.load(Ordering::SeqCst), 1);
+        assert!(coordinator.is_idle());
+    }
+
+    #[tokio::test]
+    async fn many_busy_triggers_coalesce_to_one_followup() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let coordinator = std::sync::Arc::new(CycleCoordinator::default());
+        let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let cycles = std::sync::Arc::new(AtomicUsize::new(0));
+        let owner = {
+            let coordinator = coordinator.clone();
+            let entered = entered.clone();
+            let release = release.clone();
+            let cycles = cycles.clone();
+            tokio::spawn(async move {
+                coordinator
+                    .run(CycleRequest::LOCAL_RESCAN, |_| {
+                        let entered = entered.clone();
+                        let release = release.clone();
+                        let cycles = cycles.clone();
+                        async move {
+                            if cycles.fetch_add(1, Ordering::SeqCst) == 0 {
+                                entered.notify_one();
+                                release.notified().await;
+                            }
+                        }
+                    })
+                    .await;
+            })
+        };
+        entered.notified().await;
+        for _ in 0..100 {
+            coordinator.request(CycleRequest::LOCAL_RESCAN);
+        }
+        release.notify_one();
+        owner.await.unwrap();
+
+        assert_eq!(cycles.load(Ordering::SeqCst), 2);
+        assert!(coordinator.is_idle());
+    }
+
+    #[tokio::test]
+    async fn release_window_trigger_is_not_lost() {
+        let coordinator = CycleCoordinator::default();
+        coordinator.request(CycleRequest::LOCAL_RESCAN);
+        let owner = coordinator.lock_owner().await;
+        assert!(coordinator
+            .take_pending()
+            .contains(CycleRequest::LOCAL_RESCAN));
+        assert!(coordinator.take_pending().is_empty());
+
+        coordinator.request(CycleRequest::ONLINE_RECOVERY);
+        drop(owner);
+
+        let owner = coordinator.lock_owner().await;
+        assert!(coordinator
+            .take_pending()
+            .contains(CycleRequest::ONLINE_RECOVERY));
+        drop(owner);
+        assert!(coordinator.is_idle());
+    }
+
+    #[tokio::test]
+    async fn shutdown_activity_gate_rejects_new_work_and_waits_for_settlement() {
+        let tracker = std::sync::Arc::new(ActivityTracker::default());
+        let submitted = tracker.begin().unwrap();
+        tracker.close();
+        assert!(tracker.begin().is_err());
+
+        let waiter = {
+            let tracker = tracker.clone();
+            tokio::spawn(async move { tracker.wait_idle().await })
+        };
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+        drop(submitted);
+        waiter.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn coalesced_manual_waiter_observes_owner_failure() {
+        let coordinator = CycleCoordinator::default();
+        let watcher_sequence = coordinator.request(CycleRequest::LOCAL_RESCAN);
+        let _owner = coordinator.lock_owner().await;
+        let request = coordinator.take_pending();
+        assert!(request.contains(CycleRequest::LOCAL_RESCAN));
+
+        let manual_sequence = coordinator.request(CycleRequest::CLOUD_FULL);
+        let merged = coordinator.take_pending();
+        assert!(merged.contains(CycleRequest::CLOUD_FULL));
+        let through = coordinator.requested_sequence();
+        let error = crate::error::AppError::generic("cloud refresh failed");
+        coordinator.complete(through, Some(&error));
+
+        assert!(coordinator
+            .result_if_completed(watcher_sequence)
+            .unwrap()
+            .is_err());
+        assert!(coordinator
+            .result_if_completed(manual_sequence)
+            .unwrap()
+            .unwrap_err()
+            .to_string()
+            .contains("cloud refresh failed"));
+    }
+
+    #[tokio::test]
+    async fn initial_online_and_lagged_network_receiver_level_reconcile() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let (tx, rx) = tokio::sync::broadcast::channel(2);
+        let online = std::sync::Arc::new(AtomicBool::new(true));
+        // Force the first recv after initial reconciliation to observe Lagged.
+        tx.send(crate::core::net_guard::NetworkTransition::Offline)
+            .unwrap();
+        tx.send(crate::core::net_guard::NetworkTransition::Online)
+            .unwrap();
+        tx.send(crate::core::net_guard::NetworkTransition::Online)
+            .unwrap();
+        let coordinator = std::sync::Arc::new(CycleCoordinator::default());
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let listener = {
+            let online = online.clone();
+            let coordinator = coordinator.clone();
+            tokio::spawn(async move {
+                network_listener_loop(
+                    rx,
+                    move || online.load(Ordering::SeqCst),
+                    stop_rx,
+                    true,
+                    move || {
+                        coordinator.request(CycleRequest::ONLINE_RECOVERY);
+                    },
+                )
+                .await;
+            })
+        };
+        tokio::task::yield_now().await;
+
+        let pending = coordinator.take_pending();
+        assert!(pending.contains(CycleRequest::ONLINE_RECOVERY));
+        assert!(coordinator.take_pending().is_empty());
+
+        tx.send(crate::core::net_guard::NetworkTransition::Online)
+            .unwrap();
+        tokio::task::yield_now().await;
+        assert!(coordinator
+            .take_pending()
+            .contains(CycleRequest::ONLINE_RECOVERY));
+
+        stop_tx.send(true).unwrap();
+        listener.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn watcher_lagged_batch_requests_rescan_and_listener_survives() {
+        let (changes_tx, changes_rx) = tokio::sync::broadcast::channel(2);
+        let (request_tx, mut request_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let coordinator = std::sync::Arc::new(CycleCoordinator::default());
+
+        // Overflow the receiver before the listener gets CPU. Its first recv must be Lagged,
+        // which is a level-style full-rescan request rather than a terminal condition.
+        changes_tx.send(vec!["one".into()]).unwrap();
+        changes_tx.send(vec!["two".into()]).unwrap();
+        changes_tx.send(vec!["three".into()]).unwrap();
+        let listener_coordinator = coordinator.clone();
+        let listener = tokio::spawn(async move {
+            watcher_listener_loop(changes_rx, shutdown_rx, move || {
+                listener_coordinator.request(CycleRequest::LOCAL_RESCAN);
+                request_tx.send(()).unwrap();
+            })
+            .await;
+        });
+
+        // One Lagged callback plus both retained tail batches all collapse to one pending bit.
+        for _ in 0..3 {
+            request_rx.recv().await.expect("initial backlog is drained");
+        }
+        assert_eq!(coordinator.take_pending(), CycleRequest::LOCAL_RESCAN);
+        assert!(coordinator.take_pending().is_empty());
+
+        changes_tx.send(vec!["after-lag".into()]).unwrap();
+        request_rx
+            .recv()
+            .await
+            .expect("listener survives and handles the next batch");
+        assert_eq!(coordinator.take_pending(), CycleRequest::LOCAL_RESCAN);
+
+        shutdown_tx.send(true).unwrap();
+        listener.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn watcher_warmup_arm_gap_runs_engine_plan_and_creates_one_task() {
+        use crate::mount::local_watcher::LocalWatcher;
+        use crate::mount::manager::MountManager;
+        use crate::sync::executor::SyncExecutor;
+        use crate::sync::task_runner::TaskRunner;
+        use crate::sync::transfer_state::TransferState;
+
+        let (mut engine, db) = build_engine();
+        let root = tempfile::tempdir().unwrap();
+        let mount = std::sync::Arc::new(MountManager::new(root.path()));
+        let backend = std::sync::Arc::new(ArmGapBackend {
+            calls: std::sync::Mutex::new(Vec::new()),
+            submitted: tokio::sync::Notify::new(),
+        });
+        let runner = std::sync::Arc::new(TaskRunner::new(
+            db.clone(),
+            root.path().to_path_buf(),
+            backend.clone(),
+            std::sync::Arc::new(|| true),
+            std::sync::Arc::new(|| Ok(())),
+            None,
+        ));
+        let mut executor = SyncExecutor::new(
+            1,
+            engine.files_api.clone(),
+            engine.download_api.clone(),
+            engine.upload_api.clone(),
+        );
+        executor.set_mount(mount.clone());
+        executor.set_db(db.clone());
+        executor.set_task_runner_for_test(runner);
+        engine.set_mount(mount);
+        engine.set_executor(executor);
+        engine.set_online_check(std::sync::Arc::new(|| true));
+        engine
+            .started
+            .store(true, std::sync::atomic::Ordering::Release);
+        let engine = std::sync::Arc::new(engine);
+
+        // This is the completed startup scan. The file appears only in the scan-to-watch arm gap.
+        assert!(engine.scan_local().await.is_empty());
+        std::fs::write(root.path().join("arm-gap.txt"), b"payload").unwrap();
+
+        let watcher = std::sync::Arc::new(LocalWatcher::new(root.path(), vec![], 3));
+        let changes = watcher.subscribe();
+        let (_event_tx, event_rx) = tokio::sync::mpsc::channel(2);
+        watcher.start_event_loop_for_receiver(event_rx, true).await;
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let listener = {
+            let request_engine = engine.clone();
+            tokio::spawn(async move {
+                watcher_listener_loop(changes, shutdown_rx, move || {
+                    request_engine.request_cycle_background("local-watcher");
+                })
+                .await;
+            })
+        };
+
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+        backend.submitted.notified().await;
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+            let completed = repository::list_all_transfers(&db.lock()).is_ok_and(|tasks| {
+                tasks.len() == 1 && tasks[0].state_kind() == Ok(TransferState::Completed)
+            });
+            if completed {
+                break;
+            }
+        }
+
+        let tasks = repository::list_all_transfers(&db.lock()).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].relative_path.as_deref(), Some("arm-gap.txt"));
+        assert_eq!(tasks[0].state_kind().unwrap(), TransferState::Completed);
+        assert_eq!(&*backend.calls.lock().unwrap(), &[tasks[0].id]);
+
+        shutdown_tx.send(true).unwrap();
+        listener.await.unwrap();
+        watcher.stop().await;
+        engine.shutdown().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn recoverable_refresh_failure_retries_without_edge_with_bounded_exponential_delay() {
+        use crate::error::RequestSemantics;
+
+        let (mut engine, _) = build_engine();
+        engine.set_online_check(std::sync::Arc::new(|| true));
+        engine
+            .started
+            .store(true, std::sync::atomic::Ordering::Release);
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (attempt_tx, mut attempt_rx) = tokio::sync::mpsc::unbounded_channel();
+        engine.set_incremental_refresh_hook_for_test({
+            let attempts = attempts.clone();
+            std::sync::Arc::new(move || {
+                let attempt = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                attempt_tx.send(attempt).unwrap();
+                if attempt < 3 {
+                    Err(crate::error::AppError::drive_from_response(
+                        503,
+                        "{}",
+                        None,
+                        RequestSemantics::Read,
+                        false,
+                    ))
+                } else {
+                    Ok(())
+                }
+            })
+        });
+        let scans = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (scan_tx, mut scan_rx) = tokio::sync::mpsc::unbounded_channel();
+        engine.set_cycle_observer({
+            let scans = scans.clone();
+            std::sync::Arc::new(move |stage| {
+                if stage == "local-rescan" {
+                    scans.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    scan_tx.send(()).unwrap();
+                }
+            })
+        });
+        let engine = std::sync::Arc::new(engine);
+
+        engine.request_cycle_background("network-recovery");
+        assert_eq!(attempt_rx.recv().await, Some(1));
+        assert_eq!(scans.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        tokio::time::advance(std::time::Duration::from_millis(999)).await;
+        tokio::task::yield_now().await;
+        assert!(attempt_rx.try_recv().is_err());
+        tokio::time::advance(std::time::Duration::from_millis(1)).await;
+        assert_eq!(attempt_rx.recv().await, Some(2));
+
+        // Second recoverable failure backs off for 2 seconds, rather than scanning/calling every
+        // fixed second forever. No external trigger is injected between these attempts.
+        tokio::time::advance(std::time::Duration::from_millis(1_999)).await;
+        tokio::task::yield_now().await;
+        assert!(attempt_rx.try_recv().is_err());
+        tokio::time::advance(std::time::Duration::from_millis(1)).await;
+        assert_eq!(attempt_rx.recv().await, Some(3));
+        scan_rx
+            .recv()
+            .await
+            .expect("successful refresh reaches local scan");
+
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 3);
+        assert_eq!(scans.load(std::sync::atomic::Ordering::SeqCst), 1);
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert!(engine.cycle.is_idle());
+        engine.shutdown().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn offline_watcher_event_poll_zero_recovers_at_stable_online_without_second_event() {
+        use crate::core::net_guard::NetworkStateMachine;
+        use crate::mount::local_watcher::LocalWatcher;
+        use crate::mount::manager::MountManager;
+        use crate::sync::executor::SyncExecutor;
+        use crate::sync::task_runner::TaskRunner;
+        use crate::sync::transfer_state::TransferState;
+        use notify::{Event, EventKind};
+
+        let online = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (mut engine, db) = build_engine();
+        let root = tempfile::tempdir().unwrap();
+        let mount = std::sync::Arc::new(MountManager::new(root.path()));
+        let backend = std::sync::Arc::new(ArmGapBackend {
+            calls: std::sync::Mutex::new(Vec::new()),
+            submitted: tokio::sync::Notify::new(),
+        });
+        let runner = std::sync::Arc::new(TaskRunner::new(
+            db.clone(),
+            root.path().to_path_buf(),
+            backend.clone(),
+            {
+                let online = online.clone();
+                std::sync::Arc::new(move || online.load(std::sync::atomic::Ordering::SeqCst))
+            },
+            std::sync::Arc::new(|| Ok(())),
+            None,
+        ));
+        let mut executor = SyncExecutor::new(
+            1,
+            engine.files_api.clone(),
+            engine.download_api.clone(),
+            engine.upload_api.clone(),
+        );
+        executor.set_mount(mount.clone());
+        executor.set_db(db.clone());
+        executor.set_task_runner_for_test(runner);
+        engine.set_mount(mount);
+        engine.set_executor(executor);
+        engine.set_online_check({
+            let online = online.clone();
+            std::sync::Arc::new(move || online.load(std::sync::atomic::Ordering::SeqCst))
+        });
+        engine.set_incremental_refresh_hook_for_test(std::sync::Arc::new(|| Ok(())));
+        let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        engine.set_cycle_observer({
+            let order = order.clone();
+            std::sync::Arc::new(move |stage| order.lock().unwrap().push(stage))
+        });
+        engine
+            .started
+            .store(true, std::sync::atomic::Ordering::Release);
+        let engine = std::sync::Arc::new(engine);
+
+        let watcher = std::sync::Arc::new(LocalWatcher::new(root.path(), vec![], 3));
+        let changes = watcher.subscribe();
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(2);
+        watcher.start_event_loop_for_receiver(event_rx, false).await;
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let watcher_listener = {
+            let request_engine = engine.clone();
+            let stop_rx = stop_rx.clone();
+            tokio::spawn(async move {
+                watcher_listener_loop(changes, stop_rx, move || {
+                    request_engine.request_cycle_background("local-watcher");
+                })
+                .await;
+            })
+        };
+
+        let (network_tx, network_rx) = tokio::sync::broadcast::channel(4);
+        let network_listener = {
+            let request_engine = engine.clone();
+            let online = online.clone();
+            tokio::spawn(async move {
+                network_listener_loop(
+                    network_rx,
+                    move || online.load(std::sync::atomic::Ordering::SeqCst),
+                    stop_rx,
+                    false,
+                    move || request_engine.request_cycle_background("network-recovery"),
+                )
+                .await;
+            })
+        };
+
+        std::fs::write(root.path().join("offline.txt"), b"offline payload").unwrap();
+        event_tx
+            .send(
+                Event::new(EventKind::Create(notify::event::CreateKind::File))
+                    .add_path(root.path().join("offline.txt")),
+            )
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(3)).await;
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert!(engine.cycle.has_pending());
+        assert!(backend.calls.lock().unwrap().is_empty());
+
+        let mut network = NetworkStateMachine::new(false);
+        for (index, probe_succeeded) in [true, false, true, true].into_iter().enumerate() {
+            if let Some(transition) = network.observe(probe_succeeded) {
+                online.store(network.is_online(), std::sync::atomic::Ordering::SeqCst);
+                network_tx.send(transition).unwrap();
+            }
+            if index < 3 {
+                for _ in 0..4 {
+                    tokio::task::yield_now().await;
+                }
+                assert!(backend.calls.lock().unwrap().is_empty());
+            }
+        }
+
+        backend.submitted.notified().await;
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+            if repository::list_all_transfers(&db.lock()).is_ok_and(|tasks| {
+                tasks.len() == 1 && tasks[0].state_kind() == Ok(TransferState::Completed)
+            }) {
+                break;
+            }
+        }
+        let tasks = repository::list_all_transfers(&db.lock()).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].relative_path.as_deref(), Some("offline.txt"));
+        assert_eq!(tasks[0].state_kind().unwrap(), TransferState::Completed);
+        {
+            let order = order.lock().unwrap();
+            let waiting = order
+                .iter()
+                .position(|stage| *stage == "resume-waiting")
+                .unwrap();
+            let cloud = order
+                .iter()
+                .position(|stage| *stage == "cloud-refresh")
+                .unwrap();
+            let local = order
+                .iter()
+                .position(|stage| *stage == "local-rescan")
+                .unwrap();
+            assert!(waiting < cloud && cloud < local);
+        }
+
+        stop_tx.send(true).unwrap();
+        watcher_listener.await.unwrap();
+        network_listener.await.unwrap();
+        watcher.stop().await;
+        engine.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn request_waiting_reports_offline_then_stable_probes_resume_same_id_before_rescan() {
+        use crate::core::net_guard::{NetworkStateMachine, NetworkTransition};
+        use crate::mount::manager::MountManager;
+        use crate::sync::executor::SyncExecutor;
+        use crate::sync::task_runner::{TaskDisposition, TaskRunner};
+        use crate::sync::transfer_state::{TransferOperation, TransferState};
+
+        let online = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let network = std::sync::Arc::new(parking_lot::Mutex::new(NetworkStateMachine::new(true)));
+        let (network_tx, network_rx) = tokio::sync::broadcast::channel(8);
+        let mut audit_rx = network_tx.subscribe();
+        let (mut engine, db) = build_engine();
+        let root = tempfile::tempdir().unwrap();
+        let mount = std::sync::Arc::new(MountManager::new(root.path()));
+        let backend = std::sync::Arc::new(RequestRecoveryBackend {
+            calls: std::sync::Mutex::new(Vec::new()),
+            attempts: std::sync::atomic::AtomicUsize::new(0),
+            completed_attempt: tokio::sync::Notify::new(),
+        });
+        let runner = std::sync::Arc::new(TaskRunner::new(
+            db.clone(),
+            root.path().to_path_buf(),
+            backend.clone(),
+            {
+                let online = online.clone();
+                std::sync::Arc::new(move || online.load(std::sync::atomic::Ordering::SeqCst))
+            },
+            std::sync::Arc::new(|| Ok(())),
+            None,
+        ));
+        runner.set_state_sink({
+            let db = db.clone();
+            let online = online.clone();
+            let network = network.clone();
+            let network_tx = network_tx.clone();
+            std::sync::Arc::new(move || {
+                let has_waiting = repository::list_all_transfers(&db.lock())?
+                    .into_iter()
+                    .any(|task| task.state_kind() == Ok(TransferState::WaitingForNetwork));
+                if has_waiting {
+                    let mut state = network.lock();
+                    if let Some(transition) = state.observe(false) {
+                        online.store(state.is_online(), std::sync::atomic::Ordering::SeqCst);
+                        let _ = network_tx.send(transition);
+                    }
+                }
+                Ok(())
+            })
+        });
+        let mut executor = SyncExecutor::new(
+            1,
+            engine.files_api.clone(),
+            engine.download_api.clone(),
+            engine.upload_api.clone(),
+        );
+        executor.set_mount(mount.clone());
+        executor.set_db(db.clone());
+        executor.set_task_runner_for_test(runner.clone());
+        engine.set_mount(mount);
+        engine.set_executor(executor);
+        engine.set_online_check({
+            let online = online.clone();
+            std::sync::Arc::new(move || online.load(std::sync::atomic::Ordering::SeqCst))
+        });
+        engine.set_incremental_refresh_hook_for_test(std::sync::Arc::new(|| Ok(())));
+        let recovery_order = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        engine.set_cycle_observer({
+            let recovery_order = recovery_order.clone();
+            std::sync::Arc::new(move |stage| recovery_order.lock().unwrap().push(stage))
+        });
+        engine
+            .started
+            .store(true, std::sync::atomic::Ordering::Release);
+        let edited_time = chrono::DateTime::from_timestamp_millis(20_000);
+        engine.cloud_tree.lock().insert(
+            "request-waiting.bin".into(),
+            DriveFile {
+                id: "remote-request-waiting".into(),
+                name: "request-waiting.bin".into(),
+                size: 7,
+                edited_time,
+                ..Default::default()
+            },
+        );
+        engine.path_to_id.lock().insert(
+            "request-waiting.bin".into(),
+            "remote-request-waiting".into(),
+        );
+        let engine = std::sync::Arc::new(engine);
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let listener = {
+            let request_engine = engine.clone();
+            let online = online.clone();
+            tokio::spawn(async move {
+                network_listener_loop(
+                    network_rx,
+                    move || online.load(std::sync::atomic::Ordering::SeqCst),
+                    stop_rx,
+                    false,
+                    move || request_engine.request_cycle_background("network-recovery"),
+                )
+                .await;
+            })
+        };
+
+        let destination = root.path().join("request-waiting.bin");
+        let first = runner
+            .enqueue_and_run(repository::TransferTask {
+                id: 0,
+                direction: repository::transfer_direction::DOWNLOAD,
+                file_id: Some("remote-request-waiting".into()),
+                local_path: Some(destination.to_string_lossy().into_owned()),
+                name: "request-waiting.bin".into(),
+                total_size: 7,
+                transferred: 0,
+                state: TransferState::Pending.into(),
+                error_message: None,
+                created_at: 1,
+                finished_at: None,
+                server_id: None,
+                upload_id: None,
+                resume_offset: 0,
+                session_url: None,
+                relative_path: Some("request-waiting.bin".into()),
+                parent_file_id: None,
+                operation: Some(TransferOperation::Download.into()),
+                source_mtime: None,
+                source_size: None,
+                expected_cloud_edited_time: Some(20_000),
+                attempt_count: 0,
+                next_retry_at: None,
+                error_kind: None,
+                remote_result_file_id: None,
+                state_revision: 0,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            first.outcome.disposition,
+            TaskDisposition::WaitingForNetwork
+        );
+        assert_eq!(audit_rx.recv().await.unwrap(), NetworkTransition::Offline);
+        assert!(!online.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(&*backend.calls.lock().unwrap(), &[first.task_id]);
+
+        for (index, probe_succeeded) in [true, false, true, true].into_iter().enumerate() {
+            let transition = {
+                let mut state = network.lock();
+                let transition = state.observe(probe_succeeded);
+                online.store(state.is_online(), std::sync::atomic::Ordering::SeqCst);
+                transition
+            };
+            if let Some(transition) = transition {
+                network_tx.send(transition).unwrap();
+            }
+            if index < 3 {
+                for _ in 0..4 {
+                    tokio::task::yield_now().await;
+                }
+                assert_eq!(backend.calls.lock().unwrap().len(), 1);
+            }
+        }
+
+        backend.completed_attempt.notified().await;
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+            if repository::get_transfer_by_id(&db.lock(), first.task_id)
+                .unwrap()
+                .is_some_and(|task| task.state_kind() == Ok(TransferState::Completed))
+            {
+                break;
+            }
+        }
+        let tasks = repository::list_all_transfers(&db.lock()).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, first.task_id);
+        assert_eq!(tasks[0].state_kind().unwrap(), TransferState::Completed);
+        assert_eq!(
+            &*backend.calls.lock().unwrap(),
+            &[first.task_id, first.task_id]
+        );
+        {
+            let recovery_order = recovery_order.lock().unwrap();
+            let waiting = recovery_order
+                .iter()
+                .position(|stage| *stage == "resume-waiting")
+                .unwrap();
+            let cloud = recovery_order
+                .iter()
+                .position(|stage| *stage == "cloud-refresh")
+                .unwrap();
+            let local = recovery_order
+                .iter()
+                .position(|stage| *stage == "local-rescan")
+                .unwrap();
+            assert!(waiting < cloud && cloud < local);
+        }
+
+        stop_tx.send(true).unwrap();
+        listener.await.unwrap();
+        engine.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn lagged_network_listener_recovers_same_waiting_id_once_and_survives() {
+        use crate::sync::executor::SyncExecutor;
+        use crate::sync::task_runner::TaskRunner;
+        use crate::sync::transfer_state::{TransferOperation, TransferState};
+
+        let (mut engine, db) = build_engine();
+        let root = tempfile::tempdir().unwrap();
+        let backend = std::sync::Arc::new(SchedulerBackend {
+            calls: std::sync::Mutex::new(Vec::new()),
+        });
+        let runner = std::sync::Arc::new(TaskRunner::new(
+            db.clone(),
+            root.path().to_path_buf(),
+            backend.clone(),
+            std::sync::Arc::new(|| true),
+            std::sync::Arc::new(|| Ok(())),
+            None,
+        ));
+        let mut executor = SyncExecutor::new(
+            1,
+            engine.files_api.clone(),
+            engine.download_api.clone(),
+            engine.upload_api.clone(),
+        );
+        executor.set_db(db.clone());
+        executor.set_task_runner_for_test(runner);
+        engine.set_executor(executor);
+        engine.set_online_check(std::sync::Arc::new(|| true));
+        engine.set_incremental_refresh_hook_for_test(std::sync::Arc::new(|| Ok(())));
+        engine
+            .started
+            .store(true, std::sync::atomic::Ordering::Release);
+        let refreshes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        engine.set_cycle_observer({
+            let refreshes = refreshes.clone();
+            std::sync::Arc::new(move |stage| {
+                if stage == "cloud-refresh" {
+                    refreshes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            })
+        });
+        let destination = root.path().join("lagged-network.bin");
+        let waiting_id = repository::insert_transfer(
+            &db.lock(),
+            &repository::TransferTask {
+                id: 0,
+                direction: repository::transfer_direction::DOWNLOAD,
+                file_id: Some("remote-lagged-network".into()),
+                local_path: Some(destination.to_string_lossy().into_owned()),
+                name: "lagged-network.bin".into(),
+                total_size: 7,
+                transferred: 0,
+                state: TransferState::WaitingForNetwork.into(),
+                error_message: Some("persisted offline".into()),
+                created_at: 1,
+                finished_at: None,
+                server_id: None,
+                upload_id: None,
+                resume_offset: 0,
+                session_url: None,
+                relative_path: Some("lagged-network.bin".into()),
+                parent_file_id: None,
+                operation: Some(TransferOperation::Download.into()),
+                source_mtime: None,
+                source_size: None,
+                expected_cloud_edited_time: Some(1),
+                attempt_count: 0,
+                next_retry_at: None,
+                error_kind: None,
+                remote_result_file_id: None,
+                state_revision: 0,
+            },
+        )
+        .unwrap();
+        let engine = std::sync::Arc::new(engine);
+        let (network_tx, network_rx) = tokio::sync::broadcast::channel(2);
+
+        // Overflow the already-subscribed receiver before the production listener is armed.
+        // Lagged must be reconciled as a level and the retained Online tail must coalesce.
+        network_tx
+            .send(crate::core::net_guard::NetworkTransition::Offline)
+            .unwrap();
+        network_tx
+            .send(crate::core::net_guard::NetworkTransition::Online)
+            .unwrap();
+        network_tx
+            .send(crate::core::net_guard::NetworkTransition::Online)
+            .unwrap();
+        engine.start_network_listener(network_rx);
+
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+            if repository::get_transfer_by_id(&db.lock(), waiting_id)
+                .unwrap()
+                .is_some_and(|task| task.state_kind() == Ok(TransferState::Completed))
+            {
+                break;
+            }
+        }
+        let task = repository::get_transfer_by_id(&db.lock(), waiting_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(task.state_kind().unwrap(), TransferState::Completed);
+        assert_eq!(&*backend.calls.lock().unwrap(), &[waiting_id]);
+
+        let refreshes_before_survival_probe = refreshes.load(std::sync::atomic::Ordering::SeqCst);
+        network_tx
+            .send(crate::core::net_guard::NetworkTransition::Online)
+            .unwrap();
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+            if refreshes.load(std::sync::atomic::Ordering::SeqCst) > refreshes_before_survival_probe
+            {
+                break;
+            }
+        }
+        assert!(
+            refreshes.load(std::sync::atomic::Ordering::SeqCst) > refreshes_before_survival_probe,
+            "listener must handle an Online transition after the Lagged recovery"
+        );
+        assert_eq!(&*backend.calls.lock().unwrap(), &[waiting_id]);
+        assert_eq!(repository::list_all_transfers(&db.lock()).unwrap().len(), 1);
+
+        engine.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_during_waiting_batch_does_not_submit_the_next_row() {
+        use crate::sync::executor::SyncExecutor;
+        use crate::sync::task_runner::TaskRunner;
+        use crate::sync::transfer_state::{TransferOperation, TransferState};
+
+        let (mut engine, db) = build_engine();
+        let root = tempfile::tempdir().unwrap();
+        let backend = std::sync::Arc::new(BatchShutdownBackend {
+            calls: std::sync::Mutex::new(Vec::new()),
+            first_submitted: tokio::sync::Notify::new(),
+            release_first: tokio::sync::Notify::new(),
+        });
+        let runner = std::sync::Arc::new(TaskRunner::new(
+            db.clone(),
+            root.path().to_path_buf(),
+            backend.clone(),
+            std::sync::Arc::new(|| true),
+            std::sync::Arc::new(|| Ok(())),
+            None,
+        ));
+        let mut executor = SyncExecutor::new(
+            1,
+            engine.files_api.clone(),
+            engine.download_api.clone(),
+            engine.upload_api.clone(),
+        );
+        executor.set_db(db.clone());
+        executor.set_task_runner_for_test(runner);
+        engine.set_executor(executor);
+        engine.set_online_check(std::sync::Arc::new(|| true));
+        engine.set_incremental_refresh_hook_for_test(std::sync::Arc::new(|| Ok(())));
+        engine
+            .started
+            .store(true, std::sync::atomic::Ordering::Release);
+
+        let make_waiting = |name: &str, created_at: i64| repository::TransferTask {
+            id: 0,
+            direction: repository::transfer_direction::DOWNLOAD,
+            file_id: Some(format!("remote-{name}")),
+            local_path: Some(root.path().join(name).to_string_lossy().into_owned()),
+            name: name.into(),
+            total_size: 7,
+            transferred: 0,
+            state: TransferState::WaitingForNetwork.into(),
+            error_message: Some("persisted offline".into()),
+            created_at,
+            finished_at: None,
+            server_id: None,
+            upload_id: None,
+            resume_offset: 0,
+            session_url: None,
+            relative_path: Some(name.into()),
+            parent_file_id: None,
+            operation: Some(TransferOperation::Download.into()),
+            source_mtime: None,
+            source_size: None,
+            expected_cloud_edited_time: Some(created_at),
+            attempt_count: 0,
+            next_retry_at: None,
+            error_kind: None,
+            remote_result_file_id: None,
+            state_revision: 0,
+        };
+        let first_id =
+            repository::insert_transfer(&db.lock(), &make_waiting("first.bin", 1)).unwrap();
+        let second_id =
+            repository::insert_transfer(&db.lock(), &make_waiting("second.bin", 2)).unwrap();
+        let engine = std::sync::Arc::new(engine);
+        let cycle = {
+            let engine = engine.clone();
+            tokio::spawn(async move { engine.run_sync_cycle("network-recovery").await })
+        };
+
+        backend.first_submitted.notified().await;
+        let submitted_id = *backend.calls.lock().unwrap().first().unwrap();
+        assert!(submitted_id == first_id || submitted_id == second_id);
+        let unsubmitted_id = if submitted_id == first_id {
+            second_id
+        } else {
+            first_id
+        };
+        engine.shutdown_sync();
+        backend.release_first.notify_one();
+        let error = cycle.await.unwrap().unwrap_err();
+        assert!(error.to_string().contains("已停止"));
+
+        assert_eq!(&*backend.calls.lock().unwrap(), &[submitted_id]);
+        let submitted = repository::get_transfer_by_id(&db.lock(), submitted_id)
+            .unwrap()
+            .unwrap();
+        let unsubmitted = repository::get_transfer_by_id(&db.lock(), unsubmitted_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(submitted.state_kind().unwrap(), TransferState::Completed);
+        assert_eq!(
+            unsubmitted.state_kind().unwrap(),
+            TransferState::WaitingForNetwork
+        );
+        engine.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn old_auto_error_caller_cannot_overwrite_successor_owner_running_state() {
+        let (mut engine, _) = build_engine();
+        engine.set_online_check(std::sync::Arc::new(|| true));
+        engine
+            .started
+            .store(true, std::sync::atomic::Ordering::Release);
+        let refresh_attempt = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        engine.set_incremental_refresh_hook_for_test({
+            let refresh_attempt = refresh_attempt.clone();
+            std::sync::Arc::new(move || {
+                if refresh_attempt.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    Err(crate::error::AppError::drive_from_response(
+                        503,
+                        "{}",
+                        None,
+                        crate::error::RequestSemantics::Read,
+                        false,
+                    ))
+                } else {
+                    Ok(())
+                }
+            })
+        });
+        let (old_returned_tx, old_returned_rx) = std::sync::mpsc::channel();
+        let (release_old_tx, release_old_rx) = std::sync::mpsc::channel();
+        let release_old_rx = std::sync::Mutex::new(release_old_rx);
+        let (successor_running_tx, successor_running_rx) = std::sync::mpsc::channel();
+        let (release_successor_tx, release_successor_rx) = std::sync::mpsc::channel();
+        let release_successor_rx = std::sync::Mutex::new(release_successor_rx);
+        let old_signal = std::sync::Mutex::new(Some(old_returned_tx));
+        let successor_signal = std::sync::Mutex::new(Some(successor_running_tx));
+        engine.set_cycle_observer(std::sync::Arc::new(move |stage| {
+            if stage == "auto-cycle-returned" {
+                if let Some(tx) = old_signal.lock().unwrap().take() {
+                    tx.send(()).unwrap();
+                    release_old_rx.lock().unwrap().recv().unwrap();
+                }
+            }
+            if stage == "local-rescan" {
+                if let Some(tx) = successor_signal.lock().unwrap().take() {
+                    tx.send(()).unwrap();
+                    release_successor_rx.lock().unwrap().recv().unwrap();
+                }
+            }
+        }));
+        let engine = std::sync::Arc::new(engine);
+
+        let old = {
+            let engine = engine.clone();
+            tokio::spawn(async move { engine.run_auto_cloud_refresh().await })
+        };
+        old_returned_rx.recv().unwrap();
+        let successor = {
+            let engine = engine.clone();
+            tokio::spawn(async move { engine.run_sync_cycle("local-watcher").await })
+        };
+        successor_running_rx.recv().unwrap();
+        assert!(engine.current_state().is_running);
+
+        release_old_tx.send(()).unwrap();
+        old.await.unwrap();
+        assert!(
+            engine.current_state().is_running,
+            "the released old caller must not publish idle over its running successor"
+        );
+
+        release_successor_tx.send(()).unwrap();
+        successor.await.unwrap().unwrap();
+        engine.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_after_scan_prevents_old_cycle_db_and_backend_side_effects() {
+        use crate::mount::manager::MountManager;
+        use crate::sync::executor::SyncExecutor;
+        use crate::sync::task_runner::TaskRunner;
+
+        let (mut engine, db) = build_engine();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("shutdown-gap.txt"), b"payload").unwrap();
+        let mount = std::sync::Arc::new(MountManager::new(root.path()));
+        let backend = std::sync::Arc::new(ArmGapBackend {
+            calls: std::sync::Mutex::new(Vec::new()),
+            submitted: tokio::sync::Notify::new(),
+        });
+        let runner = std::sync::Arc::new(TaskRunner::new(
+            db.clone(),
+            root.path().to_path_buf(),
+            backend.clone(),
+            std::sync::Arc::new(|| true),
+            std::sync::Arc::new(|| Ok(())),
+            None,
+        ));
+        let mut executor = SyncExecutor::new(
+            1,
+            engine.files_api.clone(),
+            engine.download_api.clone(),
+            engine.upload_api.clone(),
+        );
+        executor.set_mount(mount.clone());
+        executor.set_db(db.clone());
+        executor.set_task_runner_for_test(runner);
+        engine.set_mount(mount);
+        engine.set_executor(executor);
+        engine.set_online_check(std::sync::Arc::new(|| true));
+        engine
+            .started
+            .store(true, std::sync::atomic::Ordering::Release);
+        let (scan_done_tx, scan_done_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = std::sync::Mutex::new(release_rx);
+        let signal = std::sync::Mutex::new(Some(scan_done_tx));
+        engine.set_cycle_observer(std::sync::Arc::new(move |stage| {
+            if stage == "local-scan-complete" {
+                if let Some(tx) = signal.lock().unwrap().take() {
+                    tx.send(()).unwrap();
+                    release_rx.lock().unwrap().recv().unwrap();
+                }
+            }
+        }));
+        let engine = std::sync::Arc::new(engine);
+        let cycle = {
+            let engine = engine.clone();
+            tokio::spawn(async move { engine.run_sync_cycle("local-watcher").await })
+        };
+
+        scan_done_rx.recv().unwrap();
+        engine.shutdown_sync();
+        release_tx.send(()).unwrap();
+        let error = cycle.await.unwrap().unwrap_err();
+
+        assert!(error.to_string().contains("已停止"));
+        assert!(backend.calls.lock().unwrap().is_empty());
+        assert!(repository::list_all_transfers(&db.lock())
+            .unwrap()
+            .is_empty());
+        assert!(repository::load_all(&db.lock()).unwrap().is_empty());
+        engine.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn inflight_ambiguous_write_settles_before_replacement_can_start_new_owner() {
+        use crate::mount::manager::MountManager;
+        use crate::sync::executor::SyncExecutor;
+        use crate::sync::task_runner::{TaskDisposition, TaskRunner};
+        use crate::sync::transfer_state::{TransferOperation, TransferState};
+
+        let (mut engine, db) = build_engine();
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("ambiguous.txt");
+        std::fs::write(&source, b"payload").unwrap();
+        let metadata = std::fs::metadata(&source).unwrap();
+        let source_mtime = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_millis() as i64);
+        let mount = std::sync::Arc::new(MountManager::new(root.path()));
+        let backend = std::sync::Arc::new(AmbiguousBarrierBackend {
+            calls: std::sync::Mutex::new(Vec::new()),
+            submitted: tokio::sync::Notify::new(),
+            release_response: tokio::sync::Notify::new(),
+        });
+        let runner = std::sync::Arc::new(TaskRunner::new(
+            db.clone(),
+            root.path().to_path_buf(),
+            backend.clone(),
+            std::sync::Arc::new(|| true),
+            std::sync::Arc::new(|| Ok(())),
+            None,
+        ));
+        let mut executor = SyncExecutor::new(
+            1,
+            engine.files_api.clone(),
+            engine.download_api.clone(),
+            engine.upload_api.clone(),
+        );
+        executor.set_mount(mount.clone());
+        executor.set_db(db.clone());
+        executor.set_task_runner_for_test(runner.clone());
+        engine.set_mount(mount);
+        engine.set_executor(executor);
+        let engine = std::sync::Arc::new(engine);
+
+        let transfer = {
+            let runner = runner.clone();
+            let source = source.clone();
+            tokio::spawn(async move {
+                runner
+                    .enqueue_and_run(repository::TransferTask {
+                        id: 0,
+                        direction: repository::transfer_direction::UPLOAD,
+                        file_id: None,
+                        local_path: Some(source.to_string_lossy().into_owned()),
+                        name: "ambiguous.txt".into(),
+                        total_size: metadata.len() as i64,
+                        transferred: 0,
+                        state: TransferState::Pending.into(),
+                        error_message: None,
+                        created_at: 1,
+                        finished_at: None,
+                        server_id: None,
+                        upload_id: None,
+                        resume_offset: 0,
+                        session_url: None,
+                        relative_path: Some("ambiguous.txt".into()),
+                        parent_file_id: None,
+                        operation: Some(TransferOperation::Create.into()),
+                        source_mtime,
+                        source_size: Some(metadata.len() as i64),
+                        expected_cloud_edited_time: None,
+                        attempt_count: 0,
+                        next_retry_at: None,
+                        error_kind: None,
+                        remote_result_file_id: None,
+                        state_revision: 0,
+                    })
+                    .await
+            })
+        };
+        backend.submitted.notified().await;
+        let new_owner_started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let replacement = {
+            let engine = engine.clone();
+            let db = db.clone();
+            let new_owner_started = new_owner_started.clone();
+            tokio::spawn(async move {
+                engine.shutdown().await;
+                let rows = repository::list_all_transfers(&db.lock()).unwrap();
+                assert_eq!(rows.len(), 1);
+                assert_eq!(
+                    rows[0].state_kind().unwrap(),
+                    TransferState::VerifyingRemote
+                );
+                new_owner_started.store(true, std::sync::atomic::Ordering::SeqCst);
+            })
+        };
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert!(!replacement.is_finished());
+        assert!(!new_owner_started.load(std::sync::atomic::Ordering::SeqCst));
+
+        backend.release_response.notify_one();
+        let outcome = transfer.await.unwrap().unwrap();
+        assert_eq!(
+            outcome.outcome.disposition,
+            TaskDisposition::VerifyingRemote
+        );
+        replacement.await.unwrap();
+
+        assert!(new_owner_started.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(&*backend.calls.lock().unwrap(), &[outcome.task_id]);
+        let rows = repository::list_all_transfers(&db.lock()).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, outcome.task_id);
+        assert_eq!(
+            rows[0].state_kind().unwrap(),
+            TransferState::VerifyingRemote
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn production_start_recovers_initial_online_waiting_before_arming_running_successor() {
+        use crate::sync::task_runner::TaskRunner;
+        use crate::sync::transfer_state::{TransferOperation, TransferState};
+
+        let (mut engine, db) = build_engine();
+        let root = tempfile::tempdir().unwrap();
+        let backend = std::sync::Arc::new(SchedulerBackend {
+            calls: std::sync::Mutex::new(Vec::new()),
+        });
+        let runner = std::sync::Arc::new(TaskRunner::new(
+            db.clone(),
+            root.path().to_path_buf(),
+            backend.clone(),
+            std::sync::Arc::new(|| true),
+            std::sync::Arc::new(|| Ok(())),
+            None,
+        ));
+        engine.task_runner = Some(runner);
+        engine.set_online_check(std::sync::Arc::new(|| true));
+        engine.set_startup_cloud_hook_for_test(std::sync::Arc::new(|| Ok(())));
+        engine.set_incremental_refresh_hook_for_test(std::sync::Arc::new(|| Ok(())));
+        let waiting_id = repository::insert_transfer(
+            &db.lock(),
+            &repository::TransferTask {
+                id: 0,
+                direction: repository::transfer_direction::DOWNLOAD,
+                file_id: Some("startup-online-remote".into()),
+                local_path: Some(
+                    root.path()
+                        .join("startup-online.bin")
+                        .to_string_lossy()
+                        .into(),
+                ),
+                name: "startup-online.bin".into(),
+                total_size: 7,
+                transferred: 0,
+                state: TransferState::WaitingForNetwork.into(),
+                error_message: Some("persisted offline".into()),
+                created_at: 1,
+                finished_at: None,
+                server_id: None,
+                upload_id: None,
+                resume_offset: 0,
+                session_url: None,
+                relative_path: Some("startup-online.bin".into()),
+                parent_file_id: None,
+                operation: Some(TransferOperation::Download.into()),
+                source_mtime: None,
+                source_size: None,
+                expected_cloud_edited_time: Some(1),
+                attempt_count: 0,
+                next_retry_at: None,
+                error_kind: None,
+                remote_result_file_id: None,
+                state_revision: 0,
+            },
+        )
+        .unwrap();
+        let local_scans = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (successor_running_tx, successor_running_rx) = std::sync::mpsc::channel();
+        let (release_successor_tx, release_successor_rx) = std::sync::mpsc::channel();
+        let release_successor_rx = std::sync::Mutex::new(release_successor_rx);
+        let successor_signal = std::sync::Mutex::new(Some(successor_running_tx));
+        engine.set_cycle_observer({
+            let local_scans = local_scans.clone();
+            std::sync::Arc::new(move |stage| {
+                if stage == "local-rescan"
+                    && local_scans.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1
+                {
+                    if let Some(tx) = successor_signal.lock().unwrap().take() {
+                        tx.send(()).unwrap();
+                        release_successor_rx.lock().unwrap().recv().unwrap();
+                    }
+                }
+            })
+        });
+        let engine = std::sync::Arc::new(engine);
+        let (network_tx, network_rx) = tokio::sync::broadcast::channel(4);
+        network_tx
+            .send(crate::core::net_guard::NetworkTransition::Online)
+            .unwrap();
+        let start = {
+            let engine = engine.clone();
+            tokio::spawn(async move {
+                engine
+                    .start_with_network_receiver_for_test(network_rx)
+                    .await
+            })
+        };
+
+        successor_running_rx.recv().unwrap();
+        let start_result = start.await.unwrap();
+        assert!(start_result.is_ok());
+        assert!(engine.current_state().is_running);
+        assert_eq!(&*backend.calls.lock().unwrap(), &[waiting_id]);
+        let rows = repository::list_all_transfers(&db.lock()).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, waiting_id);
+        assert_eq!(rows[0].state_kind().unwrap(), TransferState::Completed);
+
+        release_successor_tx.send(()).unwrap();
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        engine.shutdown().await;
+    }
+
+    #[test]
+    fn shutdown_closes_the_cycle_side_effect_gate() {
+        let (engine, _) = build_engine();
+        assert!(engine.ensure_cycle_active().is_ok());
+        engine.shutdown_sync();
+        assert!(engine.ensure_cycle_active().is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn managed_backoff_deadline_wakes_exact_same_task_once() {
+        use crate::sync::task_runner::{NowMs, TaskRunner};
+        use crate::sync::transfer_state::{TransferOperation, TransferState};
+
+        let (mut engine, db) = build_engine();
+        let root = tempfile::tempdir().unwrap();
+        let start = tokio::time::Instant::now();
+        let clock: NowMs = std::sync::Arc::new(move || {
+            10_000 + start.elapsed().as_millis().try_into().unwrap_or(i64::MAX)
+        });
+        let backend = std::sync::Arc::new(SchedulerBackend {
+            calls: std::sync::Mutex::new(Vec::new()),
+        });
+        let runner = std::sync::Arc::new(TaskRunner::new_with_clock(
+            db.clone(),
+            root.path().to_path_buf(),
+            backend.clone(),
+            std::sync::Arc::new(|| true),
+            std::sync::Arc::new(|| Ok(())),
+            None,
+            clock,
+        ));
+        let destination = root.path().join("due.bin");
+        let task_id = repository::insert_transfer(
+            &db.lock(),
+            &repository::TransferTask {
+                id: 0,
+                direction: repository::transfer_direction::DOWNLOAD,
+                file_id: Some("remote-due".into()),
+                local_path: Some(destination.to_string_lossy().into_owned()),
+                name: "due.bin".into(),
+                total_size: 7,
+                transferred: 0,
+                state: TransferState::BackingOff.into(),
+                error_message: Some("retry later".into()),
+                created_at: 1,
+                finished_at: None,
+                server_id: None,
+                upload_id: None,
+                resume_offset: 0,
+                session_url: None,
+                relative_path: Some("due.bin".into()),
+                parent_file_id: None,
+                operation: Some(TransferOperation::Download.into()),
+                source_mtime: None,
+                source_size: None,
+                expected_cloud_edited_time: Some(1),
+                attempt_count: 1,
+                next_retry_at: Some(12_000),
+                error_kind: None,
+                remote_result_file_id: None,
+                state_revision: 0,
+            },
+        )
+        .unwrap();
+        engine.task_runner = Some(runner);
+        engine
+            .started
+            .store(true, std::sync::atomic::Ordering::Release);
+        let engine = std::sync::Arc::new(engine);
+        engine.start_backoff_scheduler();
+        tokio::task::yield_now().await;
+
+        tokio::time::advance(std::time::Duration::from_millis(1_999)).await;
+        tokio::task::yield_now().await;
+        assert!(backend.calls.lock().unwrap().is_empty());
+        tokio::time::advance(std::time::Duration::from_millis(1)).await;
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+
+        assert_eq!(&*backend.calls.lock().unwrap(), &[task_id]);
+        assert_eq!(
+            repository::get_transfer_by_id(&db.lock(), task_id)
+                .unwrap()
+                .unwrap()
+                .state_kind()
+                .unwrap(),
+            TransferState::Completed
+        );
+        tokio::time::advance(std::time::Duration::from_secs(60)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(backend.calls.lock().unwrap().len(), 1);
+        engine.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn offline_watcher_request_stays_sticky_until_level_recovery_with_polling_off() {
+        let (mut engine, _) = build_engine();
+        let online = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        engine.set_online_check({
+            let online = online.clone();
+            std::sync::Arc::new(move || online.load(std::sync::atomic::Ordering::SeqCst))
+        });
+        engine
+            .started
+            .store(true, std::sync::atomic::Ordering::Release);
+
+        let deferred = engine.run_sync_cycle("local-watcher").await.unwrap_err();
+        assert!(deferred.to_string().contains("排队"));
+        assert!(!engine.cycle.is_idle());
+
+        online.store(true, std::sync::atomic::Ordering::SeqCst);
+        engine.run_sync_cycle("backoff-deadline").await.unwrap();
+        assert!(engine.cycle.is_idle());
+    }
+
+    #[tokio::test]
+    async fn folder_owner_blocks_cycle_then_release_wakes_sticky_request() {
+        let (mut engine, _) = build_engine();
+        engine.set_online_check(std::sync::Arc::new(|| true));
+        engine
+            .started
+            .store(true, std::sync::atomic::Ordering::Release);
+        let engine = std::sync::Arc::new(engine);
+        let folder = engine.try_begin_folder_sync_guard().unwrap();
+
+        let deferred = engine.run_sync_cycle("local-watcher").await.unwrap_err();
+        assert!(deferred.to_string().contains("排队"));
+        assert!(engine.cycle.has_pending());
+
+        drop(folder);
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert!(engine.cycle.is_idle());
+    }
+
+    #[tokio::test]
+    async fn manual_sync_before_start_returns_error_without_false_content_change() {
+        let (engine, _) = build_engine();
+
+        let error = engine.trigger_manual_sync().await.unwrap_err();
+
+        assert!(error.to_string().contains("正在启动"));
+        assert!(!engine.current_state().content_changed);
+        assert!(!engine.cycle.has_pending());
+    }
+
+    #[tokio::test]
+    async fn bulk_retry_before_start_rejects_without_mutating_failed_sync_items() {
+        let (engine, db) = build_engine();
+        let before = failed_sync_item("bulk/prestart.txt");
+        repository::upsert(&db.lock(), &before).unwrap();
+
+        let error = engine.retry_failed().await.unwrap_err();
+
+        assert!(error.to_string().contains("正在启动"));
+        let after = repository::find_by_file_id(&db.lock(), &before.file_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.status, repository::sync_status::FAILED);
+        assert_eq!(after.error_message, before.error_message);
+        assert!(!engine.cycle.has_pending());
+    }
+
+    #[tokio::test]
+    async fn bulk_retry_offline_keeps_failed_fact_until_sticky_owner_can_run() {
+        let (mut engine, db) = build_engine();
+        engine.set_online_check(std::sync::Arc::new(|| false));
+        engine
+            .started
+            .store(true, std::sync::atomic::Ordering::Release);
+        let before = failed_sync_item("bulk/offline.txt");
+        repository::upsert(&db.lock(), &before).unwrap();
+
+        let deferred = engine.retry_failed().await.unwrap_err();
+
+        assert!(deferred.to_string().contains("排队"));
+        let after = repository::find_by_file_id(&db.lock(), &before.file_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.status, repository::sync_status::FAILED);
+        assert_eq!(after.error_message, before.error_message);
+        assert!(engine.cycle.has_pending());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn startup_resumes_waiting_and_only_due_backoff_before_first_local_plan() {
+        use crate::sync::task_runner::{NowMs, TaskRunner};
+        use crate::sync::transfer_state::{TransferOperation, TransferState};
+
+        let (mut engine, db) = build_engine();
+        let root = tempfile::tempdir().unwrap();
+        let backend = std::sync::Arc::new(SchedulerBackend {
+            calls: std::sync::Mutex::new(Vec::new()),
+        });
+        let started_at = tokio::time::Instant::now();
+        let clock: NowMs = std::sync::Arc::new(move || {
+            10_000
+                + started_at
+                    .elapsed()
+                    .as_millis()
+                    .try_into()
+                    .unwrap_or(i64::MAX)
+        });
+        engine.task_runner = Some(std::sync::Arc::new(TaskRunner::new_with_clock(
+            db.clone(),
+            root.path().to_path_buf(),
+            backend.clone(),
+            std::sync::Arc::new(|| true),
+            std::sync::Arc::new(|| Ok(())),
+            None,
+            clock,
+        )));
+        let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        engine.set_cycle_observer({
+            let order = order.clone();
+            std::sync::Arc::new(move |stage| order.lock().unwrap().push(stage))
+        });
+        let insert = |state: TransferState, rel: &str, deadline: Option<i64>| {
+            repository::insert_transfer(
+                &db.lock(),
+                &repository::TransferTask {
+                    id: 0,
+                    direction: repository::transfer_direction::DOWNLOAD,
+                    file_id: Some(format!("remote-{rel}")),
+                    local_path: Some(root.path().join(rel).to_string_lossy().into_owned()),
+                    name: rel.into(),
+                    total_size: 7,
+                    transferred: 0,
+                    state: state.into(),
+                    error_message: Some("recover".into()),
+                    created_at: 1,
+                    finished_at: None,
+                    server_id: None,
+                    upload_id: None,
+                    resume_offset: 0,
+                    session_url: None,
+                    relative_path: Some(rel.into()),
+                    parent_file_id: None,
+                    operation: Some(TransferOperation::Download.into()),
+                    source_mtime: None,
+                    source_size: None,
+                    expected_cloud_edited_time: Some(1),
+                    attempt_count: 1,
+                    next_retry_at: deadline,
+                    error_kind: None,
+                    remote_result_file_id: None,
+                    state_revision: 0,
+                },
+            )
+            .unwrap()
+        };
+        let waiting_id = insert(TransferState::WaitingForNetwork, "waiting.bin", None);
+        let due_id = insert(TransferState::BackingOff, "due.bin", Some(10_000));
+        let future_id = insert(TransferState::BackingOff, "future.bin", Some(10_001));
+
+        engine
+            .run_coordinated_cycle(
+                CycleRequest::STARTUP | CycleRequest::ONLINE_RECOVERY | CycleRequest::LOCAL_RESCAN,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(&*backend.calls.lock().unwrap(), &[waiting_id, due_id]);
+        assert_eq!(
+            repository::get_transfer_by_id(&db.lock(), future_id)
+                .unwrap()
+                .unwrap()
+                .state_kind()
+                .unwrap(),
+            TransferState::BackingOff
+        );
+        {
+            let order = order.lock().unwrap();
+            let waiting = order
+                .iter()
+                .position(|stage| *stage == "resume-waiting")
+                .unwrap();
+            let due = order
+                .iter()
+                .position(|stage| *stage == "resume-due")
+                .unwrap();
+            let local = order
+                .iter()
+                .position(|stage| *stage == "local-rescan")
+                .unwrap();
+            assert!(waiting < due && due < local);
+        }
+
+        engine
+            .started
+            .store(true, std::sync::atomic::Ordering::Release);
+        let engine = std::sync::Arc::new(engine);
+        engine.start_backoff_scheduler();
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_millis(1)).await;
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+            if repository::get_transfer_by_id(&db.lock(), future_id)
+                .unwrap()
+                .is_some_and(|task| task.state_kind() == Ok(TransferState::Completed))
+            {
+                break;
+            }
+        }
+        assert_eq!(
+            &*backend.calls.lock().unwrap(),
+            &[waiting_id, due_id, future_id]
+        );
+        assert_eq!(
+            repository::get_transfer_by_id(&db.lock(), future_id)
+                .unwrap()
+                .unwrap()
+                .state_kind()
+                .unwrap(),
+            TransferState::Completed
+        );
+        engine.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn coalesced_manual_run_observes_the_owner_cloud_failure() {
+        let (mut engine, db) = build_engine();
+        engine
+            .started
+            .store(true, std::sync::atomic::Ordering::Release);
+        engine.set_online_check(std::sync::Arc::new(|| true));
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = std::sync::Mutex::new(release_rx);
+        let (manual_enqueued_tx, manual_enqueued_rx) = std::sync::mpsc::channel();
+        let manual_enqueued_tx = std::sync::Mutex::new(Some(manual_enqueued_tx));
+        let first = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        engine.set_cycle_observer({
+            let first = first.clone();
+            let db = db.clone();
+            std::sync::Arc::new(move |stage| {
+                if stage == "local-rescan" && first.swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    entered_tx.send(()).unwrap();
+                    release_rx.lock().unwrap().recv().unwrap();
+                }
+                if stage == "request-manual" {
+                    if let Some(tx) = manual_enqueued_tx.lock().unwrap().take() {
+                        tx.send(()).unwrap();
+                    }
+                }
+                if stage == "cloud-refresh" {
+                    db.lock()
+                        .execute_batch("DROP TABLE transfer_queue;")
+                        .unwrap();
+                }
+            })
+        });
+        let engine = std::sync::Arc::new(engine);
+        let watcher = {
+            let engine = engine.clone();
+            tokio::spawn(async move { engine.run_sync_cycle("local-watcher").await })
+        };
+        entered_rx.recv().unwrap();
+        let manual = {
+            let engine = engine.clone();
+            tokio::spawn(async move { engine.run_sync_cycle("manual-refresh").await })
+        };
+        manual_enqueued_rx.recv().unwrap();
+        release_tx.send(()).unwrap();
+
+        let owner_error = watcher.await.unwrap().unwrap_err().to_string();
+        let manual_error = manual.await.unwrap().unwrap_err().to_string();
+        assert_eq!(manual_error, owner_error);
+        assert!(manual_error.contains("transfer_queue"));
+    }
 
     /// 构造测试用引擎：in-memory SQLite（含 sync_items 表）+ 桩 API。
     /// apply_results 不触网，故 API Arc 仅需可构造。
