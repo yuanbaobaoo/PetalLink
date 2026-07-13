@@ -1,17 +1,42 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
-import { TRANSFER_DIR, TRANSFER_STATE, type TransferTask } from "@/api/transfer";
+import {
+  TRANSFER_DIR,
+  TRANSFER_OPERATION,
+  TRANSFER_STATE,
+  type TransferState,
+  type TransferTask,
+} from "@/api/transfer";
 import { useTransferStore } from "./transfer";
 
-function task(id: number, state: number): TransferTask {
+function task(id: number, state: TransferState): TransferTask {
   return {
     id,
     direction: TRANSFER_DIR.UPLOAD,
+    file_id: null,
+    local_path: `/mount/task-${id}`,
     name: `task-${id}`,
     total_size: 100,
     transferred: 0,
     state,
+    error_message: null,
     created_at: id,
+    finished_at: null,
+    server_id: null,
+    upload_id: null,
+    resume_offset: 0,
+    session_url: null,
+    relative_path: `task-${id}`,
+    parent_file_id: "root",
+    operation: TRANSFER_OPERATION.CREATE,
+    source_mtime: 1,
+    source_size: 100,
+    expected_cloud_edited_time: null,
+    attempt_count: 0,
+    next_retry_at: null,
+    error_kind: null,
+    remote_result_file_id: null,
+    state_revision: 0,
   };
 }
 
@@ -51,7 +76,7 @@ describe("transfer store 状态派生", () => {
     ["BackingOff", TRANSFER_STATE.BACKING_OFF],
     ["VerifyingRemote", TRANSFER_STATE.VERIFYING_REMOTE],
     ["RestartRequired", TRANSFER_STATE.RESTART_REQUIRED],
-  ])("%s 仍属于活动任务", (_name, state) => {
+  ] as const)("%s 仍属于活动任务", (_name, state) => {
     const store = useTransferStore();
     store.tasks = [task(1, state)];
 

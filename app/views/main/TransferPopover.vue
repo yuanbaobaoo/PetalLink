@@ -2,8 +2,21 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { useTransferStore } from "@/stores/transfer";
-import { TRANSFER_DIR, TRANSFER_STATE, DIR_LABEL } from "@/api/transfer";
-import { MateIcon, MateButton, MateLinearProgress, MateEmpty, MatePopupMenu, showToast } from "@/components/mate";
+import {
+  TRANSFER_DIR,
+  TRANSFER_STATE,
+  DIR_LABEL,
+  canRetryTransferTask,
+} from "@/api/transfer";
+import type { TransferTask } from "@/api/transfer";
+import {
+  MateIcon,
+  MateButton,
+  MateLinearProgress,
+  MateEmpty,
+  MatePopupMenu,
+  showToast,
+} from "@/components/mate";
 import type { PopupItem } from "@/components/mate";
 import { formatFileSize } from "@/utils/format";
 
@@ -26,8 +39,8 @@ const stateMeta: Record<number, StateMeta> = {
 
 const clearItems: PopupItem[] = [
   { value: "completed", label: "清除已完成", icon: "check" },
-  { value: "failed", label: "清除失败项", icon: "x", danger: true },
-  { value: "finished", label: "清除已完成+失败", icon: "transfer" },
+  { value: "failed", label: "清除失败历史", icon: "x", danger: true },
+  { value: "finished", label: "清除完成+失败历史", icon: "transfer" },
 ];
 
 const emit = defineEmits<{ (e: "close"): void }>();
@@ -35,7 +48,9 @@ const emit = defineEmits<{ (e: "close"): void }>();
 // 正在重试的任务 id（防抖：重试中禁用该按钮，避免连点）
 const retryingId = ref<number | null>(null);
 
-onMounted(() => { transfer.loadAll(); });
+onMounted(() => {
+  transfer.loadAll();
+});
 
 function dirIcon(direction: number): string {
   if (direction === TRANSFER_DIR.DOWNLOAD) return "download";
@@ -74,12 +89,17 @@ async function onClear(value: string | number): Promise<void> {
 }
 
 /** 重试失败任务 */
-async function onRetry(id: number): Promise<void> {
+async function onRetry(item: TransferTask): Promise<void> {
   if (retryingId.value !== null) return; // 防抖：已有重试进行中
-  retryingId.value = id;
+  retryingId.value = item.id;
   try {
-    await transfer.retry(id);
-    showToast("已重新加入传输队列", { variant: "success" });
+    await transfer.retry(item.id);
+    showToast(
+      item.state === TRANSFER_STATE.RESTART_REQUIRED
+        ? "已请求重新规划"
+        : "已重新加入传输队列",
+      { variant: "success" },
+    );
   } catch (e) {
     // AppError 经 Tauri 序列化后是对象，取 message 字段；兜底 String
     const msg = (e as { message?: string })?.message ?? String(e);
@@ -106,6 +126,9 @@ async function onRetry(id: number): Promise<void> {
       <span>等待中 {{ transfer.waiting }}</span>
       <span class="tp-stats__sep" />
       <span>已完成 {{ transfer.completed }}</span>
+      <span v-if="transfer.failed" class="tp-stats__failed">
+        历史失败 {{ transfer.failed }}
+      </span>
       <MatePopupMenu class="tp-stats__clear" :items="clearItems" @select="onClear">
         <MateButton variant="icon" icon="transfer" tooltip="清除" />
       </MatePopupMenu>
@@ -122,7 +145,14 @@ async function onRetry(id: number): Promise<void> {
             {{ item.name }}
           </div>
           <!-- 失败时显示错误原因，否则显示进度条 -->
-          <div v-if="item.state === TRANSFER_STATE.FAILED && item.error_message" class="tp-item__error">
+          <div
+            v-if="
+              (item.state === TRANSFER_STATE.FAILED
+                || item.state === TRANSFER_STATE.RESTART_REQUIRED)
+              && item.error_message
+            "
+            class="tp-item__error"
+          >
             {{ item.error_message }}
           </div>
           <div class="tp-item__progress" v-else-if="item.direction !== TRANSFER_DIR.DELETE">
@@ -132,24 +162,30 @@ async function onRetry(id: number): Promise<void> {
               :height="4"
               :color="progressColor(item.state)"
             />
-            <span class="tp-item__pct">{{ pct(item) }}% · {{ fmtSize(item.transferred) }}/{{ fmtSize(item.total_size) }}</span>
+            <span class="tp-item__pct">
+              {{ pct(item) }}% · {{ fmtSize(item.transferred) }}/{{ fmtSize(item.total_size) }}
+            </span>
           </div>
           <div v-else class="tp-item__progress tp-item__progress--delete">删除操作</div>
         </div>
         <div class="tp-item__state" :style="{ color: stateMeta[item.state]?.color }">
-          <MateIcon :name="stateMeta[item.state]?.icon ?? 'clock'" :size="12" :spin="stateMeta[item.state]?.spin" />
+          <MateIcon
+            :name="stateMeta[item.state]?.icon ?? 'clock'"
+            :size="12"
+            :spin="stateMeta[item.state]?.spin"
+          />
           {{ stateMeta[item.state]?.label ?? "" }}
         </div>
-        <!-- 后端 prepare_retry 只接受 Failed；其他活动态不能展示重试。 -->
+        <!-- 只展示 TaskRunner/引擎真正支持的上传、下载重试或重新规划入口。 -->
         <MateButton
-          v-if="item.state === TRANSFER_STATE.FAILED"
+          v-if="canRetryTransferTask(item)"
           variant="icon"
           icon="refresh"
-          tooltip="重试"
+          :tooltip="item.state === TRANSFER_STATE.RESTART_REQUIRED ? '重新规划' : '重试'"
           :loading="retryingId === item.id"
           :disabled="retryingId !== null"
           class="tp-item__retry"
-          @click="onRetry(item.id)"
+          @click="onRetry(item)"
         />
       </div>
     </div>
@@ -176,6 +212,7 @@ async function onRetry(id: number): Promise<void> {
 
 .tp-stats { height: 36px; display: flex; align-items: center; padding: 0 var(--space-lg); gap: var(--space-sm); font-size: var(--font-caption); color: var(--text-secondary); border-bottom: 0.5px solid var(--border); flex-shrink: 0; }
 .tp-stats__sep { width: 1px; height: 14px; background-color: var(--border); }
+.tp-stats__failed { color: var(--color-error); }
 .tp-stats__clear { margin-left: auto; }
 
 .tp-body { flex: 1; overflow-y: auto; }

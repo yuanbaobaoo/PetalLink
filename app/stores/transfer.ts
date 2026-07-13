@@ -10,23 +10,36 @@ import { TRANSFER_DIR, TRANSFER_STATE } from "@/api/transfer";
 export const useTransferStore = defineStore("transfer", () => {
   // 全部传输任务
   const tasks = ref<TransferTask[]>([]);
+  let nextLoadRequest = 0;
+  let lastAppliedLoadRequest = 0;
 
   // 上传任务
   const uploads = computed(() => tasks.value.filter((t) => t.direction === TRANSFER_DIR.UPLOAD));
   // 下载任务（含「更新」——云端新版本覆盖本地，本质也是下载方向）
-  const downloads = computed(() => tasks.value.filter((t) => t.direction === TRANSFER_DIR.DOWNLOAD || t.direction === TRANSFER_DIR.DOWNLOAD_UPDATE));
+  const downloads = computed(() => tasks.value.filter(
+    (t) => t.direction === TRANSFER_DIR.DOWNLOAD
+      || t.direction === TRANSFER_DIR.DOWNLOAD_UPDATE,
+  ));
   // 进行中
   const running = computed(() => tasks.value.filter((t) => t.state === TRANSFER_STATE.RUNNING).length);
   // 等待调度
   const pending = computed(() => tasks.value.filter((t) => t.state === TRANSFER_STATE.PENDING).length);
   // 等待网络恢复
-  const waitingNetwork = computed(() => tasks.value.filter((t) => t.state === TRANSFER_STATE.WAITING_FOR_NETWORK).length);
+  const waitingNetwork = computed(
+    () => tasks.value.filter((t) => t.state === TRANSFER_STATE.WAITING_FOR_NETWORK).length,
+  );
   // 等待退避截止时间
-  const backingOff = computed(() => tasks.value.filter((t) => t.state === TRANSFER_STATE.BACKING_OFF).length);
+  const backingOff = computed(
+    () => tasks.value.filter((t) => t.state === TRANSFER_STATE.BACKING_OFF).length,
+  );
   // 正在核验有歧义的远端结果
-  const verifyingRemote = computed(() => tasks.value.filter((t) => t.state === TRANSFER_STATE.VERIFYING_REMOTE).length);
+  const verifyingRemote = computed(
+    () => tasks.value.filter((t) => t.state === TRANSFER_STATE.VERIFYING_REMOTE).length,
+  );
   // 原任务不能原样重试，等待同步引擎重新规划
-  const restartRequired = computed(() => tasks.value.filter((t) => t.state === TRANSFER_STATE.RESTART_REQUIRED).length);
+  const restartRequired = computed(
+    () => tasks.value.filter((t) => t.state === TRANSFER_STATE.RESTART_REQUIRED).length,
+  );
   // 已完成
   const completed = computed(() => tasks.value.filter((t) => t.state === TRANSFER_STATE.COMPLETED).length);
   // 永久失败历史
@@ -42,11 +55,27 @@ export const useTransferStore = defineStore("transfer", () => {
   const hasActiveTasks = computed(() => active.value > 0);
 
   /** 加载全部传输任务 */
-  async function loadAll(): Promise<void> {
+  async function loadAll(): Promise<boolean> {
+    const requestId = ++nextLoadRequest;
     try {
-      tasks.value = await transferApi.listAllTransfers();
+      const loaded = await transferApi.listAllTransfers();
+      if (requestId < lastAppliedLoadRequest) return false;
+
+      // 即使两个 invoke 的响应乱序，也不能让同一 task 的旧 state_revision 回写。
+      const currentRevisions = new Map(
+        tasks.value.map((task) => [task.id, task.state_revision]),
+      );
+      if (loaded.some((task) => {
+        const currentRevision = currentRevisions.get(task.id);
+        return currentRevision !== undefined && task.state_revision < currentRevision;
+      })) return false;
+
+      tasks.value = loaded;
+      lastAppliedLoadRequest = requestId;
+      return true;
     } catch {
-      tasks.value = [];
+      // IPC/引擎瞬时失败不等于队列为空；保留最后一份成功快照。
+      return false;
     }
   }
 
@@ -68,7 +97,7 @@ export const useTransferStore = defineStore("transfer", () => {
     await loadAll();
   }
 
-  /** 重试单个失败任务（从断点续传）。后端非阻塞立即返回，后续进度靠 sync_state 事件驱动刷新 */
+  /** 后端非阻塞接受重试；队列靠 transfer_update 重载，主页靠 sync_state 更新。 */
   async function retry(taskId: number): Promise<void> {
     await transferApi.retryTransfer(taskId);
     await loadAll();

@@ -4,7 +4,7 @@
 import { defineStore } from "pinia";
 import { ref, computed } from "vue";
 import * as syncApi from "@/api/sync";
-import type { SyncGlobalState, FailedItem } from "@/api/sync";
+import type { FailedItem } from "@/api/sync";
 import * as configApi from "@/api/config";
 
 // 重新导出 FailedItem，保持既有导入路径（`from "@/stores/sync"`）可用
@@ -12,6 +12,7 @@ export type { FailedItem };
 
 export const useSyncStore = defineStore("sync", () => {
   // 全局同步状态
+  const revision = ref(0);
   const total = ref(0);
   const completed = ref(0);
   const uploading = ref(0);
@@ -25,6 +26,8 @@ export const useSyncStore = defineStore("sync", () => {
   const editing = ref(0);
   const isRunning = ref(false);
   const isIndexing = ref(false);
+  const indexingScannedFolders = ref(0);
+  const indexingDiscoveredItems = ref(0);
   // 当前同步阶段（精确显示：indexing-startup / querying-changes / syncing-local 等）
   const syncPhase = ref<string | null>(null);
   const lastSyncTime = ref<number | null>(null);
@@ -45,40 +48,48 @@ export const useSyncStore = defineStore("sync", () => {
   });
 
   // 是否有活跃传输
-  const hasActiveTransfer = computed(() => uploading.value + downloading.value + waitingNetwork.value > 0);
+  const hasActiveTransfer = computed(
+    () => uploading.value + downloading.value + waitingNetwork.value > 0,
+  );
 
-  /** 应用一份同步状态到 store（供事件回调和主动拉取共用）。 */
-  function applyState(s: SyncGlobalState): void {
-    // 固定 HEAD 的 Rust 结构尚可能按 serde 默认输出 snake_case；公开合同以 camelCase
-    // 为准，迁移窗口只在入口做一次兼容归一化。
-    const wire = s as SyncGlobalState & {
-      waiting_network?: number;
-      transfer_failed?: number;
-    };
-    total.value = s.total ?? 0;
-    completed.value = s.completed ?? 0;
-    uploading.value = s.uploading ?? 0;
-    downloading.value = s.downloading ?? 0;
-    waitingNetwork.value = s.waitingNetwork ?? wire.waiting_network ?? 0;
-    failed.value = s.failed ?? 0;
-    transferFailed.value = s.transferFailed ?? wire.transfer_failed ?? 0;
-    failedItems.value = Array.isArray(s.failed_items) ? s.failed_items : [];
-    conflict.value = s.conflict ?? 0;
-    editing.value = s.editing ?? 0;
-    isRunning.value = s.is_running ?? false;
-    lastSyncTime.value = s.last_sync_time ?? null;
-    isIndexing.value = s.is_indexing ?? false;
+  /** 应用完整权威快照；缺字段、默认对象和旧 revision 均不改变现有 UI。 */
+  function applyState(value: unknown): boolean {
+    if (!syncApi.isSyncGlobalState(value)) return false;
+    const s = value;
+    if (s.revision < revision.value) return false;
+
+    const isNewRevision = s.revision > revision.value;
+    revision.value = s.revision;
+    total.value = s.total;
+    completed.value = s.completed;
+    uploading.value = s.uploading;
+    downloading.value = s.downloading;
+    waitingNetwork.value = s.waiting_network;
+    failed.value = s.failed;
+    transferFailed.value = s.transfer_failed;
+    failedItems.value = [...s.failed_items];
+    conflict.value = s.conflict;
+    editing.value = s.editing;
+    isRunning.value = s.is_running;
+    lastSyncTime.value = s.last_sync_time;
+    isIndexing.value = s.is_indexing;
+    indexingScannedFolders.value = s.indexing_scanned_folders;
+    indexingDiscoveredItems.value = s.indexing_discovered_items;
     syncPhase.value = s.sync_phase ?? null;
     if (s.content_changed) {
       contentChanged.value = true;
-      sidebarRefresh.value++;
+      // 同一 revision 重复投递只允许幂等赋值，不能重复触发目录刷新。
+      if (isNewRevision) sidebarRefresh.value++;
     } else {
       contentChanged.value = false;
     }
+    return true;
   }
 
-  /** 初始化：加载配置判断阶段；配置就绪时主动拉一次当前同步状态，
-   *  避免错过配置完成前已发出的 is_indexing 事件（BFS 可能先于 init 启动）。 */
+  /**
+   * 初始化：加载配置判断阶段；配置就绪时主动拉一次当前同步状态，
+   * 避免错过配置完成前已发出的 is_indexing 事件（BFS 可能先于 init 启动）。
+   */
   async function init(): Promise<void> {
     try {
       const config = await configApi.loadConfig();
@@ -122,9 +133,10 @@ export const useSyncStore = defineStore("sync", () => {
   }
 
   return {
-    total, completed, uploading, downloading, waitingNetwork,
+    revision, total, completed, uploading, downloading, waitingNetwork,
     failed, transferFailed, failedItems, conflict, editing,
-    isRunning, isIndexing, syncPhase, lastSyncTime, contentChanged,
+    isRunning, isIndexing, indexingScannedFolders, indexingDiscoveredItems,
+    syncPhase, lastSyncTime, contentChanged,
     mountConfigured, setupPhase, mountDir, progress, hasActiveTransfer,
     init, applyState, triggerManualRefresh, retryFailed,
     sidebarRefresh,

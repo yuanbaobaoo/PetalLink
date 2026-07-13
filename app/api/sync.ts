@@ -5,15 +5,17 @@ import { invoke } from "./tauri";
 
 /** 同步全局状态 */
 export interface SyncGlobalState {
+  /** 权威快照的进程内单调版本。 */
+  revision: number;
   total: number;
   completed: number;
   uploading: number;
   downloading: number;
-  /** 因网络不可用而等待恢复的当前任务数（后端 JSON 为 camelCase）。 */
-  waitingNetwork: number;
+  /** 因网络不可用而等待恢复的当前任务数，不属于永久失败。 */
+  waiting_network: number;
   failed: number;
   /** 传输队列中的永久失败历史数，不等同于当前同步项 failed。 */
-  transferFailed: number;
+  transfer_failed: number;
   failed_items: FailedItem[];
   conflict: number;
   editing: number;
@@ -23,14 +25,64 @@ export interface SyncGlobalState {
   indexing_scanned_folders: number;
   indexing_discovered_items: number;
   content_changed: boolean;
-  // 当前同步阶段（供状态条精确显示场景）；null/undefined = 空闲
-  sync_phase?: string | null;
+  // 当前同步阶段（供状态条精确显示场景）；undefined = 空闲
+  sync_phase?: string;
 }
 
 /** 失败项详情（供 SyncStatusBar 失败项弹窗） */
 export interface FailedItem {
   relative_path: string;
-  error_message?: string;
+  error_message: string | null;
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
+/**
+ * 校验来自 Tauri 事件的完整 v5 权威快照。
+ *
+ * 不接受缺字段或 revision=0 的默认对象，避免把“刷新信号”误当成真实状态。
+ */
+export function isSyncGlobalState(value: unknown): value is SyncGlobalState {
+  if (typeof value !== "object" || value === null) return false;
+  const state = value as Record<string, unknown>;
+  const counters = [
+    "revision",
+    "total",
+    "completed",
+    "uploading",
+    "downloading",
+    "waiting_network",
+    "failed",
+    "transfer_failed",
+    "conflict",
+    "editing",
+    "indexing_scanned_folders",
+    "indexing_discovered_items",
+  ];
+  if (!counters.every((key) => isNonNegativeInteger(state[key]))) return false;
+  if ((state.revision as number) === 0) return false;
+  if (!Array.isArray(state.failed_items)) return false;
+  if (!state.failed_items.every((item) => {
+    if (typeof item !== "object" || item === null) return false;
+    const failedItem = item as Record<string, unknown>;
+    return typeof failedItem.relative_path === "string"
+      && (failedItem.error_message === null
+        || typeof failedItem.error_message === "string");
+  })) return false;
+  if (
+    typeof state.is_running !== "boolean"
+    || typeof state.is_indexing !== "boolean"
+    || typeof state.content_changed !== "boolean"
+  ) return false;
+  if (
+    state.last_sync_time !== null
+    && (typeof state.last_sync_time !== "number"
+      || !Number.isFinite(state.last_sync_time))
+  ) return false;
+  if (state.sync_phase !== undefined && typeof state.sync_phase !== "string") return false;
+  return true;
 }
 
 /** 释放空间安全校验结果 */

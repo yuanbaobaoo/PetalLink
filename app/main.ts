@@ -28,7 +28,6 @@ app.mount("#app");
 // ===== 全局事件监听（挂载后注册） =====
 // 延迟导入 stores 避免 Pinia 未就绪
 import { useSyncStore } from "@/stores/sync";
-import type { SyncGlobalState } from "@/api/sync";
 import { useFileBrowserStore } from "@/stores/fileBrowser";
 import { useTransferStore } from "@/stores/transfer";
 import { showToast } from "@/components/mate";
@@ -36,10 +35,8 @@ import { showToast } from "@/components/mate";
 // 监听同步状态变化
 on("sync_state", (state: unknown) => {
   const sync = useSyncStore();
-  sync.applyState(state as SyncGlobalState);
-  // 同步刷新传输队列（重试上传的进度回调通过 sync_state 广播触发）
-  const transfer = useTransferStore();
-  transfer.loadAll().catch(() => {});
+  // sync_state 只承载完整权威状态；队列变化由独立 transfer_update 事件重载。
+  sync.applyState(state);
 }).catch(() => {});
 
 // 监听目录内容变化 → 刷新文件列表 + 侧边栏

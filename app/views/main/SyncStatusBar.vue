@@ -10,7 +10,9 @@ const sync = useSyncStore();
 const transfer = useTransferStore();
 
 // 首次进入主页也读取持久化队列，避免在下一次事件到来前把 BackingOff/VerifyingRemote 误报为空闲。
-onMounted(() => { transfer.loadAll().catch(() => {}); });
+onMounted(() => {
+  transfer.loadAll().catch(() => {});
+});
 
 // 状态文案：根据 sync_phase 精确显示当前操作场景
 const statusText = computed(() => {
@@ -32,6 +34,7 @@ const statusText = computed(() => {
       if (transfer.backingOff) return "等待下次重试…";
       if (transfer.restartRequired) return "等待重新规划…";
       if (transfer.pending) return "等待传输…";
+      if (sync.failed) return "同步存在失败项";
       return "同步完成";
   }
 });
@@ -42,7 +45,16 @@ const lastSyncFormatted = computed(() => {
   return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 });
 
-const isIdle = computed(() => !sync.hasActiveTransfer && !transfer.hasActiveTasks && !sync.isIndexing && !sync.isRunning);
+const isIdle = computed(
+  () => !sync.hasActiveTransfer
+    && !transfer.hasActiveTasks
+    && !sync.isIndexing
+    && !sync.isRunning,
+);
+const statusIcon = computed(() => {
+  if (!isIdle.value) return "sync";
+  return sync.failed ? "alert" : "check";
+});
 
 const showFailedDialog = ref(false);
 function handleShowFailed(): void { showFailedDialog.value = true; }
@@ -52,10 +64,14 @@ function handleShowFailed(): void { showFailedDialog.value = true; }
   <div class="sync-bar" v-if="sync.mountConfigured">
     <div class="sync-bar__left">
       <MateIcon
-        :name="isIdle ? 'check' : 'sync'"
+        :name="statusIcon"
         :size="16"
         :spin="!isIdle"
-        :class="{ 'is-success': isIdle, 'is-active': !isIdle }"
+        :class="{
+          'is-success': isIdle && !sync.failed,
+          'is-error': isIdle && !!sync.failed,
+          'is-active': !isIdle,
+        }"
       />
       <span class="sync-bar__text">{{ statusText }}</span>
       <span v-if="lastSyncFormatted && isIdle" class="sync-bar__time">· 上次同步 {{ lastSyncFormatted }}</span>
@@ -68,7 +84,6 @@ function handleShowFailed(): void { showFailedDialog.value = true; }
       <span v-if="sync.editing" class="tag tag--warning">编辑中 {{ sync.editing }}</span>
       <span v-if="sync.conflict" class="tag tag--warning">冲突 {{ sync.conflict }}</span>
       <span v-if="sync.failed" class="tag tag--error" @click="handleShowFailed">同步失败 {{ sync.failed }}</span>
-      <span v-if="sync.transferFailed" class="tag tag--error">历史失败 {{ sync.transferFailed }}</span>
     </div>
 
     <!-- 失败项弹窗 -->
@@ -101,6 +116,7 @@ function handleShowFailed(): void { showFailedDialog.value = true; }
 }
 .sync-bar__left { display: flex; align-items: center; gap: var(--space-sm); flex: 3; min-width: 0; }
 .sync-bar__left :deep(.is-success) { color: var(--color-success); }
+.sync-bar__left :deep(.is-error) { color: var(--color-error); }
 .sync-bar__left :deep(.is-active) { color: var(--color-brand); }
 .sync-bar__text { color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sync-bar__time { color: var(--text-secondary); }
