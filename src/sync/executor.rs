@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures_util::{stream, StreamExt};
 use tokio::sync::Semaphore;
 
 use crate::data::repository::{self, sync_status, transfer_direction, SyncItem, TransferTask};
@@ -260,6 +261,8 @@ pub struct SyncExecutor {
     /// AppHandle（用于上传失败时广播事件给前端弹 toast）
     app_handle: Option<tauri::AppHandle>,
     task_runner: Option<Arc<TaskRunner>>,
+    /// Engine-bound admission checked after an action wins an executor concurrency slot.
+    action_activity_gate: Option<Arc<dyn crate::sync::task_runner::TaskActivityGate>>,
 }
 
 impl SyncExecutor {
@@ -282,6 +285,7 @@ impl SyncExecutor {
             transfer_update_tx: None,
             app_handle: None,
             task_runner: None,
+            action_activity_gate: None,
         }
     }
 
@@ -353,6 +357,13 @@ impl SyncExecutor {
             .ok_or_else(|| AppError::generic("TaskRunner 未初始化"))
     }
 
+    pub(crate) fn set_action_activity_gate(
+        &mut self,
+        activity_gate: Arc<dyn crate::sync::task_runner::TaskActivityGate>,
+    ) {
+        self.action_activity_gate = Some(activity_gate);
+    }
+
     /// Deterministic engine-chain tests inject a fake durable backend while retaining the real
     /// planner/executor/TaskRunner path. Production initializes this field through
     /// `initialize_task_runner`.
@@ -364,33 +375,71 @@ impl SyncExecutor {
     /// 并发执行全部动作。
     /// 对齐 dart `executor.executeAll`。
     pub async fn execute_all(&self, actions: &[SyncAction]) -> Vec<ActionResult> {
-        // 修剪传输历史（保留最近 100 条）
-        self.prune_transfer_history();
-
-        let semaphore = Arc::new(Semaphore::new(self.concurrency as usize));
-        let mut handles = Vec::new();
-
-        for action in actions {
-            let sem = semaphore.clone();
-            let action = action.clone();
-            let self_clone = self.clone_executor(); // cheap clone of Arc'd fields
-
-            handles.push(tokio::spawn(async move {
-                let _permit = sem.acquire().await.unwrap();
-                self_clone.execute_one(&action).await
-            }));
+        // History pruning is itself an observable DB mutation, so it needs its own operation
+        // permit. This permit does not admit any action; every action rechecks after it wins a
+        // concurrency slot below.
+        if self.db.is_some() {
+            let prune_activity = match self.begin_action_activity() {
+                Ok(activity) => activity,
+                Err(error) => {
+                    return actions
+                        .iter()
+                        .map(|_| Self::engine_stopped_result(&error))
+                        .collect()
+                }
+            };
+            self.prune_transfer_history();
+            drop(prune_activity);
         }
 
-        let mut results = Vec::new();
-        for h in handles {
-            results.push(h.await.unwrap_or_else(|error| ActionResult {
-                success: false,
-                error_message: Some(format!("传输任务异常退出：{error}")),
-                deferred: false,
-                cloud_file: None,
-            }));
+        let concurrency = self.concurrency.max(1) as usize;
+        let semaphore = Arc::new(Semaphore::new(concurrency));
+        stream::iter(actions.iter().cloned())
+            .map(|action| {
+                let sem = semaphore.clone();
+                let executor = self.clone_executor();
+                async move {
+                    let _slot = match sem.acquire_owned().await {
+                        Ok(slot) => slot,
+                        Err(error) => {
+                            return ActionResult {
+                                success: false,
+                                error_message: Some(format!("执行器已关闭：{error}")),
+                                deferred: true,
+                                cloud_file: None,
+                            }
+                        }
+                    };
+                    // This is the action linearization point: shutdown closes the gate before it
+                    // waits for old work, so queued actions cannot start callbacks afterwards.
+                    let _activity = match executor.begin_action_activity() {
+                        Ok(activity) => activity,
+                        Err(error) => return Self::engine_stopped_result(&error),
+                    };
+                    executor.execute_one(&action).await
+                }
+            })
+            .buffered(concurrency)
+            .collect()
+            .await
+    }
+
+    fn begin_action_activity(&self) -> AppResult<Option<Box<dyn Send>>> {
+        self.action_activity_gate
+            .as_ref()
+            .map(|gate| gate.begin())
+            .transpose()
+    }
+
+    fn engine_stopped_result(error: &AppError) -> ActionResult {
+        ActionResult {
+            success: false,
+            error_message: Some(error.to_string()),
+            // Cancellation is not a synchronization failure and must not create a FAILED
+            // compatibility baseline in SyncEngine::apply_results.
+            deferred: true,
+            cloud_file: None,
         }
-        results
     }
 
     /// 克隆执行器（只保留 Arc 字段的引用，轻量）。
@@ -407,6 +456,7 @@ impl SyncExecutor {
             transfer_update_tx: self.transfer_update_tx.clone(),
             app_handle: self.app_handle.clone(),
             task_runner: self.task_runner.clone(),
+            action_activity_gate: self.action_activity_gate.clone(),
         }
     }
 

@@ -9,7 +9,11 @@ export interface SyncGlobalState {
   completed: number;
   uploading: number;
   downloading: number;
+  /** 因网络不可用而等待恢复的当前任务数（后端 JSON 为 camelCase）。 */
+  waitingNetwork: number;
   failed: number;
+  /** 传输队列中的永久失败历史数，不等同于当前同步项 failed。 */
+  transferFailed: number;
   failed_items: FailedItem[];
   conflict: number;
   editing: number;

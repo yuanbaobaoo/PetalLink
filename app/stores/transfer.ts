@@ -17,10 +17,29 @@ export const useTransferStore = defineStore("transfer", () => {
   const downloads = computed(() => tasks.value.filter((t) => t.direction === TRANSFER_DIR.DOWNLOAD || t.direction === TRANSFER_DIR.DOWNLOAD_UPDATE));
   // 进行中
   const running = computed(() => tasks.value.filter((t) => t.state === TRANSFER_STATE.RUNNING).length);
-  // 等待中
+  // 等待调度
   const pending = computed(() => tasks.value.filter((t) => t.state === TRANSFER_STATE.PENDING).length);
+  // 等待网络恢复
+  const waitingNetwork = computed(() => tasks.value.filter((t) => t.state === TRANSFER_STATE.WAITING_FOR_NETWORK).length);
+  // 等待退避截止时间
+  const backingOff = computed(() => tasks.value.filter((t) => t.state === TRANSFER_STATE.BACKING_OFF).length);
+  // 正在核验有歧义的远端结果
+  const verifyingRemote = computed(() => tasks.value.filter((t) => t.state === TRANSFER_STATE.VERIFYING_REMOTE).length);
+  // 原任务不能原样重试，等待同步引擎重新规划
+  const restartRequired = computed(() => tasks.value.filter((t) => t.state === TRANSFER_STATE.RESTART_REQUIRED).length);
   // 已完成
   const completed = computed(() => tasks.value.filter((t) => t.state === TRANSFER_STATE.COMPLETED).length);
+  // 永久失败历史
+  const failed = computed(() => tasks.value.filter((t) => t.state === TRANSFER_STATE.FAILED).length);
+  // 已取消
+  const canceled = computed(() => tasks.value.filter((t) => t.state === TRANSFER_STATE.CANCELED).length);
+  // 真正执行中的状态（传输或远端核验）
+  const processing = computed(() => running.value + verifyingRemote.value);
+  // 尚未执行完成、但当前在等待条件的状态
+  const waiting = computed(() => pending.value + waitingNetwork.value + backingOff.value + restartRequired.value);
+  // 所有非终态任务；不能把等待/退避/核验/重新规划误判成完成
+  const active = computed(() => processing.value + waiting.value);
+  const hasActiveTasks = computed(() => active.value > 0);
 
   /** 加载全部传输任务 */
   async function loadAll(): Promise<void> {
@@ -56,7 +75,9 @@ export const useTransferStore = defineStore("transfer", () => {
   }
 
   return {
-    tasks, uploads, downloads, running, pending, completed,
+    tasks, uploads, downloads,
+    running, pending, waitingNetwork, backingOff, verifyingRemote, restartRequired,
+    completed, failed, canceled, processing, waiting, active, hasActiveTasks,
     loadAll, clearCompleted, clearFailed, clearFinished, retry,
   };
 });

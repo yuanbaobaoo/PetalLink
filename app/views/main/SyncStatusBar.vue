@@ -1,11 +1,16 @@
 <!-- 同步状态条，全局进度 + 失败数点击查看详情 -->
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { useSyncStore } from "@/stores/sync";
+import { useTransferStore } from "@/stores/transfer";
 import { MateIcon, MateDialog, MateButton } from "@/components/mate";
 import { pad2 } from "@/utils/format";
 
 const sync = useSyncStore();
+const transfer = useTransferStore();
+
+// 首次进入主页也读取持久化队列，避免在下一次事件到来前把 BackingOff/VerifyingRemote 误报为空闲。
+onMounted(() => { transfer.loadAll().catch(() => {}); });
 
 // 状态文案：根据 sync_phase 精确显示当前操作场景
 const statusText = computed(() => {
@@ -20,8 +25,13 @@ const statusText = computed(() => {
     case "syncing-retry": return "正在重试失败项…";
     case "syncing-startup": return "正在同步（启动恢复）…";
     default:
-      // 有传输进行中但无 sync cycle（如手动下载）
-      if (sync.hasActiveTransfer) return "同步中";
+      // 无 sync cycle 时仍按持久化传输队列区分活动态，不能把等待/退避/核验显示为完成。
+      if (transfer.verifyingRemote) return "正在核验远端状态…";
+      if (sync.uploading || sync.downloading || transfer.running) return "同步中";
+      if (sync.waitingNetwork || transfer.waitingNetwork) return "等待网络恢复…";
+      if (transfer.backingOff) return "等待下次重试…";
+      if (transfer.restartRequired) return "等待重新规划…";
+      if (transfer.pending) return "等待传输…";
       return "同步完成";
   }
 });
@@ -32,7 +42,7 @@ const lastSyncFormatted = computed(() => {
   return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 });
 
-const isIdle = computed(() => !sync.hasActiveTransfer && !sync.isIndexing && !sync.isRunning);
+const isIdle = computed(() => !sync.hasActiveTransfer && !transfer.hasActiveTasks && !sync.isIndexing && !sync.isRunning);
 
 const showFailedDialog = ref(false);
 function handleShowFailed(): void { showFailedDialog.value = true; }
@@ -54,9 +64,11 @@ function handleShowFailed(): void { showFailedDialog.value = true; }
     <div class="sync-bar__tags">
       <span v-if="sync.uploading" class="tag tag--primary">上传 {{ sync.uploading }}</span>
       <span v-if="sync.downloading" class="tag tag--primary">下载 {{ sync.downloading }}</span>
+      <span v-if="sync.waitingNetwork" class="tag tag--warning">等待网络 {{ sync.waitingNetwork }}</span>
       <span v-if="sync.editing" class="tag tag--warning">编辑中 {{ sync.editing }}</span>
       <span v-if="sync.conflict" class="tag tag--warning">冲突 {{ sync.conflict }}</span>
-      <span v-if="sync.failed" class="tag tag--error" @click="handleShowFailed">失败 {{ sync.failed }}</span>
+      <span v-if="sync.failed" class="tag tag--error" @click="handleShowFailed">同步失败 {{ sync.failed }}</span>
+      <span v-if="sync.transferFailed" class="tag tag--error">历史失败 {{ sync.transferFailed }}</span>
     </div>
 
     <!-- 失败项弹窗 -->

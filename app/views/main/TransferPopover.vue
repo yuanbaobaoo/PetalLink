@@ -13,9 +13,12 @@ const allItems = computed(() => transfer.tasks);
 
 interface StateMeta { icon: string; label: string; color: string; spin?: boolean; }
 const stateMeta: Record<number, StateMeta> = {
-  [TRANSFER_STATE.PENDING]: { icon: "clock", label: "等待中", color: "var(--text-secondary)" },
-  [TRANSFER_STATE.RUNNING]: { icon: "sync", label: "进行中", color: "var(--color-brand)", spin: true },
-  [TRANSFER_STATE.PAUSED]: { icon: "pause", label: "已暂停", color: "var(--text-secondary)" },
+  [TRANSFER_STATE.PENDING]: { icon: "clock", label: "等待调度", color: "var(--text-secondary)" },
+  [TRANSFER_STATE.RUNNING]: { icon: "sync", label: "传输中", color: "var(--color-brand)", spin: true },
+  [TRANSFER_STATE.WAITING_FOR_NETWORK]: { icon: "clock", label: "等待网络", color: "var(--color-warning)" },
+  [TRANSFER_STATE.BACKING_OFF]: { icon: "clock", label: "等待重试", color: "var(--color-warning)" },
+  [TRANSFER_STATE.VERIFYING_REMOTE]: { icon: "sync", label: "核验远端", color: "var(--color-brand)", spin: true },
+  [TRANSFER_STATE.RESTART_REQUIRED]: { icon: "refresh", label: "等待重新规划", color: "var(--color-warning)" },
   [TRANSFER_STATE.COMPLETED]: { icon: "check", label: "已完成", color: "var(--color-success)" },
   [TRANSFER_STATE.FAILED]: { icon: "x", label: "失败", color: "var(--color-error)" },
   [TRANSFER_STATE.CANCELED]: { icon: "x", label: "已取消", color: "var(--text-secondary)" },
@@ -48,7 +51,12 @@ function progressValue(t: { total_size: number; transferred: number }): number |
 function progressColor(state: number): string {
   if (state === TRANSFER_STATE.COMPLETED) return "var(--color-success)";
   if (state === TRANSFER_STATE.FAILED) return "var(--color-error)";
-  if (state === TRANSFER_STATE.PAUSED || state === TRANSFER_STATE.PENDING) return "var(--border-hover)";
+  if (
+    state === TRANSFER_STATE.PENDING
+    || state === TRANSFER_STATE.WAITING_FOR_NETWORK
+    || state === TRANSFER_STATE.BACKING_OFF
+    || state === TRANSFER_STATE.RESTART_REQUIRED
+  ) return "var(--border-hover)";
   return "var(--color-brand)";
 }
 
@@ -93,9 +101,9 @@ async function onRetry(id: number): Promise<void> {
 
     <!-- 统计栏 -->
     <div class="tp-stats">
-      <span>进行中 {{ transfer.running }}</span>
+      <span>处理中 {{ transfer.processing }}</span>
       <span class="tp-stats__sep" />
-      <span>等待中 {{ transfer.pending }}</span>
+      <span>等待中 {{ transfer.waiting }}</span>
       <span class="tp-stats__sep" />
       <span>已完成 {{ transfer.completed }}</span>
       <MatePopupMenu class="tp-stats__clear" :items="clearItems" @select="onClear">
@@ -132,9 +140,9 @@ async function onRetry(id: number): Promise<void> {
           <MateIcon :name="stateMeta[item.state]?.icon ?? 'clock'" :size="12" :spin="stateMeta[item.state]?.spin" />
           {{ stateMeta[item.state]?.label ?? "" }}
         </div>
-        <!-- 失败项重试按钮（仅上传/下载失败时显示） -->
+        <!-- 后端 prepare_retry 只接受 Failed；其他活动态不能展示重试。 -->
         <MateButton
-          v-if="item.state === TRANSFER_STATE.FAILED && item.direction !== TRANSFER_DIR.DELETE"
+          v-if="item.state === TRANSFER_STATE.FAILED"
           variant="icon"
           icon="refresh"
           tooltip="重试"

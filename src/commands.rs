@@ -333,17 +333,7 @@ fn ensure_engine_started_owned(app: &AppHandle) -> AppResult<()> {
     engine.set_executor(executor);
 
     let engine = Arc::new(engine);
-    {
-        let weak_engine = Arc::downgrade(&engine);
-        task_runner.set_state_sink(Arc::new(move || {
-            let engine = weak_engine
-                .upgrade()
-                .ok_or_else(|| AppError::generic("同步引擎已停止"))?;
-            let result = engine.recompute_and_broadcast_state().map(|_| ());
-            engine.note_transfer_state_changed();
-            result
-        }));
-    }
+    engine.bind_task_runner_state_sink(&task_runner);
     set_sync_engine(engine.clone());
 
     // 异步启动引擎（start 内含 BFS + watcher，不阻塞调用方）
@@ -1859,10 +1849,66 @@ fn ensure_not_indexing() -> AppResult<()> {
 
 #[cfg(test)]
 mod status_command_tests {
-    use super::{clear_transfer_history_and_snapshot, EngineOwnershipProtocol};
+    use super::{
+        clear_transfer_history_and_snapshot, drop_runtime_async, set_sync_engine, try_sync_engine,
+        EngineOwnershipProtocol, CHANGES_API, DOWNLOAD_API, ENGINE_OWNERSHIP, FILES_API,
+        UPLOAD_API,
+    };
     use crate::data::repository::{self, SyncItem};
+    use crate::drive::models::DriveFile;
+    use crate::mount::manager::MountManager;
+    use crate::sync::engine::SyncEngine;
+    use crate::sync::executor::SyncExecutor;
     use crate::sync::status_aggregator::{RuntimeStatus, StatusAggregator};
-    use crate::sync::transfer_state::TransferState;
+    use crate::sync::task_runner::{
+        TaskDisposition, TaskExecutionError, TaskExecutionOutcome, TaskProgressReporter,
+        TaskRunner, TransferOperations,
+    };
+    use crate::sync::transfer_state::{TransferOperation, TransferState};
+
+    static GLOBAL_RUNTIME_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    struct GlobalRuntimeTestCleanup {
+        release_backend: std::sync::Arc<tokio::sync::Notify>,
+    }
+
+    impl Drop for GlobalRuntimeTestCleanup {
+        fn drop(&mut self) {
+            self.release_backend.notify_waiters();
+            if let Some(engine) = super::SYNC_ENGINE.lock().take() {
+                engine.shutdown_sync();
+            }
+            *super::MOUNT_MANAGER.lock() = None;
+        }
+    }
+
+    struct SubmittedAmbiguousBackend {
+        calls: std::sync::Mutex<Vec<i64>>,
+        submitted: tokio::sync::Notify,
+        release_response: std::sync::Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl TransferOperations for SubmittedAmbiguousBackend {
+        async fn execute(
+            &self,
+            task: &repository::TransferTask,
+            _progress: &TaskProgressReporter,
+        ) -> Result<TaskExecutionOutcome, TaskExecutionError> {
+            self.calls.lock().unwrap().push(task.id);
+            self.submitted.notify_one();
+            self.release_response.notified().await;
+            Ok(TaskExecutionOutcome {
+                cloud_file: Some(DriveFile {
+                    id: format!("ambiguous-remote-{}", task.id),
+                    name: task.name.clone(),
+                    size: task.total_size,
+                    ..Default::default()
+                }),
+                disposition: TaskDisposition::VerifyingRemote,
+            })
+        }
+    }
 
     #[test]
     fn no_engine_history_clear_recomputes_complete_snapshot() {
@@ -1952,5 +1998,208 @@ mod status_command_tests {
             })
             .unwrap();
         assert_eq!(live_installs.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn global_replacement_waits_for_submitted_ambiguous_write_settlement() {
+        const FAILURE_BOUND: std::time::Duration = std::time::Duration::from_secs(2);
+
+        let _serial = GLOBAL_RUNTIME_TEST_LOCK.lock().await;
+        drop_runtime_async().await;
+
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("ambiguous-replacement.txt");
+        std::fs::write(&source, b"submitted payload").unwrap();
+        let metadata = std::fs::metadata(&source).unwrap();
+        let source_mtime = metadata
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::data::migrations::run(&conn).unwrap();
+        let db = std::sync::Arc::new(parking_lot::Mutex::new(conn));
+        let release_response = std::sync::Arc::new(tokio::sync::Notify::new());
+        let backend = std::sync::Arc::new(SubmittedAmbiguousBackend {
+            calls: std::sync::Mutex::new(Vec::new()),
+            submitted: tokio::sync::Notify::new(),
+            release_response: release_response.clone(),
+        });
+        let _cleanup = GlobalRuntimeTestCleanup {
+            release_backend: release_response,
+        };
+        let mount = std::sync::Arc::new(MountManager::new(root.path()));
+        let runner = std::sync::Arc::new(TaskRunner::new(
+            db.clone(),
+            root.path().to_path_buf(),
+            backend.clone(),
+            std::sync::Arc::new(|| true),
+            std::sync::Arc::new(|| Ok(())),
+            None,
+        ));
+        let mut executor = SyncExecutor::new(
+            1,
+            FILES_API.clone(),
+            DOWNLOAD_API.clone(),
+            UPLOAD_API.clone(),
+        );
+        executor.set_mount(mount.clone());
+        executor.set_db(db.clone());
+        executor.set_task_runner_for_test(runner.clone());
+        let mut old_engine = SyncEngine::new(
+            FILES_API.clone(),
+            CHANGES_API.clone(),
+            DOWNLOAD_API.clone(),
+            UPLOAD_API.clone(),
+            db.clone(),
+            std::sync::Arc::new(StatusAggregator::default()),
+            Vec::new(),
+            0,
+            0,
+        );
+        old_engine.set_mount(mount);
+        old_engine.set_executor(executor);
+        let old_engine = std::sync::Arc::new(old_engine);
+        old_engine.bind_task_runner_state_sink(&runner);
+        let bound_runner = old_engine.task_runner().unwrap();
+        assert!(std::sync::Arc::ptr_eq(&runner, &bound_runner));
+
+        ENGINE_OWNERSHIP
+            .install(|| {
+                set_sync_engine(old_engine.clone());
+                Ok(())
+            })
+            .unwrap();
+        assert!(std::sync::Arc::ptr_eq(
+            &try_sync_engine().unwrap(),
+            &old_engine
+        ));
+
+        let transfer = tokio::spawn(async move {
+            bound_runner
+                .enqueue_and_run(repository::TransferTask {
+                    id: 0,
+                    direction: repository::transfer_direction::UPLOAD,
+                    file_id: None,
+                    local_path: Some(source.to_string_lossy().into_owned()),
+                    name: "ambiguous-replacement.txt".into(),
+                    total_size: metadata.len() as i64,
+                    transferred: 0,
+                    state: TransferState::Pending.into(),
+                    error_message: None,
+                    created_at: 1,
+                    finished_at: None,
+                    server_id: None,
+                    upload_id: None,
+                    resume_offset: 0,
+                    session_url: None,
+                    relative_path: Some("ambiguous-replacement.txt".into()),
+                    parent_file_id: None,
+                    operation: Some(TransferOperation::Create.into()),
+                    source_mtime: Some(source_mtime),
+                    source_size: Some(metadata.len() as i64),
+                    expected_cloud_edited_time: None,
+                    attempt_count: 0,
+                    next_retry_at: None,
+                    error_kind: None,
+                    remote_result_file_id: None,
+                    state_revision: 0,
+                })
+                .await
+        });
+        tokio::time::timeout(FAILURE_BOUND, backend.submitted.notified())
+            .await
+            .expect("backend submission must reach the ambiguity barrier");
+
+        let running = repository::list_all_transfers(&db.lock()).unwrap();
+        assert_eq!(running.len(), 1);
+        let task_id = running[0].id;
+        assert_eq!(running[0].state_kind().unwrap(), TransferState::Running);
+        assert_eq!(&*backend.calls.lock().unwrap(), &[task_id]);
+
+        let mut replacement = tokio::spawn(async { drop_runtime_async().await });
+        tokio::time::timeout(FAILURE_BOUND, async {
+            while try_sync_engine().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("drop_runtime_async must remove the old global slot");
+        assert!(
+            !replacement.is_finished(),
+            "replacement must wait while the submitted write is unsettled"
+        );
+
+        let successor_conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::data::migrations::run(&successor_conn).unwrap();
+        let successor = std::sync::Arc::new(SyncEngine::new(
+            FILES_API.clone(),
+            CHANGES_API.clone(),
+            DOWNLOAD_API.clone(),
+            UPLOAD_API.clone(),
+            std::sync::Arc::new(parking_lot::Mutex::new(successor_conn)),
+            std::sync::Arc::new(StatusAggregator::default()),
+            Vec::new(),
+            0,
+            0,
+        ));
+        let blocked_install_ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let blocked = {
+            let blocked_install_ran = blocked_install_ran.clone();
+            let successor = successor.clone();
+            ENGINE_OWNERSHIP.install(|| {
+                blocked_install_ran.store(true, std::sync::atomic::Ordering::SeqCst);
+                set_sync_engine(successor);
+                Ok(())
+            })
+        };
+        assert!(blocked.unwrap_err().to_string().contains("正在替换"));
+        assert!(!blocked_install_ran.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(try_sync_engine().is_none());
+
+        backend.release_response.notify_one();
+        tokio::time::timeout(FAILURE_BOUND, &mut replacement)
+            .await
+            .expect("replacement must finish after backend settlement")
+            .unwrap();
+
+        let settled = repository::get_transfer_by_id(&db.lock(), task_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(settled.id, task_id);
+        assert_eq!(
+            settled.state_kind().unwrap(),
+            TransferState::VerifyingRemote
+        );
+        assert_eq!(
+            settled.remote_result_file_id.as_deref(),
+            Some(format!("ambiguous-remote-{task_id}").as_str())
+        );
+        let outcome = tokio::time::timeout(FAILURE_BOUND, transfer)
+            .await
+            .expect("transfer future must converge")
+            .unwrap()
+            .unwrap();
+        assert_eq!(outcome.task_id, task_id);
+        assert_eq!(
+            outcome.outcome.disposition,
+            TaskDisposition::VerifyingRemote
+        );
+        assert_eq!(&*backend.calls.lock().unwrap(), &[task_id]);
+
+        ENGINE_OWNERSHIP
+            .install(|| {
+                set_sync_engine(successor.clone());
+                Ok(())
+            })
+            .unwrap();
+        assert!(std::sync::Arc::ptr_eq(
+            &try_sync_engine().unwrap(),
+            &successor
+        ));
+        drop_runtime_async().await;
+        assert!(try_sync_engine().is_none());
     }
 }

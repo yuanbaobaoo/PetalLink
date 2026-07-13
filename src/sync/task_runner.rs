@@ -345,6 +345,14 @@ impl TaskRunner {
         *self.activity_gate.write() = Some(activity_gate);
     }
 
+    fn begin_activity(&self) -> AppResult<Option<Box<dyn Send>>> {
+        self.activity_gate
+            .read()
+            .clone()
+            .map(|gate| gate.begin())
+            .transpose()
+    }
+
     /// Persist a Pending intent before any backend call, then execute that exact task row.
     pub async fn enqueue_and_run(&self, task: TransferTask) -> AppResult<EnqueuedTaskOutcome> {
         if task.id != 0
@@ -449,6 +457,9 @@ impl TaskRunner {
 
     pub async fn prepare_retry(&self, task_id: i64) -> AppResult<TransferTask> {
         let current = self.load(task_id)?;
+        // Retry validation can persist a rejection, so shutdown admission must precede it and
+        // stay held through the accepted Pending transition.
+        let _activity = self.begin_activity()?;
         if current.state_kind().map_err(transition_error)? != TransferState::Failed {
             self.notify_rejection();
             return Err(AppError::generic("任务不存在或非失败状态"));
@@ -922,6 +933,9 @@ impl TaskRunner {
             }
         }
         for task in selected_tasks {
+            // Startup recovery is a stream of independent row operations. Acquire per row so a
+            // close between rows leaves every not-yet-admitted row byte-for-byte unchanged.
+            let _activity = self.begin_activity()?;
             let state = match task.state_kind() {
                 Ok(state) => state,
                 Err(error) => {
@@ -1010,6 +1024,7 @@ impl TaskRunner {
     }
 
     fn suppress_startup_duplicate(&self, task: &TransferTask) -> AppResult<bool> {
+        let _activity = self.begin_activity()?;
         let state = task.state_kind().map_err(transition_error)?;
         let operation = task.operation_kind().map_err(transition_error)?;
         if state == TransferState::Running
@@ -1068,6 +1083,10 @@ impl TaskRunner {
         run_backend_preflight: bool,
     ) -> AppResult<TaskExecutionOutcome> {
         let state = current.state_kind().map_err(transition_error)?;
+        // This is the per-row linearization point. It intentionally precedes static validation:
+        // validation failures are persisted, and download validation may create a parent folder.
+        // An admitted permit remains alive through backend settlement, including ambiguous writes.
+        let _activity = self.begin_activity()?;
         if !matches!(
             state,
             TransferState::Pending | TransferState::WaitingForNetwork | TransferState::BackingOff
@@ -1121,14 +1140,6 @@ impl TaskRunner {
                 disposition: TaskDisposition::BackingOff,
             });
         }
-        // Linearization point for every backend interaction. Engine shutdown closes this gate
-        // before it waits for quiescence; an accepted permit is held through final settlement.
-        let _activity = self
-            .activity_gate
-            .read()
-            .clone()
-            .map(|gate| gate.begin())
-            .transpose()?;
         if run_backend_preflight {
             if let Err(failure) = self.operations.preflight(&current).await {
                 let failure = PreflightFailure::from(failure);
@@ -2230,6 +2241,32 @@ mod tests {
         calls: Mutex<Vec<i64>>,
     }
 
+    struct ClosableActivityGate {
+        accepting: AtomicBool,
+    }
+
+    impl ClosableActivityGate {
+        fn new(accepting: bool) -> Self {
+            Self {
+                accepting: AtomicBool::new(accepting),
+            }
+        }
+
+        fn close(&self) {
+            self.accepting.store(false, Ordering::SeqCst);
+        }
+    }
+
+    impl TaskActivityGate for ClosableActivityGate {
+        fn begin(&self) -> AppResult<Box<dyn Send>> {
+            if self.accepting.load(Ordering::SeqCst) {
+                Ok(Box::new(()))
+            } else {
+                Err(AppError::generic("engine shutdown"))
+            }
+        }
+    }
+
     impl Default for BlockingExecuteBackend {
         fn default() -> Self {
             Self {
@@ -2750,6 +2787,81 @@ mod tests {
         );
         assert_eq!(fixture.backend.calls().len(), 1);
         assert_eq!(fixture.backend.calls()[0].id, download_id);
+    }
+
+    #[tokio::test]
+    async fn closed_activity_gate_prevents_startup_recovery_row_mutation() {
+        let fixture = Fixture::new();
+        let id = fixture.insert(task(
+            &fixture,
+            TransferState::Running,
+            TransferOperation::Create,
+            "startup-closed.bin",
+        ));
+        let before = fixture.get(id);
+        let gate = Arc::new(ClosableActivityGate::new(false));
+        fixture.runner.set_activity_gate(gate);
+
+        let error = fixture.runner.recover_startup().await.unwrap_err();
+
+        assert!(error.to_string().contains("shutdown"));
+        let after = fixture.get(id);
+        assert_eq!(after.state_kind().unwrap(), TransferState::Running);
+        assert_eq!(after.state_revision, before.state_revision);
+        assert!(fixture.backend.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn shutdown_between_waiting_rows_keeps_rejected_next_row_unchanged() {
+        let fixture = Fixture::new();
+        let backend = Arc::new(BlockingExecuteBackend::default());
+        let runner = runner_with_backend(fixture.db.clone(), fixture.root.path(), backend.clone());
+        let gate = Arc::new(ClosableActivityGate::new(true));
+        runner.set_activity_gate(gate.clone());
+
+        let mut first = task(
+            &fixture,
+            TransferState::WaitingForNetwork,
+            TransferOperation::Download,
+            "waiting-first.bin",
+        );
+        first.created_at = 2;
+        let first_id = fixture.insert(first);
+        let mut second = task(
+            &fixture,
+            TransferState::WaitingForNetwork,
+            TransferOperation::Download,
+            "waiting-invalid.bin",
+        );
+        second.created_at = 1;
+        second.local_path = Some(
+            tempfile::tempdir()
+                .unwrap()
+                .path()
+                .join("outside.bin")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let second_id = fixture.insert(second);
+        let second_before = fixture.get(second_id);
+
+        let recovery = tokio::spawn(async move { runner.resume_waiting().await });
+        backend.execute_started.notified().await;
+        gate.close();
+        backend.execute_release.add_permits(1);
+        recovery.await.unwrap().unwrap();
+
+        assert_eq!(
+            fixture.get(first_id).state_kind().unwrap(),
+            TransferState::Completed
+        );
+        let second_after = fixture.get(second_id);
+        assert_eq!(
+            second_after.state_kind().unwrap(),
+            TransferState::WaitingForNetwork
+        );
+        assert_eq!(second_after.state_revision, second_before.state_revision);
+        assert_eq!(backend.calls.lock().as_slice(), &[first_id]);
     }
 
     #[tokio::test]

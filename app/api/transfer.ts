@@ -12,7 +12,7 @@ export interface TransferTask {
   name: string;
   total_size: number;
   transferred: number;
-  state: number; // 0=pending,1=running,2=paused,3=completed,4=failed,5=canceled
+  state: number; // TransferState discriminant，必须与 Rust src/sync/transfer_state.rs 一致
   error_message?: string;
   created_at: number;
   finished_at?: number;
@@ -31,7 +31,15 @@ export const DIR_LABEL: Record<number, string> = {
 
 /** 传输状态常量 */
 export const TRANSFER_STATE = {
-  PENDING: 0, RUNNING: 1, PAUSED: 2, COMPLETED: 3, FAILED: 4, CANCELED: 5,
+  PENDING: 0,
+  RUNNING: 1,
+  WAITING_FOR_NETWORK: 2,
+  BACKING_OFF: 3,
+  VERIFYING_REMOTE: 4,
+  RESTART_REQUIRED: 5,
+  COMPLETED: 6,
+  FAILED: 7,
+  CANCELED: 8,
 } as const;
 
 /** 列举全部传输任务 */

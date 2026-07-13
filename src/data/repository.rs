@@ -762,6 +762,19 @@ fn list_transfers_with_state(conn: &Connection, s: i32) -> AppResult<Vec<Transfe
     collect_tasks(stmt.query_map(params![s], TransferTask::from_row))
 }
 
+/// 查询指定持久化状态是否至少存在一个传输任务。
+pub fn has_transfer_in_state(conn: &Connection, state: TransferState) -> AppResult<bool> {
+    let exists: i64 = db_err!(
+        "查询",
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM transfer_queue WHERE state=?1)",
+            params![i32::from(state)],
+            |row| row.get(0),
+        )
+    );
+    Ok(exists != 0)
+}
+
 /// 查询所有传输任务（created_at 倒序）。
 pub fn list_all_transfers(conn: &Connection) -> AppResult<Vec<TransferTask>> {
     let mut stmt = db_err!(
@@ -1163,5 +1176,31 @@ mod tests {
         let completed: Vec<_> =
             list_transfers(&conn, None, Some(transfer_state::COMPLETED)).unwrap();
         assert_eq!(completed.len(), 2);
+    }
+
+    #[test]
+    fn has_transfer_in_state_is_exact() {
+        let conn = fresh_db();
+
+        assert!(!has_transfer_in_state(&conn, TransferState::WaitingForNetwork).unwrap());
+
+        let completed_id =
+            insert_transfer(&conn, &sample_transfer_task(TransferState::Completed)).unwrap();
+        assert!(!has_transfer_in_state(&conn, TransferState::WaitingForNetwork).unwrap());
+
+        let waiting_id = insert_transfer(
+            &conn,
+            &sample_transfer_task(TransferState::WaitingForNetwork),
+        )
+        .unwrap();
+        assert!(has_transfer_in_state(&conn, TransferState::WaitingForNetwork).unwrap());
+
+        conn.execute(
+            "DELETE FROM transfer_queue WHERE id=?1",
+            params![waiting_id],
+        )
+        .unwrap();
+        assert!(!has_transfer_in_state(&conn, TransferState::WaitingForNetwork).unwrap());
+        assert!(get_transfer_by_id(&conn, completed_id).unwrap().is_some());
     }
 }

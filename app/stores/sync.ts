@@ -16,7 +16,10 @@ export const useSyncStore = defineStore("sync", () => {
   const completed = ref(0);
   const uploading = ref(0);
   const downloading = ref(0);
+  const waitingNetwork = ref(0);
   const failed = ref(0);
+  // 传输队列永久失败历史；与 sync_items 的当前失败 failed 分开保存
+  const transferFailed = ref(0);
   const failedItems = ref<FailedItem[]>([]);
   const conflict = ref(0);
   const editing = ref(0);
@@ -42,15 +45,23 @@ export const useSyncStore = defineStore("sync", () => {
   });
 
   // 是否有活跃传输
-  const hasActiveTransfer = computed(() => uploading.value + downloading.value > 0);
+  const hasActiveTransfer = computed(() => uploading.value + downloading.value + waitingNetwork.value > 0);
 
   /** 应用一份同步状态到 store（供事件回调和主动拉取共用）。 */
   function applyState(s: SyncGlobalState): void {
+    // 固定 HEAD 的 Rust 结构尚可能按 serde 默认输出 snake_case；公开合同以 camelCase
+    // 为准，迁移窗口只在入口做一次兼容归一化。
+    const wire = s as SyncGlobalState & {
+      waiting_network?: number;
+      transfer_failed?: number;
+    };
     total.value = s.total ?? 0;
     completed.value = s.completed ?? 0;
     uploading.value = s.uploading ?? 0;
     downloading.value = s.downloading ?? 0;
+    waitingNetwork.value = s.waitingNetwork ?? wire.waiting_network ?? 0;
     failed.value = s.failed ?? 0;
+    transferFailed.value = s.transferFailed ?? wire.transfer_failed ?? 0;
     failedItems.value = Array.isArray(s.failed_items) ? s.failed_items : [];
     conflict.value = s.conflict ?? 0;
     editing.value = s.editing ?? 0;
@@ -111,7 +122,8 @@ export const useSyncStore = defineStore("sync", () => {
   }
 
   return {
-    total, completed, uploading, downloading, failed, failedItems, conflict, editing,
+    total, completed, uploading, downloading, waitingNetwork,
+    failed, transferFailed, failedItems, conflict, editing,
     isRunning, isIndexing, syncPhase, lastSyncTime, contentChanged,
     mountConfigured, setupPhase, mountDir, progress, hasActiveTransfer,
     init, applyState, triggerManualRefresh, retryFailed,
