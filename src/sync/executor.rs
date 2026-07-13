@@ -14,7 +14,7 @@ use tokio::sync::Semaphore;
 
 use crate::data::repository::{self, sync_status, transfer_direction, SyncItem, TransferTask};
 use crate::drive::{
-    download_api::DownloadApi,
+    download_api::{DownloadApi, DownloadExpectation},
     files_api::FilesApi,
     upload_api::{ResumeSession, UploadApi},
 };
@@ -227,13 +227,25 @@ impl TransferOperations for ExecutorTransferOperations {
                 let progress_reporter = progress.clone();
                 let on_progress: crate::drive::download_api::ProgressFn =
                     Box::new(move |received, _total| {
-                        if let Err(error) = progress_reporter.update_transferred(received as i64) {
+                        if let Err(error) =
+                            progress_reporter.update_download_progress(received as i64)
+                        {
                             tracing::debug!(%error, "忽略过期下载进度回调");
                         }
                     });
                 let file_id = task.file_id.as_deref().expect("preflight requires file id");
+                let expectation = DownloadExpectation {
+                    edited_time_ms: task.expected_cloud_edited_time,
+                    size: u64::try_from(task.total_size).ok(),
+                    content_hash: None,
+                };
                 self.download_api
-                    .download(file_id, &local_path, Some(&on_progress))
+                    .download_with_expectation(
+                        file_id,
+                        &local_path,
+                        Some(&expectation),
+                        Some(&on_progress),
+                    )
                     .await?;
                 let _ = self.mount.mark_downloaded(&local_path).await;
                 let _ = self.mount.set_file_id_xattr(&local_path, file_id).await;

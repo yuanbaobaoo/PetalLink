@@ -150,6 +150,26 @@ impl TaskProgressReporter {
         })
     }
 
+    /// Persist the durable download offset together with visible progress. Unlike an upload
+    /// session this offset needs no server URL; the Download API validates its sidecar metadata
+    /// and actual `.tmp` length before issuing the next Range request.
+    pub fn update_download_progress(&self, transferred: i64) -> AppResult<()> {
+        if transferred < 0 || transferred > self.total_size {
+            return Err(AppError::generic("下载断点超出任务总大小"));
+        }
+        let now = chrono::Utc::now().timestamp_millis();
+        let previous = self.last_progress_ms.load(Ordering::Relaxed);
+        if previous != 0 && now.saturating_sub(previous) < PROGRESS_THROTTLE_MS {
+            return Ok(());
+        }
+        self.last_progress_ms.store(now, Ordering::Relaxed);
+        self.update(RunningTransferPatch {
+            transferred: Some(transferred),
+            resume_offset: Some(transferred),
+            ..Default::default()
+        })
+    }
+
     pub fn update_resume(
         &self,
         server_id: &str,
@@ -981,12 +1001,16 @@ impl TaskRunner {
                             .expect("validated download task has relative path");
                         let validated_destination = self.mount_root.join(relative_path);
                         let tmp_path = crate::drive::download_api::tmp_path(&validated_destination);
-                        let _ = std::fs::remove_file(tmp_path);
+                        let durable_offset = std::fs::metadata(&tmp_path)
+                            .ok()
+                            .filter(|metadata| metadata.is_file())
+                            .map(|metadata| metadata.len().min(task.total_size as u64) as i64)
+                            .unwrap_or(0);
                         let restart = self.transition_failure(
                             &task,
                             TransferState::RestartRequired,
                             TransferErrorKind::SessionExpired,
-                            "进程中断，下载将从头重启",
+                            "进程中断，保留已验证下载断点并重新建立 Range 请求",
                         )?;
                         let pending = self.transition(
                             restart.id,
@@ -996,8 +1020,8 @@ impl TaskRunner {
                                 error_kind: ColumnPatch::Clear,
                                 error_message: ColumnPatch::Clear,
                                 finished_at: ColumnPatch::Clear,
-                                transferred: Some(0),
-                                resume_offset: Some(0),
+                                transferred: Some(durable_offset),
+                                resume_offset: Some(durable_offset),
                                 ..Default::default()
                             },
                         )?;
