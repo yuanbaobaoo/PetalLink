@@ -950,7 +950,7 @@ impl SyncExecutor {
                 },
                 // 对齐 dart：400/409 时查同名已存在文件夹，存在则视为成功
                 // （同样用末段 name 匹配，与云端真名一致才能命中）
-                Err(ref e) if e.to_string().contains("400") || e.to_string().contains("409") => {
+                Err(ref e) if matches!(e.drive_status(), Some(400 | 409)) => {
                     if let Some(pid) = action.parent_file_id.as_deref() {
                         if let Ok(list) = self.files_api.list_all(Some(pid)).await {
                             if let Some(existing) =
@@ -1022,9 +1022,8 @@ impl SyncExecutor {
                 cloud_file: None,
             },
             Err(e) => {
-                let msg = e.to_string();
                 // 404 表示云端已不存在（可能已被前序操作删除），视为成功
-                if msg.contains("404") {
+                if e.drive_status() == Some(404) {
                     tracing::info!(rel, file_id, "云端文件已不存在（404），视为删除成功");
                     ActionResult {
                         success: true,
@@ -1035,7 +1034,7 @@ impl SyncExecutor {
                 } else {
                     ActionResult {
                         success: false,
-                        error_message: Some(msg),
+                        error_message: Some(e.to_string()),
                         deferred: false,
                         cloud_file: None,
                     }

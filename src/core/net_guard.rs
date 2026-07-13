@@ -7,8 +7,10 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use tokio::net::TcpStream;
+use tokio::sync::broadcast;
 use tokio::time::sleep;
 
 /// 探测目标主机（华为 Drive API 域名）
@@ -23,11 +25,126 @@ const POLL_WAIT_SECS: u64 = 2;
 /// 全局网络状态：True=在线，false=离线
 static ONLINE: AtomicBool = AtomicBool::new(true);
 
-/// 探测任务是否已启动（防止重复 spawn）
-static PROBE_STARTED: Mutex<bool> = Mutex::new(false);
+/// 稳定网络状态发生的真实转换。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkTransition {
+    Online,
+    Offline,
+}
 
-/// 探测任务 shutdown 标志（应用退出时置 true，终止探测循环）
-static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+#[derive(Debug)]
+struct NetworkStateMachine {
+    online: bool,
+    consecutive_successes: u8,
+}
+
+impl NetworkStateMachine {
+    fn new(online: bool) -> Self {
+        Self {
+            online,
+            consecutive_successes: 0,
+        }
+    }
+
+    fn is_online(&self) -> bool {
+        self.online
+    }
+
+    fn observe(&mut self, probe_succeeded: bool) -> Option<NetworkTransition> {
+        if !probe_succeeded {
+            self.consecutive_successes = 0;
+            if self.online {
+                self.online = false;
+                return Some(NetworkTransition::Offline);
+            }
+            return None;
+        }
+
+        if self.online {
+            self.consecutive_successes = 0;
+            return None;
+        }
+
+        self.consecutive_successes = self.consecutive_successes.saturating_add(1);
+        if self.consecutive_successes < 2 {
+            return None;
+        }
+        self.online = true;
+        self.consecutive_successes = 0;
+        Some(NetworkTransition::Online)
+    }
+}
+
+#[derive(Debug, Default)]
+struct ProbeLifecycle {
+    generation: u64,
+    running: bool,
+}
+
+impl ProbeLifecycle {
+    fn start(&mut self) -> Option<u64> {
+        if self.running {
+            return None;
+        }
+        self.generation = self.generation.wrapping_add(1);
+        if self.generation == 0 {
+            self.generation = 1;
+        }
+        self.running = true;
+        Some(self.generation)
+    }
+
+    fn shutdown(&mut self) -> bool {
+        if !self.running {
+            return false;
+        }
+        self.running = false;
+        true
+    }
+
+    fn accepts(&self, generation: u64) -> bool {
+        self.running && self.generation == generation
+    }
+
+    fn finish(&mut self, generation: u64) -> bool {
+        if !self.accepts(generation) {
+            return false;
+        }
+        self.running = false;
+        true
+    }
+}
+
+#[derive(Debug)]
+struct ProbeRuntime {
+    lifecycle: ProbeLifecycle,
+    network: NetworkStateMachine,
+}
+
+impl Default for ProbeRuntime {
+    fn default() -> Self {
+        Self {
+            lifecycle: ProbeLifecycle::default(),
+            network: NetworkStateMachine::new(true),
+        }
+    }
+}
+
+static PROBE_RUNTIME: Lazy<Mutex<ProbeRuntime>> = Lazy::new(|| Mutex::new(ProbeRuntime::default()));
+static TRANSITIONS: Lazy<broadcast::Sender<NetworkTransition>> = Lazy::new(|| {
+    let (sender, _) = broadcast::channel(16);
+    sender
+});
+
+struct ProbeGenerationGuard {
+    generation: u64,
+}
+
+impl Drop for ProbeGenerationGuard {
+    fn drop(&mut self) {
+        finish_probe_generation(self.generation);
+    }
+}
 
 /// 查询当前是否在线（零开销，供同步引擎各入口快速判断）。
 #[allow(dead_code)]
@@ -35,33 +152,35 @@ pub fn is_online() -> bool {
     ONLINE.load(Ordering::SeqCst)
 }
 
+/// 订阅稳定网络转换；只会收到真实 Offline/Online 状态变化。
+pub fn subscribe() -> broadcast::Receiver<NetworkTransition> {
+    TRANSITIONS.subscribe()
+}
+
 /// 启动后台探测任务（幂等，重复调用安全）。
 /// 在 tokio 运行时中周期性 TCP 探测目标主机，更新全局 ONLINE 状态。
 #[allow(dead_code)]
 pub fn start_probe_task() {
-    let mut started = PROBE_STARTED.lock();
-    if *started {
-        return;
-    }
-    *started = true;
-    drop(started);
+    let generation = {
+        let mut runtime = PROBE_RUNTIME.lock();
+        let Some(generation) = runtime.lifecycle.start() else {
+            return;
+        };
+        runtime.network = NetworkStateMachine::new(ONLINE.load(Ordering::SeqCst));
+        generation
+    };
 
     tracing::info!("网络探测任务已启动（间隔 {}s）", PROBE_INTERVAL_SECS);
-    tokio::spawn(async {
+    tokio::spawn(async move {
+        let _generation_guard = ProbeGenerationGuard { generation };
         loop {
-            if SHUTDOWN.load(Ordering::SeqCst) {
+            if !generation_is_active(generation) {
                 tracing::info!("网络探测任务检测到 shutdown，退出循环");
                 break;
             }
-            let online = probe_once().await;
-            let was_online = ONLINE.load(Ordering::SeqCst);
-            if online != was_online {
-                ONLINE.store(online, Ordering::SeqCst);
-                if online {
-                    tracing::info!("网络状态：在线（恢复同步）");
-                } else {
-                    tracing::warn!("网络状态：离线（探测失败，暂停同步）");
-                }
+            let probe_succeeded = probe_once().await;
+            if !record_probe_result(generation, probe_succeeded) {
+                break;
             }
             sleep(Duration::from_secs(PROBE_INTERVAL_SECS)).await;
         }
@@ -71,7 +190,59 @@ pub fn start_probe_task() {
 /// 通知探测任务退出（应用关闭时调用）。
 #[allow(dead_code)]
 pub fn shutdown_probe() {
-    SHUTDOWN.store(true, Ordering::SeqCst);
+    let stopped = PROBE_RUNTIME.lock().lifecycle.shutdown();
+    if stopped {
+        tracing::info!("网络探测任务已请求停止");
+    }
+}
+
+fn generation_is_active(generation: u64) -> bool {
+    PROBE_RUNTIME.lock().lifecycle.accepts(generation)
+}
+
+fn finish_probe_generation(generation: u64) -> bool {
+    PROBE_RUNTIME.lock().lifecycle.finish(generation)
+}
+
+fn record_probe_result(generation: u64, probe_succeeded: bool) -> bool {
+    let mut runtime = PROBE_RUNTIME.lock();
+    let was_online = runtime.network.is_online();
+    if !publish_probe_result(
+        &mut runtime,
+        generation,
+        probe_succeeded,
+        &ONLINE,
+        &TRANSITIONS,
+    ) {
+        return false;
+    }
+    let online = runtime.network.is_online();
+    if online != was_online {
+        if online {
+            tracing::info!("网络状态：在线（恢复同步）");
+        } else {
+            tracing::warn!("网络状态：离线（探测失败，暂停同步）");
+        }
+    }
+    true
+}
+
+fn publish_probe_result(
+    runtime: &mut ProbeRuntime,
+    generation: u64,
+    probe_succeeded: bool,
+    online_mirror: &AtomicBool,
+    transitions: &broadcast::Sender<NetworkTransition>,
+) -> bool {
+    if !runtime.lifecycle.accepts(generation) {
+        return false;
+    }
+    let Some(transition) = runtime.network.observe(probe_succeeded) else {
+        return true;
+    };
+    online_mirror.store(runtime.network.is_online(), Ordering::SeqCst);
+    let _ = transitions.send(transition);
+    true
 }
 
 /// 单次 TCP 探测：connect 到目标主机 443 端口。
@@ -125,26 +296,115 @@ pub fn init_sleep_handling() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex as StdMutex;
-
-    // 测试串行化锁：用例共享全局 ONLINE 静态状态，
-    // cargo test 默认并行运行会相互污染导致 flaky 失败，故强制串行。
-    static TEST_LOCK: StdMutex<()> = StdMutex::new(());
 
     #[test]
-    fn test_online_default_true() {
-        let _guard = TEST_LOCK.lock().unwrap();
-        ONLINE.store(true, Ordering::SeqCst);
-        assert!(is_online());
+    fn offline_recovery_requires_two_consecutive_successes() {
+        let mut state = NetworkStateMachine::new(true);
+
+        assert_eq!(state.observe(false), Some(NetworkTransition::Offline));
+        assert!(!state.is_online());
+        assert_eq!(state.observe(true), None);
+        assert!(!state.is_online());
+        assert_eq!(state.observe(false), None);
+        assert_eq!(state.observe(true), None);
+        assert_eq!(state.observe(true), Some(NetworkTransition::Online));
+        assert!(state.is_online());
+        assert_eq!(state.observe(true), None);
     }
 
     #[test]
-    fn test_online_can_flip_to_offline() {
-        let _guard = TEST_LOCK.lock().unwrap();
-        ONLINE.store(true, Ordering::SeqCst);
-        ONLINE.store(false, Ordering::SeqCst);
-        assert!(!is_online());
-        // 恢复，避免污染其他测试
-        ONLINE.store(true, Ordering::SeqCst);
+    fn flapping_emits_exactly_one_event_per_stable_transition() {
+        let mut state = NetworkStateMachine::new(true);
+        let transitions: Vec<_> = [false, true, true, false, false, true, true]
+            .into_iter()
+            .filter_map(|success| state.observe(success))
+            .collect();
+
+        assert_eq!(
+            transitions,
+            vec![
+                NetworkTransition::Offline,
+                NetworkTransition::Online,
+                NetworkTransition::Offline,
+                NetworkTransition::Online,
+            ]
+        );
+    }
+
+    #[test]
+    fn probe_lifecycle_is_idempotent_restart_safe_and_rejects_old_generation() {
+        let mut lifecycle = ProbeLifecycle::default();
+        assert!(!lifecycle.shutdown());
+
+        let first = lifecycle.start().expect("first start creates generation");
+        assert_eq!(lifecycle.start(), None);
+        assert!(lifecycle.accepts(first));
+
+        assert!(lifecycle.shutdown());
+        assert!(!lifecycle.shutdown());
+        assert!(!lifecycle.accepts(first));
+
+        let second = lifecycle.start().expect("restart creates generation");
+        assert_ne!(first, second);
+        assert!(!lifecycle.accepts(first));
+        assert!(lifecycle.accepts(second));
+
+        assert!(!lifecycle.finish(first));
+        assert!(lifecycle.accepts(second));
+        assert!(lifecycle.finish(second));
+        assert!(!lifecycle.accepts(second));
+    }
+
+    #[test]
+    fn broadcast_publishes_only_real_stable_transitions() {
+        let mut runtime = ProbeRuntime::default();
+        let generation = runtime.lifecycle.start().unwrap();
+        let (sender, mut receiver) = broadcast::channel(8);
+        let online = AtomicBool::new(true);
+
+        assert!(publish_probe_result(
+            &mut runtime,
+            generation,
+            false,
+            &online,
+            &sender,
+        ));
+        assert_eq!(receiver.try_recv(), Ok(NetworkTransition::Offline));
+        assert!(!online.load(Ordering::SeqCst));
+
+        assert!(publish_probe_result(
+            &mut runtime,
+            generation,
+            false,
+            &online,
+            &sender,
+        ));
+        assert!(publish_probe_result(
+            &mut runtime,
+            generation,
+            true,
+            &online,
+            &sender,
+        ));
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        assert!(!online.load(Ordering::SeqCst));
+
+        assert!(publish_probe_result(
+            &mut runtime,
+            generation,
+            true,
+            &online,
+            &sender,
+        ));
+        assert_eq!(receiver.try_recv(), Ok(NetworkTransition::Online));
+        assert!(online.load(Ordering::SeqCst));
+
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
     }
 }

@@ -14,9 +14,12 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use crate::drive::ascii_json::ascii_json_encode;
-use crate::drive::client::parse_json_response;
+use crate::drive::client::{
+    parse_json_response, parse_json_response_with_semantics, response_decode_error,
+    response_metadata,
+};
 use crate::drive::models::{DriveFile, FileListResult};
-use crate::error::{AppError, AppResult};
+use crate::error::{AppError, AppResult, RequestSemantics};
 
 /// 华为文件夹 mimeType
 const FOLDER_MIME_TYPE: &str = "application/vnd.huawei-apps.folder";
@@ -99,8 +102,11 @@ impl FilesApi {
         let resp = self
             .send_post(&url, encoded.into_bytes(), "application/json")
             .await?;
-        let body_json: Value = parse_json_response(resp, "createFolder").await?;
-        DriveFile::from_json(&body_json).ok_or_else(|| AppError::generic("创建文件夹响应异常"))
+        let metadata = response_metadata(&resp, RequestSemantics::Write);
+        let body_json: Value =
+            parse_json_response_with_semantics(resp, "createFolder", RequestSemantics::Write)
+                .await?;
+        parse_written_drive_file(&body_json, "createFolder", metadata.auth_already_replayed)
     }
 
     /// 删除文件（软删除，移入回收站"最近删除"）。
@@ -109,12 +115,13 @@ impl FilesApi {
     /// 要实现软删除（进"最近删除"），必须用 PATCH 更新 `recycled: true`。
     /// 对齐华为官方文档 Files:update → recycled 字段。
     pub async fn delete(&self, id: &str) -> AppResult<()> {
-        let url = format!("{}/files/{id}", crate::constants::DRIVE_API_BASE);
+        let path = delete_path(id);
         let mut body = serde_json::Map::new();
         body.insert("recycled".into(), Value::Bool(true));
         let encoded = ascii_json_encode(&Value::Object(body));
         let resp = self
-            .send_patch(&url, encoded.into_bytes(), "application/json")
+            .client
+            .patch(&path, encoded.into_bytes(), "application/json")
             .await?;
         // 消费 body
         let _ = resp.text().await;
@@ -150,8 +157,10 @@ impl FilesApi {
         let resp = self
             .send_patch(&url, encoded.into_bytes(), "application/json")
             .await?;
-        let body_json: Value = parse_json_response(resp, "update").await?;
-        DriveFile::from_json(&body_json).ok_or_else(|| AppError::generic("更新响应异常"))
+        let metadata = response_metadata(&resp, RequestSemantics::Write);
+        let body_json: Value =
+            parse_json_response_with_semantics(resp, "update", RequestSemantics::Write).await?;
+        parse_written_drive_file(&body_json, "update", metadata.auth_already_replayed)
     }
 
     /// 搜索文件。对齐 dart `FilesApi.search(keyword, {parentId?, ...})`。
@@ -208,6 +217,11 @@ impl FilesApi {
     }
 }
 
+fn delete_path(id: &str) -> String {
+    let encoded_id = percent_encoding::utf8_percent_encode(id, &URL_PATH_SEGMENT_ENCODE_SET);
+    format!("/files/{encoded_id}")
+}
+
 /// URL 编码（query 参数用），对齐 dart `Uri.encodeQueryComponent`。
 /// 仅不编码 RFC 3986 unreserved 字符：A-Za-z0-9-_.~
 ///
@@ -218,6 +232,41 @@ pub fn urlencoding(s: &str) -> String {
 
 /// 模块级编码集（避免临时值生命周期问题）。
 static URL_QUERY_ENCODE_SET: once_cell::sync::Lazy<percent_encoding::AsciiSet> =
+    once_cell::sync::Lazy::new(|| {
+        percent_encoding::CONTROLS
+            .add(b' ')
+            .add(b'!')
+            .add(b'"')
+            .add(b'#')
+            .add(b'$')
+            .add(b'%')
+            .add(b'&')
+            .add(b'\'')
+            .add(b'(')
+            .add(b')')
+            .add(b'*')
+            .add(b'+')
+            .add(b',')
+            .add(b'/')
+            .add(b':')
+            .add(b';')
+            .add(b'<')
+            .add(b'=')
+            .add(b'>')
+            .add(b'?')
+            .add(b'@')
+            .add(b'[')
+            .add(b'\\')
+            .add(b']')
+            .add(b'^')
+            .add(b'`')
+            .add(b'{')
+            .add(b'|')
+            .add(b'}')
+    });
+
+/// URL path segment 编码集；与 query 参数分别命名，避免未来两种语义误混。
+static URL_PATH_SEGMENT_ENCODE_SET: once_cell::sync::Lazy<percent_encoding::AsciiSet> =
     once_cell::sync::Lazy::new(|| {
         percent_encoding::CONTROLS
             .add(b' ')
@@ -271,10 +320,44 @@ pub fn build_create_folder_body(name: &str, parent_id: Option<&str>) -> Value {
     Value::Object(body)
 }
 
+fn parse_written_drive_file(
+    body: &Value,
+    ctx: &str,
+    auth_already_replayed: bool,
+) -> AppResult<DriveFile> {
+    DriveFile::from_json(body).ok_or_else(|| {
+        response_decode_error(
+            ctx,
+            RequestSemantics::Write,
+            auth_already_replayed,
+            "响应缺少文件必填字段",
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::models::{now_ms, TokenPair};
+    use crate::auth::service::AuthService;
     use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn authenticated_files_api(base_url: String) -> FilesApi {
+        let auth = Arc::new(AuthService::new());
+        auth.refresher().set_current(TokenPair {
+            access_token: "access-token".into(),
+            refresh_token: "refresh-token".into(),
+            expires_at: now_ms() + 3_600_000,
+            token_type: "Bearer".into(),
+            scope: None,
+        });
+        let client = Arc::new(crate::drive::client::DriveClient::with_base_url(
+            auth, base_url,
+        ));
+        FilesApi::new(client)
+    }
 
     #[test]
     fn test_build_create_folder_body_root() {
@@ -310,5 +393,55 @@ mod tests {
         let encoded = urlencoding("'root' in parentFolder");
         assert!(!encoded.contains(' '));
         assert!(!encoded.contains('\''));
+    }
+
+    #[test]
+    fn invalid_written_drive_file_response_is_post_submit_decode_error() {
+        let error = parse_written_drive_file(&json!({"fileName": "created"}), "createFolder", true)
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            AppError::DriveApi {
+                transport_kind: Some(crate::error::DriveTransportKind::Decode),
+                request_may_have_reached_server: true,
+                auth_already_replayed: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn delete_uses_injectable_relative_drive_path() {
+        assert_eq!(
+            delete_path("file id/with spaces"),
+            "/files/file%20id%2Fwith%20spaces"
+        );
+    }
+
+    #[tokio::test]
+    async fn irreversible_delete_never_reports_final_500_as_success() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/files/victim"))
+            .respond_with(ResponseTemplate::new(500).set_body_json(serde_json::json!({
+                "errorCode": "delete-failed"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let api = authenticated_files_api(server.uri());
+
+        let error = api.delete("victim").await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            AppError::DriveApi {
+                status_code: Some(500),
+                error_code: Some(ref code),
+                request_may_have_reached_server: true,
+                ..
+            } if code == "delete-failed"
+        ));
     }
 }

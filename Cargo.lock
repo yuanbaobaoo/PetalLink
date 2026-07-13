@@ -17,6 +17,7 @@ dependencies = [
  "futures",
  "futures-util",
  "hex",
+ "http",
  "mockall",
  "notify",
  "notify-debouncer-full",

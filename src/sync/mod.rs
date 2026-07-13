@@ -7,6 +7,7 @@ pub mod conflict;
 pub mod engine;
 pub mod executor;
 pub mod planner;
+pub mod retry_policy;
 pub mod stability;
 pub mod state;
 pub mod status_aggregator;

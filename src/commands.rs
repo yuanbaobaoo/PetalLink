@@ -1171,8 +1171,7 @@ async fn sync_folder_recursive_impl(
                 }
                 Err(e) => {
                     // 409/400 时查同名已存在目录，存在则视为成功
-                    let msg = e.to_string();
-                    if msg.contains("400") || msg.contains("409") {
+                    if matches!(e.drive_status(), Some(400 | 409)) {
                         if let Some(pid) = parent_id {
                             if let Ok(list) = FILES_API.list_all(Some(pid)).await {
                                 if let Some(existing) =

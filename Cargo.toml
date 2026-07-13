@@ -102,6 +102,7 @@ objc2-foundation = { version = "0.3", features = ["NSNotification", "NSString", 
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSStatusItem", "NSMenu", "NSWorkspace", "NSWindow", "NSRunningApplication", "NSImage", "NSResponder"] }
 
 [dev-dependencies]
+http = "1"
 tokio = { version = "1", features = ["full", "test-util"] }
 wiremock = "0.6"
 tempfile = "3"
