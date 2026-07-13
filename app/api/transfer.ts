@@ -116,27 +116,39 @@ export function canRetryTransferTask(task: TransferTask): boolean {
   return supportedUpload || supportedDownload;
 }
 
-/** 列举全部传输任务 */
+/**
+ * 列举全部传输任务
+ */
 export function listAllTransfers(): Promise<TransferTask[]> {
   return invoke<TransferTask[]>("transfer_list_all");
 }
 
-/** 清除已完成 */
+/**
+ * 清除已完成
+ */
 export function clearCompleted(): Promise<void> {
   return invoke<void>("transfer_clear_completed");
 }
 
-/** 清除失败项 */
+/**
+ * 清除失败项
+ */
 export function clearFailed(): Promise<void> {
   return invoke<void>("transfer_clear_failed");
 }
 
-/** 清除已完成+失败 */
+/**
+ * 清除已完成+失败
+ */
 export function clearFinished(): Promise<void> {
   return invoke<void>("transfer_clear_finished");
 }
 
-/** 重试单个传输任务；Failed 重放，RestartRequired 请求重新规划。 */
+/**
+ * 重试单个传输任务；Failed 重放，RestartRequired 请求重新规划。
+ *
+ * @param taskId - 传输任务 ID
+ */
 export function retryTransfer(taskId: number): Promise<void> {
   return invoke<void>("transfer_retry", { taskId });
 }

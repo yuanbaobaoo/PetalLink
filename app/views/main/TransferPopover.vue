@@ -20,11 +20,14 @@ import {
 import type { PopupItem } from "@/components/mate";
 import { formatFileSize } from "@/utils/format";
 
+// 传输 store
 const transfer = useTransferStore();
 
+// 当前传输队列（全部任务）
 const allItems = computed(() => transfer.tasks);
 
 interface StateMeta { icon: string; label: string; color: string; spin?: boolean; }
+// 各传输状态的展示元信息（图标/文案/颜色）
 const stateMeta: Record<number, StateMeta> = {
   [TRANSFER_STATE.PENDING]: { icon: "clock", label: "等待调度", color: "var(--text-secondary)" },
   [TRANSFER_STATE.RUNNING]: { icon: "sync", label: "传输中", color: "var(--color-brand)", spin: true },
@@ -37,12 +40,14 @@ const stateMeta: Record<number, StateMeta> = {
   [TRANSFER_STATE.CANCELED]: { icon: "x", label: "已取消", color: "var(--text-secondary)" },
 };
 
+// 清除菜单选项（已完成 / 失败历史 / 完成+失败历史）
 const clearItems: PopupItem[] = [
   { value: "completed", label: "清除已完成", icon: "check" },
   { value: "failed", label: "清除失败历史", icon: "x", danger: true },
   { value: "finished", label: "清除完成+失败历史", icon: "transfer" },
 ];
 
+// 关闭弹窗事件
 const emit = defineEmits<{ (e: "close"): void }>();
 
 // 正在重试的任务 id（防抖：重试中禁用该按钮，避免连点）
@@ -88,7 +93,11 @@ async function onClear(value: string | number): Promise<void> {
   else if (value === "finished") await transfer.clearFinished();
 }
 
-/** 重试失败任务 */
+/**
+ * 重试失败任务
+ *
+ * @param item - 传输任务
+ */
 async function onRetry(item: TransferTask): Promise<void> {
   if (retryingId.value !== null) return; // 防抖：已有重试进行中
   retryingId.value = item.id;

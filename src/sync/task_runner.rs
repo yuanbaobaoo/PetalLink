@@ -4460,7 +4460,7 @@ mod tests {
     async fn closed_engine_activity_gate_prevents_running_and_backend_submission() {
         struct ClosedGate;
         impl super::TaskActivityGate for ClosedGate {
-            fn begin(&self) -> AppResult<Box<dyn Send>> {
+            fn begin(&self, _relative_path: Option<&str>) -> AppResult<Box<dyn Send>> {
                 Err(AppError::generic("engine shutdown"))
             }
         }

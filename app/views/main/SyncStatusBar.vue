@@ -6,13 +6,10 @@ import { useTransferStore } from "@/stores/transfer";
 import { MateIcon, MateDialog, MateButton } from "@/components/mate";
 import { pad2 } from "@/utils/format";
 
+// 同步 store
 const sync = useSyncStore();
+// 传输 store
 const transfer = useTransferStore();
-
-// 首次进入主页也读取持久化队列，避免在下一次事件到来前把 BackingOff/VerifyingRemote 误报为空闲。
-onMounted(() => {
-  transfer.loadAll().catch(() => {});
-});
 
 // 状态文案：根据 sync_phase 精确显示当前操作场景
 const statusText = computed(() => {
@@ -39,25 +36,45 @@ const statusText = computed(() => {
   }
 });
 
+// 上次同步时间（格式化 HH:MM）
 const lastSyncFormatted = computed(() => {
   if (!sync.lastSyncTime) return "";
   const d = new Date(sync.lastSyncTime);
   return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 });
 
+// 是否处于空闲态（无任何活动同步/传输）
 const isIdle = computed(
   () => !sync.hasActiveTransfer
     && !transfer.hasActiveTasks
     && !sync.isIndexing
     && !sync.isRunning,
 );
+// 状态图标（同步中/失败/完成）
 const statusIcon = computed(() => {
   if (!isIdle.value) return "sync";
   return sync.failed ? "alert" : "check";
 });
 
+// 失败项弹窗是否可见
 const showFailedDialog = ref(false);
-function handleShowFailed(): void { showFailedDialog.value = true; }
+
+/**
+ * 首次进入主页也读取持久化队列，避免在下一次事件到来前把
+ * BackingOff/VerifyingRemote 误报为空闲。
+ */
+onMounted(async () => {
+  try {
+    await transfer.loadAll();
+  } catch {
+    // IPC/引擎瞬时失败：保留默认状态，等待下一次事件纠正
+  }
+});
+
+/** 打开失败项弹窗 */
+function handleShowFailed(): void {
+  showFailedDialog.value = true;
+}
 </script>
 
 <template>

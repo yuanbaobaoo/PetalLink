@@ -10,7 +10,9 @@ import { TRANSFER_DIR, TRANSFER_STATE } from "@/api/transfer";
 export const useTransferStore = defineStore("transfer", () => {
   // 全部传输任务
   const tasks = ref<TransferTask[]>([]);
+  // loadAll 请求序号（递增），用于丢弃乱序响应
   let nextLoadRequest = 0;
+  // 已应用的最大 loadAll 请求序号，防止旧响应覆盖新状态
   let lastAppliedLoadRequest = 0;
 
   // 上传任务
@@ -54,7 +56,11 @@ export const useTransferStore = defineStore("transfer", () => {
   const active = computed(() => processing.value + waiting.value);
   const hasActiveTasks = computed(() => active.value > 0);
 
-  /** 加载全部传输任务 */
+  /**
+   * 加载全部传输任务
+   *
+   * @returns 是否成功应用（乱序/IPC 失败返回 false，保留旧快照）
+   */
   async function loadAll(): Promise<boolean> {
     const requestId = ++nextLoadRequest;
     try {
@@ -79,25 +85,35 @@ export const useTransferStore = defineStore("transfer", () => {
     }
   }
 
-  /** 清除已完成 */
+  /**
+   * 清除已完成
+   */
   async function clearCompleted(): Promise<void> {
     await transferApi.clearCompleted();
     await loadAll();
   }
 
-  /** 清除失败项 */
+  /**
+   * 清除失败项
+   */
   async function clearFailed(): Promise<void> {
     await transferApi.clearFailed();
     await loadAll();
   }
 
-  /** 清除已完成+失败 */
+  /**
+   * 清除已完成+失败
+   */
   async function clearFinished(): Promise<void> {
     await transferApi.clearFinished();
     await loadAll();
   }
 
-  /** 后端非阻塞接受重试；队列靠 transfer_update 重载，主页靠 sync_state 更新。 */
+  /**
+   * 后端非阻塞接受重试；队列靠 transfer_update 重载，主页靠 sync_state 更新。
+   *
+   * @param taskId - 传输任务 ID
+   */
   async function retry(taskId: number): Promise<void> {
     await transferApi.retryTransfer(taskId);
     await loadAll();

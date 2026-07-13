@@ -52,7 +52,12 @@ export const useSyncStore = defineStore("sync", () => {
     () => uploading.value + downloading.value + waitingNetwork.value > 0,
   );
 
-  /** 应用完整权威快照；缺字段、默认对象和旧 revision 均不改变现有 UI。 */
+  /**
+   * 应用完整权威快照；缺字段、默认对象和旧 revision 均不改变现有 UI。
+   *
+   * @param value - 来自 Tauri 事件的状态快照
+   * @returns 是否成功应用
+   */
   function applyState(value: unknown): boolean {
     if (!syncApi.isSyncGlobalState(value)) return false;
     const s = value;
@@ -114,7 +119,9 @@ export const useSyncStore = defineStore("sync", () => {
     }
   }
 
-  /** 触发全量刷新 */
+  /**
+   * 触发全量刷新
+   */
   async function triggerManualRefresh(): Promise<void> {
     try {
       await syncApi.manualRefresh();
@@ -123,7 +130,9 @@ export const useSyncStore = defineStore("sync", () => {
     }
   }
 
-  /** 重试失败项 */
+  /**
+   * 重试失败项
+   */
   async function retryFailed(): Promise<void> {
     try {
       await syncApi.retryFailed();
