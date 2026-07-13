@@ -9,6 +9,7 @@
 //!   否则中文名报 400 `21004002 fileName can not be blank`。
 //! - **createFolder**：mimeType 必填，root 目录省略 parentFolder。
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -23,14 +24,54 @@ use crate::error::{AppError, AppResult, RequestSemantics};
 
 /// 华为文件夹 mimeType
 const FOLDER_MIME_TYPE: &str = "application/vnd.huawei-apps.folder";
+const PRODUCTION_PAGE_SIZE: u32 = 100;
+const PRODUCTION_MAX_PAGES: usize = 1_000;
+
+/// Files:list 的客户端分页上限。
+///
+/// 华为只定义单页大小上限，没有定义目录总页数。客户端仍需要有限上限来避免服务端
+/// cursor 循环或异常数据导致永久索引；达到上限且仍有下一页时必须失败，不能返回部分树。
+#[derive(Debug, Clone, Copy)]
+pub struct PaginationPolicy {
+    max_pages: usize,
+}
+
+impl PaginationPolicy {
+    pub fn new(max_pages: usize) -> AppResult<Self> {
+        if max_pages == 0 {
+            return Err(AppError::generic("Files 分页上限必须大于 0"));
+        }
+        Ok(Self { max_pages })
+    }
+
+    const fn production() -> Self {
+        Self {
+            max_pages: PRODUCTION_MAX_PAGES,
+        }
+    }
+}
 
 pub struct FilesApi {
     client: Arc<crate::drive::client::DriveClient>,
+    pagination: PaginationPolicy,
 }
 
 impl FilesApi {
     pub fn new(client: Arc<crate::drive::client::DriveClient>) -> Self {
-        Self { client }
+        Self {
+            client,
+            pagination: PaginationPolicy::production(),
+        }
+    }
+
+    /// 使用可控的分页上限构造真实 Files API wrapper。
+    ///
+    /// 该 seam 仍走 [`DriveClient`] 的生产请求链，只替换防无限分页的客户端上限。
+    pub fn with_pagination_policy(
+        client: Arc<crate::drive::client::DriveClient>,
+        pagination: PaginationPolicy,
+    ) -> Self {
+        Self { client, pagination }
     }
 
     /// 列举目录内容（单页）。
@@ -43,53 +84,76 @@ impl FilesApi {
         cursor: Option<&str>,
         page_size: u32,
     ) -> AppResult<FileListResult> {
+        validate_page_size(page_size)?;
         let folder_token = match parent_id {
             Some(id) if !id.is_empty() => id,
             _ => "root",
         };
+        validate_query_literal(folder_token, "parentFolder")?;
         let query_param = format!("'{folder_token}' in parentFolder");
-        let mut url = format!(
-            "{}/files?fields=*&pageSize={}&queryParam={}",
-            crate::constants::DRIVE_API_BASE,
-            page_size,
+        let mut path = format!(
+            "/files?fields=*&pageSize={page_size}&queryParam={}",
             urlencoding(&query_param)
         );
         if let Some(c) = cursor {
             if !c.is_empty() {
-                url.push_str(&format!("&cursor={}", urlencoding(c)));
+                path.push_str(&format!("&cursor={}", urlencoding(c)));
             }
         }
 
-        let resp = self.send_get(&url).await?;
+        let resp = self.send_get(&path).await?;
+        let auth_already_replayed =
+            response_metadata(&resp, RequestSemantics::Read).auth_already_replayed;
         let body: Value = parse_json_response(resp, "list").await?;
-        Ok(FileListResult::from_json(&body))
+        parse_file_list_page(&body, "list", auth_already_replayed)
     }
 
     /// 列举目录全部内容（自动翻页）。
-    /// 对齐 dart `FilesApi.listAll({parentId?})`：pageSize=500，最多 100 页（~50K 项）。
+    /// 固定使用华为官方上限 pageSize=100；空的非终止页仍按 nextCursor 继续。
     pub async fn list_all(&self, parent_id: Option<&str>) -> AppResult<Vec<DriveFile>> {
-        const MAX_PAGES: usize = 100;
         let mut all = Vec::new();
         let mut cursor: Option<String> = None;
-        for _ in 0..MAX_PAGES {
-            let result = self.list(parent_id, cursor.as_deref(), 500).await?;
-            let has_next = result.has_next();
+        let mut seen_cursors = HashSet::new();
+
+        for page_index in 0..self.pagination.max_pages {
+            let result = self
+                .list(parent_id, cursor.as_deref(), PRODUCTION_PAGE_SIZE)
+                .await?;
             all.extend(result.files);
-            cursor = result.next_cursor;
-            if !has_next {
-                return Ok(all);
+
+            match result.next_cursor {
+                None => return Ok(all),
+                Some(next_cursor) => {
+                    if !seen_cursors.insert(next_cursor.clone()) {
+                        return Err(files_protocol_error(
+                            "listAll",
+                            "nextCursor 重复或形成循环",
+                            false,
+                        ));
+                    }
+                    if page_index + 1 >= self.pagination.max_pages {
+                        return Err(files_protocol_error(
+                            "listAll",
+                            "达到分页上限时服务端仍返回 nextCursor，结果不完整",
+                            false,
+                        ));
+                    }
+                    cursor = Some(next_cursor);
+                }
             }
         }
-        tracing::warn!("listAll 超过 {MAX_PAGES} 页，截断");
-        Ok(all)
+
+        Err(files_protocol_error("listAll", "分页策略无可用页数", false))
     }
 
     /// 获取单个文件元数据。对齐 dart `FilesApi.get(id)`。
     pub async fn get(&self, id: &str) -> AppResult<DriveFile> {
-        let url = format!("{}/files/{id}?fields=*", crate::constants::DRIVE_API_BASE);
-        let resp = self.send_get(&url).await?;
+        let path = format!("{}?fields=*", file_path(id));
+        let resp = self.send_get(&path).await?;
+        let auth_already_replayed =
+            response_metadata(&resp, RequestSemantics::Read).auth_already_replayed;
         let body: Value = parse_json_response(resp, "get").await?;
-        DriveFile::from_json(&body).ok_or_else(|| AppError::generic("文件元数据格式异常"))
+        parse_drive_file_strict(&body, "get", auth_already_replayed, None)
     }
 
     /// 创建文件夹。对齐 dart `FilesApi.createFolder({name, parentId?})`。
@@ -98,9 +162,9 @@ impl FilesApi {
     pub async fn create_folder(&self, name: &str, parent_id: Option<&str>) -> AppResult<DriveFile> {
         let body = build_create_folder_body(name, parent_id);
         let encoded = ascii_json_encode(&body);
-        let url = format!("{}/files?fields=*", crate::constants::DRIVE_API_BASE);
+        let path = "/files?fields=*";
         let resp = self
-            .send_post(&url, encoded.into_bytes(), "application/json")
+            .send_post(path, encoded.into_bytes(), "application/json")
             .await?;
         let metadata = response_metadata(&resp, RequestSemantics::Write);
         let body_json: Value =
@@ -153,9 +217,9 @@ impl FilesApi {
             body.insert("description".into(), Value::String(desc.to_string()));
         }
         let encoded = ascii_json_encode(&Value::Object(body));
-        let url = format!("{}/files/{id}", crate::constants::DRIVE_API_BASE);
+        let path = format!("{}?fields=*", file_path(id));
         let resp = self
-            .send_patch(&url, encoded.into_bytes(), "application/json")
+            .send_patch(&path, encoded.into_bytes(), "application/json")
             .await?;
         let metadata = response_metadata(&resp, RequestSemantics::Write);
         let body_json: Value =
@@ -165,59 +229,330 @@ impl FilesApi {
 
     /// 搜索文件。对齐 dart `FilesApi.search(keyword, {parentId?, ...})`。
     ///
-    /// 关键：用 `queryParam=fileName:contains:"keyword"`，叠加 parentFolder 语法。
+    /// 关键：用官方 `fileName contains 'keyword'` 单引号 DSL，整段只编码一次。
+    /// 官方未定义单引号和反斜线的转义规则，因此这些输入在发请求前 fail closed。
     pub async fn search(
         &self,
         keyword: &str,
         parent_id: Option<&str>,
         page_size: u32,
     ) -> AppResult<FileListResult> {
-        let mut query = format!("fileName:contains:\"{keyword}\"");
+        validate_page_size(page_size)?;
+        validate_query_literal(keyword, "搜索关键词")?;
+        let mut query = format!("fileName contains '{keyword}'");
         if let Some(pid) = parent_id {
             if !pid.is_empty() {
+                validate_query_literal(pid, "parentFolder")?;
                 query = format!("{query} and '{pid}' in parentFolder");
             }
         }
-        let url = format!(
-            "{}/files?fields=*&pageSize={}&queryParam={}",
-            crate::constants::DRIVE_API_BASE,
-            page_size,
+        let path = format!(
+            "/files?fields=*&pageSize={page_size}&queryParam={}",
             urlencoding(&query)
         );
-        let resp = self.send_get(&url).await?;
+        let resp = self.send_get(&path).await?;
+        let auth_already_replayed =
+            response_metadata(&resp, RequestSemantics::Read).auth_already_replayed;
         let body: Value = parse_json_response(resp, "search").await?;
-        Ok(FileListResult::from_json(&body))
+        parse_file_list_page(&body, "search", auth_already_replayed)
     }
 
     // ===== 内部：委托 DriveClient 统一的 auth + 401 重放逻辑 =====
 
-    /// 发送 GET（完整 URL，注入 token + 401 重放）
-    async fn send_get(&self, url: &str) -> AppResult<reqwest::Response> {
-        self.client.get_full(url).await
+    /// 发送 GET（相对 Drive API 路径，保留可注入 base URL + 401 重放）。
+    async fn send_get(&self, path: &str) -> AppResult<reqwest::Response> {
+        self.client.get(path).await
     }
 
     /// 发送 POST（带 body）
     async fn send_post(
         &self,
-        url: &str,
+        path: &str,
         body: Vec<u8>,
         content_type: &str,
     ) -> AppResult<reqwest::Response> {
-        self.client.post_full(url, Some(body), content_type).await
+        self.client.post(path, Some(body), content_type).await
     }
 
     /// 发送 PATCH
     async fn send_patch(
         &self,
-        url: &str,
+        path: &str,
         body: Vec<u8>,
         content_type: &str,
     ) -> AppResult<reqwest::Response> {
-        self.client.patch_full(url, body, content_type).await
+        self.client.patch(path, body, content_type).await
+    }
+}
+
+fn validate_page_size(page_size: u32) -> AppResult<()> {
+    if (1..=PRODUCTION_PAGE_SIZE).contains(&page_size) {
+        Ok(())
+    } else {
+        Err(AppError::generic("Files pageSize 必须在 1..=100 范围内"))
+    }
+}
+
+fn validate_query_literal(value: &str, field: &str) -> AppResult<()> {
+    if value.contains(['\'', '\\']) {
+        return Err(AppError::generic(format!(
+            "{field} 包含华为 queryParam 尚未定义转义规则的字符"
+        )));
+    }
+    Ok(())
+}
+
+fn files_protocol_error(ctx: &str, cause: &str, auth_already_replayed: bool) -> AppError {
+    response_decode_error(ctx, RequestSemantics::Read, auth_already_replayed, cause)
+}
+
+/// 严格解析 Files:list/search 单页。
+///
+/// `files` 缺失、类型错误或任一条目不完整时整页失败；`nextCursor` 只接受
+/// 缺失/null/string，空字符串按终页处理。这样 schema 歧义永远不会变成可信空页。
+fn parse_file_list_page(
+    body: &Value,
+    ctx: &str,
+    auth_already_replayed: bool,
+) -> AppResult<FileListResult> {
+    let object = body
+        .as_object()
+        .ok_or_else(|| files_protocol_error(ctx, "响应顶层必须是对象", auth_already_replayed))?;
+
+    if let Some(category) = object.get("category") {
+        match category {
+            Value::String(value) if value == "drive#fileList" => {}
+            _ => {
+                return Err(files_protocol_error(
+                    ctx,
+                    "category 不是 drive#fileList",
+                    auth_already_replayed,
+                ));
+            }
+        }
+    }
+
+    let raw_files = object
+        .get("files")
+        .and_then(Value::as_array)
+        .ok_or_else(|| files_protocol_error(ctx, "files 缺失或不是数组", auth_already_replayed))?;
+    let mut files = Vec::with_capacity(raw_files.len());
+    for (index, value) in raw_files.iter().enumerate() {
+        files.push(parse_drive_file_strict(
+            value,
+            ctx,
+            auth_already_replayed,
+            Some(index),
+        )?);
+    }
+
+    let next_cursor = match object.get("nextCursor") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) if value.is_empty() => None,
+        Some(Value::String(value)) => Some(value.clone()),
+        Some(_) => {
+            return Err(files_protocol_error(
+                ctx,
+                "nextCursor 必须是字符串、null 或缺失",
+                auth_already_replayed,
+            ));
+        }
+    };
+
+    Ok(FileListResult { files, next_cursor })
+}
+
+fn parse_drive_file_strict(
+    value: &Value,
+    ctx: &str,
+    auth_already_replayed: bool,
+    index: Option<usize>,
+) -> AppResult<DriveFile> {
+    let prefix = index
+        .map(|index| format!("files[{index}]"))
+        .unwrap_or_else(|| "file".to_string());
+    let object = value.as_object().ok_or_else(|| {
+        files_protocol_error(ctx, &format!("{prefix} 必须是对象"), auth_already_replayed)
+    })?;
+
+    require_nonempty_string(object.get("id"), ctx, &prefix, "id", auth_already_replayed)?;
+    let name_value = object.get("fileName").or_else(|| object.get("name"));
+    require_nonempty_string(name_value, ctx, &prefix, "fileName", auth_already_replayed)?;
+    require_nonempty_string(
+        object.get("mimeType"),
+        ctx,
+        &prefix,
+        "mimeType",
+        auth_already_replayed,
+    )?;
+    if let Some(category) = object.get("category") {
+        match category {
+            Value::String(value) if value == "drive#file" => {}
+            _ => {
+                return Err(files_protocol_error(
+                    ctx,
+                    &format!("{prefix}.category 不是 drive#file"),
+                    auth_already_replayed,
+                ));
+            }
+        }
+    }
+
+    validate_optional_nonnegative_i64(
+        object.get("size"),
+        ctx,
+        &prefix,
+        "size",
+        auth_already_replayed,
+    )?;
+    validate_optional_string(
+        object.get("description"),
+        ctx,
+        &prefix,
+        "description",
+        auth_already_replayed,
+    )?;
+    validate_optional_string(
+        object.get("thumbnailLink"),
+        ctx,
+        &prefix,
+        "thumbnailLink",
+        auth_already_replayed,
+    )?;
+    for field in [
+        "sha256",
+        "md5",
+        "md5Checksum",
+        "fileSha256",
+        "hash",
+        "contentHash",
+    ] {
+        validate_optional_string(
+            object.get(field),
+            ctx,
+            &prefix,
+            field,
+            auth_already_replayed,
+        )?;
+    }
+    for field in ["createdTime", "editedTime"] {
+        validate_optional_timestamp(
+            object.get(field),
+            ctx,
+            &prefix,
+            field,
+            auth_already_replayed,
+        )?;
+    }
+    if let Some(parent_folder) = object.get("parentFolder") {
+        match parent_folder {
+            Value::Null => {}
+            Value::Array(values)
+                if values
+                    .iter()
+                    .all(|value| value.as_str().is_some_and(|value| !value.is_empty())) => {}
+            _ => {
+                return Err(files_protocol_error(
+                    ctx,
+                    &format!("{prefix}.parentFolder 必须是字符串数组（元素不能为空）或 null"),
+                    auth_already_replayed,
+                ));
+            }
+        }
+    }
+
+    DriveFile::from_json(value).ok_or_else(|| {
+        files_protocol_error(
+            ctx,
+            &format!("{prefix} 无法构造 DriveFile"),
+            auth_already_replayed,
+        )
+    })
+}
+
+fn require_nonempty_string(
+    value: Option<&Value>,
+    ctx: &str,
+    prefix: &str,
+    field: &str,
+    auth_already_replayed: bool,
+) -> AppResult<()> {
+    if value
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.is_empty())
+    {
+        Ok(())
+    } else {
+        Err(files_protocol_error(
+            ctx,
+            &format!("{prefix}.{field} 缺失、类型错误或为空"),
+            auth_already_replayed,
+        ))
+    }
+}
+
+fn validate_optional_nonnegative_i64(
+    value: Option<&Value>,
+    ctx: &str,
+    prefix: &str,
+    field: &str,
+    auth_already_replayed: bool,
+) -> AppResult<()> {
+    match value {
+        None | Some(Value::Null) => Ok(()),
+        Some(Value::Number(number)) if number.as_i64().is_some_and(|value| value >= 0) => Ok(()),
+        _ => Err(files_protocol_error(
+            ctx,
+            &format!("{prefix}.{field} 必须是非负整数或 null"),
+            auth_already_replayed,
+        )),
+    }
+}
+
+fn validate_optional_string(
+    value: Option<&Value>,
+    ctx: &str,
+    prefix: &str,
+    field: &str,
+    auth_already_replayed: bool,
+) -> AppResult<()> {
+    match value {
+        None | Some(Value::Null | Value::String(_)) => Ok(()),
+        _ => Err(files_protocol_error(
+            ctx,
+            &format!("{prefix}.{field} 必须是字符串或 null"),
+            auth_already_replayed,
+        )),
+    }
+}
+
+fn validate_optional_timestamp(
+    value: Option<&Value>,
+    ctx: &str,
+    prefix: &str,
+    field: &str,
+    auth_already_replayed: bool,
+) -> AppResult<()> {
+    match value {
+        None | Some(Value::Null) => Ok(()),
+        Some(Value::String(timestamp))
+            if chrono::DateTime::parse_from_rfc3339(timestamp).is_ok() =>
+        {
+            Ok(())
+        }
+        _ => Err(files_protocol_error(
+            ctx,
+            &format!("{prefix}.{field} 必须是 RFC3339 字符串或 null"),
+            auth_already_replayed,
+        )),
     }
 }
 
 fn delete_path(id: &str) -> String {
+    file_path(id)
+}
+
+fn file_path(id: &str) -> String {
     let encoded_id = percent_encoding::utf8_percent_encode(id, &URL_PATH_SEGMENT_ENCODE_SET);
     format!("/files/{encoded_id}")
 }

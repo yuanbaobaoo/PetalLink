@@ -1,189 +1,443 @@
 //! Changes API —— 华为 Drive 增量变更接口（GET /drive/v1/changes）。
 //!
-//! 用于自动云端刷新的增量路径：相比全量 BFS（refresh_cloud_tree）大幅省流量、提速。
-//! cursor 持久化后可跨重启复用；失效或接口异常时由调用方回退全量 BFS。
-//!
-//! ⚠️ 字段名（changes/nextCursor/removed）基于 GDrive 协议推断 + 阶段二验证。
-//!    若华为实际字段不同，调整 ChangeListResult::from_json 的键名探测。
+//! `nextCursor` 只用于同一轮增量拉取的续页；末页的 `newStartCursor`
+//! 才是下一轮轮询可提交的 checkpoint。任一页面或变更项无法严格解释时，
+//! 本模块直接失败，由调用方保留旧 checkpoint 并回退可信全量刷新。
 
+use std::collections::HashSet;
 use std::sync::Arc;
+
+use serde_json::{Map, Value};
 
 use crate::drive::client::{parse_json_response, DriveClient};
 use crate::drive::models::DriveFile;
 use crate::error::{AppError, AppResult};
 
-/// 变更类型。判定依据：华为 change 事件的 `changeType` 字段（真机验证）。
-/// 已知值：`trashDone`（移入回收站/软删除）。其余（create/update/untrash 等）按非删除处理。
-#[derive(Debug, Clone, PartialEq, Eq)]
+const DEFAULT_MAX_CHANGE_PAGES: usize = 10_000;
+
+/// 变更类型。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChangeKind {
-    /// 文件被移入回收站（软删除）。changeType == "trashDone" 或 file.recycled == true。
+    /// 官方 `deleted=true` 硬删除，或真机兼容的 trashDone/recycled 软删除。
     Removed,
-    /// 文件新增或元数据修改（含内容更新、改名、移动、从回收站恢复等）。
+    /// 文件新增或元数据修改。
     Modified,
 }
 
-/// 单条变更：一个云端文件的增/改/删事件。
+/// 单条严格解析后的变更。
+///
+/// 删除事件可能只有顶层 `fileId`，因此不能用伪造的空 `DriveFile` 表示 tombstone。
 #[derive(Debug, Clone)]
 pub struct Change {
     pub kind: ChangeKind,
-    pub file: DriveFile,
-}
-
-/// 变更列表 + 分页游标。
-#[derive(Debug, Clone)]
-pub struct ChangeListResult {
-    pub changes: Vec<Change>,
-    /// 下一页游标；None 表示已追平最新（无更多变更）。
-    pub next_cursor: Option<String>,
-}
-
-impl ChangeListResult {
-    /// 从 JSON 解析。已校准（阶段二真机验证）：
-    /// - 数组字段：`changes`（华为确认）
-    /// - 分页游标字段：`newStartCursor`（华为确认，**非** GDrive 的 nextCursor）
-    pub fn from_json(json: &serde_json::Value) -> Self {
-        let changes = json
-            .get("changes")
-            .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(Change::from_json).collect())
-            .unwrap_or_default();
-
-        // 华为用 newStartCursor；保留 nextCursor 回退以防接口变体
-        let next_cursor = json
-            .get("newStartCursor")
-            .or_else(|| json.get("nextCursor"))
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string());
-
-        Self {
-            changes,
-            next_cursor,
-        }
-    }
+    pub file_id: String,
+    pub file: Option<DriveFile>,
 }
 
 impl Change {
-    /// 从单条 change JSON 解析。已校准（阶段二真机验证，2026-07-06）：
-    ///
-    /// 华为 change 事件结构（与 GDrive 差异显著）：
-    /// ```json
-    /// { "category":"drive#change", "changeType":"trashDone", "deleted":false,
-    ///   "file":{...完整 DriveFile，删除事件也带...}, "fileId":"...", "type":"File" }
-    /// ```
-    /// - **删除判定**：`changeType == "trashDone"`（移入回收站）。**非** GDrive 的 `removed:true`。
-    ///   注意 `deleted` 字段恒为 false（华为用 changeType 区分，不用 deleted）。
-    /// - **file 字段**：所有事件都带完整 file（删除事件 file.recycled==true）。
-    /// - 删除事件也带完整 file，直接解析即可，无需构造最小 DriveFile。
-    pub fn from_json(v: &serde_json::Value) -> Option<Self> {
-        // 删除判定：changeType == "trashDone" 为主，file.recycled 兜底
-        let is_removed = v.get("changeType").and_then(|v| v.as_str()) == Some("trashDone")
-            || v.get("file")
-                .and_then(|f| f.get("recycled"))
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
+    pub fn file_id(&self) -> &str {
+        &self.file_id
+    }
 
-        // file 字段：所有事件都带完整 file；解析失败则用 fileId 构造最小 DriveFile 兜底
-        let file = v.get("file").and_then(DriveFile::from_json).or_else(|| {
-            // 极端兜底：file 缺失或解析失败，用顶层 fileId 构造最小 DriveFile
-            v.get("fileId")
-                .and_then(|v| v.as_str())
-                .map(|id| DriveFile {
-                    id: id.to_string(),
-                    name: String::new(),
-                    category: crate::drive::models::FileCategory::None,
-                    size: 0,
-                    parent_folder: None,
-                    description: None,
-                    created_time: None,
-                    edited_time: None,
-                    mime_type: None,
-                    content_hash: None,
-                    thumbnail_link: None,
-                })
-        })?;
+    pub fn file(&self) -> Option<&DriveFile> {
+        self.file.as_ref()
+    }
 
-        Some(Self {
-            kind: if is_removed {
-                ChangeKind::Removed
-            } else {
-                ChangeKind::Modified
-            },
+    /// 严格解析单条 change。无法安全解释的字段或语义让整页失败。
+    pub fn from_json(value: &Value) -> AppResult<Self> {
+        let object = value
+            .as_object()
+            .ok_or_else(|| protocol_error("change 条目不是对象"))?;
+
+        validate_category(object, "category", "drive#change", "change")?;
+        validate_category(object, "type", "File", "change")?;
+        validate_optional_rfc3339(object, "time", "change")?;
+
+        let file_id = required_non_empty_string(object, "fileId", "change")?.to_string();
+        let deleted = required_bool(object, "deleted", "change")?;
+        let change_type = optional_non_empty_string(object, "changeType", "change")?;
+
+        let parsed_file = match object.get("file") {
+            None | Some(Value::Null) => None,
+            Some(file) => Some(parse_change_file(file)?),
+        };
+
+        if let Some((parsed_id, _, _)) = parsed_file.as_ref() {
+            if parsed_id != &file_id {
+                return Err(protocol_error(format!(
+                    "change.file.id 与 fileId 不一致：{} != {}",
+                    parsed_id, file_id
+                )));
+            }
+        }
+
+        let recycled = parsed_file
+            .as_ref()
+            .is_some_and(|(_, recycled, _)| *recycled);
+        let soft_deleted = change_type == Some("trashDone") || recycled;
+        let kind = if deleted || soft_deleted {
+            ChangeKind::Removed
+        } else {
+            ChangeKind::Modified
+        };
+
+        let file = parsed_file.and_then(|(_, _, file)| file);
+        if kind == ChangeKind::Modified && file.is_none() {
+            return Err(protocol_error(format!(
+                "非删除 change 缺少可完整解析的 file：{file_id}"
+            )));
+        }
+
+        Ok(Self {
+            kind,
+            file_id,
             file,
+        })
+    }
+}
+
+/// Changes 单页。两个 cursor 字段有不同含义，禁止合并。
+#[derive(Debug, Clone)]
+pub struct ChangesPage {
+    pub changes: Vec<Change>,
+    /// 同一轮 catch-up 的下一页 cursor；非空时必须继续。
+    pub next_cursor: Option<String>,
+    /// 仅末页可提交为下一轮 checkpoint。
+    pub new_start_cursor: Option<String>,
+}
+
+/// 兼容旧调用名称；语义已严格升级为 [`ChangesPage`]。
+pub type ChangeListResult = ChangesPage;
+
+impl ChangesPage {
+    pub fn from_json(json: &Value) -> AppResult<Self> {
+        let object = json
+            .as_object()
+            .ok_or_else(|| protocol_error("Changes:list 顶层响应不是对象"))?;
+        validate_category(object, "category", "drive#changeList", "Changes:list")?;
+
+        let raw_changes = object
+            .get("changes")
+            .ok_or_else(|| protocol_error("Changes:list 响应缺少 changes 数组"))?
+            .as_array()
+            .ok_or_else(|| protocol_error("Changes:list 的 changes 不是数组"))?;
+
+        let mut changes = Vec::with_capacity(raw_changes.len());
+        for (index, value) in raw_changes.iter().enumerate() {
+            changes.push(Change::from_json(value).map_err(|error| {
+                protocol_error(format!(
+                    "Changes:list 第 {} 个 change 无效：{error}",
+                    index + 1
+                ))
+            })?);
+        }
+
+        // 两个字段都先严格解析，再由 paginator 决定续页或终止。
+        let next_cursor = optional_cursor(object, "nextCursor")?;
+        let new_start_cursor = optional_cursor(object, "newStartCursor")?;
+
+        Ok(Self {
+            changes,
+            next_cursor,
+            new_start_cursor,
         })
     }
 }
 
 pub struct ChangesApi {
     client: Arc<DriveClient>,
+    max_pages: usize,
 }
 
 impl ChangesApi {
     pub fn new(client: Arc<DriveClient>) -> Self {
-        Self { client }
+        Self {
+            client,
+            max_pages: DEFAULT_MAX_CHANGE_PAGES,
+        }
     }
 
-    /// 获取初始游标（startCursor）。GET /changes/getStartCursor。
-    ///
-    /// 华为的 /changes 接口强制要求 cursor，无 cursor 直接 400；初始 cursor 必须先通过本端点获取。
-    /// 响应：`{"category":"drive#startCursor","startCursor":"311296"}`
+    /// 使用受控页数上限构造 paginator。生产默认值与测试/诊断值相互独立。
+    pub fn with_page_limit(client: Arc<DriveClient>, max_pages: usize) -> AppResult<Self> {
+        if max_pages == 0 {
+            return Err(AppError::generic("Changes 分页上限必须大于 0"));
+        }
+        Ok(Self { client, max_pages })
+    }
+
+    /// 获取初始游标。官方要求显式请求 `fields=*`。
     pub async fn get_start_cursor(&self) -> AppResult<String> {
-        let resp = self.client.get("/changes/getStartCursor").await?;
-        let body: serde_json::Value = parse_json_response(resp, "startCursor").await?;
-        body.get("startCursor")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .ok_or_else(|| AppError::generic("startCursor 响应缺少 startCursor 字段".to_string()))
+        let resp = self.client.get("/changes/getStartCursor?fields=*").await?;
+        let body: Value = parse_json_response(resp, "startCursor").await?;
+        let object = body
+            .as_object()
+            .ok_or_else(|| protocol_error("getStartCursor 顶层响应不是对象"))?;
+        validate_category(object, "category", "drive#startCursor", "getStartCursor")?;
+        Ok(required_non_empty_string(object, "startCursor", "getStartCursor")?.to_string())
     }
 
-    /// 拉取一页增量变更（pageSize 默认 100）。
-    /// 路径相对 base_url（base_url 已含 /drive/v1），对齐 about_api 的 /about 写法。
-    pub async fn list_changes(&self, cursor: Option<&str>) -> AppResult<ChangeListResult> {
-        let mut url = "/changes?fields=*&pageSize=100".to_string();
-        if let Some(c) = cursor {
-            if !c.is_empty() {
-                url.push_str(&format!(
-                    "&cursor={}",
-                    crate::drive::files_api::urlencoding(c)
+    /// 拉取一页增量变更。cursor 是华为接口必填项。
+    pub async fn list_changes(&self, cursor: &str) -> AppResult<ChangesPage> {
+        let cursor = required_cursor(cursor, "Changes:list")?;
+        let url = format!(
+            "/changes?fields=*&pageSize=100&includeDeleted=true&cursor={}",
+            crate::drive::files_api::urlencoding(cursor)
+        );
+        let resp = self.client.get(&url).await?;
+        let body: Value = parse_json_response(resp, "changes").await?;
+        ChangesPage::from_json(&body)
+    }
+
+    /// 拉取完整的一轮增量变更。
+    ///
+    /// 空 `changes` 不代表终页；只要 `nextCursor` 非空就继续。只有无非空
+    /// `nextCursor` 且存在非空 `newStartCursor` 时才成功返回 checkpoint。
+    pub async fn list_all_changes(&self, start_cursor: &str) -> AppResult<(Vec<Change>, String)> {
+        let mut cursor = required_cursor(start_cursor, "Changes:list_all")?.to_string();
+        let mut seen = HashSet::new();
+        seen.insert(cursor.clone());
+        let mut all = Vec::new();
+
+        for page_number in 1..=self.max_pages {
+            let page = self.list_changes(&cursor).await?;
+            let page_count = page.changes.len();
+            all.extend(page.changes);
+
+            if let Some(next_cursor) = page.next_cursor {
+                if page_number == self.max_pages {
+                    return Err(protocol_error(format!(
+                        "Changes:list 达到页数上限 {} 时仍有 nextCursor，拒绝返回部分结果",
+                        self.max_pages
+                    )));
+                }
+                if !seen.insert(next_cursor.clone()) {
+                    return Err(protocol_error(format!(
+                        "Changes:list cursor 未推进或形成循环：{next_cursor}"
+                    )));
+                }
+                tracing::debug!(
+                    page_number,
+                    page_count,
+                    total = all.len(),
+                    "Changes:list 继续翻页"
+                );
+                cursor = next_cursor;
+                continue;
+            }
+
+            let final_cursor = page.new_start_cursor.ok_or_else(|| {
+                protocol_error("Changes:list 终页缺少非空 newStartCursor，无法提交 checkpoint")
+            })?;
+            tracing::info!(
+                pages = page_number,
+                total = all.len(),
+                "Changes:list 已完整追平"
+            );
+            return Ok((all, final_cursor));
+        }
+
+        Err(protocol_error("Changes:list 未能在分页上限内结束"))
+    }
+}
+
+fn required_cursor<'a>(cursor: &'a str, operation: &str) -> AppResult<&'a str> {
+    if cursor.trim().is_empty() {
+        Err(protocol_error(format!("{operation} 缺少非空 cursor")))
+    } else {
+        Ok(cursor)
+    }
+}
+
+fn optional_cursor(object: &Map<String, Value>, field: &str) -> AppResult<Option<String>> {
+    match object.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(cursor)) if cursor.trim().is_empty() => Ok(None),
+        Some(Value::String(cursor)) => Ok(Some(cursor.clone())),
+        Some(_) => Err(protocol_error(format!(
+            "Changes:list 的 {field} 必须是字符串、null 或缺失"
+        ))),
+    }
+}
+
+fn required_non_empty_string<'a>(
+    object: &'a Map<String, Value>,
+    field: &str,
+    context: &str,
+) -> AppResult<&'a str> {
+    match object.get(field) {
+        Some(Value::String(value)) if !value.trim().is_empty() => Ok(value),
+        Some(Value::String(_)) => Err(protocol_error(format!("{context} 的 {field} 不能为空"))),
+        Some(_) => Err(protocol_error(format!("{context} 的 {field} 必须是字符串"))),
+        None => Err(protocol_error(format!("{context} 缺少 {field}"))),
+    }
+}
+
+fn optional_non_empty_string<'a>(
+    object: &'a Map<String, Value>,
+    field: &str,
+    context: &str,
+) -> AppResult<Option<&'a str>> {
+    match object.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) if !value.trim().is_empty() => Ok(Some(value)),
+        Some(Value::String(_)) => Err(protocol_error(format!(
+            "{context} 的 {field} 不能为空字符串"
+        ))),
+        Some(_) => Err(protocol_error(format!(
+            "{context} 的 {field} 必须是字符串或 null"
+        ))),
+    }
+}
+
+fn required_bool(object: &Map<String, Value>, field: &str, context: &str) -> AppResult<bool> {
+    match object.get(field) {
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(_) => Err(protocol_error(format!("{context} 的 {field} 必须是布尔值"))),
+        None => Err(protocol_error(format!("{context} 缺少 {field}"))),
+    }
+}
+
+fn validate_category(
+    object: &Map<String, Value>,
+    field: &str,
+    expected: &str,
+    context: &str,
+) -> AppResult<()> {
+    match object.get(field) {
+        None | Some(Value::Null) => Ok(()),
+        Some(Value::String(value)) if value == expected => Ok(()),
+        Some(Value::String(value)) => Err(protocol_error(format!(
+            "{context} 的 {field} 非预期：{value}"
+        ))),
+        Some(_) => Err(protocol_error(format!(
+            "{context} 的 {field} 必须是字符串或 null"
+        ))),
+    }
+}
+
+fn validate_optional_string(
+    object: &Map<String, Value>,
+    field: &str,
+    context: &str,
+) -> AppResult<()> {
+    match object.get(field) {
+        None | Some(Value::Null) | Some(Value::String(_)) => Ok(()),
+        Some(_) => Err(protocol_error(format!(
+            "{context} 的 {field} 必须是字符串或 null"
+        ))),
+    }
+}
+
+fn validate_optional_rfc3339(
+    object: &Map<String, Value>,
+    field: &str,
+    context: &str,
+) -> AppResult<()> {
+    match object.get(field) {
+        None | Some(Value::Null) => Ok(()),
+        Some(Value::String(value)) => chrono::DateTime::parse_from_rfc3339(value)
+            .map(|_| ())
+            .map_err(|_| protocol_error(format!("{context} 的 {field} 不是 RFC3339 时间"))),
+        Some(_) => Err(protocol_error(format!(
+            "{context} 的 {field} 必须是 RFC3339 字符串或 null"
+        ))),
+    }
+}
+
+/// 返回 `(id, recycled, 完整文件)`。删除 tombstone 的 file 可以只含 id；
+/// 非删除事件由调用方要求第三项必须存在。
+fn parse_change_file(value: &Value) -> AppResult<(String, bool, Option<DriveFile>)> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| protocol_error("change.file 不是对象"))?;
+    validate_category(object, "category", "drive#file", "change.file")?;
+
+    let id = required_non_empty_string(object, "id", "change.file")?.to_string();
+    let name = match object.get("fileName") {
+        Some(Value::String(value)) if !value.trim().is_empty() => Some(value.as_str()),
+        Some(Value::String(_)) => {
+            return Err(protocol_error("change.file 的 fileName 不能为空"));
+        }
+        Some(Value::Null) | None => optional_non_empty_string(object, "name", "change.file")?,
+        Some(_) => {
+            return Err(protocol_error(
+                "change.file 的 fileName 必须是字符串或 null",
+            ));
+        }
+    };
+
+    validate_optional_string(object, "mimeType", "change.file")?;
+    validate_optional_string(object, "description", "change.file")?;
+    validate_optional_string(object, "thumbnailLink", "change.file")?;
+    for hash_field in [
+        "sha256",
+        "md5",
+        "md5Checksum",
+        "fileSha256",
+        "hash",
+        "contentHash",
+    ] {
+        validate_optional_string(object, hash_field, "change.file")?;
+    }
+    validate_optional_rfc3339(object, "createdTime", "change.file")?;
+    validate_optional_rfc3339(object, "editedTime", "change.file")?;
+
+    if let Some(parent_folder) = object.get("parentFolder") {
+        match parent_folder {
+            Value::Null => {}
+            Value::Array(parents)
+                if parents.iter().all(|parent| {
+                    parent
+                        .as_str()
+                        .is_some_and(|parent| !parent.trim().is_empty())
+                }) => {}
+            Value::Array(_) => {
+                return Err(protocol_error(
+                    "change.file 的 parentFolder 必须只包含非空字符串",
+                ));
+            }
+            _ => {
+                return Err(protocol_error(
+                    "change.file 的 parentFolder 必须是数组或 null",
                 ));
             }
         }
-        let resp = self.client.get(&url).await?;
-        let body: serde_json::Value = parse_json_response(resp, "changes").await?;
-        Ok(ChangeListResult::from_json(&body))
     }
 
-    /// 拉取全部增量变更（自动分页至追平最新状态）。
-    ///
-    /// 华为 API 的 newStartCursor 字段即使已追平也会返回非空值（类似 GDrive 的
-    /// nextPageToken——是"下次轮询的起点"而非"还有更多数据"的标记）。
-    /// 因此不能仅靠 cursor.is_none() 判断结束，需结合页内条目数：返回 0 条即已追平。
-    pub async fn list_all_changes(
-        &self,
-        start_cursor: Option<&str>,
-    ) -> AppResult<(Vec<Change>, Option<String>)> {
-        let mut all = Vec::new();
-        let mut cursor: Option<String> = start_cursor.map(|s| s.to_string());
-        let mut pages = 0u32;
-        loop {
-            let result = self.list_changes(cursor.as_deref()).await?;
-            let page_count = result.changes.len();
-            all.extend(result.changes);
-            cursor = result.next_cursor;
-            pages += 1;
-            // 追平判定：若无新条目，或 cursor 为空，视为已追上
-            if page_count == 0 || cursor.is_none() {
-                tracing::info!(total = all.len(), pages, "list_all_changes 已追平最新状态");
-                return Ok((all, None));
+    if let Some(size) = object.get("size") {
+        match size {
+            Value::Null => {}
+            Value::Number(number) if number.as_i64().is_some() => {}
+            _ => {
+                return Err(protocol_error("change.file 的 size 必须是 i64 整数或 null"));
             }
-            tracing::debug!(
-                page_total = all.len(),
-                last_page = page_count,
-                pages,
-                "list_all_changes 继续翻页…"
-            );
         }
     }
+
+    let recycled = match object.get("recycled") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => {
+            return Err(protocol_error(
+                "change.file 的 recycled 必须是布尔值或 null",
+            ))
+        }
+    };
+
+    let file = if name.is_some() {
+        Some(
+            DriveFile::from_json(value)
+                .ok_or_else(|| protocol_error("change.file 无法解析为 DriveFile"))?,
+        )
+    } else {
+        None
+    };
+
+    Ok((id, recycled, file))
+}
+
+fn protocol_error(message: impl Into<String>) -> AppError {
+    AppError::generic(format!("华为 Changes API 协议错误：{}", message.into()))
 }
 
 #[cfg(test)]
@@ -192,7 +446,6 @@ mod tests {
 
     #[test]
     fn test_parse_modified_change() {
-        // 增/改事件（校准自真机）：changeType 非 trashDone，file 字段内是完整文件，游标用 newStartCursor
         let json = serde_json::json!({
             "category": "drive#changeList",
             "changes": [{
@@ -205,16 +458,19 @@ mod tests {
             }],
             "newStartCursor": "311298"
         });
-        let r = ChangeListResult::from_json(&json);
-        assert_eq!(r.changes.len(), 1);
-        assert_eq!(r.changes[0].kind, ChangeKind::Modified);
-        assert_eq!(r.changes[0].file.name, "a.txt");
-        assert_eq!(r.next_cursor.as_deref(), Some("311298"));
+        let result = ChangesPage::from_json(&json).expect("strict modified change");
+        assert_eq!(result.changes.len(), 1);
+        assert_eq!(result.changes[0].kind, ChangeKind::Modified);
+        assert_eq!(
+            result.changes[0].file().map(|file| file.name.as_str()),
+            Some("a.txt")
+        );
+        assert_eq!(result.next_cursor, None);
+        assert_eq!(result.new_start_cursor.as_deref(), Some("311298"));
     }
 
     #[test]
     fn test_parse_removed_change() {
-        // 删除事件（校准自真机）：changeType=="trashDone"，file 字段仍带完整文件（recycled:true）
         let json = serde_json::json!({
             "category": "drive#changeList",
             "changes": [{
@@ -227,24 +483,27 @@ mod tests {
             }],
             "newStartCursor": "311299"
         });
-        let r = ChangeListResult::from_json(&json);
-        assert_eq!(r.changes.len(), 1);
-        assert_eq!(r.changes[0].kind, ChangeKind::Removed);
-        assert_eq!(r.changes[0].file.id, "f9");
-        assert_eq!(r.changes[0].file.name, "del.txt");
-        assert_eq!(r.next_cursor.as_deref(), Some("311299"));
+        let result = ChangesPage::from_json(&json).expect("strict soft-delete change");
+        assert_eq!(result.changes.len(), 1);
+        assert_eq!(result.changes[0].kind, ChangeKind::Removed);
+        assert_eq!(result.changes[0].file_id(), "f9");
+        assert_eq!(
+            result.changes[0].file().map(|file| file.name.as_str()),
+            Some("del.txt")
+        );
+        assert_eq!(result.new_start_cursor.as_deref(), Some("311299"));
     }
 
     #[test]
-    fn test_parse_empty() {
-        // 空变更（校准自真机）：changes 空数组 + newStartCursor 与请求 cursor 相同
+    fn test_parse_empty_terminal_page() {
         let json = serde_json::json!({
             "category": "drive#changeList",
             "changes": [],
             "newStartCursor": "311296"
         });
-        let r = ChangeListResult::from_json(&json);
-        assert!(r.changes.is_empty());
-        assert_eq!(r.next_cursor.as_deref(), Some("311296"));
+        let result = ChangesPage::from_json(&json).expect("strict empty terminal page");
+        assert!(result.changes.is_empty());
+        assert_eq!(result.next_cursor, None);
+        assert_eq!(result.new_start_cursor.as_deref(), Some("311296"));
     }
 }

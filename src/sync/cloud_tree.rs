@@ -1,25 +1,20 @@
-//! 云端树 BFS 构建 + 缓存持久化。
+//! 云端树 BFS 构建 + 可信 checkpoint 持久化。
 //!
 //! 对齐 `legacy/lib/sync/sync_engine.dart` 的 BFS 部分 + cloudtree 持久化。
 //!
 //! BFS 并发数 8（每个 folder 独立 fetch），失败节点重试 2 次。
-//! 完成后写入 `<Application Support>/cloudtree_<escaped>.json` 缓存。
+//! BFS 只构建候选树，不直接替换磁盘 checkpoint。调用方必须在完整应用 Changes 后，
+//! 将 tree/path map/final cursor 作为同一个 [`CloudTreeCache`] 原子提交，再安装到 live state。
 //!
-//! # 索引完整性守卫
-//! BFS 全量扫描可能耗时几十秒。若中途被强退（关机/注销/Ctrl-C），缓存写盘是
-//! all-or-nothing 且只在成功结尾执行 → 新缓存丢失，留下旧/空缓存。若 startup
-//! 盲信这份缓存跳过 BFS，就会拿残缺 `cloud_tree` 跑 `run_sync_cycle` → planner
-//! 把全部本地文件误判为「本地新增」→ 疯狂上传/建目录（见 commit 历史）。
-//!
-//! 守卫机制（用明确标记而非启发式判断）：
-//! - `CloudTreeCache.complete: bool`：仅当 BFS 成功跑完才置 true。
-//! - BFS 入口先写一份 `complete:false` 哨兵（原子写）。中途被杀 → 哨兵留在盘上。
-//! - shutdown flush 再补一道把缓存标记为不完整（双保险，覆盖 BFS 尚未开始的窗口）。
-//! - `load_persisted_cloud_tree` 见到 `complete:false` / 空 tree → 返回 None →
-//!   engine 强制全量重跑 BFS，绝不进文件同步路径。
-//!   旧缓存无 `complete` 字段 → `#[serde(default)]` 得 false → 视为不完整 → 重跑一次后自然带上新字段。
+//! # 可信边界
+//! - 刷新开始、分页失败、子树重试耗尽都不改正式 checkpoint。
+//! - `complete=true`、非空 cursor、tree/path map 内部一致才可加载为 trusted。
+//! - 严格完整扫描得到的空 tree 是合法的云盘状态，不能按条目数量判坏。
+//! - 候选文件先写完并 fsync，随后同目录 rename，最后 fsync 父目录；调用方只在
+//!   `persist_cloud_checkpoint` 成功后安装同一候选，避免 old-tree/new-cursor 撕裂。
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::io::Write;
 use std::sync::Arc;
 
 use futures::future::join_all;
@@ -28,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::core::cache_paths;
 use crate::drive::files_api::FilesApi;
 use crate::drive::models::DriveFile;
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::mount::manager::MountManager;
 
 /// BFS 并发数
@@ -40,10 +35,82 @@ pub struct CloudTreeCache {
     pub root_folder_id: Option<String>,
     pub tree: HashMap<String, DriveFile>,
     pub path_to_id: HashMap<String, String>,
-    /// BFS 是否成功跑完。旧缓存无此字段 → default false → 视为不完整 → 强制重跑。
-    /// 见模块级「索引完整性守卫」文档。
+    /// 与 tree/path map 同批应用完成的 Changes 末页 `newStartCursor`。
+    /// 旧缓存没有该字段，因此反序列化为 None 并强制可信全量刷新。
+    #[serde(default)]
+    pub cursor: Option<String>,
+    /// 候选是否已经完成全量/增量应用。旧缓存无此字段时默认为 false。
     #[serde(default)]
     pub complete: bool,
+}
+
+impl CloudTreeCache {
+    /// 构造一个可提交的完整候选 checkpoint。
+    pub fn new_trusted(
+        root_folder_id: Option<String>,
+        tree: HashMap<String, DriveFile>,
+        mut path_to_id: HashMap<String, String>,
+        cursor: String,
+    ) -> AppResult<Self> {
+        // 根目录本身不在 tree 中，但增量 merge 需要 rootId → "" 反查来解析根级新增项。
+        if let Some(root_id) = &root_folder_id {
+            path_to_id
+                .entry(String::new())
+                .or_insert_with(|| root_id.clone());
+        }
+        let checkpoint = Self {
+            root_folder_id,
+            tree,
+            path_to_id,
+            cursor: Some(cursor),
+            complete: true,
+        };
+        checkpoint.validate_trusted()?;
+        Ok(checkpoint)
+    }
+
+    /// 校验 checkpoint 是否足以作为删除决策的可信远端事实。
+    pub fn validate_trusted(&self) -> AppResult<()> {
+        if !self.complete {
+            return Err(AppError::generic("云端 checkpoint 未完整提交"));
+        }
+        if !matches!(self.cursor.as_deref(), Some(cursor) if !cursor.trim().is_empty()) {
+            return Err(AppError::generic("云端 checkpoint 缺少有效 cursor"));
+        }
+
+        let mut seen_ids = HashSet::with_capacity(self.tree.len());
+        for (path, file) in &self.tree {
+            if path.is_empty() || file.id.trim().is_empty() {
+                return Err(AppError::generic("云端 checkpoint 包含空路径或空 fileId"));
+            }
+            if !seen_ids.insert(file.id.as_str()) {
+                return Err(AppError::generic(format!(
+                    "云端 checkpoint 中 fileId 重复：{}",
+                    file.id
+                )));
+            }
+            if self.path_to_id.get(path) != Some(&file.id) {
+                return Err(AppError::generic(format!(
+                    "云端 checkpoint 的路径索引不一致：{path}"
+                )));
+            }
+        }
+
+        for (path, file_id) in &self.path_to_id {
+            if path.is_empty() {
+                if self.root_folder_id.as_ref() != Some(file_id) {
+                    return Err(AppError::generic("云端 checkpoint 的根目录索引不一致"));
+                }
+                continue;
+            }
+            if self.tree.get(path).map(|file| &file.id) != Some(file_id) {
+                return Err(AppError::generic(format!(
+                    "云端 checkpoint 包含孤立路径索引：{path}"
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// 构建云端文件树（BFS）。
@@ -51,7 +118,7 @@ pub struct CloudTreeCache {
 pub async fn refresh_cloud_tree(
     files_api: &Arc<FilesApi>,
     mount: &Option<Arc<MountManager>>,
-    abs_mount_dir: &str,
+    _abs_mount_dir: &str,
 ) -> AppResult<(
     HashMap<String, DriveFile>,
     HashMap<String, String>,
@@ -70,24 +137,7 @@ pub async fn refresh_cloud_tree(
         retries: 0,
     });
 
-    // 索引完整性哨兵：BFS 开始前先写一份 complete:false 的空缓存（原子写）。
-    // 若本次 BFS 中途被强退，哨兵留在盘上 → 下次 startup load 见 complete:false
-    // → 视为不可用 → 强制全量重跑，绝不拿残缺缓存去触发文件同步/上传。
-    // （complete:true 的完整缓存由 BFS 成功结尾覆盖写入。）
-    let _ = persist_cloud_tree_internal(
-        abs_mount_dir,
-        &HashMap::new(),
-        &HashMap::new(),
-        &None,
-        false,
-    );
-
     let mut processed_folders: usize = 0;
-    // BUG 4 第一道防线：追踪永久失败子树计数。
-    // 永久失败（重试耗尽）的文件夹其子树会从 tree 中缺失 → 若仍写 complete=true，
-    // 残缺缓存会通过完整性校验 → planner 误判「云端无此文件」→ DeleteFromLocal 删本地。
-    // 故 >0 时写 complete=false（残缺数据不作为可信基线，下次启动强制重跑）。
-    let mut permanent_failures: usize = 0;
 
     tracing::info!("开始 BFS 云端树构建");
 
@@ -177,7 +227,14 @@ pub async fn refresh_cloud_tree(
                         });
                     } else {
                         tracing::error!(path = %node.path, error = %e, "BFS 文件夹永久失败（子树将缺失）");
-                        permanent_failures += 1;
+                        return Err(AppError::generic(format!(
+                            "云端树刷新不完整：目录 {} 重试耗尽：{e}",
+                            if node.path.is_empty() {
+                                "/"
+                            } else {
+                                node.path.as_str()
+                            }
+                        )));
                     }
                 }
             }
@@ -206,24 +263,8 @@ pub async fn refresh_cloud_tree(
         processed_folders,
     );
 
-    // 持久化缓存：永久失败时标 complete=false（残缺数据不作为可信基线）
-    let _ = persist_cloud_tree_internal(
-        abs_mount_dir,
-        &tree,
-        &path_to_id,
-        &root_folder_id,
-        permanent_failures == 0,
-    );
-    if permanent_failures > 0 {
-        tracing::warn!(
-            failures = permanent_failures,
-            files = tree.len(),
-            "云端树存在永久失败子树，缓存标记为 incomplete（下次启动强制重跑）"
-        );
-    } else {
-        tracing::info!(files = tree.len(), "云端树已持久化 complete=true");
-    }
-
+    // 此处只返回完整候选。调用方必须先从扫描前 cursor 重放 Changes，再把最终 cursor
+    // 与候选 tree/path map 一次性持久化，成功后才允许替换 live state。
     Ok((tree, path_to_id, root_folder_id))
 }
 
@@ -236,7 +277,7 @@ struct BfsNode {
 }
 
 /// 动态发现根目录的真实 folder ID。
-/// 统计根文件列表中出现次数 ≥ 2 的 parentFolder 值（对齐 dart `_detectRootFolderId`）。
+/// 取根级条目 parentFolder 中唯一的最高频值；最高频并列则 fail closed。
 fn detect_root_folder_id(files: &[DriveFile]) -> Option<String> {
     let mut counter: HashMap<String, usize> = HashMap::new();
     for f in files {
@@ -246,18 +287,20 @@ fn detect_root_folder_id(files: &[DriveFile]) -> Option<String> {
             }
         }
     }
-    counter
-        .into_iter()
-        .filter(|(_, count)| *count >= 2)
-        .max_by_key(|(_, count)| *count)
-        .map(|(id, _)| id)
+    let mut candidates: Vec<(String, usize)> = counter.into_iter().collect();
+    candidates
+        .sort_unstable_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    let (root_id, max_count) = candidates.first()?;
+    if matches!(candidates.get(1), Some((_, count)) if count == max_count) {
+        return None;
+    }
+    Some(root_id.clone())
 }
 
-/// 加载缓存的云端树。不存在或损坏 → None。
+/// 加载可信云端 checkpoint。不存在、旧格式或内部不一致 → None。
 ///
-/// **完整性守卫**：仅当 `complete=true` 且 tree 非空时返回 `Some`；否则返回 `None`
-/// （调用方 engine 会据此强制全量重跑 BFS）。这保证 startup 永远不会拿残缺/空/
-/// 未完成的缓存去跑文件同步，杜绝「索引中被退出 → 下次误判全量新增」。
+/// 条目数量不是可信条件：严格完成的空云盘是合法 checkpoint。旧版独立 cursor 文件
+/// 不会在这里拼接进旧 tree；缺少同版本 cursor 的缓存必须先做可信全量刷新。
 pub fn load_persisted_cloud_tree(abs_mount_dir: &str) -> Option<CloudTreeCache> {
     let cache_file = cache_paths::cloud_tree_cache_file(abs_mount_dir).ok()?;
     if !cache_file.exists() {
@@ -268,71 +311,107 @@ pub fn load_persisted_cloud_tree(abs_mount_dir: &str) -> Option<CloudTreeCache> 
     if !file.exists() {
         return None;
     }
-    let raw = std::fs::read_to_string(&file).ok()?;
-    let cache: CloudTreeCache = serde_json::from_str(&raw).ok()?;
-    // 完整性校验：未标记完成（上次 BFS 中断/被强退，或旧版无此字段）→ 视为不可用
-    if !cache.complete {
-        tracing::warn!("云端树缓存未标记完成（上次索引可能中断或为旧格式），将全量重跑 BFS");
+    let raw = match std::fs::read_to_string(&file) {
+        Ok(raw) => raw,
+        Err(error) => {
+            tracing::warn!(%error, "读取云端 checkpoint 失败，将全量刷新");
+            return None;
+        }
+    };
+    let cache: CloudTreeCache = match serde_json::from_str(&raw) {
+        Ok(cache) => cache,
+        Err(error) => {
+            tracing::warn!(%error, "解析云端 checkpoint 失败，将全量刷新");
+            return None;
+        }
+    };
+    if let Err(error) = cache.validate_trusted() {
+        tracing::warn!(%error, "云端 checkpoint 不可信，将全量刷新");
         return None;
     }
-    // 兜底：complete=true 但 tree 空（理论上不应发生，防御异常数据）
-    if cache.tree.is_empty() {
-        tracing::warn!("云端树缓存为空，将全量重跑 BFS");
-        return None;
-    }
-    tracing::info!(files = cache.tree.len(), "从缓存加载云端树");
+    tracing::info!(files = cache.tree.len(), "从缓存加载可信云端 checkpoint");
     Some(cache)
 }
 
-/// 原子写云端树缓存。
+/// 原子提交完整可信 checkpoint。
 ///
-/// 写到 `cache_file + TMP_SUFFIX` → 同步落盘 → rename 覆盖 `cache_file`。
-/// 保证磁盘上要么是完整新版、要么是上一版，绝不出现写到一半的半截 JSON
-/// （对齐项目已有的 `.tmp` + rename 原子写范式，见 `constants::TMP_SUFFIX`、
-/// `download_api`）。`complete` 由调用方决定：BFS 成功跑完且无永久失败 → true；
-/// 存在永久失败子树 / 哨兵 → false（残缺数据不作为可信基线，下次启动强制重跑）。
-fn persist_cloud_tree_internal(
-    abs_mount_dir: &str,
-    tree: &HashMap<String, DriveFile>,
-    path_to_id: &HashMap<String, String>,
-    root_folder_id: &Option<String>,
-    complete: bool,
-) -> AppResult<()> {
+/// 候选先在同目录临时文件完整写入并 fsync，之后才 rename 覆盖正式文件并 fsync
+/// 父目录。rename 之前的任何失败都不会修改上一份正式 checkpoint。调用方必须把
+/// 此函数的 `Ok(())` 当作安装 live tree/path/cursor 的唯一提交门槛。
+pub fn persist_cloud_checkpoint(abs_mount_dir: &str, checkpoint: &CloudTreeCache) -> AppResult<()> {
+    checkpoint.validate_trusted()?;
     let cache_file = cache_paths::cloud_tree_cache_file(abs_mount_dir)?;
-    if let Some(parent) = cache_file.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let cache = CloudTreeCache {
-        root_folder_id: root_folder_id.clone(),
-        tree: tree.clone(),
-        path_to_id: path_to_id.clone(),
-        complete,
-    };
-    let json = serde_json::to_string_pretty(&cache)?;
-    // 原子写：tmp → fsync → rename
+    let parent = cache_file
+        .parent()
+        .ok_or_else(|| AppError::generic("云端 checkpoint 路径缺少父目录"))?;
+    std::fs::create_dir_all(parent)?;
+
+    let json = serde_json::to_vec_pretty(checkpoint)?;
     let tmp_file = cache_file.with_extension("json.tmp");
-    std::fs::write(&tmp_file, &json)?;
-    // fsync tmp 确保内容落盘，再 rename 保证目标文件原子替换
-    {
-        let f = std::fs::File::open(&tmp_file)?;
-        f.sync_all()?;
+    let backup_file = cache_file.with_extension("json.bak");
+    if backup_file.exists() {
+        std::fs::remove_file(&backup_file)?;
     }
-    std::fs::rename(&tmp_file, &cache_file)?;
-    tracing::info!(complete, "云端树已持久化");
+    {
+        let mut candidate = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&tmp_file)?;
+        candidate.write_all(&json)?;
+        candidate.sync_all()?;
+    }
+
+    // 保留旧 inode，便于 rename 后父目录 fsync 失败时恢复旧正式文件。
+    // backup 只用于本次提交回滚，loader 永远只读取正式 checkpoint。
+    let had_previous = cache_file.exists();
+    if had_previous {
+        std::fs::hard_link(&cache_file, &backup_file)?;
+        sync_parent_directory(parent)?;
+    }
+
+    if let Err(error) = std::fs::rename(&tmp_file, &cache_file) {
+        let _ = std::fs::remove_file(&backup_file);
+        return Err(error.into());
+    }
+    if let Err(error) = sync_parent_directory(parent) {
+        let rollback = if had_previous {
+            std::fs::rename(&backup_file, &cache_file)
+        } else {
+            std::fs::remove_file(&cache_file)
+        };
+        if let Err(rollback_error) = rollback {
+            tracing::error!(%rollback_error, "云端 checkpoint 提交失败且旧版本回滚失败");
+        } else {
+            let _ = sync_parent_directory(parent);
+        }
+        return Err(error);
+    }
+    if had_previous {
+        let _ = std::fs::remove_file(&backup_file);
+    }
+    tracing::info!(files = checkpoint.tree.len(), "可信云端 checkpoint 已提交");
     Ok(())
 }
 
-/// 把当前配置挂载目录的云端树缓存标记为不完整（complete=false）。
+#[cfg(unix)]
+fn sync_parent_directory(parent: &std::path::Path) -> AppResult<()> {
+    std::fs::File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_parent: &std::path::Path) -> AppResult<()> {
+    // Windows 不支持以普通 File 打开目录；同目录 rename 仍保证不会暴露半截 JSON。
+    Ok(())
+}
+
+/// 兼容旧 shutdown 调用：只清理未提交候选，不再破坏最后可信 checkpoint。
 ///
-/// 供 `platform::shutdown::flush_with_timeout` 在退出时调用（双保险）：
-/// 即使退出发生在 BFS 尚未开始的窗口（哨兵还没写），也能确保下次 startup
-/// 检测到「未完成」并强制全量重跑 BFS。纯本地文件操作，无网络、非阻塞，
-/// 3.2s 超时兜底内必完成。
-///
-/// 语义：仅当缓存文件存在且当前 `complete=true` 时才改写为 false ——
-/// 这样不会破坏已经写下的哨兵，也避免在根本没有缓存的场景下凭空创建空文件。
+/// 新模型下刷新从不把 partial state 写进正式文件，所以正常退出时把正式 checkpoint
+/// 改成 `complete=false` 反而会丢失最后可信基线。未提交 `.tmp` 永远不会被 loader
+/// 读取；退出时尽力清理即可。
 pub fn mark_cache_incomplete_if_exists() {
-    // 读当前配置得到挂载目录；配置缺失则无操作（无挂载目录 = 无缓存可标记）
     let Ok(config) = crate::core::config_store::ConfigStore::load() else {
         return;
     };
@@ -340,39 +419,14 @@ pub fn mark_cache_incomplete_if_exists() {
     let Ok(cache_file) = cache_paths::cloud_tree_cache_file(&abs_dir) else {
         return;
     };
-    if !cache_file.exists() {
-        return;
-    }
-    // 已是不完整（哨兵/旧格式）→ 无需改写
-    let raw = match std::fs::read_to_string(&cache_file) {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-    let mut cache: CloudTreeCache = match serde_json::from_str(&raw) {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-    if !cache.complete {
-        return;
-    }
-    cache.complete = false;
-    let json = match serde_json::to_string_pretty(&cache) {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-    // 原子写覆盖（tmp → fsync → rename）
     let tmp_file = cache_file.with_extension("json.tmp");
-    if std::fs::write(&tmp_file, &json).is_err() {
-        return;
+    if tmp_file.exists() {
+        let _ = std::fs::remove_file(tmp_file);
     }
-    if std::fs::File::open(&tmp_file)
-        .and_then(|f| f.sync_all())
-        .is_err()
-    {
-        return;
+    let backup_file = cache_file.with_extension("json.bak");
+    if backup_file.exists() {
+        let _ = std::fs::remove_file(backup_file);
     }
-    let _ = std::fs::rename(&tmp_file, &cache_file);
-    tracing::info!("退出标记：云端树缓存置为未完成（下次启动将全量重跑 BFS）");
 }
 
 impl Default for DriveFile {
@@ -428,6 +482,7 @@ mod tests {
             root_folder_id: Some("root".into()),
             tree,
             path_to_id: HashMap::new(),
+            cursor: Some("c1".into()),
             complete: false,
         };
         write_cache_raw(&abs, &serde_json::to_string_pretty(&cache).unwrap());
@@ -437,21 +492,22 @@ mod tests {
         );
     }
 
-    /// complete=true 但 tree 空 → load 应返回 None
+    /// 严格完成的空云盘是合法可信 checkpoint。
     #[test]
-    fn test_load_rejects_empty_tree() {
+    fn test_load_accepts_complete_empty_tree() {
         let dir = tempfile::tempdir().unwrap();
         let abs = dir.path().to_string_lossy().to_string();
         let cache = CloudTreeCache {
             root_folder_id: Some("root".into()),
             tree: HashMap::new(),
             path_to_id: HashMap::new(),
+            cursor: Some("c-empty".into()),
             complete: true,
         };
         write_cache_raw(&abs, &serde_json::to_string_pretty(&cache).unwrap());
         assert!(
-            load_persisted_cloud_tree(&abs).is_none(),
-            "complete=true 但空 tree 不应被信任"
+            load_persisted_cloud_tree(&abs).is_some(),
+            "完整空盘必须可作为可信 checkpoint"
         );
     }
 
@@ -462,10 +518,13 @@ mod tests {
         let abs = dir.path().to_string_lossy().to_string();
         let mut tree = HashMap::new();
         tree.insert("学习".into(), sample_file());
+        let mut path_to_id = HashMap::new();
+        path_to_id.insert("学习".into(), "f1".into());
         let cache = CloudTreeCache {
             root_folder_id: Some("root".into()),
             tree,
-            path_to_id: HashMap::new(),
+            path_to_id,
+            cursor: Some("c1".into()),
             complete: true,
         };
         write_cache_raw(&abs, &serde_json::to_string_pretty(&cache).unwrap());
@@ -493,7 +552,7 @@ mod tests {
         );
     }
 
-    /// persist_cloud_tree_internal 原子写：写入后文件存在且可被 load 正确读回，
+    /// persist_cloud_checkpoint 原子写：写入后文件存在且可被 load 正确读回，
     /// 且无残留 .tmp 文件。
     #[test]
     fn test_persist_internal_atomic_and_readable() {
@@ -503,7 +562,9 @@ mod tests {
         tree.insert("学习".into(), sample_file());
         let mut p2i = HashMap::new();
         p2i.insert("学习".into(), "f1".into());
-        persist_cloud_tree_internal(&abs, &tree, &p2i, &Some("root".into()), true).unwrap();
+        let checkpoint =
+            CloudTreeCache::new_trusted(Some("root".into()), tree, p2i, "c1".into()).unwrap();
+        persist_cloud_checkpoint(&abs, &checkpoint).unwrap();
 
         let cache_file = cache_paths::cloud_tree_cache_file(&abs).unwrap();
         assert!(cache_file.exists(), "缓存文件应存在");

@@ -2,7 +2,7 @@
 //!
 //! 对齐 `legacy/lib/sync/sync_planner.dart` 的 `_decide` 决策表。
 //!
-//! 输入：`SyncSnapshot { local, cloud, db, is_startup_resume }`
+//! 输入：`SyncSnapshot { local, cloud, db, cloud_tree_trusted, is_startup_resume }`
 //! 输出：按路径过滤后的 `Vec<SyncAction>`（不含 skip/null 类型）。
 
 use std::collections::{HashMap, HashSet};
@@ -19,6 +19,9 @@ pub struct SyncSnapshot {
     pub cloud: HashMap<String, DriveFile>,
     /// DB 同步记录（rel_path → DB record，含 mtime/size/status）
     pub db: HashMap<String, DbSnapshotEntry>,
+    /// cloud 是否来自完整分页并与 cursor 同批原子提交的可信 checkpoint。
+    /// false 时“云端不存在”只是未知事实，不能驱动任一方向的删除。
+    pub cloud_tree_trusted: bool,
     /// 是否为启动恢复期（影响删除语义）
     pub is_startup_resume: bool,
 }
@@ -56,6 +59,19 @@ impl SyncPlanner {
         let mut actions = Vec::new();
         for rel_path in all_paths {
             if let Some(action) = self.decide(rel_path, snapshot) {
+                if !snapshot.cloud_tree_trusted
+                    && matches!(
+                        action.action_type,
+                        SyncActionType::DeleteFromLocal | SyncActionType::DeleteFromCloud
+                    )
+                {
+                    tracing::warn!(
+                        path = rel_path,
+                        action = ?action.action_type,
+                        "云端 checkpoint 不可信，抑制删除动作"
+                    );
+                    continue;
+                }
                 // 过滤 Skip 类型（对齐 dart plan() 的 action.type != SyncActionType.skip 过滤）
                 // ★ 例外：携带 cloud_file 的 Skip 是 pending 占位项的收敛动作（上次失败实为成功），
                 //   必须放行到 engine，让其 upsert 真实 fileId + 清理 pending 孤儿行。
@@ -502,6 +518,7 @@ mod tests {
             local,
             cloud: HashMap::new(),
             db: HashMap::new(),
+            cloud_tree_trusted: true,
             is_startup_resume: false,
         };
         let actions = SyncPlanner.plan(&snapshot);
@@ -521,6 +538,7 @@ mod tests {
             local: HashMap::new(),
             cloud,
             db: HashMap::new(),
+            cloud_tree_trusted: true,
             is_startup_resume: false,
         };
         let actions = SyncPlanner.plan(&snapshot);
@@ -543,6 +561,7 @@ mod tests {
             local,
             cloud,
             db,
+            cloud_tree_trusted: true,
             is_startup_resume: false,
         };
         let actions = SyncPlanner.plan(&snapshot);
@@ -566,6 +585,7 @@ mod tests {
             local,
             cloud,
             db,
+            cloud_tree_trusted: true,
             is_startup_resume: false,
         };
         let actions = SyncPlanner.plan(&snapshot);
@@ -589,6 +609,7 @@ mod tests {
             local,
             cloud,
             db,
+            cloud_tree_trusted: true,
             is_startup_resume: false,
         };
         let actions = SyncPlanner.plan(&snapshot);
@@ -605,6 +626,7 @@ mod tests {
             local: HashMap::new(),
             cloud,
             db: HashMap::new(),
+            cloud_tree_trusted: true,
             is_startup_resume: false,
         };
         let actions = SyncPlanner.plan(&snapshot);
@@ -627,6 +649,7 @@ mod tests {
             local,
             cloud,
             db,
+            cloud_tree_trusted: true,
             is_startup_resume: false,
         };
         let actions = SyncPlanner.plan(&snapshot);
@@ -657,6 +680,7 @@ mod tests {
             local,
             cloud: HashMap::new(),
             db,
+            cloud_tree_trusted: true,
             is_startup_resume: false,
         };
         let actions = SyncPlanner.plan(&snapshot);
@@ -687,6 +711,7 @@ mod tests {
             local,
             cloud: HashMap::new(),
             db,
+            cloud_tree_trusted: true,
             is_startup_resume: false,
         };
         let actions = SyncPlanner.plan(&snapshot);
@@ -722,6 +747,7 @@ mod tests {
             local,
             cloud: HashMap::new(),
             db,
+            cloud_tree_trusted: true,
             is_startup_resume: false,
         };
         let actions = SyncPlanner.plan(&snapshot);
@@ -760,6 +786,7 @@ mod tests {
             local,
             cloud: HashMap::new(),
             db,
+            cloud_tree_trusted: true,
             is_startup_resume: false,
         };
         let actions = SyncPlanner.plan(&snapshot);
@@ -809,6 +836,7 @@ mod tests {
             local,
             cloud: HashMap::new(),
             db,
+            cloud_tree_trusted: true,
             is_startup_resume: false,
         };
         let actions = SyncPlanner.plan(&snapshot);
@@ -847,6 +875,7 @@ mod tests {
             local,
             cloud: HashMap::new(),
             db,
+            cloud_tree_trusted: true,
             is_startup_resume: false,
         };
         let actions = SyncPlanner.plan(&snapshot);
@@ -896,6 +925,7 @@ mod tests {
             local,
             cloud,
             db,
+            cloud_tree_trusted: true,
             is_startup_resume: false,
         };
         let actions = SyncPlanner.plan(&snapshot);
@@ -980,6 +1010,7 @@ mod tests {
             local,
             cloud: HashMap::new(),
             db,
+            cloud_tree_trusted: true,
             is_startup_resume: false,
         };
         let actions = SyncPlanner.plan(&snapshot);
@@ -1002,7 +1033,10 @@ mod tests {
     fn test_startup_resume_guards_delete_when_cloud_missing() {
         let mut local = HashMap::new();
         // mtime/size 与 db 一致 → is_local_changed=false
-        local.insert("A/f.txt".to_string(), make_local("A/f.txt", 100, 1000, false));
+        local.insert(
+            "A/f.txt".to_string(),
+            make_local("A/f.txt", 100, 1000, false),
+        );
         let mut db = HashMap::new();
         // 真实 fileId（非 pending:）+ status=SYNCED
         db.insert(
@@ -1013,6 +1047,7 @@ mod tests {
             local,
             cloud: HashMap::new(),
             db,
+            cloud_tree_trusted: true,
             is_startup_resume: true, // 启动恢复期
         };
         let action = SyncPlanner.decide("A/f.txt", &snapshot).expect("应有动作");
@@ -1036,7 +1071,10 @@ mod tests {
     fn test_session_delete_not_guarded() {
         let mut local = HashMap::new();
         // mtime/size 与 db 一致 → is_local_changed=false
-        local.insert("A/f.txt".to_string(), make_local("A/f.txt", 100, 1000, false));
+        local.insert(
+            "A/f.txt".to_string(),
+            make_local("A/f.txt", 100, 1000, false),
+        );
         let mut db = HashMap::new();
         // 真实 fileId + status=SYNCED
         db.insert(
@@ -1047,6 +1085,7 @@ mod tests {
             local,
             cloud: HashMap::new(),
             db,
+            cloud_tree_trusted: true,
             is_startup_resume: false, // 会话内
         };
         let action = SyncPlanner.decide("A/f.txt", &snapshot).expect("应有动作");

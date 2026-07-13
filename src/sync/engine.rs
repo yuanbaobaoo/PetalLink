@@ -411,6 +411,10 @@ pub struct SyncEngine {
     cloud_tree: Mutex<HashMap<String, DriveFile>>,
     path_to_id: Mutex<HashMap<String, String>>,
     root_folder_id: Mutex<Option<String>>,
+    cloud_cursor: Mutex<Option<String>>,
+    /// `true` only when the live tree came from a complete, crash-consistent checkpoint.
+    /// Failed/partial refreshes keep the previous tree for display but revoke destructive trust.
+    cloud_tree_trusted: AtomicBool,
     recently_deleted_paths: Mutex<HashMap<String, i64>>,
     state: Mutex<SyncGlobalState>,
     status_aggregator: Arc<StatusAggregator>,
@@ -483,6 +487,8 @@ impl SyncEngine {
             cloud_tree: Mutex::new(HashMap::new()),
             path_to_id: Mutex::new(HashMap::new()),
             root_folder_id: Mutex::new(None),
+            cloud_cursor: Mutex::new(None),
+            cloud_tree_trusted: AtomicBool::new(false),
             recently_deleted_paths: Mutex::new(HashMap::new()),
             state: Mutex::new(SyncGlobalState::default()),
             status_aggregator,
@@ -1045,6 +1051,20 @@ impl SyncEngine {
     pub fn cloud_tree_lock(&self) -> parking_lot::MutexGuard<'_, HashMap<String, DriveFile>> {
         self.cloud_tree.lock()
     }
+    pub(crate) fn cloud_tree_is_trusted(&self) -> bool {
+        self.cloud_tree_trusted.load(Ordering::Acquire)
+    }
+    fn set_cloud_tree_trusted(&self, trusted: bool) {
+        self.cloud_tree_trusted.store(trusted, Ordering::Release);
+    }
+    fn install_cloud_checkpoint(&self, checkpoint: cloud_tree::CloudTreeCache) {
+        self.set_cloud_tree_trusted(false);
+        *self.cloud_tree.lock() = checkpoint.tree;
+        *self.path_to_id.lock() = checkpoint.path_to_id;
+        *self.root_folder_id.lock() = checkpoint.root_folder_id;
+        *self.cloud_cursor.lock() = checkpoint.cursor;
+        self.set_cloud_tree_trusted(true);
+    }
     /// 获取 path_to_id 的可变锁（供 commands 层清理用）。
     pub fn path_to_id_lock(&self) -> parking_lot::MutexGuard<'_, HashMap<String, String>> {
         self.path_to_id.lock()
@@ -1142,48 +1162,42 @@ impl SyncEngine {
             Err(error) => tracing::warn!(%error, "统一中断任务恢复失败"),
         }
     }
-    async fn load_or_refresh_cloud_tree(&self, mount_dir: &str) -> AppResult<()> {
+    /// Returns true when a trusted checkpoint was loaded and still needs one incremental catch-up;
+    /// false when this call already built, replayed and committed a fresh full checkpoint.
+    async fn load_or_refresh_cloud_tree(&self, mount_dir: &str) -> AppResult<bool> {
         let _activity = self.begin_external_activity()?;
         #[cfg(test)]
         if let Some(hook) = &self.startup_cloud_hook {
-            return hook();
+            let result = hook();
+            self.set_cloud_tree_trusted(result.is_ok());
+            return result.map(|_| false);
         }
         let abs_dir = crate::core::paths::expand_tilde(mount_dir);
-        let loaded = cloud_tree::load_persisted_cloud_tree(&abs_dir).map(|cache| {
-            *self.cloud_tree.lock() = cache.tree;
-            *self.path_to_id.lock() = cache.path_to_id;
-            *self.root_folder_id.lock() = cache.root_folder_id;
-        });
-        if loaded.is_none() {
-            let refresh_result = {
-                async {
-                    // 广播 is_indexing=true（对齐 dart BFS 期间的状态广播）
-                    self.update_runtime_and_broadcast(|runtime| {
-                        runtime.is_indexing = true;
-                        runtime.sync_phase = Some("indexing-startup".to_string());
-                    })?;
-                    let (tree, p2i, root) =
-                        cloud_tree::refresh_cloud_tree(&self.files_api, &self.mount, &abs_dir)
-                            .await?;
-                    self.ensure_cycle_active()?;
-                    *self.cloud_tree.lock() = tree;
-                    *self.path_to_id.lock() = p2i;
-                    *self.root_folder_id.lock() = root;
-                    self.update_runtime_and_broadcast(|runtime| {
-                        runtime.is_indexing = false;
-                        runtime.sync_phase = None;
-                    })?;
-                    Ok::<(), AppError>(())
-                }
-                .await
-            };
+        let loaded_from_cache = if let Some(cache) = cloud_tree::load_persisted_cloud_tree(&abs_dir)
+        {
+            self.install_cloud_checkpoint(cache);
+            true
+        } else {
+            self.set_cloud_tree_trusted(false);
+            self.update_runtime_and_broadcast(|runtime| {
+                runtime.is_indexing = true;
+                runtime.sync_phase = Some("indexing-startup".to_string());
+            })?;
+            let refresh_result = self.build_and_commit_full_checkpoint(&abs_dir).await;
+            let reset_result = self.update_runtime_and_broadcast(|runtime| {
+                runtime.is_indexing = false;
+                runtime.sync_phase = None;
+            });
             if refresh_result.is_err() {
+                self.set_cloud_tree_trusted(false);
                 self.restore_idle_runtime_after_error();
             }
             refresh_result?;
-        }
+            reset_result?;
+            false
+        };
         // ★ 清理无效墓碑：云端树里已不存在的 DELETED 记录可以真删了
-        {
+        if self.cloud_tree_is_trusted() {
             let conn = self.db.lock();
             let ct = self.cloud_tree.lock();
             // 收集所有 DELETED 但云端已不存在的路径
@@ -1210,8 +1224,10 @@ impl SyncEngine {
                 }
                 tracing::info!(count = to_purge.len(), "已清理无效墓碑（云端已不存在）");
             }
+        } else {
+            tracing::warn!("云端树不可信，跳过墓碑清理");
         }
-        Ok(())
+        Ok(loaded_from_cache)
     }
 
     async fn start_watcher(self: &Arc<Self>) {
@@ -1576,6 +1592,7 @@ impl SyncEngine {
             "local-watcher"
         };
         let result = async {
+            let mut startup_needs_incremental = true;
             self.update_runtime_and_broadcast(|runtime| {
                 runtime.is_running = true;
                 if runtime.sync_phase.is_none() {
@@ -1640,16 +1657,21 @@ impl SyncEngine {
                 && request.contains(CycleRequest::CLOUD_INCREMENTAL)
             {
                 let mount_dir = self.mount_dir.lock().clone().unwrap_or_default();
-                if let Err(error) = self.load_or_refresh_cloud_tree(&mount_dir).await {
-                    tracing::warn!(%error, "启动 owner 云端树刷新失败，保留恢复请求");
-                    self.cycle.restore(
-                        CycleRequest::LOCAL_RESCAN
-                            | CycleRequest::CLOUD_INCREMENTAL
-                            | CycleRequest::ONLINE_RECOVERY,
-                    );
+                match self.load_or_refresh_cloud_tree(&mount_dir).await {
+                    Ok(loaded_from_cache) => {
+                        startup_needs_incremental = loaded_from_cache;
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "启动 owner 无法建立可信云端 checkpoint，禁止进入 planner");
+                        self.cycle.restore(
+                            CycleRequest::LOCAL_RESCAN
+                                | CycleRequest::CLOUD_INCREMENTAL
+                                | CycleRequest::ONLINE_RECOVERY,
+                        );
+                        return Err(error);
+                    }
                 }
                 self.ensure_cycle_active()?;
-                self.try_init_changes_cursor(&mount_dir).await;
             }
             self.ensure_cycle_active()?;
             if request.contains(CycleRequest::CLOUD_FULL) {
@@ -1659,7 +1681,9 @@ impl SyncEngine {
                         .restore(CycleRequest::LOCAL_RESCAN | CycleRequest::CLOUD_FULL);
                     return Err(error);
                 }
-            } else if request.contains(CycleRequest::CLOUD_INCREMENTAL) {
+            } else if request.contains(CycleRequest::CLOUD_INCREMENTAL)
+                && (!request.contains(CycleRequest::STARTUP) || startup_needs_incremental)
+            {
                 if !self.is_online() {
                     self.cycle.restore(
                         CycleRequest::LOCAL_RESCAN
@@ -1735,9 +1759,14 @@ impl SyncEngine {
             tracing::info!(count = in_cloud_db_not_local.len(), paths = ?in_cloud_db_not_local, "云端+DB有但本地无（应生成 DeleteFromCloud）");
         }
 
-        // #4 DB 自愈（对齐 dart _reconcileDbRecords）：
-        // 本地有内容无 DB → 补 synced；本地占位符无 DB → 补 cloudOnly
-        self.reconcile_db_records(&local, &db);
+        let cloud_tree_trusted = self.cloud_tree_is_trusted();
+
+        // 只有可信云端快照才能据“云端存在/缺失”制造成功 baseline。
+        if cloud_tree_trusted {
+            self.reconcile_db_records(&local, &db);
+        } else {
+            tracing::warn!("云端树不可信，跳过 DB reconcile");
+        }
 
         let db_len = db.len();
         let local_len = local.len();
@@ -1747,10 +1776,13 @@ impl SyncEngine {
             cloud: cloud.clone(),
             db,
             is_startup_resume: triggered_by == "startup-resume",
+            cloud_tree_trusted,
         };
         let mut actions = self.planner.plan(&snapshot);
         // §2.8 改名检测：在本地新文件上检查 xattr fileId，匹配 → 改名而非 upload+delete
-        self.detect_renames(&mut actions);
+        if cloud_tree_trusted {
+            self.detect_renames(&mut actions);
+        }
         filter_anti_oscillation(&mut actions, &self.recently_deleted_paths.lock());
         fill_parent_file_ids(&mut actions, &self.path_to_id.lock());
         // 为"云端已删目录下有内容需救援"补建目录链（跳过用户主动删除的目录）
@@ -1828,7 +1860,11 @@ impl SyncEngine {
 
         // ★ 清理残余 DB 记录：planner 不再为"双方都删了"生成 DeleteFromCloud（避免
         // 无意义的 404 API 调用），改为此处直接清理 local 和 cloud 都不存在的 DB 行。
-        self.purge_stale_db_records(&local, &cloud);
+        if cloud_tree_trusted {
+            self.purge_stale_db_records(&local, &cloud);
+        } else {
+            tracing::warn!("云端树不可信，跳过 stale DB purge");
+        }
 
         // #7 contentChanged 逻辑（对齐 dart：仅结构性操作成功才 true）
         let content_changed = actions.iter().zip(results.iter()).any(|(a, r)| {
@@ -2249,16 +2285,22 @@ impl SyncEngine {
             // 若 fileId 存在但路径不同 → 说明用户复制了带 xattr 的已同步文件到新位置，
             // 不能创建 DB 记录，否则 planner 会误判为 "云端已删除" → DeleteFromLocal（数据丢失）。
             // 新路径的文件应由 planner 的 Upload 分支处理（local_exists, !cloud_exists, !db_exists）。
-            if let Some(cloud_file) = ct.get(rel) {
-                if cloud_file.id != file_id {
-                    tracing::info!(
-                        rel = %rel,
-                        xattr_fid = %file_id,
-                        cloud_fid = %cloud_file.id,
-                        "reconcile 跳过：xattr fileId 与 cloud_tree 不一致（可能为复制文件），由 planner 正常处理"
-                    );
-                    continue;
-                }
+            let Some(cloud_file) = ct.get(rel) else {
+                tracing::info!(
+                    rel = %rel,
+                    xattr_fid = %file_id,
+                    "reconcile 跳过：可信 cloud_tree 同路径不存在，禁止制造已同步 baseline"
+                );
+                continue;
+            };
+            if cloud_file.id != file_id {
+                tracing::info!(
+                    rel = %rel,
+                    xattr_fid = %file_id,
+                    cloud_fid = %cloud_file.id,
+                    "reconcile 跳过：xattr fileId 与 cloud_tree 不一致（可能为复制文件），由 planner 正常处理"
+                );
+                continue;
             }
             let _ = repository::upsert(
                 &conn,
@@ -2464,6 +2506,48 @@ impl SyncEngine {
         result
     }
 
+    /// Build a full candidate without touching the last trusted checkpoint, replay every change
+    /// that occurred during BFS, persist tree/path/cursor as one unit, then install that unit.
+    async fn build_and_commit_full_checkpoint(&self, abs_dir: &str) -> AppResult<()> {
+        let result = async {
+            self.ensure_cycle_active()?;
+            let start_cursor = self.start_cursor_source.get_start_cursor().await?;
+            self.ensure_cycle_active()?;
+            let (mut tree, mut path_to_id, root_folder_id) =
+                cloud_tree::refresh_cloud_tree(&self.files_api, &self.mount, abs_dir).await?;
+            self.ensure_cycle_active()?;
+            let (changes, final_cursor) = self.changes_api.list_all_changes(&start_cursor).await?;
+            Self::apply_changes_to_candidate(
+                &mut tree,
+                &mut path_to_id,
+                root_folder_id.as_deref(),
+                &changes,
+            )?;
+            let checkpoint = cloud_tree::CloudTreeCache::new_trusted(
+                root_folder_id,
+                tree,
+                path_to_id,
+                final_cursor,
+            )?;
+            self.ensure_cycle_active()?;
+            cloud_tree::persist_cloud_checkpoint(abs_dir, &checkpoint)?;
+            self.ensure_cycle_active()?;
+            self.install_cloud_checkpoint(checkpoint);
+            if let Ok(legacy_cursor) = crate::core::cache_paths::changes_cursor_file(abs_dir) {
+                let _ = std::fs::remove_file(legacy_cursor);
+            }
+            self.incremental_since_full.store(0, Ordering::Relaxed);
+            Ok(())
+        }
+        .await;
+        if result.is_err() {
+            // Keep the old live candidate for non-destructive display, but cloud absence is now
+            // unknown and must not drive delete/reconcile/purge decisions.
+            self.set_cloud_tree_trusted(false);
+        }
+        result
+    }
+
     /// Full refresh stage owned by the cycle coordinator.
     async fn refresh_cloud_full_for_cycle(&self) -> AppResult<()> {
         let _activity = self.begin_external_activity()?;
@@ -2479,26 +2563,21 @@ impl SyncEngine {
             runtime.sync_phase = Some("indexing-manual".to_string());
         })?;
         // 无论成功失败都要复位 is_indexing，避免 BFS 出错后状态条卡在索引态
-        let refresh_result =
-            cloud_tree::refresh_cloud_tree(&self.files_api, &self.mount, &abs_dir).await;
+        let refresh_result = self.build_and_commit_full_checkpoint(&abs_dir).await;
         self.ensure_cycle_active()?;
         let reset_result = self.update_runtime_and_broadcast(|runtime| {
             runtime.is_indexing = false;
             runtime.sync_phase = None;
         });
-        let (tree, p2i, root) = match refresh_result {
-            Ok(refreshed) => {
+        match refresh_result {
+            Ok(()) => {
                 reset_result?;
-                refreshed
             }
             Err(error) => {
                 let _ = reset_result;
                 return Err(error);
             }
-        };
-        *self.cloud_tree.lock() = tree;
-        *self.path_to_id.lock() = p2i;
-        *self.root_folder_id.lock() = root;
+        }
         Ok(())
     }
 
@@ -2557,12 +2636,7 @@ impl SyncEngine {
 
     /// 增量优先：有 cursor → changes API merge；失败/无 cursor → 全量 BFS。
     async fn try_incremental_or_full_refresh(&self, abs_dir: &str) -> AppResult<()> {
-        let cursor_path = crate::core::cache_paths::changes_cursor_file(abs_dir)?;
-        let saved_cursor = std::fs::read_to_string(&cursor_path)
-            .ok()
-            .filter(|s| !s.trim().is_empty());
-
-        // 安全网：连续增量达阈值 → 强制全量，纠正改名/移动/新建文件的累积偏差
+        let saved_cursor = self.cloud_cursor.lock().clone();
         let consecutive = self.incremental_since_full.load(Ordering::Relaxed);
         let force_full = consecutive >= INCREMENTAL_FORCED_FULL_THRESHOLD;
         if force_full {
@@ -2573,208 +2647,211 @@ impl SyncEngine {
             );
         }
 
-        if !force_full {
-            if let Some(ref cursor) = saved_cursor {
-                // 增量路径：先查询云端变更，再 merge（phase 分两步：querying → syncing）
+        if !force_full && self.cloud_tree_is_trusted() {
+            if let Some(cursor) = saved_cursor.filter(|cursor| !cursor.trim().is_empty()) {
                 self.set_phase("querying-changes")?;
-                match self.changes_api.list_all_changes(Some(cursor)).await {
-                    Ok((changes, new_cursor)) => {
-                        self.ensure_cycle_active()?;
-                        tracing::info!(
-                            count = changes.len(),
-                            "增量 changes 拉取成功，merge 进 cloud_tree"
-                        );
-                        let (hit, resolved, skipped) = self.merge_changes_into_cloud_tree(&changes);
-                        // 若全部变更都无法解析（如从回收站恢复后 parent_folder 缺失），
-                        // 增量 merge 完全无效 → 回退全量 BFS，确保 cloud_tree 正确更新。
-                        if hit == 0 && resolved == 0 && skipped > 0 {
-                            tracing::info!(
-                                skipped,
-                                "增量 merge 全部 skip（可能为恢复操作），回退全量 BFS"
-                            );
-                            let _ = std::fs::remove_file(&cursor_path);
-                            // fall through to full BFS below
-                        } else {
-                            // 更新 cursor（new_cursor 为 None 表示已追平，保留旧 cursor 即可）
-                            let to_write = new_cursor.as_deref().unwrap_or(cursor);
-                            let _ = std::fs::write(&cursor_path, to_write);
-                            // 计数 +1（下次达阈值会强制全量）
-                            self.incremental_since_full.fetch_add(1, Ordering::Relaxed);
-                            return Ok(());
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "增量 changes 失败，回退全量 BFS 并清 cursor");
-                        let _ = std::fs::remove_file(&cursor_path);
+                let incremental = async {
+                    let (changes, final_cursor) =
+                        self.changes_api.list_all_changes(&cursor).await?;
+                    self.ensure_cycle_active()?;
+                    let mut tree = self.cloud_tree.lock().clone();
+                    let mut path_to_id = self.path_to_id.lock().clone();
+                    let root_folder_id = self.root_folder_id.lock().clone();
+                    Self::apply_changes_to_candidate(
+                        &mut tree,
+                        &mut path_to_id,
+                        root_folder_id.as_deref(),
+                        &changes,
+                    )?;
+                    let checkpoint = cloud_tree::CloudTreeCache::new_trusted(
+                        root_folder_id,
+                        tree,
+                        path_to_id,
+                        final_cursor,
+                    )?;
+                    self.ensure_cycle_active()?;
+                    cloud_tree::persist_cloud_checkpoint(abs_dir, &checkpoint)?;
+                    self.ensure_cycle_active()?;
+                    self.install_cloud_checkpoint(checkpoint);
+                    self.incremental_since_full.fetch_add(1, Ordering::Relaxed);
+                    Ok::<(), AppError>(())
+                }
+                .await;
+                match incremental {
+                    Ok(()) => return Ok(()),
+                    Err(error) => {
+                        self.set_cloud_tree_trusted(false);
+                        tracing::warn!(%error, "增量 checkpoint 失败，保留旧盘并回退可信全量刷新");
                     }
                 }
             }
         }
 
-        // 全量 BFS 路径（无 cursor / 增量失败 / 强制纠偏）
         self.set_phase("indexing-auto-full")?;
-        let (tree, p2i, root) =
-            cloud_tree::refresh_cloud_tree(&self.files_api, &self.mount, abs_dir).await?;
-        self.ensure_cycle_active()?;
-        *self.cloud_tree.lock() = tree;
-        *self.path_to_id.lock() = p2i;
-        *self.root_folder_id.lock() = root;
-        // 全量成功后：清旧 cursor + 计数归零 + 重建增量基线（否则本会话后续一直走全量）
-        let _ = std::fs::remove_file(&cursor_path);
-        self.incremental_since_full.store(0, Ordering::Relaxed);
-        self.try_init_changes_cursor_abs(abs_dir).await;
-        Ok(())
+        self.build_and_commit_full_checkpoint(abs_dir).await
     }
 
-    /// 全量 BFS 后尝试取 changes 首页游标建立增量基线。失败静默。
-    /// 已有 cursor 则不重复初始化；不支持时退化为「首次自动刷新走全量」，不报错。
-    async fn try_init_changes_cursor(&self, mount_dir: &str) {
-        #[cfg(test)]
-        if self.startup_cloud_hook.is_some() {
-            return;
-        }
-        let abs_dir = crate::core::paths::expand_tilde(mount_dir);
-        self.try_init_changes_cursor_abs(&abs_dir).await;
-    }
-
-    /// 同 try_init_changes_cursor，但直接用 abs_dir（供 try_incremental_or_full_refresh 复用）。
-    async fn try_init_changes_cursor_abs(&self, abs_dir: &str) {
-        let cursor_path = match crate::core::cache_paths::changes_cursor_file(abs_dir) {
-            Ok(p) => p,
-            Err(_) => return,
-        };
-        // 已有 cursor 则不重复初始化
-        if cursor_path.exists() {
-            return;
-        }
-        let _activity = match self.begin_external_activity() {
-            Ok(activity) => activity,
-            Err(error) => {
-                tracing::debug!(%error, "引擎已停止，跳过 changes startCursor 初始化");
-                return;
-            }
-        };
-        // 取初始游标：华为 /changes 强制要求 cursor，初始 cursor 必须先调 getStartCursor 获取。
-        // 失败（如接口不可用）静默，首次自动刷新会因无 cursor 走全量回退，不报错。
-        match self.start_cursor_source.get_start_cursor().await {
-            Ok(c) => {
-                let _ = std::fs::write(&cursor_path, &c);
-                tracing::info!(cursor = %c, "已建立 changes 增量基线 cursor");
-            }
-            Err(e) => {
-                tracing::debug!(error = %e, "取 changes startCursor 失败（忽略，首次自动刷新会全量回退）")
-            }
-        }
-    }
-
-    /// 把增量 changes merge 进内存 cloud_tree + path_to_id（按 fileId 反查 rel_path 增删改）。
-    ///
-    /// 对于新建文件/文件夹（rel_path 未知），利用 Change.file.parent_folder 反向解析路径：
-    /// 通过父目录 ID 在 path_to_id 中查找父路径，拼接 `parent_rel + "/" + file.name`。
-    /// 使用不动点循环处理嵌套新建目录（如一次性新建 A/B/C/file.txt），每轮能解析的
-    /// 立即插入，使后续项可找到父目录。仍无法解析的跳过，靠定期全量 BFS 兜底。
-    ///
-    /// 已知局限：
-    /// - 改名/移动（已知 id 但 rel_path 已变）：会按旧 rel_path 更新，与真实路径不一致，
-    ///   靠定期强制全量收敛（INCREMENTAL_FORCED_FULL_THRESHOLD）
-    fn merge_changes_into_cloud_tree(
-        &self,
+    /// 把一批 Changes 全量应用到候选树。调用方只在整个批次成功且 checkpoint
+    /// 已原子落盘后安装候选；任一无法解析的 parent/rename/move 都 fail closed。
+    fn apply_changes_to_candidate(
+        tree: &mut HashMap<String, DriveFile>,
+        path_to_id: &mut HashMap<String, String>,
+        root_folder_id: Option<&str>,
         changes: &[crate::drive::changes_api::Change],
-    ) -> (u32, u32, u32) {
+    ) -> AppResult<()> {
         use crate::drive::changes_api::ChangeKind;
-        // 先读 path_to_id 建 fileId→rel_path 反查表
-        let mut id_to_path: std::collections::HashMap<String, String> = {
-            let p2i = self.path_to_id.lock();
-            p2i.iter().map(|(p, id)| (id.clone(), p.clone())).collect()
-        };
-        let mut tree = self.cloud_tree.lock();
-        let mut p2i = self.path_to_id.lock();
-        let mut hit = 0u32;
-        let mut resolved_new = 0u32;
-        let mut skip = 0u32;
+        let mut id_to_path: HashMap<String, String> = path_to_id
+            .iter()
+            .map(|(path, id)| (id.clone(), path.clone()))
+            .collect();
+        if let Some(root_id) = root_folder_id.filter(|id| !id.trim().is_empty()) {
+            id_to_path.insert(root_id.to_string(), String::new());
+        }
 
-        // 第一遍：处理已知路径的变更 + 收集未知路径的新文件
-        let mut unknowns: Vec<&crate::drive::changes_api::Change> = Vec::new();
-        for c in changes {
-            match c.kind {
+        for change in changes {
+            match change.kind {
                 ChangeKind::Removed => {
-                    if let Some(rel) = id_to_path.get(&c.file.id) {
-                        tracing::info!(
-                            rel = %rel,
-                            fid = %c.file.id,
-                            "增量 merge：云端删除 → 从 cloud_tree/path_to_id 移除"
-                        );
-                        tree.remove(rel);
-                        p2i.remove(rel);
-                        hit += 1;
-                    } else {
-                        tracing::debug!(
-                            fid = %c.file.id,
-                            "增量 merge：未知 fileId 的删除，skip"
-                        );
-                        skip += 1;
+                    let Some(relative_path) = id_to_path.get(change.file_id()).cloned() else {
+                        // 已经不在候选树中的 tombstone 是幂等 no-op，仍算完整消费。
+                        continue;
+                    };
+                    if relative_path.is_empty() {
+                        return Err(AppError::generic("Changes 试图删除云盘根目录"));
+                    }
+
+                    let prefix = format!("{relative_path}/");
+                    let removed_paths: Vec<String> = tree
+                        .keys()
+                        .filter(|path| *path == &relative_path || path.starts_with(&prefix))
+                        .cloned()
+                        .collect();
+                    for path in removed_paths {
+                        tree.remove(&path);
+                        if let Some(id) = path_to_id.remove(&path) {
+                            id_to_path.remove(&id);
+                        }
                     }
                 }
                 ChangeKind::Modified => {
-                    if let Some(rel) = id_to_path.get(&c.file.id) {
-                        // 已知路径：更新 cloud_tree
-                        tree.insert(rel.clone(), c.file.clone());
-                        hit += 1;
-                    } else {
-                        // 未知路径：收集待解析
-                        unknowns.push(c);
-                    }
-                }
-            }
-        }
-
-        // 不动点循环：反复尝试解析未知文件的路径，每轮能解析的立即插入 id_to_path/p2i/tree
-        // 以支持嵌套新建目录（如 A/ → A/B/ → A/B/file.txt）
-        if !unknowns.is_empty() {
-            loop {
-                let mut progress = false;
-                let mut still_unknown: Vec<&crate::drive::changes_api::Change> = Vec::new();
-                for c in unknowns {
-                    // 从 parent_folder[0] 查找父目录路径
-                    let parent_id = c
-                        .file
+                    let file = change.file().ok_or_else(|| {
+                        AppError::generic(format!(
+                            "非删除 Change 缺少完整文件：{}",
+                            change.file_id()
+                        ))
+                    })?;
+                    crate::core::paths::validate_path_segment(&file.name)?;
+                    let parent_id = file
                         .parent_folder
                         .as_ref()
-                        .and_then(|v| v.first())
-                        .filter(|s| !s.is_empty());
-                    let Some(parent_rel) = parent_id.and_then(|pid| id_to_path.get(pid)) else {
-                        still_unknown.push(c);
-                        continue;
-                    };
-                    // 构造相对路径：parent_rel + "/" + name（根目录下不加前缀 "/"）
-                    let rel = if parent_rel.is_empty() {
-                        c.file.name.clone()
+                        .and_then(|parents| parents.first())
+                        .filter(|id| !id.trim().is_empty())
+                        .ok_or_else(|| {
+                            AppError::generic(format!(
+                                "Change {} 缺少可解析 parentFolder",
+                                change.file_id()
+                            ))
+                        })?;
+                    if parent_id == change.file_id() {
+                        return Err(AppError::generic("Change 的 parentFolder 指向自身"));
+                    }
+                    let parent_path = id_to_path.get(parent_id).cloned().ok_or_else(|| {
+                        AppError::generic(format!(
+                            "Change {} 的 parentFolder {} 无法映射到可信路径",
+                            change.file_id(),
+                            parent_id
+                        ))
+                    })?;
+                    let desired_path = if parent_path.is_empty() {
+                        file.name.clone()
                     } else {
-                        format!("{}/{}", parent_rel, c.file.name)
+                        format!("{parent_path}/{}", file.name)
                     };
-                    // 插入云端树 + 路径映射
-                    tree.insert(rel.clone(), c.file.clone());
-                    p2i.insert(rel.clone(), c.file.id.clone());
-                    id_to_path.insert(c.file.id.clone(), rel);
-                    resolved_new += 1;
-                    progress = true;
-                }
-                unknowns = still_unknown;
-                if !progress {
-                    break;
+
+                    if let Some(existing_path) = id_to_path.get(change.file_id()).cloned() {
+                        if existing_path.is_empty() {
+                            return Err(AppError::generic("Changes 不支持修改云盘根目录"));
+                        }
+                        if existing_path != desired_path {
+                            if desired_path.starts_with(&format!("{existing_path}/")) {
+                                return Err(AppError::generic("Change 试图把目录移动到自身子树"));
+                            }
+                            Self::rekey_candidate_subtree(
+                                tree,
+                                path_to_id,
+                                &mut id_to_path,
+                                &existing_path,
+                                &desired_path,
+                            )?;
+                        }
+                    } else if let Some(existing_id) = path_to_id.get(&desired_path) {
+                        if existing_id != change.file_id() {
+                            return Err(AppError::generic(format!(
+                                "Change 目标路径冲突：{desired_path}"
+                            )));
+                        }
+                    };
+
+                    tree.insert(desired_path.clone(), file.clone());
+                    path_to_id.insert(desired_path.clone(), change.file_id().to_string());
+                    id_to_path.insert(change.file_id().to_string(), desired_path);
                 }
             }
-            skip += unknowns.len() as u32;
+        }
+        Ok(())
+    }
+
+    fn rekey_candidate_subtree(
+        tree: &mut HashMap<String, DriveFile>,
+        path_to_id: &mut HashMap<String, String>,
+        id_to_path: &mut HashMap<String, String>,
+        old_root: &str,
+        new_root: &str,
+    ) -> AppResult<()> {
+        let old_prefix = format!("{old_root}/");
+        let moved_paths: Vec<String> = tree
+            .keys()
+            .filter(|path| path.as_str() == old_root || path.starts_with(&old_prefix))
+            .cloned()
+            .collect();
+        if moved_paths.is_empty() {
+            return Err(AppError::generic(format!(
+                "Change 引用的旧路径不在候选树：{old_root}"
+            )));
+        }
+        let moved_set: std::collections::HashSet<&str> =
+            moved_paths.iter().map(String::as_str).collect();
+        let targets: Vec<(String, String)> = moved_paths
+            .iter()
+            .map(|old_path| {
+                let suffix = old_path.strip_prefix(old_root).unwrap_or_default();
+                (old_path.clone(), format!("{new_root}{suffix}"))
+            })
+            .collect();
+        for (_, target) in &targets {
+            if tree.contains_key(target) && !moved_set.contains(target.as_str()) {
+                return Err(AppError::generic(format!(
+                    "Change 移动/改名目标路径已存在：{target}"
+                )));
+            }
         }
 
-        tracing::info!(
-            total = changes.len(),
-            hit,
-            resolved_new,
-            skip,
-            "增量 merge 完成（hit=已知更新, resolved=新文件路径解析, skip=仍未知跳过）"
-        );
-        (hit, resolved_new, skip)
+        let mut moved = Vec::with_capacity(targets.len());
+        for (old_path, new_path) in targets {
+            let file = tree
+                .remove(&old_path)
+                .ok_or_else(|| AppError::generic(format!("候选树移动时路径消失：{old_path}")))?;
+            let file_id = path_to_id.remove(&old_path).ok_or_else(|| {
+                AppError::generic(format!("候选路径索引移动时路径消失：{old_path}"))
+            })?;
+            id_to_path.remove(&file_id);
+            moved.push((new_path, file_id, file));
+        }
+        for (new_path, file_id, file) in moved {
+            id_to_path.insert(file_id.clone(), new_path.clone());
+            path_to_id.insert(new_path.clone(), file_id);
+            tree.insert(new_path, file);
+        }
+        Ok(())
     }
 
     /// §2.11 防误删校验：对 DeleteFromCloud 动作，实际 stat 本地文件是否真的不存在。
@@ -4055,11 +4132,14 @@ mod tests {
         engine.start_cursor_source = source.clone();
         let mount = tempfile::tempdir().unwrap();
         let mount_dir = mount.path().to_string_lossy().into_owned();
-        let cursor_path = crate::core::cache_paths::changes_cursor_file(&mount_dir).unwrap();
-        let _ = std::fs::remove_file(&cursor_path);
+        let checkpoint_path = crate::core::cache_paths::cloud_tree_cache_file(&mount_dir).unwrap();
+        let _ = std::fs::remove_file(&checkpoint_path);
 
         engine.shutdown_sync();
-        engine.try_init_changes_cursor_abs(&mount_dir).await;
+        assert!(engine
+            .build_and_commit_full_checkpoint(&mount_dir)
+            .await
+            .is_err());
 
         assert_eq!(
             source.calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -4067,8 +4147,8 @@ mod tests {
             "closed engines must not start getStartCursor"
         );
         assert!(
-            !cursor_path.exists(),
-            "closed engines must not write cursor cache"
+            !checkpoint_path.exists(),
+            "closed engines must not write cloud checkpoint"
         );
     }
 
@@ -7395,6 +7475,7 @@ mod tests {
             local,
             cloud: std::collections::HashMap::new(),
             db,
+            cloud_tree_trusted: true,
             is_startup_resume: false,
         };
         // 模拟 planner 产出的备份动作
@@ -7502,6 +7583,7 @@ mod tests {
             local,
             cloud,
             db,
+            cloud_tree_trusted: true,
             is_startup_resume: false,
         };
         let mut actions = vec![SyncAction {
