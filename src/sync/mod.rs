@@ -12,4 +12,5 @@ pub mod stability;
 pub mod state;
 pub mod status_aggregator;
 pub mod sync_state_store;
+pub mod task_runner;
 pub mod transfer_state;

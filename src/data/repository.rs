@@ -38,6 +38,7 @@ pub mod sync_status {
 pub mod transfer_direction {
     pub const UPLOAD: i32 = 0;
     pub const DOWNLOAD: i32 = 1;
+    #[allow(dead_code)]
     pub const DELETE: i32 = 2;
     /// 云端新版本覆盖本地已有文件（语义为「更新」，区别于首次拉取的 DOWNLOAD）。
     /// 仅同步引擎的 Download 动作在本地已有真实内容时使用；与 DOWNLOAD 共享下载执行路径。
@@ -191,6 +192,18 @@ pub struct TransferPatch {
     pub resume_offset: Option<i64>,
     /// `Some` replaces the non-null attempt count; `None` preserves it.
     pub attempt_count: Option<i64>,
+}
+
+/// Running-only progress/session patch guarded by task ID and lifecycle revision.
+/// These updates intentionally do not increment `state_revision`: a lifecycle settlement does,
+/// making every late callback fail the `(id, revision, Running)` predicate.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RunningTransferPatch {
+    pub transferred: Option<i64>,
+    pub resume_offset: Option<i64>,
+    pub server_id: ColumnPatch<String>,
+    pub upload_id: ColumnPatch<String>,
+    pub session_url: ColumnPatch<String>,
 }
 
 // ===== SyncItems 仓储 =====
@@ -451,6 +464,145 @@ pub fn transition_transfer(
     Ok(updated)
 }
 
+/// Update mutable error/retry fields without changing lifecycle state.
+/// This is only for truthful same-state facts such as a rejected manual retry that remains
+/// Failed; lifecycle changes must use [`transition_transfer`].
+pub fn patch_transfer_in_state(
+    conn: &Connection,
+    task_id: i64,
+    expected_revision: i64,
+    expected_state: TransferState,
+    patch: TransferPatch,
+) -> Result<TransferTask, TransitionError> {
+    let current = conn
+        .query_row(
+            "SELECT * FROM transfer_queue WHERE id=?1",
+            params![task_id],
+            TransferTask::from_row,
+        )
+        .optional()?
+        .ok_or(TransitionError::NotFound { task_id })?;
+    if current.state_revision != expected_revision || current.state_kind()? != expected_state {
+        return Err(TransitionError::StaleRevision {
+            task_id,
+            expected_revision,
+        });
+    }
+
+    let TransferPatch {
+        error_kind,
+        error_message,
+        next_retry_at,
+        finished_at,
+        remote_result_file_id,
+        session_url,
+        transferred,
+        resume_offset,
+        attempt_count,
+    } = patch;
+    let (error_kind_mode, error_kind) = nullable_patch(error_kind);
+    let error_kind = error_kind.map(i32::from);
+    let (error_message_mode, error_message) = nullable_patch(error_message);
+    let (next_retry_at_mode, next_retry_at) = nullable_patch(next_retry_at);
+    let (finished_at_mode, finished_at) = nullable_patch(finished_at);
+    let (remote_result_file_id_mode, remote_result_file_id) = nullable_patch(remote_result_file_id);
+    let (session_url_mode, session_url) = nullable_patch(session_url);
+    let changed = conn.execute(
+        "UPDATE transfer_queue SET
+            error_kind=CASE ?1 WHEN 0 THEN error_kind WHEN 1 THEN ?2 ELSE NULL END,
+            error_message=CASE ?3 WHEN 0 THEN error_message WHEN 1 THEN ?4 ELSE NULL END,
+            next_retry_at=CASE ?5 WHEN 0 THEN next_retry_at WHEN 1 THEN ?6 ELSE NULL END,
+            finished_at=CASE ?7 WHEN 0 THEN finished_at WHEN 1 THEN ?8 ELSE NULL END,
+            remote_result_file_id=CASE ?9 WHEN 0 THEN remote_result_file_id WHEN 1 THEN ?10 ELSE NULL END,
+            session_url=CASE ?11 WHEN 0 THEN session_url WHEN 1 THEN ?12 ELSE NULL END,
+            transferred=CASE WHEN ?13 IS NULL THEN transferred ELSE ?13 END,
+            resume_offset=CASE WHEN ?14 IS NULL THEN resume_offset ELSE ?14 END,
+            attempt_count=CASE WHEN ?15 IS NULL THEN attempt_count ELSE ?15 END,
+            state_revision=state_revision+1
+         WHERE id=?16 AND state_revision=?17 AND state=?18",
+        params![
+            error_kind_mode,
+            error_kind,
+            error_message_mode,
+            error_message,
+            next_retry_at_mode,
+            next_retry_at,
+            finished_at_mode,
+            finished_at,
+            remote_result_file_id_mode,
+            remote_result_file_id,
+            session_url_mode,
+            session_url,
+            transferred,
+            resume_offset,
+            attempt_count,
+            task_id,
+            expected_revision,
+            i32::from(expected_state),
+        ],
+    )?;
+    if changed != 1 {
+        return Err(TransitionError::StaleRevision {
+            task_id,
+            expected_revision,
+        });
+    }
+    conn.query_row(
+        "SELECT * FROM transfer_queue WHERE id=?1",
+        params![task_id],
+        TransferTask::from_row,
+    )
+    .optional()?
+    .ok_or(TransitionError::NotFound { task_id })
+}
+
+/// Update progress/session data only while the exact task revision is Running.
+pub fn update_running_transfer(
+    conn: &Connection,
+    task_id: i64,
+    expected_revision: i64,
+    patch: RunningTransferPatch,
+) -> Result<TransferTask, TransitionError> {
+    let (server_mode, server_id) = nullable_patch(patch.server_id);
+    let (upload_mode, upload_id) = nullable_patch(patch.upload_id);
+    let (session_mode, session_url) = nullable_patch(patch.session_url);
+    let changed = conn.execute(
+        "UPDATE transfer_queue SET
+            transferred=CASE WHEN ?1 IS NULL THEN transferred ELSE ?1 END,
+            resume_offset=CASE WHEN ?2 IS NULL THEN resume_offset ELSE ?2 END,
+            server_id=CASE ?3 WHEN 0 THEN server_id WHEN 1 THEN ?4 ELSE NULL END,
+            upload_id=CASE ?5 WHEN 0 THEN upload_id WHEN 1 THEN ?6 ELSE NULL END,
+            session_url=CASE ?7 WHEN 0 THEN session_url WHEN 1 THEN ?8 ELSE NULL END
+         WHERE id=?9 AND state_revision=?10 AND state=?11",
+        params![
+            patch.transferred,
+            patch.resume_offset,
+            server_mode,
+            server_id,
+            upload_mode,
+            upload_id,
+            session_mode,
+            session_url,
+            task_id,
+            expected_revision,
+            i32::from(TransferState::Running),
+        ],
+    )?;
+    if changed != 1 {
+        return Err(TransitionError::StaleRevision {
+            task_id,
+            expected_revision,
+        });
+    }
+    conn.query_row(
+        "SELECT * FROM transfer_queue WHERE id=?1",
+        params![task_id],
+        TransferTask::from_row,
+    )
+    .optional()?
+    .ok_or(TransitionError::NotFound { task_id })
+}
+
 /// Transition core for callers that must settle related rows in the same transaction.
 pub(crate) fn transition_transfer_in_transaction(
     conn: &Connection,
@@ -619,59 +771,10 @@ pub fn list_all_transfers(conn: &Connection) -> AppResult<Vec<TransferTask>> {
     collect_tasks(stmt.query_map([], TransferTask::from_row))
 }
 
-/// 更新传输任务状态/进度。
-#[allow(dead_code)]
-pub fn update_transfer_state(
-    conn: &Connection,
-    id: i64,
-    state: i32,
-    transferred: i64,
-    finished_at: Option<i64>,
-    error_message: Option<&str>,
-) -> AppResult<()> {
-    db_err!(
-        "更新传输任务",
-        conn.execute(
-            "UPDATE transfer_queue SET state = ?1, transferred = ?2, finished_at = ?3, error_message = ?4 WHERE id = ?5",
-            params![state, transferred, finished_at, error_message, id],
-        )
-    );
-    Ok(())
-}
-
 /// 清空传输队列表。
 pub fn delete_all_transfers(conn: &Connection) -> AppResult<()> {
     db_err!("清空", conn.execute("DELETE FROM transfer_queue", []));
     Ok(())
-}
-
-/// 结算传输任务：成功 → COMPLETED + transferred=total_size；失败 → FAILED + transferred 保持。
-///
-/// 替代 commands.rs 中 3 处重复的结算 SQL（download_on_demand / folder_recursive 下载循环 / 上传循环）。
-/// 错误仅忽略（与原内联实现一致——结算失败不应阻断主流程）。
-pub fn settle_transfer_by_id(
-    conn: &Connection,
-    task_id: i64,
-    success: bool,
-    error_message: Option<&str>,
-) {
-    let (state, transferred_sql) = if success {
-        (transfer_state::COMPLETED, "transferred = total_size")
-    } else {
-        (transfer_state::FAILED, "transferred = transferred")
-    };
-    let sql = format!(
-        "UPDATE transfer_queue SET state=?1, error_message=?2, finished_at=?3, {transferred_sql} WHERE id=?4"
-    );
-    let _ = conn.execute(
-        &sql,
-        params![
-            state,
-            error_message,
-            chrono::Utc::now().timestamp_millis(),
-            task_id
-        ],
-    );
 }
 
 /// 修剪传输历史：保留最近 N 条已结束任务（completed/failed/canceled）。
@@ -924,13 +1027,19 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(updated.state_kind().unwrap(), TransferState::VerifyingRemote);
+        assert_eq!(
+            updated.state_kind().unwrap(),
+            TransferState::VerifyingRemote
+        );
         assert_eq!(updated.state_revision, 1);
         assert_eq!(updated.error_kind, original.error_kind);
         assert_eq!(updated.error_message, original.error_message);
         assert_eq!(updated.next_retry_at, original.next_retry_at);
         assert_eq!(updated.finished_at, original.finished_at);
-        assert_eq!(updated.remote_result_file_id, original.remote_result_file_id);
+        assert_eq!(
+            updated.remote_result_file_id,
+            original.remote_result_file_id
+        );
         assert_eq!(updated.session_url, original.session_url);
         assert_eq!(updated.transferred, original.transferred);
         assert_eq!(updated.resume_offset, original.resume_offset);

@@ -91,15 +91,6 @@ pub fn mount() -> AppResult<Arc<MountManager>> {
 /// 全局 SyncEngine（setup 或首次配置时注入；运行期共享同一实例）
 static SYNC_ENGINE: Mutex<Option<Arc<SyncEngine>>> = Mutex::new(None);
 
-/// 全局传输更新广播发送端（供非 executor 路径的同步进度回调触发前端刷新，如双端对齐）。
-/// 由 ensure_engine_started 创建并 set。回调拿不到 AppHandle，但能通过此全局 tx 触发刷新。
-static TRANSFER_UPDATE_TX: Mutex<Option<tokio::sync::broadcast::Sender<()>>> = Mutex::new(None);
-
-/// 设置传输更新广播发送端。
-pub fn set_transfer_update_tx(tx: tokio::sync::broadcast::Sender<()>) {
-    *TRANSFER_UPDATE_TX.lock() = Some(tx);
-}
-
 /// 设置 SyncEngine。
 pub fn set_sync_engine(e: Arc<SyncEngine>) {
     *SYNC_ENGINE.lock() = Some(e);
@@ -241,8 +232,7 @@ pub fn ensure_engine_started(app: &AppHandle) -> AppResult<()> {
     executor.set_transfer_update_tx(transfer_update_tx.clone());
     // 注入 AppHandle：上传失败时直接 emit upload_failed → 前端弹 toast
     executor.set_app_handle(app.clone());
-    // 存入全局，供双端对齐等非 executor 路径的进度回调触发前端刷新
-    set_transfer_update_tx(transfer_update_tx);
+    let task_runner = executor.initialize_task_runner()?;
     // 传输进度实时推送监听器
     {
         let app_for_transfer = app.clone();
@@ -250,8 +240,9 @@ pub fn ensure_engine_started(app: &AppHandle) -> AppResult<()> {
             loop {
                 match transfer_update_rx.recv().await {
                     Ok(()) => {
-                        // 刷新传输面板 + 状态条计数 + 托盘菜单「正在传输」段
-                        notify_transfer(&app_for_transfer);
+                        use tauri::Emitter;
+                        let _ = app_for_transfer.emit("transfer_update", ());
+                        crate::platform::tray::refresh_menu(&app_for_transfer);
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -276,6 +267,15 @@ pub fn ensure_engine_started(app: &AppHandle) -> AppResult<()> {
     engine.set_executor(executor);
 
     let engine = Arc::new(engine);
+    {
+        let weak_engine = Arc::downgrade(&engine);
+        task_runner.set_state_sink(Arc::new(move || {
+            let engine = weak_engine
+                .upgrade()
+                .ok_or_else(|| AppError::generic("同步引擎已停止"))?;
+            engine.recompute_and_broadcast_state().map(|_| ())
+        }));
+    }
     set_sync_engine(engine.clone());
 
     // 异步启动引擎（start 内含 BFS + watcher，不阻塞调用方）
@@ -295,12 +295,8 @@ pub fn ensure_engine_started(app: &AppHandle) -> AppResult<()> {
                 match rx.recv().await {
                     Ok(state) => {
                         emit_sync_state(&bridge_app, &state);
-                        // 注意：此处不再调 emit_transfer_update。
-                        // emit_transfer_update 内部会调 push_live_transfer_state（广播 sync_state），
-                        // 而本桥接监听 sync_state → 会形成无限循环（emit_transfer_update →
-                        // push_live_transfer_state → sync_state 广播 → 本桥接 → emit_transfer_update …），
-                        // 导致 CPU 满载 + UI 卡死。sync_state 已携带传输计数，无需反向触发。
-                        // 同步刷新托盘菜单的「正在传输」段（refresh_menu 不触发 sync_state 广播，安全）
+                        // sync_state is already the complete authoritative snapshot. Transfer
+                        // list refresh is emitted by TaskRunner's separate transfer_update sink.
                         crate::platform::tray::refresh_menu(&bridge_app);
                         if state.content_changed {
                             emit_folder_content_changed(&bridge_app);
@@ -610,10 +606,59 @@ pub async fn drive_download_file(file_id: String, dest_path: String) -> AppResul
     let dest = std::path::PathBuf::from(&dest_path);
     let rel = crate::core::paths::relative_path_from_mount(m.mount_dir(), &dest)?;
     let dest = crate::core::paths::safe_join_under(m.mount_dir(), &rel, false)?;
-    let progress: crate::drive::download_api::ProgressFn = Box::new(|_, _| {});
-    DOWNLOAD_API
-        .download(&file_id, &dest, Some(&progress))
-        .await
+    let cloud = FILES_API.get(&file_id).await?;
+    let is_update = dest.is_file();
+    let operation = if is_update {
+        crate::sync::transfer_state::TransferOperation::DownloadUpdate
+    } else {
+        crate::sync::transfer_state::TransferOperation::Download
+    };
+    let result = sync_engine()?
+        .task_runner()?
+        .enqueue_and_run(repository::TransferTask {
+            id: 0,
+            direction: if is_update {
+                repository::transfer_direction::DOWNLOAD_UPDATE
+            } else {
+                repository::transfer_direction::DOWNLOAD
+            },
+            file_id: Some(file_id),
+            local_path: Some(dest.to_string_lossy().into_owned()),
+            name: cloud.name,
+            total_size: cloud.size,
+            transferred: 0,
+            state: i32::from(crate::sync::transfer_state::TransferState::Pending),
+            error_message: None,
+            created_at: chrono::Utc::now().timestamp_millis(),
+            finished_at: None,
+            server_id: None,
+            upload_id: None,
+            resume_offset: 0,
+            session_url: None,
+            relative_path: Some(rel),
+            parent_file_id: cloud
+                .parent_folder
+                .as_ref()
+                .and_then(|parents| parents.first().cloned()),
+            operation: Some(i32::from(operation)),
+            source_mtime: None,
+            source_size: None,
+            expected_cloud_edited_time: cloud.edited_time.map(|time| time.timestamp_millis()),
+            attempt_count: 0,
+            next_retry_at: None,
+            error_kind: None,
+            remote_result_file_id: None,
+            state_revision: 0,
+        })
+        .await?;
+    if result.outcome.disposition == crate::sync::task_runner::TaskDisposition::Completed {
+        Ok(())
+    } else {
+        Err(AppError::generic(format!(
+            "下载已进入恢复队列：{:?}",
+            result.outcome.disposition
+        )))
+    }
 }
 
 #[tauri::command]
@@ -625,10 +670,57 @@ pub async fn drive_upload_file(
     let path = std::path::PathBuf::from(&local_path);
     let rel = crate::core::paths::relative_path_from_mount(m.mount_dir(), &path)?;
     let path = crate::core::paths::safe_join_under(m.mount_dir(), &rel, false)?;
-    let progress: crate::drive::upload_api::ProgressFn = Box::new(|_| {});
-    UPLOAD_API
-        .upload(&path, parent_id.as_deref(), Some(&progress), None)
-        .await
+    let parent_id = parent_id.filter(|id| !id.trim().is_empty());
+    let metadata = std::fs::metadata(&path)
+        .map_err(|error| AppError::generic(format!("读取上传源失败：{error}")))?;
+    let source_mtime = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis() as i64);
+    let result = sync_engine()?
+        .task_runner()?
+        .enqueue_and_run(repository::TransferTask {
+            id: 0,
+            direction: repository::transfer_direction::UPLOAD,
+            file_id: None,
+            local_path: Some(path.to_string_lossy().into_owned()),
+            name: rel.rsplit('/').next().unwrap_or(&rel).to_string(),
+            total_size: metadata.len() as i64,
+            transferred: 0,
+            state: i32::from(crate::sync::transfer_state::TransferState::Pending),
+            error_message: None,
+            created_at: chrono::Utc::now().timestamp_millis(),
+            finished_at: None,
+            server_id: None,
+            upload_id: None,
+            resume_offset: 0,
+            session_url: None,
+            relative_path: Some(rel),
+            parent_file_id: parent_id,
+            operation: Some(i32::from(
+                crate::sync::transfer_state::TransferOperation::Create,
+            )),
+            source_mtime,
+            source_size: Some(metadata.len() as i64),
+            expected_cloud_edited_time: None,
+            attempt_count: 0,
+            next_retry_at: None,
+            error_kind: None,
+            remote_result_file_id: None,
+            state_revision: 0,
+        })
+        .await?;
+    if result.outcome.disposition != crate::sync::task_runner::TaskDisposition::Completed {
+        return Err(AppError::generic(format!(
+            "上传已进入恢复队列：{:?}",
+            result.outcome.disposition
+        )));
+    }
+    result
+        .outcome
+        .cloud_file
+        .ok_or_else(|| AppError::generic("上传完成但缺少云端文件结果"))
 }
 
 // ========================================================================
@@ -813,7 +905,7 @@ pub async fn sync_free_up_space(
 
 #[tauri::command]
 pub async fn sync_download_on_demand(
-    app: AppHandle,
+    _app: AppHandle,
     file_id: String,
     dest_path: String,
 ) -> AppResult<bool> {
@@ -828,14 +920,11 @@ pub async fn sync_download_on_demand(
     let m = mount()?;
     let frontend_dest = PathBuf::from(&dest_path);
     let frontend_rel = crate::core::paths::relative_path_from_mount(m.mount_dir(), &frontend_dest)?;
-    let record_rel = {
+    let record = {
         let conn = DB.lock();
-        repository::find_by_file_id(&conn, &file_id)
-            .ok()
-            .flatten()
-            .map(|r| r.local_path)
+        repository::find_by_file_id(&conn, &file_id).ok().flatten()
     };
-    let dest_rel = match record_rel {
+    let dest_rel = match record.as_ref().map(|record| record.local_path.clone()) {
         Some(rel) => {
             crate::core::paths::validate_relative_path(&rel, false)?;
             if rel != frontend_rel {
@@ -861,139 +950,63 @@ pub async fn sync_download_on_demand(
     let cloud_edited_time = cloud_file
         .as_ref()
         .and_then(|f| f.edited_time.map(|t| t.timestamp_millis()))
-        .or_else(|| {
-            let conn = DB.lock();
-            repository::find_by_file_id(&conn, &file_id)
-                .ok()
-                .flatten()
-                .and_then(|r| r.cloud_edited_time)
-        });
-    let cloud_size = cloud_file.as_ref().map(|f| f.size).unwrap_or(0);
-    // 入队传输记录（按需下载也纳入传输队列 + 状态条「同步中」）
-    let task_id = {
-        let conn = DB.lock();
-        repository::insert_transfer(
-            &conn,
-            &repository::TransferTask {
-                id: 0,
-                direction: repository::transfer_direction::DOWNLOAD,
-                file_id: Some(file_id.clone()),
-                local_path: Some(dest.to_string_lossy().to_string()),
-                name: name.clone(),
-                total_size: cloud_size, // 云端真实大小（用于进度条）；查询失败则 0
-                transferred: 0,
-                state: repository::transfer_state::RUNNING,
-                error_message: None,
-                created_at: chrono::Utc::now().timestamp_millis(),
-                finished_at: None,
-                server_id: None,
-                upload_id: None,
-                resume_offset: 0,
-                session_url: None,
-                relative_path: Some(dest_rel.clone()),
-                parent_file_id: None,
-                operation: Some(i32::from(
-                    crate::sync::transfer_state::TransferOperation::Download,
-                )),
-                source_mtime: None,
-                source_size: None,
-                expected_cloud_edited_time: cloud_edited_time,
-                attempt_count: 0,
-                next_retry_at: None,
-                error_kind: None,
-                remote_result_file_id: None,
-                state_revision: 0,
-            },
-        )
-        .unwrap_or(0)
-    };
-    emit_transfer_update(&app); // 入队即通知：传输面板 + 状态条变「同步中」
-    let result = download_to_dest(&file_id, &dest, &name, cloud_size, cloud_edited_time).await;
-    // 结算传输记录（成功 transferred=total_size，失败保持）
-    {
-        let conn = DB.lock();
-        repository::settle_transfer_by_id(
-            &conn,
-            task_id,
-            result.is_ok(),
-            result.as_ref().err().map(|e| e.to_string()).as_deref(),
-        );
-    }
-    emit_transfer_update(&app); // 结算后通知：传输面板 + 状态条刷新
-    match result {
-        Ok(()) => Ok(true),
-        Err(e) => {
-            // 清理 .tmp 残留
-            let tmp = PathBuf::from(format!("{}.tmp", dest.display()));
-            let _ = std::fs::remove_file(&tmp);
-            Err(e)
-        }
-    }
-}
-
-/// 下载单个文件到 dest（folder sync 与 sync_download_on_demand 共用）：
-/// 备份被修改的占位（改名保留）→ 删未修改占位 → 下载 → mark_downloaded → upsert DB。
-///
-/// `cloud_edited_time`：云端 editedTime（毫秒）。必须传入真实值——写 None 会让
-/// `is_cloud_changed` 判定云端已变 → 下一轮重复下载刚下好的文件。folder sync 从
-/// DriveFile 传；downloadOnDemand 无 DriveFile 时查库保留既有值。
-async fn download_to_dest(
-    file_id: &str,
-    dest: &Path,
-    name: &str,
-    size: i64,
-    cloud_edited_time: Option<i64>,
-) -> AppResult<()> {
-    let m = mount()?;
-    // 相对挂载根的路径：DB/cloud_tree/scan_local 全用相对路径，绝对路径会与
-    // 占位时写入的相对路径记录共存（主键 file_id+local_path），形成孤儿记录
-    // 导致 planner 每轮误判（288 振荡根因）。
-    let rel = crate::core::paths::relative_path_from_mount(m.mount_dir(), dest)?;
-    if let Some(parent) = dest.parent() {
-        tokio::fs::create_dir_all(parent).await.ok();
-    }
-    // 占位被用户修改过 → 改名保留；未修改/非占位 → None
-    let _ = m.backup_modified_placeholder_if_needed(dest).await?;
-    // 未修改占位（仍存在、0 字节）或残留 → 删除，让下载干净写入
-    if dest.exists() {
-        let _ = tokio::fs::remove_file(dest).await;
-    }
-    let progress: crate::drive::download_api::ProgressFn = Box::new(|_, _| {});
-    DOWNLOAD_API
-        .download(file_id, dest, Some(&progress))
-        .await?;
-    // mark_downloaded（xattr state=downloaded + 清灰标）
-    let _ = m.mark_downloaded(dest).await;
-    // 补写 fileId xattr：删占位再下载产生新 inode，占位时的 fileId xattr 丢失，
-    // reconcile 无法自愈。对齐 dart downloadOnDemand 原地覆盖保留 fileId 的语义。
-    let _ = m.set_file_id_xattr(dest, file_id).await;
-    // upsert DB（status=synced，相对路径，覆盖旧 cloudOnly 记录）
-    let conn = DB.lock();
-    let local_size = std::fs::metadata(dest).ok().map(|m| m.len() as i64);
-    let local_mtime = std::fs::metadata(dest)
+        .or_else(|| record.as_ref().and_then(|record| record.cloud_edited_time));
+    let cloud_size = cloud_file
+        .as_ref()
+        .map(|file| file.size)
+        .or_else(|| record.as_ref().map(|record| record.size))
+        .unwrap_or(0);
+    let is_update = std::fs::metadata(&dest)
         .ok()
-        .and_then(|m| m.modified().ok())
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_millis() as i64);
-    let _ = repository::upsert(
-        &conn,
-        &repository::SyncItem {
-            file_id: file_id.to_string(),
-            local_path: rel,
-            parent_folder_id: None,
-            name: name.to_string(),
-            is_folder: false,
-            size,
-            local_size,
-            sha256: None,
-            local_mtime,
-            cloud_edited_time,
-            last_sync_time: Some(chrono::Utc::now().timestamp_millis()),
-            status: repository::sync_status::SYNCED,
-            error_message: None,
-        },
-    );
-    Ok(())
+        .is_some_and(|metadata| metadata.is_file() && metadata.len() > 0);
+    let operation = if is_update {
+        crate::sync::transfer_state::TransferOperation::DownloadUpdate
+    } else {
+        crate::sync::transfer_state::TransferOperation::Download
+    };
+    let direction = if is_update {
+        repository::transfer_direction::DOWNLOAD_UPDATE
+    } else {
+        repository::transfer_direction::DOWNLOAD
+    };
+    let task = repository::TransferTask {
+        id: 0,
+        direction,
+        file_id: Some(file_id),
+        local_path: Some(dest.to_string_lossy().into_owned()),
+        name,
+        total_size: cloud_size,
+        transferred: 0,
+        state: i32::from(crate::sync::transfer_state::TransferState::Pending),
+        error_message: None,
+        created_at: chrono::Utc::now().timestamp_millis(),
+        finished_at: None,
+        server_id: None,
+        upload_id: None,
+        resume_offset: 0,
+        session_url: None,
+        relative_path: Some(dest_rel),
+        parent_file_id: cloud_file
+            .as_ref()
+            .and_then(|file| file.parent_folder.as_ref())
+            .and_then(|parents| parents.first().cloned()),
+        operation: Some(i32::from(operation)),
+        source_mtime: None,
+        source_size: None,
+        expected_cloud_edited_time: cloud_edited_time,
+        attempt_count: 0,
+        next_retry_at: None,
+        error_kind: None,
+        remote_result_file_id: None,
+        state_revision: 0,
+    };
+    let result = sync_engine()?.task_runner()?.enqueue_and_run(task).await?;
+    match result.outcome.disposition {
+        crate::sync::task_runner::TaskDisposition::Completed => Ok(true),
+        disposition => Err(AppError::generic(format!(
+            "下载已进入恢复队列：{disposition:?}"
+        ))),
+    }
 }
 
 /// folder sync 进度事件 payload
@@ -1056,6 +1069,7 @@ async fn sync_folder_recursive_impl(
     rel_path: &str,
 ) -> AppResult<i64> {
     let m = mount()?;
+    let task_runner = eng.task_runner()?;
     crate::core::paths::validate_relative_path(rel_path, true)?;
     let dest_dir = crate::core::paths::safe_join_under(m.mount_dir(), rel_path, true)?;
     tracing::info!(folder_id, rel = %rel_path, "sync_folder_recursive: 开始递归同步");
@@ -1199,72 +1213,62 @@ async fn sync_folder_recursive_impl(
         } else {
             format!("{rel_path}/{subrel}")
         };
-        // 入队传输记录（双端对齐要求所有文件操作出现在传输队列）
-        let task_id = {
-            let conn = DB.lock();
-            repository::insert_transfer(
-                &conn,
-                &repository::TransferTask {
-                    id: 0,
-                    direction: repository::transfer_direction::DOWNLOAD,
-                    file_id: Some(f.id.clone()),
-                    local_path: Some(dest.to_string_lossy().to_string()),
-                    name: full_rel.clone(),
-                    total_size: f.size,
-                    transferred: 0,
-                    state: repository::transfer_state::RUNNING,
-                    error_message: None,
-                    created_at: chrono::Utc::now().timestamp_millis(),
-                    finished_at: None,
-                    server_id: None,
-                    upload_id: None,
-                    resume_offset: 0,
-                    session_url: None,
-                    relative_path: Some(full_rel.clone()),
-                    parent_file_id: None,
-                    operation: Some(i32::from(
-                        crate::sync::transfer_state::TransferOperation::Download,
-                    )),
-                    source_mtime: None,
-                    source_size: None,
-                    expected_cloud_edited_time: f.edited_time.map(|time| time.timestamp_millis()),
-                    attempt_count: 0,
-                    next_retry_at: None,
-                    error_kind: None,
-                    remote_result_file_id: None,
-                    state_revision: 0,
-                },
-            )
-            .unwrap_or(0)
+        let is_update = std::fs::metadata(&dest)
+            .ok()
+            .is_some_and(|metadata| metadata.is_file() && metadata.len() > 0);
+        let task = repository::TransferTask {
+            id: 0,
+            direction: if is_update {
+                repository::transfer_direction::DOWNLOAD_UPDATE
+            } else {
+                repository::transfer_direction::DOWNLOAD
+            },
+            file_id: Some(f.id.clone()),
+            local_path: Some(dest.to_string_lossy().into_owned()),
+            name: f.name.clone(),
+            total_size: f.size,
+            transferred: 0,
+            state: i32::from(crate::sync::transfer_state::TransferState::Pending),
+            error_message: None,
+            created_at: chrono::Utc::now().timestamp_millis(),
+            finished_at: None,
+            server_id: None,
+            upload_id: None,
+            resume_offset: 0,
+            session_url: None,
+            relative_path: Some(full_rel.clone()),
+            parent_file_id: f
+                .parent_folder
+                .as_ref()
+                .and_then(|parents| parents.first().cloned()),
+            operation: Some(i32::from(if is_update {
+                crate::sync::transfer_state::TransferOperation::DownloadUpdate
+            } else {
+                crate::sync::transfer_state::TransferOperation::Download
+            })),
+            source_mtime: None,
+            source_size: None,
+            expected_cloud_edited_time: f.edited_time.map(|time| time.timestamp_millis()),
+            attempt_count: 0,
+            next_retry_at: None,
+            error_kind: None,
+            remote_result_file_id: None,
+            state_revision: 0,
         };
-        // 入队即通知：前端传输面板 + 托盘菜单立即显示新下载项
-        notify_transfer(app);
-        let download_result = download_to_dest(
-            &f.id,
-            &dest,
-            &f.name,
-            f.size,
-            f.edited_time.map(|t| t.timestamp_millis()),
-        )
-        .await;
-        // 结算传输记录（成功时 transferred=total_size，失败时保持原值）
-        {
-            let conn = DB.lock();
-            repository::settle_transfer_by_id(
-                &conn,
-                task_id,
-                download_result.is_ok(),
-                download_result
-                    .as_ref()
-                    .err()
-                    .map(|e| e.to_string())
-                    .as_deref(),
-            );
-        }
-        // 结算后通知：传输面板 + 托盘菜单刷新（状态变化/消失）
-        notify_transfer(app);
-        if let Err(e) = download_result {
-            tracing::warn!(subrel = %subrel, error = %e, "sync_folder_recursive: 下载失败");
+        match task_runner.enqueue_and_run(task).await {
+            Ok(result)
+                if result.outcome.disposition
+                    == crate::sync::task_runner::TaskDisposition::Completed => {}
+            Ok(result) => tracing::warn!(
+                subrel = %subrel,
+                disposition = ?result.outcome.disposition,
+                "sync_folder_recursive: 下载进入恢复队列"
+            ),
+            Err(error) => tracing::warn!(
+                subrel = %subrel,
+                %error,
+                "sync_folder_recursive: 下载失败"
+            ),
         }
         done += 1;
         let _ = app.emit(
@@ -1288,108 +1292,62 @@ async fn sync_folder_recursive_impl(
             format!("{rel_path}/{subrel}")
         };
         let file_size = local_path.metadata().map(|m| m.len() as i64).unwrap_or(0);
-        // 入队传输记录
-        let task_id = {
-            let conn = DB.lock();
-            repository::insert_transfer(
-                &conn,
-                &repository::TransferTask {
-                    id: 0,
-                    direction: repository::transfer_direction::UPLOAD,
-                    file_id: None,
-                    local_path: Some(local_path.to_string_lossy().to_string()),
-                    name: full_rel.clone(),
-                    total_size: file_size,
-                    transferred: 0,
-                    state: repository::transfer_state::RUNNING,
-                    error_message: None,
-                    created_at: chrono::Utc::now().timestamp_millis(),
-                    finished_at: None,
-                    server_id: None,
-                    upload_id: None,
-                    resume_offset: 0,
-                    session_url: None,
-                    relative_path: Some(full_rel.clone()),
-                    parent_file_id: Some(parent_id.to_string()),
-                    operation: Some(i32::from(
-                        crate::sync::transfer_state::TransferOperation::Create,
-                    )),
-                    source_mtime: None,
-                    source_size: Some(file_size),
-                    expected_cloud_edited_time: None,
-                    attempt_count: 0,
-                    next_retry_at: None,
-                    error_kind: None,
-                    remote_result_file_id: None,
-                    state_revision: 0,
-                },
-            )
-            .unwrap_or(0)
+        let source_mtime = local_path
+            .metadata()
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_millis() as i64);
+        let task = repository::TransferTask {
+            id: 0,
+            direction: repository::transfer_direction::UPLOAD,
+            file_id: None,
+            local_path: Some(local_path.to_string_lossy().into_owned()),
+            name: subrel.rsplit('/').next().unwrap_or(subrel).to_string(),
+            total_size: file_size,
+            transferred: 0,
+            state: i32::from(crate::sync::transfer_state::TransferState::Pending),
+            error_message: None,
+            created_at: chrono::Utc::now().timestamp_millis(),
+            finished_at: None,
+            server_id: None,
+            upload_id: None,
+            resume_offset: 0,
+            session_url: None,
+            relative_path: Some(full_rel.clone()),
+            parent_file_id: Some(parent_id.to_string()),
+            operation: Some(i32::from(
+                crate::sync::transfer_state::TransferOperation::Create,
+            )),
+            source_mtime,
+            source_size: Some(file_size),
+            expected_cloud_edited_time: None,
+            attempt_count: 0,
+            next_retry_at: None,
+            error_kind: None,
+            remote_result_file_id: None,
+            state_revision: 0,
         };
-        // 入队即通知：前端传输面板 + 托盘菜单立即显示新上传项
-        notify_transfer(app);
-        // 进度回调：节流写 transferred + 通知刷新（按 task_id 更新，500ms 节流）
-        let prog_db = DB.clone();
-        let prog_task_id = task_id;
-        let prog_throttle = std::sync::atomic::AtomicI64::new(0);
-        let on_progress: crate::drive::upload_api::ProgressFn = Box::new(move |ratio: f64| {
-            emit_transfer_progress(&prog_db, prog_task_id, ratio, &prog_throttle);
-        });
-        let upload_result = UPLOAD_API
-            .upload(local_path, Some(parent_id), Some(&on_progress), None)
-            .await;
-        // 结算传输记录（成功时 transferred=total_size，失败时保持原值）
-        {
-            let conn = DB.lock();
-            repository::settle_transfer_by_id(
-                &conn,
-                task_id,
-                upload_result.is_ok(),
-                upload_result
-                    .as_ref()
-                    .err()
-                    .map(|e| e.to_string())
-                    .as_deref(),
-            );
-        }
-        // 结算后通知：传输面板 + 托盘菜单刷新（状态变化/消失）
-        notify_transfer(app);
-        match upload_result {
-            Ok(uploaded) => {
-                eng.cloud_tree_insert(full_rel.clone(), uploaded.clone());
-                eng.path_to_id_insert(full_rel.clone(), uploaded.id.clone());
-                let conn = DB.lock();
-                let local_size = local_path.metadata().map(|m| m.len() as i64).ok();
-                let local_mtime = local_path
-                    .metadata()
-                    .ok()
-                    .and_then(|m| m.modified().ok())
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_millis() as i64);
-                // DB local_path 用相对路径 full_rel（与 cloud_tree/path_to_id 一致），
-                // 绝对路径会与占位记录共存成孤儿（288 振荡根因）。
-                let _ = repository::upsert(
-                    &conn,
-                    &repository::SyncItem {
-                        file_id: uploaded.id,
-                        local_path: full_rel,
-                        parent_folder_id: Some(parent_id.to_string()),
-                        name: uploaded.name,
-                        is_folder: false,
-                        size: uploaded.size,
-                        local_size,
-                        sha256: None,
-                        local_mtime,
-                        cloud_edited_time: uploaded.edited_time.map(|t| t.timestamp_millis()),
-                        last_sync_time: Some(chrono::Utc::now().timestamp_millis()),
-                        status: repository::sync_status::SYNCED,
-                        error_message: None,
-                    },
-                );
+        match task_runner.enqueue_and_run(task).await {
+            Ok(result)
+                if result.outcome.disposition
+                    == crate::sync::task_runner::TaskDisposition::Completed =>
+            {
+                if let Some(uploaded) = result.outcome.cloud_file {
+                    eng.cloud_tree_insert(full_rel.clone(), uploaded.clone());
+                    eng.path_to_id_insert(full_rel.clone(), uploaded.id);
+                }
             }
-            Err(e) => {
-                tracing::warn!(subrel = %subrel, error = %e, "sync_folder_recursive: 上传失败")
-            }
+            Ok(result) => tracing::warn!(
+                subrel = %subrel,
+                disposition = ?result.outcome.disposition,
+                "sync_folder_recursive: 上传进入恢复队列"
+            ),
+            Err(error) => tracing::warn!(
+                subrel = %subrel,
+                %error,
+                "sync_folder_recursive: 上传失败"
+            ),
         }
         done += 1;
         let _ = app.emit(
@@ -1616,8 +1574,7 @@ pub fn transfer_clear_finished(app: AppHandle) -> AppResult<()> {
     Ok(())
 }
 
-/// 重试单个传输任务（从断点续传）。
-/// 直接调起单任务上传：有有效 session_url 则断点续传，否则从头重传。
+/// 接受一个持久化传输任务重试；上传和下载均由统一 TaskRunner 在后台执行。
 #[tauri::command]
 pub async fn transfer_retry(task_id: i64) -> AppResult<()> {
     let engine = sync_engine()?;
@@ -1794,66 +1751,6 @@ pub fn emit_folder_content_changed(app: &AppHandle) {
     let _ = app.emit("folder_content_changed", ());
 }
 
-/// 节流写传输进度并触发前端刷新（供双端对齐等非 executor 路径的同步进度回调用）。
-///
-/// - `db`：传输队列 DB 连接（全局）
-/// - `task_id`：transfer_queue 行 id
-/// - `ratio`：进度比例（0.0-1.0）
-/// - `last_emit_ms`：节流状态（AtomicI64，500ms 节流）
-///
-/// 与 executor::emit_throttled_progress 同构，但按 task_id 更新（双端对齐串行执行）。
-fn emit_transfer_progress(
-    db: &Arc<Mutex<rusqlite::Connection>>,
-    task_id: i64,
-    ratio: f64,
-    last_emit_ms: &std::sync::atomic::AtomicI64,
-) {
-    use std::sync::atomic::Ordering;
-    const PROGRESS_THROTTLE_MS: i64 = 500;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
-    let last = last_emit_ms.load(Ordering::Relaxed);
-    if last != 0 && now - last < PROGRESS_THROTTLE_MS {
-        return;
-    }
-    last_emit_ms.store(now, Ordering::Relaxed);
-    // 写 transferred = ratio * total_size（查 total_size 防越界）
-    {
-        let conn = db.lock();
-        let total: i64 = conn
-            .query_row(
-                "SELECT total_size FROM transfer_queue WHERE id=?1",
-                rusqlite::params![task_id],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
-        if total > 0 {
-            let transferred = (ratio * total as f64) as i64;
-            let _ = conn.execute(
-                "UPDATE transfer_queue SET transferred=?1 WHERE id=?2",
-                rusqlite::params![transferred, task_id],
-            );
-        }
-    }
-    // 通过全局 tx 触发前端 + 托盘菜单刷新（回调拿不到 AppHandle，故走全局 tx）
-    if let Some(tx) = TRANSFER_UPDATE_TX.lock().as_ref() {
-        let _ = tx.send(());
-    }
-}
-
-/// 推送传输队列变更通知
-pub fn emit_transfer_update(app: &AppHandle) {
-    let _ = app.emit("transfer_update", ());
-    // 同时刷新状态条 uploading/downloading 计数：重算 transfer_queue RUNNING 数并推送 sync_state。
-    // 统一在此刷新，覆盖所有传输场景（自动同步 executor、双端对齐、手动下载），
-    // 无需每个调用点单独处理。
-    if let Some(e) = try_sync_engine() {
-        e.push_live_transfer_state();
-    }
-}
-
 /// 索引守卫：cloud_tree BFS 重建中时拒绝文件操作（基于不完整数据会误判）。
 ///
 /// 替代散布在 drive_delete/rename/move、sync_download_on_demand、sync_folder_recursive 等
@@ -1869,15 +1766,6 @@ fn ensure_not_indexing() -> AppResult<()> {
         ));
     }
     Ok(())
-}
-
-/// 通知传输面板 + 托盘菜单同时刷新。
-///
-/// `emit_transfer_update` + `tray::refresh_menu` 在 commands.rs 中成对出现，
-/// 统一封装避免遗漏其一。
-fn notify_transfer(app: &AppHandle) {
-    emit_transfer_update(app);
-    crate::platform::tray::refresh_menu(app);
 }
 
 #[cfg(test)]

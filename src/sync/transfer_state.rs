@@ -157,19 +157,22 @@ pub const fn can_transition(from: TransferState, to: TransferState) -> bool {
 
     matches!(
         (from, to),
-        (Pending, Running | Canceled)
-            | (
-                Running,
-                WaitingForNetwork
-                    | BackingOff
-                    | VerifyingRemote
-                    | RestartRequired
-                    | Completed
-                    | Failed
-                    | Canceled
-            )
-            | (WaitingForNetwork, Running | Failed | Canceled)
-            | (BackingOff, Running | Failed | Canceled)
+        (
+            Pending,
+            Running | WaitingForNetwork | RestartRequired | Failed | Canceled
+        ) | (
+            Running,
+            WaitingForNetwork
+                | BackingOff
+                | VerifyingRemote
+                | RestartRequired
+                | Completed
+                | Failed
+                | Canceled
+        ) | (
+            WaitingForNetwork,
+            Running | RestartRequired | Failed | Canceled
+        ) | (BackingOff, Running | RestartRequired | Failed | Canceled)
             | (
                 VerifyingRemote,
                 Running
@@ -181,7 +184,7 @@ pub const fn can_transition(from: TransferState, to: TransferState) -> bool {
                     | Canceled
             )
             | (RestartRequired, Pending | Failed | Canceled)
-            | (Failed, Pending | Canceled)
+            | (Failed, Pending | RestartRequired | Canceled)
     )
 }
 
@@ -271,6 +274,9 @@ mod tests {
         ];
         let allowed = [
             (Pending, Running),
+            (Pending, WaitingForNetwork),
+            (Pending, RestartRequired),
+            (Pending, Failed),
             (Pending, Canceled),
             (Running, WaitingForNetwork),
             (Running, BackingOff),
@@ -280,9 +286,11 @@ mod tests {
             (Running, Failed),
             (Running, Canceled),
             (WaitingForNetwork, Running),
+            (WaitingForNetwork, RestartRequired),
             (WaitingForNetwork, Failed),
             (WaitingForNetwork, Canceled),
             (BackingOff, Running),
+            (BackingOff, RestartRequired),
             (BackingOff, Failed),
             (BackingOff, Canceled),
             (VerifyingRemote, Running),
@@ -296,6 +304,7 @@ mod tests {
             (RestartRequired, Failed),
             (RestartRequired, Canceled),
             (Failed, Pending),
+            (Failed, RestartRequired),
             (Failed, Canceled),
         ];
 

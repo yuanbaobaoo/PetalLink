@@ -3,7 +3,9 @@
 //! 对齐 `legacy/lib/sync/sync_engine.dart`。
 
 use parking_lot::Mutex;
-use rusqlite::{params, Connection, OptionalExtension};
+#[cfg(test)]
+use rusqlite::OptionalExtension;
+use rusqlite::{params, Connection};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -24,6 +26,7 @@ use crate::sync::executor::SyncExecutor;
 use crate::sync::planner::{DbSnapshotEntry, SyncPlanner, SyncSnapshot};
 use crate::sync::state::{FreeUpCheckResult, SyncGlobalState};
 use crate::sync::status_aggregator::{RuntimeStatus, StatusAggregator};
+use crate::sync::task_runner::TaskRunner;
 use crate::sync::transfer_state::TransferState;
 
 /// 增量同步安全网：连续走 N 次增量后强制一次全量 BFS，纠正改名/移动/新建文件的累积偏差。
@@ -61,6 +64,7 @@ pub struct SyncEngine {
     #[allow(dead_code)]
     conflict: Arc<Mutex<ConflictResolver>>,
     executor: Option<SyncExecutor>,
+    task_runner: Option<Arc<TaskRunner>>,
     syncing: Mutex<bool>,
     /// 手动同步（trigger_manual_sync）互斥锁：防重复点击触发并发 BFS。
     /// 与 syncing 区分：syncing 守护 run_sync_cycle；manual_syncing 守护整段手动同步。
@@ -119,6 +123,7 @@ impl SyncEngine {
             planner: SyncPlanner,
             conflict: Arc::new(Mutex::new(ConflictResolver::new())),
             executor: None,
+            task_runner: None,
             syncing: Mutex::new(false),
             manual_syncing: Mutex::new(false),
             folder_syncing: Mutex::new(false),
@@ -147,7 +152,14 @@ impl SyncEngine {
     }
 
     pub fn set_executor(&mut self, executor: SyncExecutor) {
+        self.task_runner = executor.task_runner().ok();
         self.executor = Some(executor);
+    }
+
+    pub(crate) fn task_runner(&self) -> AppResult<Arc<TaskRunner>> {
+        self.task_runner
+            .clone()
+            .ok_or_else(|| AppError::generic("TaskRunner 未初始化"))
     }
     pub fn state_receiver(&self) -> broadcast::Receiver<SyncGlobalState> {
         self.state_tx.subscribe()
@@ -200,6 +212,7 @@ impl SyncEngine {
     ///
     /// The transfer lifecycle and compatibility sync status change in one SQLite transaction.
     /// Task execution remains the responsibility of the existing runner path.
+    #[cfg(test)]
     fn accept_failed_transfer_retry(&self, task_id: i64) -> AppResult<repository::TransferTask> {
         let pending = {
             let conn = self.db.lock();
@@ -277,6 +290,7 @@ impl SyncEngine {
     }
 
     /// Apply one optimistic typed lifecycle transition and publish the resulting full snapshot.
+    #[cfg(test)]
     fn transition_transfer_and_broadcast(
         &self,
         task_id: i64,
@@ -286,20 +300,15 @@ impl SyncEngine {
     ) -> AppResult<repository::TransferTask> {
         let updated = {
             let conn = self.db.lock();
-            repository::transition_transfer(
-                &conn,
-                task_id,
-                expected_revision,
-                next_state,
-                patch,
-            )
-            .map_err(|error| AppError::generic(error.to_string()))?
+            repository::transition_transfer(&conn, task_id, expected_revision, next_state, patch)
+                .map_err(|error| AppError::generic(error.to_string()))?
         };
         self.recompute_and_broadcast_state()?;
         Ok(updated)
     }
 
     /// Persist a retry's permanent failure in both task history and compatibility sync status.
+    #[cfg(test)]
     fn record_retry_failure_and_broadcast(
         &self,
         task_id: i64,
@@ -332,18 +341,19 @@ impl SyncEngine {
                 .relative_path
                 .as_deref()
                 .ok_or_else(|| AppError::generic("任务缺少相对路径，无法记录重试失败"))?;
-            transaction.execute(
-                "UPDATE sync_items
+            transaction
+                .execute(
+                    "UPDATE sync_items
                  SET status=?1, error_message=?2
                  WHERE local_path=?3 AND status=?4",
-                params![
-                    repository::sync_status::FAILED,
-                    error_message,
-                    relative_path,
-                    repository::sync_status::SYNCING,
-                ],
-            )
-            .map_err(|error| AppError::generic(format!("记录重试失败状态失败：{error}")))?;
+                    params![
+                        repository::sync_status::FAILED,
+                        error_message,
+                        relative_path,
+                        repository::sync_status::SYNCING,
+                    ],
+                )
+                .map_err(|error| AppError::generic(format!("记录重试失败状态失败：{error}")))?;
             transaction
                 .commit()
                 .map_err(|error| AppError::generic(format!("提交重试失败结算失败：{error}")))?;
@@ -352,6 +362,7 @@ impl SyncEngine {
     }
 
     /// Atomically confirm a retry task and replace its successful sync baseline.
+    #[cfg(test)]
     fn settle_retry_success_and_broadcast(
         &self,
         task_id: i64,
@@ -512,7 +523,9 @@ impl SyncEngine {
     }
     /// 记入防振荡集（客户端删除后加锁，防 watcher cycle 误判）。
     pub fn add_recently_deleted(&self, rel: &str) {
-        self.recently_deleted_paths.lock().insert(rel.to_string(), chrono::Utc::now().timestamp_millis());
+        self.recently_deleted_paths
+            .lock()
+            .insert(rel.to_string(), chrono::Utc::now().timestamp_millis());
     }
     /// 获取 cloud_tree 的可变锁（供 commands 层清理用）。
     pub fn cloud_tree_lock(&self) -> parking_lot::MutexGuard<'_, HashMap<String, DriveFile>> {
@@ -532,9 +545,7 @@ impl SyncEngine {
         }
         *self.running.lock() = true;
 
-        if let Err(error) =
-            self.update_runtime_and_broadcast(|runtime| runtime.is_running = true)
-        {
+        if let Err(error) = self.update_runtime_and_broadcast(|runtime| runtime.is_running = true) {
             self.restore_idle_runtime_after_error();
             return Err(error);
         }
@@ -600,206 +611,21 @@ impl SyncEngine {
     /// - 上传无断点：标记 FAILED（planner 下轮重新创建上传任务）
     /// - 删除：标记 FAILED
     async fn recover_interrupted_transfers(&self) {
-        let all: Vec<repository::TransferTask> = {
-            let conn = self.db.lock();
-            repository::list_all_transfers(&conn).unwrap_or_default()
-        };
-
-        // 只关心 RUNNING / PENDING（kill 时未完成的任务）
-        let interrupted: Vec<&repository::TransferTask> = all
-            .iter()
-            .filter(|t| {
-                t.state == repository::transfer_state::RUNNING
-                    || t.state == repository::transfer_state::PENDING
-            })
-            .collect();
-
-        if interrupted.is_empty() {
+        let Some(task_runner) = &self.task_runner else {
+            tracing::warn!("TaskRunner 未初始化，跳过中断任务恢复");
             return;
-        }
-
-        let now_ms = || chrono::Utc::now().timestamp_millis();
-        let mut resumed = 0u32;
-        let mut failed_dl = 0u32;
-        let mut failed_ul = 0u32;
-        let mut failed_del = 0u32;
-
-        for task in &interrupted {
-            // --- DOWNLOAD（含 DOWNLOAD_UPDATE：执行路径相同，.tmp 清理/失败标记一致）---
-            if task.direction == repository::transfer_direction::DOWNLOAD
-                || task.direction == repository::transfer_direction::DOWNLOAD_UPDATE
-            {
-                // 清理孤儿 .tmp 文件（下载写 .tmp 再 rename，kill 后 .tmp 残留）
-                if let Some(ref local_path) = task.local_path {
-                    let tmp = format!("{}.tmp", local_path);
-                    let _ = std::fs::remove_file(&tmp);
-                }
-                let conn = self.db.lock();
-                let _ = conn.execute(
-                    "UPDATE transfer_queue SET state=?1, error_message=?2, finished_at=?3 WHERE id=?4",
-                    rusqlite::params![
-                        repository::transfer_state::FAILED,
-                        "进程中断，下载未完成",
-                        now_ms(),
-                        task.id
-                    ],
-                );
-                drop(conn);
-                failed_dl += 1;
-                tracing::info!(name = %task.name, "中断下载已标记为失败，.tmp 已清理");
-            }
-            // --- UPLOAD ---
-            else if task.direction == repository::transfer_direction::UPLOAD {
-                // 有有效会话 URL（断点 token）且本地文件还在 → 尝试续传。
-                // ★ 必须用 session_url 判定：华为 API 变更后 init 响应 body 不再返回 serverId/uploadId，
-                // on_resume 持久化的 server_id/upload_id 可能为空字符串。若用它们判定会误命中空字符串，
-                // 进而用空 serverId 拼接出畸形 URL 发起 PUT（必然失败）。session_url 才是唯一可靠的续传 token。
-                if let (Some(local_path), Some(session_url)) =
-                    (&task.local_path, &task.session_url)
-                {
-                    if session_url.is_empty() {
-                        // 无有效会话 URL → 标记 FAILED，planner 下轮重建
-                        let conn = self.db.lock();
-                        let _ = conn.execute(
-                            "UPDATE transfer_queue SET state=?1, error_message=?2, finished_at=?3 WHERE id=?4",
-                            rusqlite::params![
-                                repository::transfer_state::FAILED,
-                                "进程中断，上传未完成",
-                                now_ms(),
-                                task.id
-                            ],
-                        );
-                        drop(conn);
-                        failed_ul += 1;
-                        tracing::info!(name = %task.name, "中断上传（无 session_url）已标记为失败");
-                        continue;
-                    }
-                    let path = std::path::PathBuf::from(local_path);
-                    if !path.exists() {
-                        let conn = self.db.lock();
-                        let _ = conn.execute(
-                            "UPDATE transfer_queue SET state=?1, error_message=?2, finished_at=?3 WHERE id=?4",
-                            rusqlite::params![
-                                repository::transfer_state::FAILED,
-                                "本地文件不存在，无法续传",
-                                now_ms(),
-                                task.id
-                            ],
-                        );
-                        drop(conn);
-                        failed_ul += 1;
-                        continue;
-                    }
-
-                    let Some(ref exec) = self.executor else {
-                        break;
-                    };
-                    let upload_api = exec.upload_api();
-                    let session = crate::drive::upload_api::ResumeSession {
-                        // server_id/upload_id 可能为空（新 API 不返回），续传靠 session_url 直 PUT。
-                        server_id: task.server_id.clone().unwrap_or_default(),
-                        upload_id: task.upload_id.clone().unwrap_or_default(),
-                        // ★ 从 DB 读回真实的 session_url（华为 Location 头返回的会话 URL）。
-                        session_url: task.session_url.clone().unwrap_or_default(),
-                        chunk_size: 0,
-                        // 从 transfer_queue.resume_offset 读回，启用断点续传
-                        start_offset: task.resume_offset as u64,
-                    };
-
-                    let db_clone = self.db.clone();
-                    let task_id = task.id;
-                    let on_resume: crate::drive::upload_api::ResumeProgressFn = Box::new(
-                        move |_sid, _uid, offset, _session_url| {
-                            let conn = db_clone.lock();
-                            let _ = conn.execute(
-                                "UPDATE transfer_queue SET resume_offset=?1, transferred=?1 WHERE id=?2",
-                                rusqlite::params![offset as i64, task_id],
-                            );
-                        },
-                    );
-
-                    tracing::info!(name = %task.name, offset = task.resume_offset, "尝试断点续传…");
-
-                    match upload_api
-                        .upload_resume(&path, None, Some(&session), None, Some(&on_resume))
-                        .await
-                    {
-                        Ok(f) => {
-                            let conn = self.db.lock();
-                            let _ = conn.execute(
-                                "UPDATE transfer_queue SET state=?1, finished_at=?2, transferred=total_size WHERE id=?3",
-                                rusqlite::params![
-                                    repository::transfer_state::COMPLETED,
-                                    now_ms(),
-                                    task_id
-                                ],
-                            );
-                            drop(conn);
-                            resumed += 1;
-                            tracing::info!(name = %task.name, cloud_id = %f.id, "断点续传完成");
-                        }
-                        Err(e) => {
-                            let conn = self.db.lock();
-                            let _ = conn.execute(
-                                "UPDATE transfer_queue SET state=?1, error_message=?2, finished_at=?3 WHERE id=?4",
-                                rusqlite::params![
-                                    repository::transfer_state::FAILED,
-                                    format!("续传失败: {e}"),
-                                    now_ms(),
-                                    task_id
-                                ],
-                            );
-                            drop(conn);
-                            failed_ul += 1;
-                            tracing::warn!(name = %task.name, error = %e, "断点续传失败");
-                        }
-                    }
-                } else {
-                    // 无 session_url 或无 local_path → 标记 FAILED，planner 下轮重建
-                    let conn = self.db.lock();
-                    let _ = conn.execute(
-                        "UPDATE transfer_queue SET state=?1, error_message=?2, finished_at=?3 WHERE id=?4",
-                        rusqlite::params![
-                            repository::transfer_state::FAILED,
-                            "进程中断，上传未完成",
-                            now_ms(),
-                            task.id
-                        ],
-                    );
-                    drop(conn);
-                    failed_ul += 1;
-                    tracing::info!(name = %task.name, "中断上传（无 session_url/local_path）已标记为失败");
-                }
-            }
-            // --- DELETE ---
-            else if task.direction == repository::transfer_direction::DELETE {
-                let conn = self.db.lock();
-                let _ = conn.execute(
-                    "UPDATE transfer_queue SET state=?1, error_message=?2, finished_at=?3 WHERE id=?4",
-                    rusqlite::params![
-                        repository::transfer_state::FAILED,
-                        "进程中断",
-                        now_ms(),
-                        task.id
-                    ],
-                );
-                drop(conn);
-                failed_del += 1;
-            }
-        }
-
-        if resumed > 0 || failed_dl > 0 || failed_ul > 0 || failed_del > 0 {
-            tracing::info!(
-                resumed,
-                failed_download = failed_dl,
-                failed_upload = failed_ul,
-                failed_delete = failed_del,
-                "中断传输恢复完成"
-            );
-            self.push_live_transfer_state();
+        };
+        match task_runner.recover_startup().await {
+            Ok(summary) => tracing::info!(
+                completed = summary.completed,
+                waiting_network = summary.waiting_network,
+                verifying_remote = summary.verifying_remote,
+                failed = summary.failed,
+                "中断传输已通过统一 TaskRunner 恢复"
+            ),
+            Err(error) => tracing::warn!(%error, "统一中断任务恢复失败"),
         }
     }
-
     async fn load_or_refresh_cloud_tree(&self, mount_dir: &str) -> AppResult<()> {
         let abs_dir = crate::core::paths::expand_tilde(mount_dir);
         let loaded = cloud_tree::load_persisted_cloud_tree(&abs_dir).map(|cache| {
@@ -977,16 +803,16 @@ impl SyncEngine {
         //   由上层调用方已设好 phase，此处不覆盖；其余按 triggered_by 设对应 phase）
         let result = async {
             self.update_runtime_and_broadcast(|runtime| {
-            runtime.is_running = true;
-            if runtime.sync_phase.is_none() {
-                runtime.sync_phase = match triggered_by {
-                    "local-watcher" => Some("syncing-local".to_string()),
-                    "manual-refresh" => Some("syncing-manual".to_string()),
-                    "retry-failed" => Some("syncing-retry".to_string()),
-                    "startup-resume" => Some("syncing-startup".to_string()),
-                    _ => None, // auto-cloud-refresh 由上层设好
-                };
-            }
+                runtime.is_running = true;
+                if runtime.sync_phase.is_none() {
+                    runtime.sync_phase = match triggered_by {
+                        "local-watcher" => Some("syncing-local".to_string()),
+                        "manual-refresh" => Some("syncing-manual".to_string()),
+                        "retry-failed" => Some("syncing-retry".to_string()),
+                        "startup-resume" => Some("syncing-startup".to_string()),
+                        _ => None, // auto-cloud-refresh 由上层设好
+                    };
+                }
             })?;
             self.run_sync_cycle_inner(triggered_by).await
         }
@@ -1087,8 +913,8 @@ impl SyncEngine {
                 runtime.editing = 0;
                 runtime.content_changed = false;
                 runtime.is_running = false;
-            // 同步周期结束即非索引态：复位 is_indexing，防止此前某次 BFS/刷新
-            // 的 is_indexing=true 因交错未被清，导致状态条永久卡在「正在读取云端索引」。
+                // 同步周期结束即非索引态：复位 is_indexing，防止此前某次 BFS/刷新
+                // 的 is_indexing=true 因交错未被清，导致状态条永久卡在「正在读取云端索引」。
                 runtime.is_indexing = false;
                 runtime.sync_phase = None;
                 runtime.last_sync_time = Some(chrono::Utc::now().timestamp_millis());
@@ -1324,7 +1150,9 @@ impl SyncEngine {
                 // ★ 防振荡：所有 DeleteFromLocal/DeleteFromCloud/BackupBeforeCloudDelete 成功
                 // 的路径都加入 recentlyDeletedPaths，防止 users 从云端回收站恢复后
                 // planner 误生成 CreateFolder 导致 (1) 后缀副本。
-                self.recently_deleted_paths.lock().insert(rel.clone(), chrono::Utc::now().timestamp_millis());
+                self.recently_deleted_paths
+                    .lock()
+                    .insert(rel.clone(), chrono::Utc::now().timestamp_millis());
                 // ★ 若删除的是目录，级联清理所有子孙的 DB 记录。
                 // dedupe_directory_deletes 将子文件删除合并为目录删除后，子文件的 DB 记录
                 // 不会被执行器结算（动作已移除），导致残留。用户从回收站恢复目录后，
@@ -1350,7 +1178,9 @@ impl SyncEngine {
                             p2i.remove(k);
                         }
                         // 同时清理防振荡集
-                        self.recently_deleted_paths.lock().insert(rel.clone(), chrono::Utc::now().timestamp_millis());
+                        self.recently_deleted_paths
+                            .lock()
+                            .insert(rel.clone(), chrono::Utc::now().timestamp_millis());
                         tracing::info!(
                             rel = %rel,
                             descendants = to_remove.len().saturating_sub(1),
@@ -1361,11 +1191,33 @@ impl SyncEngine {
                 continue;
             }
 
-            let status = if !result.success && result.deferred {
-                repository::sync_status::SYNCING // 延迟（稳定性/编辑中）→ syncing
-            } else if !result.success {
-                repository::sync_status::FAILED
-            } else if action.action_type == SyncActionType::CreatePlaceholder {
+            // A failed/deferred durable task must never advance the last confirmed-success
+            // baseline. Permanent failures may update only compatibility status/message; all
+            // mtime/size/fileId/cloud-version facts remain untouched and TaskRunner is the
+            // authoritative failure source.
+            if !result.success {
+                if !result.deferred {
+                    if let Some(file_id) = action
+                        .file_id
+                        .as_deref()
+                        .filter(|file_id| !file_id.starts_with(repository::PENDING_FILE_ID_PREFIX))
+                    {
+                        let _ = conn.execute(
+                            "UPDATE sync_items SET status=?1, error_message=?2
+                             WHERE file_id=?3 AND local_path=?4",
+                            rusqlite::params![
+                                repository::sync_status::FAILED,
+                                result.error_message.as_deref(),
+                                file_id,
+                                rel,
+                            ],
+                        );
+                    }
+                }
+                continue;
+            }
+
+            let status = if action.action_type == SyncActionType::CreatePlaceholder {
                 repository::sync_status::CLOUD_ONLY // 占位符 → cloudOnly（非 synced）
             } else if action.action_type == SyncActionType::CreateConflictCopy {
                 repository::sync_status::CONFLICT
@@ -1376,24 +1228,17 @@ impl SyncEngine {
             // 云端元数据：成功时优先用 executor 返回的（新上传/建文件夹的 fileId 由此得到），
             // 否则用 action 携带的（download/placeholder 的 cloud_file）。
             let cloud_file = result.cloud_file.as_ref().or(action.cloud_file.as_ref());
-            // fileId：成功 → cloud_file.id ?? action.fileId；失败/推迟 → action.fileId（新增场景为 None）
-            let file_id = if result.success {
-                cloud_file.map(|f| f.id.clone()).or(action.file_id.clone())
-            } else {
-                action.file_id.clone()
-            };
-            // 新增上传失败（fileId=null）→ 写入 pending: 占位项（status=FAILED），
-            // 让 retry_failed 能找到它（否则重试按钮失效）。占位 fileId 前缀 pending: 不会与真实 fileId 冲突。
-            // 其他失败（无 local_path，如缺少 fileId 的下载）仍跳过 DB 写入。
+            // A confirmed success must have a real remote ID. TaskRunner routes incomplete
+            // upload responses to VerifyingRemote, so synthesizing a pending ID here would create
+            // a false success baseline.
+            let file_id = cloud_file
+                .map(|file| file.id.clone())
+                .or_else(|| action.file_id.clone());
             let file_id = match file_id {
                 Some(fid) => fid,
                 None => {
-                    if action.action_type == SyncActionType::Upload && action.local_path.is_some() {
-                        format!("{}{}", repository::PENDING_FILE_ID_PREFIX, rel)
-                    } else {
-                        tracing::debug!(rel = %rel, status, "跳过 DB 写入（fileId=null 且非上传）");
-                        continue;
-                    }
+                    tracing::warn!(rel = %rel, status, "跳过成功基线写入：缺少真实 fileId");
+                    continue;
                 }
             };
 
@@ -1428,10 +1273,13 @@ impl SyncEngine {
             // 成功上传/覆盖上传 → 清掉同路径的 pending: 占位孤儿行。
             // PK 是 (file_id, local_path)，真实 fileId 与 pending: 占位 fileId 是不同主键，
             // upsert 不会覆盖占位行 → 必须显式删除，避免残留孤儿导致 planner 误判。
-            if result.success && !file_id.starts_with(repository::PENDING_FILE_ID_PREFIX) {
+            if !file_id.starts_with(repository::PENDING_FILE_ID_PREFIX) {
                 let _ = conn.execute(
-                    "DELETE FROM sync_items WHERE local_path=?1 AND file_id LIKE ?2",
-                    rusqlite::params![rel, format!("{}%", repository::PENDING_FILE_ID_PREFIX)],
+                    "DELETE FROM sync_items WHERE local_path=?1 AND file_id=?2",
+                    rusqlite::params![
+                        rel,
+                        format!("{}{}", repository::PENDING_FILE_ID_PREFIX, rel)
+                    ],
                 );
             }
 
@@ -1453,11 +1301,7 @@ impl SyncEngine {
                     last_sync_time: Some(chrono::Utc::now().timestamp_millis()),
                     status,
                     // 成功时清空 error_message（Skip 收敛等场景 result 可能带 reason，但已同步不应残留错误）
-                    error_message: if result.success {
-                        None
-                    } else {
-                        result.error_message.clone()
-                    },
+                    error_message: None,
                 },
             );
         }
@@ -1651,8 +1495,7 @@ impl SyncEngine {
 
     /// 委托权威聚合器重算完整状态（不重置 runtime-only fields）。
     ///
-    /// 供 transfer_update 监听器调用：双端对齐/手动下载/传输进度等不经过 sync cycle 的场景，
-    /// 入队/结算 RUNNING 传输后，需刷新状态条的 uploading/downloading 计数。
+    /// 供少数非 TaskRunner 的兼容入口显式请求一次完整状态重算。
     /// 与 [`update_and_push_state`] 区别：后者只在周期结束调用且重置 is_running；
     /// 本方法保留 runtime fields，但不会保留任何过期 DB 计数。
     pub fn push_live_transfer_state(&self) {
@@ -2111,12 +1954,16 @@ impl SyncEngine {
             if a.action_type != crate::sync::state::SyncActionType::DeleteFromLocal {
                 continue;
             }
-            let Some(file_id) = &a.file_id else { continue; };
+            let Some(file_id) = &a.file_id else {
+                continue;
+            };
             // 占位项（pending: 前缀）无真实云端对应，不复核
             if file_id.starts_with(PENDING_FILE_ID_PREFIX) {
                 continue;
             }
-            let Some(rel) = &a.relative_path else { continue; };
+            let Some(rel) = &a.relative_path else {
+                continue;
+            };
 
             match self.files_api.get(file_id).await {
                 Ok(_) => {
@@ -2127,11 +1974,13 @@ impl SyncEngine {
                         "删除前复核：云端仍存在该文件，跳过删除（cloud_tree 疑似残缺）"
                     );
                     a.action_type = crate::sync::state::SyncActionType::Skip;
-                    a.reason = Some(
-                        "删除前复核：云端仍存在，跳过（cloud_tree 疑似残缺）".to_string(),
-                    );
+                    a.reason =
+                        Some("删除前复核：云端仍存在，跳过（cloud_tree 疑似残缺）".to_string());
                 }
-                Err(crate::error::AppError::DriveApi { status_code: Some(404), .. }) => {
+                Err(crate::error::AppError::DriveApi {
+                    status_code: Some(404),
+                    ..
+                }) => {
                     // 云端确实不存在 → 允许删除（保持原动作）
                     tracing::debug!(rel = %rel, "删除前复核：云端确认不存在，允许删除");
                 }
@@ -2201,157 +2050,31 @@ impl SyncEngine {
         self.run_sync_cycle("retry-failed").await
     }
 
-    /// 重试单个 transfer_queue 任务（用户在传输面板点"重试"时调用）。
-    /// 非阻塞：接受为 PENDING 后按类型化状态机进入 RUNNING，再后台 spawn 上传任务。
-    /// 有有效 session_url → 断点续传；无 → 从头重传。
+    /// Retry one durable transfer through the same runner used by automatic/startup work.
     pub async fn retry_transfer(self: &Arc<Self>, task_id: i64) -> AppResult<()> {
-        use repository::transfer_direction;
-        use std::path::PathBuf;
-
-        // 所有前置条件先验证；拒绝的重试不得清除现有失败事实。
-        let task = {
-            let conn = self.db.lock();
-            repository::get_transfer_by_id(&conn, task_id)
-                .map_err(|e| crate::error::AppError::generic(format!("查询传输任务失败：{e}")))?
-                .ok_or_else(|| crate::error::AppError::generic("任务不存在"))?
-        };
-        if task.state_kind().map_err(|error| AppError::generic(error.to_string()))?
-            != TransferState::Failed
-        {
-            return Err(AppError::generic("任务不存在或非失败状态"));
-        }
-
-        // 仅处理上传方向
-        if task.direction != transfer_direction::UPLOAD {
-            return Err(crate::error::AppError::generic("当前仅支持上传任务重试"));
-        }
-        let relative_path = task
-            .relative_path
-            .as_deref()
-            .ok_or_else(|| AppError::generic("任务缺少相对路径，无法安全重试"))?;
-        crate::core::paths::validate_relative_path(relative_path, false)?;
-
-        let local_path = task
-            .local_path
-            .as_deref()
-            .ok_or_else(|| crate::error::AppError::generic("任务缺少本地路径"))?;
-        let path = PathBuf::from(local_path);
-        if !path.exists() {
-            return Err(crate::error::AppError::generic("本地文件不存在"));
-        }
-        let exec = match &self.executor {
-            Some(e) => e.clone_executor(),
-            None => return Err(crate::error::AppError::generic("同步引擎未就绪")),
-        };
-
-        let pending = self.accept_failed_transfer_retry(task_id)?;
-        let task = self.transition_transfer_and_broadcast(
-            task_id,
-            pending.state_revision,
-            TransferState::Running,
-            repository::TransferPatch::default(),
-        )?;
-        tracing::info!(task_id, name = %task.name, "开始重试传输任务");
-
-        // ★ 后台 spawn 上传任务（非阻塞，命令立即返回）
+        let task_runner = self.task_runner()?;
+        let pending = task_runner.prepare_retry(task_id).await?;
         let engine = self.clone();
-        let total_size = task.total_size;
-        let task_id_val = task.id;
-        let task_name = task.name.clone();
-        let has_resume = task.session_url.as_deref().filter(|s| !s.is_empty()).is_some()
-            && task.resume_offset > 0;
-        let resume_session = if has_resume {
-            Some(crate::drive::upload_api::ResumeSession {
-                server_id: task.server_id.clone().unwrap_or_default(),
-                upload_id: task.upload_id.clone().unwrap_or_default(),
-                session_url: task.session_url.clone().unwrap_or_default(),
-                chunk_size: 0,
-                start_offset: task.resume_offset as u64,
-            })
-        } else {
-            None
-        };
-
-        tracing::info!(name = %task_name, has_resume, "后台启动重试上传任务");
         tauri::async_runtime::spawn(async move {
-            // 进度回调（写 DB + 广播触发前端刷新）
-            let progress: crate::drive::upload_api::ProgressFn = {
-                let engine = engine.clone();
-                Box::new(move |frac: f64| {
-                    let conn = engine.db.lock();
-                    let transferred = (frac * total_size as f64) as i64;
-                    let _ = conn.execute(
-                        "UPDATE transfer_queue SET transferred=?1 WHERE id=?2",
-                        rusqlite::params![transferred, task_id_val],
-                    );
-                    drop(conn);
-                    if let Err(error) = engine.recompute_and_broadcast_state() {
-                        tracing::warn!(%error, "重试进度后重算全局状态失败");
-                    }
-                })
-            };
-            // 续传回调
-            let on_resume: crate::drive::upload_api::ResumeProgressFn = {
-                let engine = engine.clone();
-                Box::new(move |sid, uid, offset, session_url| {
-                    let conn = engine.db.lock();
-                    let _ = conn.execute(
-                        "UPDATE transfer_queue SET server_id=?1, upload_id=?2, resume_offset=?3, transferred=?3, session_url=?4 WHERE id=?5",
-                        rusqlite::params![sid, uid, offset as i64, session_url, task_id_val],
-                    );
-                })
-            };
-
-            let upload_api = exec.upload_api();
-            let result = if let Some(ref session) = resume_session {
-                upload_api
-                    .upload_resume(&path, None, Some(session), Some(&progress), Some(&on_resume))
-                    .await
-            } else {
-                upload_api
-                    .upload(&path, None, Some(&progress), Some(&on_resume))
-                    .await
-            };
-
-            // 结算
-            let now = chrono::Utc::now().timestamp_millis();
-            match &result {
-                Ok(drive_file) => {
-                    // ★ 补取完整元数据（含 editedTime，防下载循环）——必须在 DB 锁外 await
-                    let cf = if drive_file.edited_time.is_none() {
-                        match exec.files_api().get(&drive_file.id).await {
-                            Ok(full) => full,
-                            Err(_) => drive_file.clone(),
+            match task_runner.run_prepared(pending.id).await {
+                Ok(outcome) => {
+                    if let Some(cloud_file) = outcome.cloud_file {
+                        let relative_path = {
+                            let conn = engine.db.lock();
+                            repository::get_transfer_by_id(&conn, task_id)
+                                .ok()
+                                .flatten()
+                                .and_then(|task| task.relative_path)
+                        };
+                        if let Some(relative_path) = relative_path {
+                            engine.cloud_tree_insert(relative_path.clone(), cloud_file.clone());
+                            engine.path_to_id_insert(relative_path, cloud_file.id.clone());
                         }
-                    } else {
-                        drive_file.clone()
-                    };
-                    match engine.settle_retry_success_and_broadcast(
-                        task_id_val,
-                        task.state_revision,
-                        &cf,
-                        now,
-                    ) {
-                        Ok(_) => tracing::info!(name = %task_name, "重试上传成功（已更新 sync_items）"),
-                        Err(error) => tracing::error!(%error, name = %task_name, "重试上传结算失败"),
                     }
                 }
-                Err(e) => {
-                    let error_message = e.to_string();
-                    if let Err(error) = engine.record_retry_failure_and_broadcast(
-                        task_id_val,
-                        task.state_revision,
-                        &error_message,
-                        now,
-                    ) {
-                        tracing::error!(%error, name = %task_name, "重试上传失败结算失败");
-                    }
-                    tracing::warn!(name = %task_name, error = %e, "重试上传失败");
-                }
+                Err(error) => tracing::warn!(task_id, %error, "后台重试任务失败"),
             }
-
         });
-
         Ok(())
     }
 }
@@ -2526,8 +2249,9 @@ fn dedupe_directory_deletes(
         //（说明祖先前一轮已被级联回收），同样跳过 API 调用（只清 DB），
         // 避免回收站平铺、层级丢失。
         {
-            let has_deleted_ancestor = (0..rel.len())
-                .any(|i| rel.as_bytes().get(i) == Some(&b'/') && !cloud_tree.contains_key(&rel[..i]));
+            let has_deleted_ancestor = (0..rel.len()).any(|i| {
+                rel.as_bytes().get(i) == Some(&b'/') && !cloud_tree.contains_key(&rel[..i])
+            });
             if has_deleted_ancestor {
                 skipped_rel_paths.push(rel.clone());
                 return false;
@@ -2839,9 +2563,7 @@ mod tests {
     }
 
     fn failed_transfer_task(relative_path: Option<&str>) -> repository::TransferTask {
-        use crate::sync::transfer_state::{
-            TransferErrorKind, TransferOperation, TransferState,
-        };
+        use crate::sync::transfer_state::{TransferErrorKind, TransferOperation, TransferState};
 
         repository::TransferTask {
             id: 0,
@@ -2882,11 +2604,8 @@ mod tests {
         let task_id = {
             let conn = db.lock();
             repository::upsert(&conn, &before).unwrap();
-            repository::insert_transfer(
-                &conn,
-                &failed_transfer_task(Some("folder/retry.txt")),
-            )
-            .unwrap()
+            repository::insert_transfer(&conn, &failed_transfer_task(Some("folder/retry.txt")))
+                .unwrap()
         };
         let mut state_rx = eng.state_receiver();
 
@@ -3089,7 +2808,10 @@ mod tests {
             })
             .is_err());
         assert!(eng.current_state().is_indexing);
-        assert_eq!(eng.current_state().sync_phase.as_deref(), Some("indexing-manual"));
+        assert_eq!(
+            eng.current_state().sync_phase.as_deref(),
+            Some("indexing-manual")
+        );
 
         assert!(eng
             .update_runtime_and_broadcast(|runtime| {
@@ -3134,11 +2856,8 @@ mod tests {
         let task_id = {
             let conn = db.lock();
             repository::upsert(&conn, &failed_sync_item("folder/retry.txt")).unwrap();
-            repository::insert_transfer(
-                &conn,
-                &failed_transfer_task(Some("folder/retry.txt")),
-            )
-            .unwrap()
+            repository::insert_transfer(&conn, &failed_transfer_task(Some("folder/retry.txt")))
+                .unwrap()
         };
 
         let pending = eng.accept_failed_transfer_retry(task_id).unwrap();
@@ -3165,12 +2884,7 @@ mod tests {
             ..Default::default()
         };
         let completed_snapshot = eng
-            .settle_retry_success_and_broadcast(
-                task_id,
-                running.state_revision,
-                &cloud_file,
-                9_000,
-            )
+            .settle_retry_success_and_broadcast(task_id, running.state_revision, &cloud_file, 9_000)
             .unwrap();
         let (completed, settled_sync_item, sync_item_count) = {
             let conn = db.lock();
@@ -3191,7 +2905,10 @@ mod tests {
         };
         assert_eq!(completed.state_kind().unwrap(), TransferState::Completed);
         assert_eq!(settled_sync_item.local_path, "folder/retry.txt");
-        assert_eq!(settled_sync_item.parent_folder_id.as_deref(), Some("parent"));
+        assert_eq!(
+            settled_sync_item.parent_folder_id.as_deref(),
+            Some("parent")
+        );
         assert_eq!(settled_sync_item.local_mtime, Some(1_000));
         assert_eq!(settled_sync_item.local_size, Some(222));
         assert_eq!(settled_sync_item.cloud_edited_time, Some(8_000));
@@ -3244,12 +2961,7 @@ mod tests {
         };
 
         let error = eng
-            .settle_retry_success_and_broadcast(
-                task_id,
-                running.state_revision,
-                &cloud_file,
-                9_000,
-            )
+            .settle_retry_success_and_broadcast(task_id, running.state_revision, &cloud_file, 9_000)
             .unwrap_err();
 
         assert!(error.to_string().contains("forced baseline failure"));
@@ -3338,11 +3050,8 @@ mod tests {
         let task_id = {
             let conn = db.lock();
             repository::upsert(&conn, &failed_sync_item("folder/retry.txt")).unwrap();
-            repository::insert_transfer(
-                &conn,
-                &failed_transfer_task(Some("folder/retry.txt")),
-            )
-            .unwrap()
+            repository::insert_transfer(&conn, &failed_transfer_task(Some("folder/retry.txt")))
+                .unwrap()
         };
         let pending = eng.accept_failed_transfer_retry(task_id).unwrap();
         let running = eng
@@ -3401,7 +3110,9 @@ mod tests {
             repository::insert_transfer(&conn, &waiting).unwrap();
         }
 
-        let snapshot = eng.clear_transfer_history_and_broadcast(false, true).unwrap();
+        let snapshot = eng
+            .clear_transfer_history_and_broadcast(false, true)
+            .unwrap();
 
         assert_eq!(snapshot.failed, 1);
         assert_eq!(snapshot.failed_items.len(), 1);
@@ -3781,5 +3492,57 @@ mod tests {
             "A 仍在云端 → 不应补建"
         );
         assert_eq!(actions.len(), 1, "仅保留原备份动作");
+    }
+
+    #[test]
+    fn failed_action_updates_only_exact_baseline_identity() {
+        let (eng, db) = build_engine();
+        let mut first = failed_sync_item("same/path.txt");
+        first.file_id = "file-a".into();
+        first.status = repository::sync_status::SYNCED;
+        first.error_message = None;
+        let mut second = first.clone();
+        second.file_id = "file-b".into();
+        {
+            let conn = db.lock();
+            repository::upsert(&conn, &first).unwrap();
+            repository::upsert(&conn, &second).unwrap();
+        }
+        let action = SyncAction {
+            action_type: SyncActionType::Upload,
+            relative_path: Some("same/path.txt".into()),
+            file_id: Some("file-a".into()),
+            parent_file_id: Some("parent".into()),
+            local_path: Some("/mount/same/path.txt".into()),
+            cloud_file: None,
+            reason: None,
+        };
+        eng.apply_results(
+            &[action],
+            &[ActionResult {
+                success: false,
+                error_message: Some("failed".into()),
+                deferred: false,
+                cloud_file: None,
+            }],
+        );
+
+        let conn = db.lock();
+        let status_a: i32 = conn
+            .query_row(
+                "SELECT status FROM sync_items WHERE file_id='file-a' AND local_path='same/path.txt'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let status_b: i32 = conn
+            .query_row(
+                "SELECT status FROM sync_items WHERE file_id='file-b' AND local_path='same/path.txt'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status_a, repository::sync_status::FAILED);
+        assert_eq!(status_b, repository::sync_status::SYNCED);
     }
 }
