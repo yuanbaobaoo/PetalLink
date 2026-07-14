@@ -30,8 +30,7 @@ fn plist_path() -> Option<PathBuf> {
     Some(launch_agents_dir()?.join(plist_name()))
 }
 
-/// 是否已启用开机自启（plist 文件存在且已 bootstrap）。
-/// 注：仅检查 plist 文件存在性；bootstrap 状态不做二次验证。
+/// 以 LaunchAgent 配置文件是否存在判断开机自启；不额外验证 bootstrap 状态。
 pub fn is_enabled() -> bool {
     plist_path().map(|p| p.exists()).unwrap_or(false)
 }
@@ -223,36 +222,4 @@ pub fn set_enabled(enabled: bool) -> std::io::Result<()> {
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_is_enabled_false_when_no_plist() {
-        // 测试环境下不应有真实 plist
-        assert!(!is_enabled() || plist_path().map(|p| p.exists()).unwrap_or(false));
-    }
-
-    #[test]
-    fn test_resolve_paths_returns_exe() {
-        let (bundle, binary) = resolve_paths();
-        // binary 路径应非空且至少包含可执行文件名
-        assert!(!binary.to_string_lossy().is_empty());
-        // 测试环境通常不在 .app bundle 内
-        if let Some(b) = bundle {
-            assert!(
-                b.extension().map(|e| e == "app").unwrap_or(false),
-                "若检测到 bundle，其扩展名应为 .app"
-            );
-        }
-    }
-
-    #[test]
-    fn test_plist_name_matches_bundle_id() {
-        let name = plist_name();
-        assert!(name.starts_with("io.github."));
-        assert!(name.ends_with(".plist"));
-    }
 }

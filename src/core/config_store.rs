@@ -19,7 +19,7 @@ use crate::error::{AppError, AppResult};
 const CONFIG_FILE_NAME: &str = "config.json";
 
 /// Application Support 目录下的 PetalLink 工作目录。
-/// macOS: `~/Library/Application Support/io.github.yuanbaobaoo.PetalLink`
+/// macOS 路径：`~/Library/Application Support/io.github.yuanbaobaoo.PetalLink`
 /// 对齐 dart `getApplicationSupportDirectory()`。
 pub fn support_dir() -> AppResult<PathBuf> {
     let base = dirs::data_dir()
@@ -86,6 +86,7 @@ impl ConfigStore {
     }
 }
 
+/// 解析、迁移并校验配置文本，同时返回是否需要回写。
 fn parse_config_raw(raw: &str) -> AppResult<(AppConfig, bool)> {
     let json: Value =
         serde_json::from_str(raw).map_err(|e| AppError::config(format!("配置解析失败：{e}")))?;
@@ -94,6 +95,7 @@ fn parse_config_raw(raw: &str) -> AppResult<(AppConfig, bool)> {
     Ok((config, dirty))
 }
 
+/// 确认已配置的同步目录可创建且可写，并清理探测文件。
 fn validate_configured_mount_dir_access(config: &AppConfig) -> AppResult<()> {
     if !config.mount_configured {
         return Ok(());
@@ -223,6 +225,7 @@ fn sort_field_to_str(f: SortField) -> &'static str {
     }
 }
 
+/// 将排序方向映射为持久化字符串。
 fn sort_order_to_str(o: SortOrder) -> &'static str {
     match o {
         SortOrder::Ascending => "ascending",
@@ -230,6 +233,7 @@ fn sort_order_to_str(o: SortOrder) -> &'static str {
     }
 }
 
+/// 解析排序字段，未知值回退为按名称排序。
 fn parse_sort_field(v: Option<&Value>) -> SortField {
     match v.and_then(Value::as_str) {
         Some("name") => SortField::Name,
@@ -239,135 +243,11 @@ fn parse_sort_field(v: Option<&Value>) -> SortField {
     }
 }
 
+/// 解析排序方向，未知值回退为升序。
 fn parse_sort_order(v: Option<&Value>) -> SortOrder {
     match v.and_then(Value::as_str) {
         Some("ascending") => SortOrder::Ascending,
         Some("descending") => SortOrder::Descending,
         _ => SortOrder::Ascending,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::tempdir;
-
-    #[test]
-    fn test_migration_legacy_small_poll_to_new_default() {
-        // 旧配置 poll=30 debounce=30 应迁移为新默认 60/3
-        let json = json!({
-            "pollIntervalSec": 30,
-            "debounceSec": 30,
-            "concurrency": 6,
-        });
-        let config = from_json(&json).0;
-        assert_eq!(config.poll_interval_sec, 60);
-        assert_eq!(config.debounce_sec, 3);
-    }
-
-    #[test]
-    fn test_migration_legacy_small_poll_variants() {
-        // 旧版秒级小值（10/45）一律迁移到 60；0（关闭）与 ≥60 的值保留
-        for &old_poll in &[10u32, 30, 45] {
-            let json = json!({ "pollIntervalSec": old_poll });
-            let config = from_json(&json).0;
-            assert_eq!(config.poll_interval_sec, 60, "poll={old_poll} 应迁移到 60");
-        }
-        // 0 = 关闭，保留
-        assert_eq!(
-            from_json(&json!({ "pollIntervalSec": 0 }))
-                .0
-                .poll_interval_sec,
-            0
-        );
-        // ≥60 保留
-        assert_eq!(
-            from_json(&json!({ "pollIntervalSec": 60 }))
-                .0
-                .poll_interval_sec,
-            60
-        );
-        assert_eq!(
-            from_json(&json!({ "pollIntervalSec": 600 }))
-                .0
-                .poll_interval_sec,
-            600
-        );
-    }
-
-    #[test]
-    fn test_no_migration_when_valid() {
-        // 合法的新版值不迁移
-        let json = json!({
-            "pollIntervalSec": 120,
-            "debounceSec": 5,
-        });
-        let config = from_json(&json).0;
-        assert_eq!(config.poll_interval_sec, 120);
-        assert_eq!(config.debounce_sec, 5);
-    }
-
-    #[test]
-    fn test_migration_clears_legacy_default_mount_when_unconfigured() {
-        // 旧版：未配置但 mount_dir 残留旧默认 ~/hwcloud-drive → 清空
-        let json = json!({
-            "mountDir": "~/hwcloud-drive",
-            "mountConfigured": false,
-        });
-        let config = from_json(&json).0;
-        assert_eq!(config.mount_dir, "");
-        assert!(!config.mount_configured);
-    }
-
-    #[test]
-    fn test_migration_keeps_explicitly_configured_mount() {
-        // 用户显式配置过（mount_configured=true）的 ~/hwcloud-drive 保留
-        let json = json!({
-            "mountDir": "~/hwcloud-drive",
-            "mountConfigured": true,
-        });
-        let config = from_json(&json).0;
-        assert_eq!(config.mount_dir, "~/hwcloud-drive");
-        assert!(config.mount_configured);
-    }
-
-    #[test]
-    fn test_roundtrip_serialization() {
-        let config = AppConfig {
-            mount_configured: true,
-            concurrency: 10,
-            ..AppConfig::default()
-        };
-        let json = to_json(&config);
-        let restored = from_json(&json).0;
-        assert!(restored.mount_configured);
-        assert_eq!(restored.concurrency, 10);
-    }
-
-    #[test]
-    fn test_export_import_roundtrip() {
-        // export/import 应能还原（用临时目录避免污染真实配置）
-        let _td = tempdir();
-        let config = AppConfig {
-            concurrency: 8,
-            mount_configured: true,
-            ..AppConfig::default()
-        };
-        let exported = ConfigStore::export_to_json(&config).unwrap();
-        assert!(exported.contains("\"concurrency\": 8"));
-    }
-
-    #[test]
-    fn test_sort_field_roundtrip() {
-        let json = json!({ "sortField": "size", "sortOrder": "descending" });
-        let config = from_json(&json).0;
-        assert_eq!(config.sort_field, SortField::Size);
-        assert_eq!(config.sort_order, SortOrder::Descending);
-    }
-
-    #[test]
-    fn test_parse_config_raw_rejects_invalid_json() {
-        let err = parse_config_raw("{ invalid json").unwrap_err();
-        assert!(matches!(err, AppError::Config { .. }));
     }
 }

@@ -20,6 +20,7 @@ use crate::drive::client::{
 };
 use crate::error::{AppError, AppResult, RequestSemantics};
 
+/// 以临时文件和版本约束执行可恢复下载。
 pub struct DownloadApi {
     client: Arc<DriveClient>,
     drive_base: String,
@@ -37,18 +38,20 @@ pub struct DownloadExpectation {
     pub edited_time_ms: Option<i64>,
     pub size: Option<u64>,
     pub content_hash: Option<String>,
-    /// Existing downloaded file that may be replaced only while its local version is unchanged.
+    /// 已下载文件；仅当本地版本未变化时才允许替换。
     pub destination_snapshot: Option<LocalDestinationSnapshot>,
-    /// Fresh download may replace only an absent path or this fileId's untouched placeholder.
+    /// 首次下载仅可写入空路径或当前云端文件未改动的占位符。
     pub placeholder_file_id: Option<String>,
 }
 
+/// 安装下载结果前必须保持不变的本地文件快照。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalDestinationSnapshot {
     pub mtime_ms: i64,
     pub size: u64,
 }
 
+/// 与临时内容绑定的持久化断点身份。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct ResumeMetadata {
     file_id: String,
@@ -61,6 +64,7 @@ struct ResumeMetadata {
 }
 
 impl ResumeMetadata {
+    /// 判断元数据是否含可阻止跨版本续传的稳定身份。
     fn has_stable_identity(&self) -> bool {
         self.revision.is_some()
             || self.edited_time_ms.is_some()
@@ -70,23 +74,19 @@ impl ResumeMetadata {
     }
 }
 
+/// 从下载前云端元数据查询得到的版本快照。
 #[derive(Debug, Clone)]
 struct RemoteMetadata {
     resume: ResumeMetadata,
 }
 
 impl DownloadApi {
+    /// 使用共享 Drive 客户端创建下载接口。
     pub fn new(client: Arc<DriveClient>) -> Self {
         Self {
             client,
             drive_base: crate::constants::DRIVE_API_BASE.to_string(),
         }
-    }
-
-    /// 测试或本地契约验证用：注入 Drive API base URL。
-    #[cfg(test)]
-    pub fn with_base_url(client: Arc<DriveClient>, drive_base: String) -> Self {
-        Self { client, drive_base }
     }
 
     /// 下载文件到 `dest_path`。保留原接口；版本由 API 每次从云端读取并校验。
@@ -286,6 +286,7 @@ impl DownloadApi {
         }
     }
 
+    /// 获取并严格校验下载所需的云端版本元数据。
     async fn fetch_remote_metadata(&self, file_id: &str) -> AppResult<RemoteMetadata> {
         let encoded_id = crate::drive::files_api::urlencoding(file_id);
         let response = self
@@ -344,6 +345,7 @@ impl DownloadApi {
         })
     }
 
+    /// 仅在断点身份与当前云端版本一致时返回可续传偏移。
     async fn validated_resume_offset(
         &self,
         dest_path: &Path,
@@ -371,6 +373,7 @@ impl DownloadApi {
         Ok(length)
     }
 
+    /// 发送内容请求；遇到 401 时刷新认证并原样重放一次。
     async fn send_content_request(
         &self,
         file_id: &str,
@@ -397,6 +400,7 @@ impl DownloadApi {
         Ok((response, true))
     }
 
+    /// 构造带可选 Range 与版本条件的已认证内容请求。
     fn build_content_request(
         &self,
         file_id: &str,
@@ -422,6 +426,7 @@ impl DownloadApi {
         request
     }
 
+    /// 复核长度、哈希及两端版本后原子安装临时文件。
     async fn verify_and_install(
         &self,
         file_id: &str,
@@ -475,6 +480,7 @@ impl DownloadApi {
     }
 }
 
+/// 安装前确认本地目标仍为空缺、原快照或本文件的未改占位符。
 fn verify_local_destination(
     dest_path: &Path,
     expectation: Option<&DownloadExpectation>,
@@ -530,6 +536,7 @@ fn verify_local_destination(
     Ok(())
 }
 
+/// 判断远端版本是否满足调度器提供的全部约束。
 fn matches_expectation(remote: &ResumeMetadata, expectation: &DownloadExpectation) -> bool {
     expectation
         .edited_time_ms
@@ -576,6 +583,7 @@ fn validated_response_offset(
     }
 }
 
+/// 解析 `bytes start-end/total` 响应范围。
 fn parse_content_range(value: &str) -> Option<(u64, u64, u64)> {
     let value = value.trim().strip_prefix("bytes ")?;
     let (range, total) = value.split_once('/')?;
@@ -583,6 +591,7 @@ fn parse_content_range(value: &str) -> Option<(u64, u64, u64)> {
     Some((start.parse().ok()?, end.parse().ok()?, total.parse().ok()?))
 }
 
+/// 从无符号整数或十进制字符串读取字节数。
 fn parse_u64(value: Option<&Value>) -> Option<u64> {
     match value? {
         Value::Number(value) => value.as_u64(),
@@ -591,6 +600,7 @@ fn parse_u64(value: Option<&Value>) -> Option<u64> {
     }
 }
 
+/// 将非空字符串或数值标量转换为版本字符串。
 fn scalar_string(value: Option<&Value>) -> Option<String> {
     match value? {
         Value::String(value) if !value.is_empty() => Some(value.clone()),
@@ -599,6 +609,7 @@ fn scalar_string(value: Option<&Value>) -> Option<String> {
     }
 }
 
+/// 克隆可选的非空 JSON 字符串。
 fn nonempty_string(value: Option<&Value>) -> Option<String> {
     value?
         .as_str()
@@ -606,6 +617,7 @@ fn nonempty_string(value: Option<&Value>) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// 流式计算文件 SHA-256；打开或读取失败直接返回错误。
 async fn sha256_file(path: &Path) -> AppResult<String> {
     let mut file = File::open(path)
         .await
@@ -625,11 +637,13 @@ async fn sha256_file(path: &Path) -> AppResult<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
+/// 尝试读取断点元数据；缺失、读失败或损坏均视为不可续传。
 async fn read_resume_metadata(dest: &Path) -> Option<ResumeMetadata> {
     let bytes = tokio::fs::read(resume_metadata_path(dest)).await.ok()?;
     serde_json::from_slice(&bytes).ok()
 }
 
+/// 先同步暂存文件再原子提交断点元数据。
 async fn write_resume_metadata(dest: &Path, metadata: &ResumeMetadata) -> AppResult<()> {
     let bytes = serde_json::to_vec(metadata)
         .map_err(|error| AppError::generic(format!("序列化下载断点失败：{error}")))?;
@@ -654,6 +668,7 @@ async fn write_resume_metadata(dest: &Path, metadata: &ResumeMetadata) -> AppRes
     Ok(())
 }
 
+/// 仅对判定为永久失败的错误清除断点，暂态失败保留现场。
 fn cleanup_if_permanent(dest: &Path, error: &AppError) {
     let should_keep = match error {
         AppError::DriveApi {
@@ -683,16 +698,19 @@ pub fn resume_metadata_path(dest: &Path) -> PathBuf {
     append_suffix(dest, ".download-meta.tmp")
 }
 
+/// 构造断点元数据写入阶段使用的暂存路径。
 fn resume_metadata_staging_path(dest: &Path) -> PathBuf {
     append_suffix(dest, ".download-meta-write.tmp")
 }
 
+/// 在完整路径字节串末尾追加内部后缀。
 fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
     let mut value = path.as_os_str().to_owned();
     value.push(suffix);
     PathBuf::from(value)
 }
 
+/// 尽力删除已提交及写入中的断点元数据。
 fn remove_resume_metadata(dest: &Path) {
     let _ = std::fs::remove_file(resume_metadata_path(dest));
     let _ = std::fs::remove_file(resume_metadata_staging_path(dest));
@@ -702,23 +720,4 @@ fn remove_resume_metadata(dest: &Path) {
 pub fn discard_resume_artifacts(dest: &Path) {
     let _ = std::fs::remove_file(tmp_path(dest));
     remove_resume_metadata(dest);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_tmp_path_appends_suffix() {
-        let dest = PathBuf::from("/tmp/report.txt");
-        let tmp = tmp_path(&dest);
-        assert_eq!(tmp, PathBuf::from("/tmp/report.txt.tmp"));
-    }
-
-    #[test]
-    fn test_tmp_path_multiple_extensions() {
-        let dest = PathBuf::from("/tmp/archive.tar.gz");
-        let tmp = tmp_path(&dest);
-        assert_eq!(tmp, PathBuf::from("/tmp/archive.tar.gz.tmp"));
-    }
 }

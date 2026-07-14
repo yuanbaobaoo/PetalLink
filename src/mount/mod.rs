@@ -2,7 +2,11 @@
 //!
 //! 对齐 `legacy/lib/mount/` 的模块划分。
 
+/// 带元数据缓存的文件哈希计算。
 pub mod file_hasher;
+/// 本地文件系统变更监听与防抖。
 pub mod local_watcher;
+/// 镜像目录、占位符与扩展属性管理。
 pub mod manager;
+/// 内部文件及用户模式的跳过规则。
 pub mod skip;

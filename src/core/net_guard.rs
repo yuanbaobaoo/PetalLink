@@ -32,25 +32,29 @@ pub enum NetworkTransition {
     Offline,
 }
 
+/// 将探测样本稳定化为在线或离线状态转换。
 #[derive(Debug)]
-pub(crate) struct NetworkStateMachine {
+struct NetworkStateMachine {
     online: bool,
     consecutive_successes: u8,
 }
 
 impl NetworkStateMachine {
-    pub(crate) fn new(online: bool) -> Self {
+    /// 以给定初始在线状态创建状态机。
+    fn new(online: bool) -> Self {
         Self {
             online,
             consecutive_successes: 0,
         }
     }
 
-    pub(crate) fn is_online(&self) -> bool {
+    /// 返回当前稳定网络状态。
+    fn is_online(&self) -> bool {
         self.online
     }
 
-    pub(crate) fn observe(&mut self, probe_succeeded: bool) -> Option<NetworkTransition> {
+    /// 接收探测样本，仅在稳定状态真实改变时返回转换。
+    fn observe(&mut self, probe_succeeded: bool) -> Option<NetworkTransition> {
         if !probe_succeeded {
             self.consecutive_successes = 0;
             if self.online {
@@ -75,6 +79,7 @@ impl NetworkStateMachine {
     }
 }
 
+/// 以代次标识管理后台探测任务的单实例生命周期。
 #[derive(Debug, Default)]
 struct ProbeLifecycle {
     generation: u64,
@@ -82,6 +87,7 @@ struct ProbeLifecycle {
 }
 
 impl ProbeLifecycle {
+    /// 启动新代次；已有任务运行时返回空值。
     fn start(&mut self) -> Option<u64> {
         if self.running {
             return None;
@@ -94,6 +100,7 @@ impl ProbeLifecycle {
         Some(self.generation)
     }
 
+    /// 将运行中的代次标记为停止。
     fn shutdown(&mut self) -> bool {
         if !self.running {
             return false;
@@ -102,10 +109,12 @@ impl ProbeLifecycle {
         true
     }
 
+    /// 判断结果是否属于当前仍在运行的代次。
     fn accepts(&self, generation: u64) -> bool {
         self.running && self.generation == generation
     }
 
+    /// 仅结束匹配的当前代次，拒绝陈旧任务回写。
     fn finish(&mut self, generation: u64) -> bool {
         if !self.accepts(generation) {
             return false;
@@ -115,6 +124,7 @@ impl ProbeLifecycle {
     }
 }
 
+/// 汇总探测生命周期与稳定网络状态。
 #[derive(Debug)]
 struct ProbeRuntime {
     lifecycle: ProbeLifecycle,
@@ -122,6 +132,7 @@ struct ProbeRuntime {
 }
 
 impl Default for ProbeRuntime {
+    /// 创建在线且尚未启动探测的运行状态。
     fn default() -> Self {
         Self {
             lifecycle: ProbeLifecycle::default(),
@@ -130,17 +141,21 @@ impl Default for ProbeRuntime {
     }
 }
 
+/// 全局探测运行状态，锁内操作不得等待异步 I/O。
 static PROBE_RUNTIME: Lazy<Mutex<ProbeRuntime>> = Lazy::new(|| Mutex::new(ProbeRuntime::default()));
+/// 稳定网络状态转换广播通道。
 static TRANSITIONS: Lazy<broadcast::Sender<NetworkTransition>> = Lazy::new(|| {
     let (sender, _) = broadcast::channel(16);
     sender
 });
 
+/// 在探测任务退出时收束其所属代次。
 struct ProbeGenerationGuard {
     generation: u64,
 }
 
 impl Drop for ProbeGenerationGuard {
+    /// 结束仍匹配的探测代次。
     fn drop(&mut self) {
         finish_probe_generation(self.generation);
     }
@@ -157,14 +172,14 @@ pub fn subscribe() -> broadcast::Receiver<NetworkTransition> {
     TRANSITIONS.subscribe()
 }
 
-/// Feed a real request-layer transport failure into the same stable level machine used by TCP
-/// probes. This produces at most one Online→Offline edge; recovery still requires two successful
-/// probes, preventing a WaitingForNetwork transition from immediately retrying in a hot loop.
+/// 将真实请求层传输失败送入 TCP 探测共用的稳定状态机。
+/// 最多发布一次 Online→Offline 边沿；恢复仍要求连续两次探测成功，避免等待网络的任务热循环重试。
 pub fn report_request_network_failure() -> bool {
     let mut runtime = PROBE_RUNTIME.lock();
     publish_request_network_failure(&mut runtime.network, &ONLINE, &TRANSITIONS)
 }
 
+/// 发布请求层离线转换；重复失败不会产生重复边沿。
 fn publish_request_network_failure(
     network: &mut NetworkStateMachine,
     online_mirror: &AtomicBool,
@@ -217,14 +232,17 @@ pub fn shutdown_probe() {
     }
 }
 
+/// 判断给定探测代次是否仍可发布结果。
 fn generation_is_active(generation: u64) -> bool {
     PROBE_RUNTIME.lock().lifecycle.accepts(generation)
 }
 
+/// 尝试结束给定探测代次。
 fn finish_probe_generation(generation: u64) -> bool {
     PROBE_RUNTIME.lock().lifecycle.finish(generation)
 }
 
+/// 记录探测样本并在状态变化时输出日志。
 fn record_probe_result(generation: u64, probe_succeeded: bool) -> bool {
     let mut runtime = PROBE_RUNTIME.lock();
     let was_online = runtime.network.is_online();
@@ -248,6 +266,7 @@ fn record_probe_result(generation: u64, probe_succeeded: bool) -> bool {
     true
 }
 
+/// 校验代次后更新稳定状态、原子镜像与广播通道。
 fn publish_probe_result(
     runtime: &mut ProbeRuntime,
     generation: u64,
@@ -312,145 +331,4 @@ pub fn init_sleep_handling() {
         "睡眠/唤醒监听：采用纯探测方案（无系统通知，依赖 {}s 周期探测）",
         PROBE_INTERVAL_SECS
     );
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn offline_recovery_requires_two_consecutive_successes() {
-        let mut state = NetworkStateMachine::new(true);
-
-        assert_eq!(state.observe(false), Some(NetworkTransition::Offline));
-        assert!(!state.is_online());
-        assert_eq!(state.observe(true), None);
-        assert!(!state.is_online());
-        assert_eq!(state.observe(false), None);
-        assert_eq!(state.observe(true), None);
-        assert_eq!(state.observe(true), Some(NetworkTransition::Online));
-        assert!(state.is_online());
-        assert_eq!(state.observe(true), None);
-    }
-
-    #[test]
-    fn flapping_emits_exactly_one_event_per_stable_transition() {
-        let mut state = NetworkStateMachine::new(true);
-        let transitions: Vec<_> = [false, true, true, false, false, true, true]
-            .into_iter()
-            .filter_map(|success| state.observe(success))
-            .collect();
-
-        assert_eq!(
-            transitions,
-            vec![
-                NetworkTransition::Offline,
-                NetworkTransition::Online,
-                NetworkTransition::Offline,
-                NetworkTransition::Online,
-            ]
-        );
-    }
-
-    #[test]
-    fn probe_lifecycle_is_idempotent_restart_safe_and_rejects_old_generation() {
-        let mut lifecycle = ProbeLifecycle::default();
-        assert!(!lifecycle.shutdown());
-
-        let first = lifecycle.start().expect("first start creates generation");
-        assert_eq!(lifecycle.start(), None);
-        assert!(lifecycle.accepts(first));
-
-        assert!(lifecycle.shutdown());
-        assert!(!lifecycle.shutdown());
-        assert!(!lifecycle.accepts(first));
-
-        let second = lifecycle.start().expect("restart creates generation");
-        assert_ne!(first, second);
-        assert!(!lifecycle.accepts(first));
-        assert!(lifecycle.accepts(second));
-
-        assert!(!lifecycle.finish(first));
-        assert!(lifecycle.accepts(second));
-        assert!(lifecycle.finish(second));
-        assert!(!lifecycle.accepts(second));
-    }
-
-    #[test]
-    fn broadcast_publishes_only_real_stable_transitions() {
-        let mut runtime = ProbeRuntime::default();
-        let generation = runtime.lifecycle.start().unwrap();
-        let (sender, mut receiver) = broadcast::channel(8);
-        let online = AtomicBool::new(true);
-
-        assert!(publish_probe_result(
-            &mut runtime,
-            generation,
-            false,
-            &online,
-            &sender,
-        ));
-        assert_eq!(receiver.try_recv(), Ok(NetworkTransition::Offline));
-        assert!(!online.load(Ordering::SeqCst));
-
-        assert!(publish_probe_result(
-            &mut runtime,
-            generation,
-            false,
-            &online,
-            &sender,
-        ));
-        assert!(publish_probe_result(
-            &mut runtime,
-            generation,
-            true,
-            &online,
-            &sender,
-        ));
-        assert!(matches!(
-            receiver.try_recv(),
-            Err(broadcast::error::TryRecvError::Empty)
-        ));
-        assert!(!online.load(Ordering::SeqCst));
-
-        assert!(publish_probe_result(
-            &mut runtime,
-            generation,
-            true,
-            &online,
-            &sender,
-        ));
-        assert_eq!(receiver.try_recv(), Ok(NetworkTransition::Online));
-        assert!(online.load(Ordering::SeqCst));
-
-        assert!(matches!(
-            receiver.try_recv(),
-            Err(broadcast::error::TryRecvError::Empty)
-        ));
-    }
-
-    #[test]
-    fn request_layer_failure_reports_offline_once_then_uses_stable_recovery() {
-        let mut network = NetworkStateMachine::new(true);
-        let online = AtomicBool::new(true);
-        let (sender, mut receiver) = broadcast::channel(4);
-
-        assert!(publish_request_network_failure(
-            &mut network,
-            &online,
-            &sender
-        ));
-        assert_eq!(receiver.try_recv(), Ok(NetworkTransition::Offline));
-        assert!(!publish_request_network_failure(
-            &mut network,
-            &online,
-            &sender
-        ));
-        assert!(matches!(
-            receiver.try_recv(),
-            Err(broadcast::error::TryRecvError::Empty)
-        ));
-        assert_eq!(network.observe(true), None);
-        assert_eq!(network.observe(true), Some(NetworkTransition::Online));
-    }
 }

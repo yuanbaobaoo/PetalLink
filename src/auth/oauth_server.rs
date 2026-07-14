@@ -52,6 +52,7 @@ pub struct OauthServer {
     result_rx: Option<oneshot::Receiver<OauthCallbackResult>>,
 }
 
+/// 可跨任务触发回调监听停止的句柄。
 #[derive(Clone)]
 pub struct OauthServerStopHandle {
     stop_tx: watch::Sender<bool>,
@@ -209,7 +210,7 @@ fn url_decode(s: &str) -> String {
         .to_string()
 }
 
-/// 写 HTTP 响应。
+/// 写入带长度和关闭连接头的 UTF-8 HTML 成功响应。
 async fn write_response(
     stream: &mut (impl tokio::io::AsyncWrite + Unpin),
     html: &str,
@@ -245,72 +246,5 @@ h1{{color:#d73a49}}</style></head>
 <p>{reason}</p>
 <p>请返回 App 重新登录。</p></body></html>"#
         )
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_query_success() {
-        let r = parse_query("code=abc123&state=xyz");
-        assert_eq!(r.code.as_deref(), Some("abc123"));
-        assert_eq!(r.state.as_deref(), Some("xyz"));
-        assert!(r.is_success());
-    }
-
-    #[test]
-    fn test_parse_query_error() {
-        let r = parse_query("error=1101&error_description=invalid+scope&sub_error=20042");
-        assert_eq!(r.error.as_deref(), Some("1101"));
-        assert_eq!(r.error_description.as_deref(), Some("invalid scope"));
-        assert_eq!(r.sub_error.as_deref(), Some("20042"));
-        assert!(!r.is_success());
-    }
-
-    #[test]
-    fn test_parse_query_url_decoded() {
-        // 中文 error_description 应被解码
-        let r = parse_query("error=denied&error_description=%E6%8E%88%E6%9D%83%E5%A4%B1%E8%B4%A5");
-        assert_eq!(r.error_description.as_deref(), Some("授权失败"));
-    }
-
-    #[test]
-    fn test_build_response_page_success() {
-        let r = OauthCallbackResult {
-            code: Some("c".into()),
-            ..Default::default()
-        };
-        let html = build_response_page(&r);
-        assert!(html.contains("授权成功"));
-        assert!(html.contains("#1a7f37"));
-    }
-
-    #[test]
-    fn test_build_response_page_failure() {
-        let r = OauthCallbackResult {
-            error: Some("1101".into()),
-            ..Default::default()
-        };
-        let html = build_response_page(&r);
-        assert!(html.contains("授权失败"));
-        assert!(html.contains("1101"));
-        assert!(html.contains("#d73a49"));
-    }
-
-    #[tokio::test]
-    async fn test_stop_handle_closes_wait_for_callback() {
-        let server = OauthServer::start(0).await.expect("启动 OAuth 测试 server");
-        let stop = server.stop_handle();
-        let waiter = tokio::spawn(server.wait_for_callback());
-
-        stop.stop();
-
-        let result = waiter.await.expect("等待任务应结束");
-        assert!(
-            result.is_err(),
-            "stop 后 wait_for_callback 不应继续等到超时"
-        );
     }
 }

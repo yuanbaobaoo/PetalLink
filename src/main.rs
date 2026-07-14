@@ -12,6 +12,7 @@
 // 桌面端二进制入口
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+/// 初始化运行环境并启动桌面应用。
 fn main() {
     // 全局 panic 钩子：记录后不崩溃（§3.4）
     let default_hook = std::panic::take_hook();

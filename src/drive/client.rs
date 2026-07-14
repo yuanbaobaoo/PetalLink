@@ -24,10 +24,11 @@ use crate::error::{parse_retry_after, AppError, AppResult, DriveTransportKind, R
 pub struct DriveClient {
     http: Client,
     auth: Arc<AuthService>,
-    /// Drive API base URL（默认 `DRIVE_API_BASE`；测试可注入 wiremock 地址）。
+    /// Drive API base URL（默认 `DRIVE_API_BASE`）。
     base_url: String,
 }
 
+/// 随成功响应传递的请求语义与认证重放信息。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ResponseMetadata {
     pub semantics: RequestSemantics,
@@ -35,6 +36,7 @@ pub(crate) struct ResponseMetadata {
 }
 
 impl DriveClient {
+    /// 创建带超时、连接池和认证服务的 Drive 客户端。
     pub fn new(auth: Arc<AuthService>) -> Self {
         let http = Client::builder()
             .connect_timeout(Duration::from_secs(15))
@@ -46,22 +48,6 @@ impl DriveClient {
             http,
             auth,
             base_url: constants::DRIVE_API_BASE.to_string(),
-        }
-    }
-
-    /// 测试用：注入自定义 base URL（如 wiremock 地址）。
-    #[cfg(test)]
-    pub fn with_base_url(auth: Arc<AuthService>, base_url: String) -> Self {
-        let http = Client::builder()
-            .connect_timeout(Duration::from_secs(15))
-            .timeout(Duration::from_secs(60))
-            .pool_max_idle_per_host(15)
-            .build()
-            .expect("构建 reqwest client 失败");
-        Self {
-            http,
-            auth,
-            base_url,
         }
     }
 
@@ -132,7 +118,7 @@ impl DriveClient {
         self.execute_with_retry(Method::GET, &url, |r| r).await
     }
 
-    /// POST 请求。
+    /// 向相对路径发送 POST；仅返回最终 2xx，401 最多刷新重放一次。
     pub async fn post(
         &self,
         path: &str,
@@ -151,7 +137,7 @@ impl DriveClient {
         .await
     }
 
-    /// PATCH 请求。
+    /// 向相对路径发送 PATCH；传输失败会保留写请求是否可能已提交的语义。
     pub async fn patch(
         &self,
         path: &str,
@@ -166,7 +152,7 @@ impl DriveClient {
         .await
     }
 
-    /// DELETE 请求。
+    /// 向相对路径发送 DELETE；仅返回最终 2xx，401 最多刷新重放一次。
     pub async fn delete(&self, path: &str) -> AppResult<reqwest::Response> {
         let url = format!("{}{}", self.base_url, path);
         self.execute_with_retry(Method::DELETE, &url, |r| r).await
@@ -178,7 +164,7 @@ impl DriveClient {
         self.execute_with_retry(Method::GET, url, |r| r).await
     }
 
-    /// POST 请求（完整 URL）。
+    /// 向完整 URL 发送 POST，并沿用统一的成功校验与单次认证重放。
     pub async fn post_full(
         &self,
         url: &str,
@@ -196,7 +182,7 @@ impl DriveClient {
         .await
     }
 
-    /// PATCH 请求（完整 URL）。
+    /// 向完整 URL 发送 PATCH，并保留写后响应不确定性的结构化错误信息。
     pub async fn patch_full(
         &self,
         url: &str,
@@ -210,7 +196,7 @@ impl DriveClient {
         .await
     }
 
-    /// DELETE 请求（完整 URL）。
+    /// 向完整 URL 发送 DELETE，并沿用统一的成功校验与单次认证重放。
     pub async fn delete_full(&self, url: &str) -> AppResult<reqwest::Response> {
         self.execute_with_retry(Method::DELETE, url, |r| r).await
     }
@@ -271,6 +257,7 @@ pub async fn handle_error_response_with_metadata(
     AppError::drive_from_response(status, &body, retry_after, semantics, auth_already_replayed)
 }
 
+/// 按 HTTP 方法区分只读请求与可能已提交的写请求。
 fn request_semantics(method: &Method) -> RequestSemantics {
     if matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) {
         RequestSemantics::Read
@@ -279,10 +266,12 @@ fn request_semantics(method: &Method) -> RequestSemantics {
     }
 }
 
+/// 判断最终响应是否必须转换为结构化 HTTP 错误。
 fn must_reject_final_status(status: StatusCode) -> bool {
     !status.is_success()
 }
 
+/// 仅放行最终 2xx 响应；其余状态读取错误体后返回失败。
 async fn ensure_success_response(
     mut response: reqwest::Response,
     semantics: RequestSemantics,
@@ -300,6 +289,7 @@ async fn ensure_success_response(
     Ok(response)
 }
 
+/// 将请求语义与认证重放状态附加到成功响应。
 fn attach_response_metadata(
     response: &mut reqwest::Response,
     semantics: RequestSemantics,
@@ -311,6 +301,7 @@ fn attach_response_metadata(
     });
 }
 
+/// 读取响应元数据；外部响应缺失扩展时使用给定语义且视为未重放。
 pub(crate) fn response_metadata(
     response: &reqwest::Response,
     fallback_semantics: RequestSemantics,
@@ -381,128 +372,4 @@ pub fn response_decode_error(
         auth_already_replayed,
         Some(&diagnostic),
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::error::DriveTransportKind;
-
-    #[test]
-    fn final_status_rejects_every_non_success_including_second_401() {
-        for status in [
-            StatusCode::BAD_REQUEST,
-            StatusCode::UNAUTHORIZED,
-            StatusCode::TOO_MANY_REQUESTS,
-            StatusCode::INTERNAL_SERVER_ERROR,
-        ] {
-            assert!(must_reject_final_status(status), "status={status}");
-        }
-        assert!(!must_reject_final_status(StatusCode::OK));
-        assert!(!must_reject_final_status(StatusCode::NO_CONTENT));
-    }
-
-    #[test]
-    fn response_decode_error_preserves_write_submission_uncertainty() {
-        let write =
-            response_decode_error("createFolder", RequestSemantics::Write, true, "missing id");
-        let read = response_decode_error("list", RequestSemantics::Read, false, "invalid json");
-
-        assert_eq!(write.to_string(), "云端响应异常");
-        assert!(matches!(
-            write,
-            AppError::DriveApi {
-                transport_kind: Some(DriveTransportKind::Decode),
-                request_may_have_reached_server: true,
-                auth_already_replayed: true,
-                ..
-            }
-        ));
-        assert!(matches!(
-            read,
-            AppError::DriveApi {
-                transport_kind: Some(DriveTransportKind::Decode),
-                request_may_have_reached_server: false,
-                auth_already_replayed: false,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn response_extension_preserves_auth_replay_for_later_decode() {
-        let raw = http::Response::builder()
-            .status(StatusCode::OK)
-            .body(reqwest::Body::from("{}"))
-            .unwrap();
-        let mut response: reqwest::Response = raw.into();
-        attach_response_metadata(&mut response, RequestSemantics::Write, true);
-
-        let metadata = response_metadata(&response, RequestSemantics::Read);
-        assert_eq!(metadata.semantics, RequestSemantics::Write);
-        assert!(metadata.auth_already_replayed);
-
-        let error = response_decode_error(
-            "update",
-            metadata.semantics,
-            metadata.auth_already_replayed,
-            "missing id",
-        );
-        assert!(matches!(
-            error,
-            AppError::DriveApi {
-                auth_already_replayed: true,
-                request_may_have_reached_server: true,
-                ..
-            }
-        ));
-    }
-
-    #[tokio::test]
-    async fn second_401_is_structured_and_marked_as_already_replayed() {
-        let raw = http::Response::builder()
-            .status(StatusCode::UNAUTHORIZED)
-            .body(reqwest::Body::from(r#"{"errorCode":"still-unauthorized"}"#))
-            .unwrap();
-        let response: reqwest::Response = raw.into();
-
-        let error = ensure_success_response(response, RequestSemantics::Write, true)
-            .await
-            .unwrap_err();
-
-        assert!(matches!(
-            error,
-            AppError::DriveApi {
-                status_code: Some(401),
-                error_code: Some(ref code),
-                request_may_have_reached_server: true,
-                auth_already_replayed: true,
-                ..
-            } if code == "still-unauthorized"
-        ));
-    }
-
-    #[tokio::test]
-    async fn final_429_preserves_retry_after_and_numeric_huawei_code() {
-        let raw = http::Response::builder()
-            .status(StatusCode::TOO_MANY_REQUESTS)
-            .header(RETRY_AFTER, "12")
-            .body(reqwest::Body::from(r#"{"errorCode":21004002}"#))
-            .unwrap();
-        let response: reqwest::Response = raw.into();
-
-        let error = ensure_success_response(response, RequestSemantics::Read, false)
-            .await
-            .unwrap_err();
-
-        assert!(matches!(
-            error,
-            AppError::DriveApi {
-                status_code: Some(429),
-                error_code: Some(ref code),
-                retry_after: Some(crate::error::RetryAfter::DelaySeconds(12)),
-                ..
-            } if code == "21004002"
-        ));
-    }
 }

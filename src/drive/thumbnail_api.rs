@@ -7,11 +7,13 @@ use std::sync::Arc;
 use crate::drive::client::DriveClient;
 use crate::error::AppResult;
 
+/// 获取云盘文件缩略图二进制内容。
 pub struct ThumbnailApi {
     client: Arc<DriveClient>,
 }
 
 impl ThumbnailApi {
+    /// 使用共享 Drive 客户端创建缩略图接口。
     pub fn new(client: Arc<DriveClient>) -> Self {
         Self { client }
     }

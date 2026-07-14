@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::sync::state::{SyncAction, SyncActionType};
 
-/// 防振荡过滤。
+/// 丢弃近期远端删除路径上的回摆动作，但保留继续确认云端删除的动作。
 pub(super) fn filter_anti_oscillation(actions: &mut Vec<SyncAction>, rdp: &HashMap<String, i64>) {
     actions.retain(|a| {
         let rel = match &a.relative_path {
@@ -15,7 +15,7 @@ pub(super) fn filter_anti_oscillation(actions: &mut Vec<SyncAction>, rdp: &HashM
     });
 }
 
-/// 填充 parent_file_id。
+/// 依据父路径映射，为尚未指定父目录的嵌套动作补充云端目录标识。
 pub(super) fn fill_parent_file_ids(actions: &mut [SyncAction], p2i: &HashMap<String, String>) {
     for a in actions {
         if a.parent_file_id.is_some() || a.relative_path.is_none() {

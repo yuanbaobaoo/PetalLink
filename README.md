@@ -114,8 +114,8 @@ cargo test --test oauth_flow_test
 # 全部 Rust 测试
 cargo test
 
-# 大文件上传独立测试
-cargo run --bin upload-tester -- <file_path>
+# 真实云端手工上传测试（默认忽略）
+HWCLOUD_TEST_FILE="<file_path>" cargo test --test upload_tester -- --ignored --nocapture
 ```
 
 测试覆盖范围：
@@ -181,7 +181,6 @@ PetalLink/
 ├── src/                         # Rust 后端（Tauri）
 │   ├── main.rs                  # 入口
 │   ├── lib.rs                   # 应用装配 + 命令注册 + setup
-│   ├── bin/upload_tester.rs     # 大文件上传独立测试工具
 │   ├── commands.rs              # 42 个 Tauri 命令
 │   ├── auth/                    # OAuth + PKCE + token.bin 加密存储
 │   ├── drive/                   # 华为 Drive REST API 客户端
@@ -198,7 +197,8 @@ PetalLink/
 │   └── styles/                  # 设计令牌
 ├── assets/                      # 品牌图标资源（唯一图源）
 ├── design/prototype/            # UI 设计原型
-├── tests/                       # 集成测试（wiremock）
+├── tests/                       # 集成测试
+│   └── upload_tester.rs         # 默认忽略的真实云端手工集成测试
 ├── docs/                        # 需求文档 + 概要设计 + API 整理
 ├── Cargo.toml                   # Rust 依赖
 ├── tauri.conf.json              # Tauri 配置

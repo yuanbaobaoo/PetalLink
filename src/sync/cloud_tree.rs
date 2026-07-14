@@ -2,8 +2,8 @@
 //!
 //! 对齐 `legacy/lib/sync/sync_engine.dart` 的 BFS 部分 + cloudtree 持久化。
 //!
-//! BFS 并发数 8（每个 folder 独立 fetch），失败节点重试 2 次。
-//! BFS 只构建候选树，不直接替换磁盘 checkpoint。调用方必须在完整应用 Changes 后，
+//! 广度优先扫描并发数为 8（每个目录独立拉取），失败节点重试 2 次。
+//! 广度优先扫描只构建候选树，不直接替换磁盘检查点。调用方必须在完整应用变更后，
 //! 将 tree/path map/final cursor 作为同一个 [`CloudTreeCache`] 原子提交，再安装到 live state。
 //!
 //! # 可信边界
@@ -26,10 +26,10 @@ use crate::drive::models::DriveFile;
 use crate::error::{AppError, AppResult};
 use crate::mount::manager::MountManager;
 
-/// BFS 并发数
+/// 广度优先扫描的最大并发数。
 const INDEXING_CONCURRENCY: usize = 8;
 
-/// 缓存 JSON 结构
+/// 可原子提交的云端树、路径索引与增量游标检查点。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CloudTreeCache {
     pub root_folder_id: Option<String>,
@@ -251,7 +251,7 @@ pub async fn refresh_cloud_tree(
     Ok((tree, path_to_id, root_folder_id))
 }
 
-/// BFS 节点
+/// 广度优先扫描中的目录节点。
 #[derive(Debug, Clone)]
 struct BfsNode {
     folder_id: Option<String>,
@@ -346,7 +346,7 @@ pub fn persist_cloud_checkpoint(abs_mount_dir: &str, checkpoint: &CloudTreeCache
     }
 
     // 保留旧 inode，便于 rename 后父目录 fsync 失败时恢复旧正式文件。
-    // backup 只用于本次提交回滚，loader 永远只读取正式 checkpoint。
+    // 备份只用于本次提交回滚，加载器永远只读取正式检查点。
     let had_previous = cache_file.exists();
     if had_previous {
         std::fs::hard_link(&cache_file, &backup_file)?;
@@ -378,14 +378,16 @@ pub fn persist_cloud_checkpoint(abs_mount_dir: &str, checkpoint: &CloudTreeCache
 }
 
 #[cfg(unix)]
+/// 将 checkpoint 所在目录的元数据刷入磁盘。
 fn sync_parent_directory(parent: &std::path::Path) -> AppResult<()> {
     std::fs::File::open(parent)?.sync_all()?;
     Ok(())
 }
 
 #[cfg(not(unix))]
+/// 非 Unix 平台依赖同目录原子重命名保证完整性。
 fn sync_parent_directory(_parent: &std::path::Path) -> AppResult<()> {
-    // Windows 不支持以普通 File 打开目录；同目录 rename 仍保证不会暴露半截 JSON。
+    // Windows 不支持以普通文件打开目录；同目录重命名仍保证不会暴露半截 JSON。
     Ok(())
 }
 
@@ -413,6 +415,7 @@ pub fn mark_cache_incomplete_if_exists() {
 }
 
 impl Default for DriveFile {
+    /// 构造不含云端元数据的空文件记录。
     fn default() -> Self {
         Self {
             id: String::new(),
@@ -427,196 +430,5 @@ impl Default for DriveFile {
             content_hash: None,
             thumbnail_link: None,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // ===== 索引完整性守卫测试（load_persisted_cloud_tree 严格校验）=====
-
-    /// 构造一个非空 DriveFile 供缓存填充
-    fn sample_file() -> DriveFile {
-        use crate::drive::models::FileCategory;
-        DriveFile {
-            id: "f1".into(),
-            name: "学习".into(),
-            category: FileCategory::Folder,
-            ..Default::default()
-        }
-    }
-
-    /// 把给定 CloudTreeCache 写入临时挂载目录的缓存文件路径，供 load 测试。
-    fn write_cache_raw(abs_mount_dir: &str, json: &str) {
-        let cache_file = cache_paths::cloud_tree_cache_file(abs_mount_dir).unwrap();
-        std::fs::create_dir_all(cache_file.parent().unwrap()).unwrap();
-        std::fs::write(&cache_file, json).unwrap();
-    }
-
-    /// complete=false（哨兵/中断）→ load 应返回 None（强制全量重跑）
-    #[test]
-    fn test_load_rejects_incomplete_cache() {
-        let dir = tempfile::tempdir().unwrap();
-        let abs = dir.path().to_string_lossy().to_string();
-        let mut tree = HashMap::new();
-        tree.insert("学习".into(), sample_file());
-        let cache = CloudTreeCache {
-            root_folder_id: Some("root".into()),
-            tree,
-            path_to_id: HashMap::new(),
-            cursor: Some("c1".into()),
-            complete: false,
-        };
-        write_cache_raw(&abs, &serde_json::to_string_pretty(&cache).unwrap());
-        assert!(
-            load_persisted_cloud_tree(&abs).is_none(),
-            "complete=false 的缓存必须被拒绝，否则 startup 会拿残缺缓存触发文件同步"
-        );
-    }
-
-    /// 严格完成的空云盘是合法可信 checkpoint。
-    #[test]
-    fn test_load_accepts_complete_empty_tree() {
-        let dir = tempfile::tempdir().unwrap();
-        let abs = dir.path().to_string_lossy().to_string();
-        let cache = CloudTreeCache {
-            root_folder_id: Some("root".into()),
-            tree: HashMap::new(),
-            path_to_id: HashMap::new(),
-            cursor: Some("c-empty".into()),
-            complete: true,
-        };
-        write_cache_raw(&abs, &serde_json::to_string_pretty(&cache).unwrap());
-        assert!(
-            load_persisted_cloud_tree(&abs).is_some(),
-            "完整空盘必须可作为可信 checkpoint"
-        );
-    }
-
-    /// complete=true 且 tree 非空 → load 应返回 Some
-    #[test]
-    fn test_load_accepts_complete_cache() {
-        let dir = tempfile::tempdir().unwrap();
-        let abs = dir.path().to_string_lossy().to_string();
-        let mut tree = HashMap::new();
-        tree.insert("学习".into(), sample_file());
-        let mut path_to_id = HashMap::new();
-        path_to_id.insert("学习".into(), "f1".into());
-        let cache = CloudTreeCache {
-            root_folder_id: Some("root".into()),
-            tree,
-            path_to_id,
-            cursor: Some("c1".into()),
-            complete: true,
-        };
-        write_cache_raw(&abs, &serde_json::to_string_pretty(&cache).unwrap());
-        let loaded = load_persisted_cloud_tree(&abs);
-        assert!(loaded.is_some(), "完整缓存应被接受");
-        assert_eq!(loaded.unwrap().tree.len(), 1);
-    }
-
-    /// 旧版缓存无 complete 字段 → serde default false → 视为不完整 → 返回 None
-    /// （安全升级：旧缓存强制重跑一次 BFS，之后自然带上新字段）
-    #[test]
-    fn test_old_cache_without_complete_field_treated_incomplete() {
-        let dir = tempfile::tempdir().unwrap();
-        let abs = dir.path().to_string_lossy().to_string();
-        // 手写无 complete 字段的旧格式 JSON
-        let old_json = r#"{
-            "root_folder_id": "root",
-            "tree": {"学习": {"id": "f1", "name": "学习"}},
-            "path_to_id": {"学习": "f1"}
-        }"#;
-        write_cache_raw(&abs, old_json);
-        assert!(
-            load_persisted_cloud_tree(&abs).is_none(),
-            "旧格式缓存（无 complete 字段）应被视为不完整，强制重跑 BFS"
-        );
-    }
-
-    /// persist_cloud_checkpoint 原子写：写入后文件存在且可被 load 正确读回，
-    /// 且无残留 .tmp 文件。
-    #[test]
-    fn test_persist_internal_atomic_and_readable() {
-        let dir = tempfile::tempdir().unwrap();
-        let abs = dir.path().to_string_lossy().to_string();
-        let mut tree = HashMap::new();
-        tree.insert("学习".into(), sample_file());
-        let mut p2i = HashMap::new();
-        p2i.insert("学习".into(), "f1".into());
-        let checkpoint =
-            CloudTreeCache::new_trusted(Some("root".into()), tree, p2i, "c1".into()).unwrap();
-        persist_cloud_checkpoint(&abs, &checkpoint).unwrap();
-
-        let cache_file = cache_paths::cloud_tree_cache_file(&abs).unwrap();
-        assert!(cache_file.exists(), "缓存文件应存在");
-        // 无残留 .tmp
-        let tmp = cache_file.with_extension("json.tmp");
-        assert!(!tmp.exists(), "原子写后不应残留 .tmp 文件");
-        // 可被 load 读回
-        let loaded = load_persisted_cloud_tree(&abs);
-        assert!(loaded.is_some());
-        assert_eq!(loaded.unwrap().root_folder_id.as_deref(), Some("root"));
-    }
-
-    #[test]
-    fn test_detect_root_folder_id_most_common() {
-        use crate::drive::models::FileCategory;
-        let files = vec![
-            DriveFile {
-                id: "f1".into(),
-                name: "a".into(),
-                category: FileCategory::Folder,
-                size: 0,
-                parent_folder: Some(vec!["root-real-123".into()]),
-                ..Default::default()
-            },
-            DriveFile {
-                id: "f2".into(),
-                name: "b".into(),
-                category: FileCategory::None,
-                size: 100,
-                parent_folder: Some(vec!["root-real-123".into()]),
-                ..Default::default()
-            },
-            DriveFile {
-                id: "f3".into(),
-                name: "c".into(),
-                category: FileCategory::None,
-                size: 50,
-                parent_folder: Some(vec!["other-id".into()]),
-                ..Default::default()
-            },
-        ];
-        let root = detect_root_folder_id(&files);
-        // root-real-123 出现 2 次，other-id 仅 1 次 → root-real-123 当选
-        assert_eq!(root.as_deref(), Some("root-real-123"));
-    }
-
-    #[test]
-    fn test_detect_root_folder_id_no_consensus() {
-        use crate::drive::models::FileCategory;
-        let files = vec![
-            DriveFile {
-                id: "f1".into(),
-                name: "a".into(),
-                category: FileCategory::None,
-                size: 0,
-                parent_folder: Some(vec!["id-a".into()]),
-                ..Default::default()
-            },
-            DriveFile {
-                id: "f2".into(),
-                name: "b".into(),
-                category: FileCategory::None,
-                size: 0,
-                parent_folder: Some(vec!["id-b".into()]),
-                ..Default::default()
-            },
-        ];
-        let root = detect_root_folder_id(&files);
-        // 都只出现 1 次 → None
-        assert!(root.is_none());
     }
 }

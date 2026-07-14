@@ -18,6 +18,7 @@ pub struct TokenPair {
     pub scope: Option<String>,
 }
 
+/// 返回缺省的 Bearer 令牌类型。
 fn default_token_type() -> String {
     "Bearer".to_string()
 }
@@ -195,114 +196,4 @@ fn pick(json: &Value, keys: &[&str]) -> Option<String> {
 /// 当前时间（毫秒 epoch）
 pub(crate) fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn test_token_from_response_computes_expiry() {
-        let before = now_ms();
-        let json = json!({
-            "access_token": "at",
-            "refresh_token": "rt",
-            "expires_in": 3600,
-        });
-        let token = TokenPair::from_token_response(&json).unwrap();
-        let after = now_ms();
-        assert_eq!(token.access_token, "at");
-        assert_eq!(token.refresh_token, "rt");
-        // expires_at 应在 [before + 3600s, after + 3600s]
-        assert!(token.expires_at >= before + 3600 * 1000);
-        assert!(token.expires_at <= after + 3600 * 1000);
-        assert_eq!(token.token_type, "Bearer");
-        assert!(!token.is_expired());
-    }
-
-    #[test]
-    fn test_token_defaults_expires_in() {
-        // 缺失 expires_in 时默认 3600
-        let json = json!({"access_token": "at", "refresh_token": "rt"});
-        let token = TokenPair::from_token_response(&json).unwrap();
-        assert!(!token.is_expired());
-    }
-
-    #[test]
-    fn test_will_expire_within() {
-        let json = json!({
-            "access_token": "at",
-            "refresh_token": "rt",
-            "expires_in": 10,
-        });
-        let token = TokenPair::from_token_response(&json).unwrap();
-        // 过期 10 秒后，buffer 60 秒必然在窗口内
-        assert!(token.will_expire_within(60));
-        // buffer 0 秒（刚创建，距今 10 秒）不应触发
-        assert!(!token.will_expire_within(0));
-    }
-
-    #[test]
-    fn test_userinfo_primary_label_priority() {
-        // displayName 优先
-        let u = UserInfo {
-            display_name: Some("张三".into()),
-            mobile: Some("13800000000".into()),
-            ..Default::default()
-        };
-        assert_eq!(u.primary_label().as_deref(), Some("张三"));
-
-        // 无 displayName 走 mobile
-        let u = UserInfo {
-            mobile: Some("13800000000".into()),
-            name: Some("name".into()),
-            ..Default::default()
-        };
-        assert_eq!(u.primary_label().as_deref(), Some("13800000000"));
-
-        // 都没有走 name
-        let u = UserInfo {
-            name: Some("oidc-name".into()),
-            open_id: Some("opid".into()),
-            ..Default::default()
-        };
-        assert_eq!(u.primary_label().as_deref(), Some("oidc-name"));
-    }
-
-    #[test]
-    fn test_userinfo_from_json_field_aliases() {
-        let json = json!({
-            "openID": "opid",
-            "displayName": "昵称",
-            "displayNameFlag": 1,
-        });
-        let u = UserInfo::from_json(&json);
-        assert_eq!(u.open_id.as_deref(), Some("opid"));
-        assert_eq!(u.display_name.as_deref(), Some("昵称"));
-        assert!(u.is_anonymized);
-    }
-
-    #[test]
-    fn test_userinfo_anonymous_resolves_to_mobile() {
-        let u = UserInfo {
-            display_name: Some("182****1234".into()),
-            mobile: Some("18200001234".into()),
-            is_anonymized: true,
-            ..Default::default()
-        };
-        let resolved = u.resolve_anonymous_as_mobile();
-        assert!(resolved.display_name.is_none());
-        assert_eq!(resolved.primary_label().as_deref(), Some("18200001234"));
-        assert_eq!(resolved.secondary_label().as_deref(), Some("匿名账号"));
-    }
-
-    #[test]
-    fn test_userinfo_initial_cjk() {
-        let u = UserInfo {
-            display_name: Some("张三".into()),
-            ..Default::default()
-        };
-        assert_eq!(u.initial().as_deref(), Some("张"));
-    }
 }

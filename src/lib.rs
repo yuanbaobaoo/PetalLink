@@ -5,15 +5,25 @@
 use std::sync::Arc;
 use tauri::Manager;
 
+/// OAuth 授权与令牌生命周期。
 pub mod auth;
+/// Tauri 命令入口。
 pub mod commands;
+/// 应用级常量。
 pub mod constants;
+/// 配置、日志与路径基础设施。
 pub mod core;
+/// SQLite 数据访问层。
 mod data;
+/// 华为云盘 API 客户端。
 pub mod drive;
+/// 统一错误模型。
 pub mod error;
+/// 本地挂载与文件监听。
 mod mount;
+/// 桌面平台集成。
 pub mod platform;
+/// 双向同步引擎。
 pub mod sync;
 
 /// 日志初始化：三路输出（默认 INFO，对齐 dart `initLogger`）。
@@ -80,7 +90,7 @@ pub fn load_env() {
     }
 }
 
-/// 应用启动 —— Tauri Builder。
+/// 装配 Tauri 插件、命令与生命周期钩子，并启动桌面应用事件循环。
 pub fn run() {
     init_logger();
     load_env();
@@ -119,7 +129,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
-            // Auth
+            // 授权命令
             commands::auth_check_secret,
             commands::auth_restore,
             commands::auth_login,
@@ -127,7 +137,7 @@ pub fn run() {
             commands::auth_logout,
             commands::auth_get_user_info,
             commands::auth_is_logged_in,
-            // Drive
+            // 云盘命令
             commands::drive_list,
             commands::drive_list_all,
             commands::drive_get_file,
@@ -140,7 +150,7 @@ pub fn run() {
             commands::drive_get_about,
             commands::drive_download_file,
             commands::drive_upload_file,
-            // Sync
+            // 同步命令
             commands::sync_manual_refresh,
             commands::sync_check_safe_free_up,
             commands::sync_check_file_local_status,
@@ -151,19 +161,19 @@ pub fn run() {
             commands::sync_retry_failed,
             commands::sync_state,
             commands::sync_items_by_folder,
-            // Config
+            // 配置命令
             commands::config_load,
             commands::config_save,
             commands::config_export_json,
             commands::config_import_json,
-            // Transfer
+            // 传输命令
             commands::transfer_list_all,
             commands::transfer_has_active,
             commands::transfer_clear_completed,
             commands::transfer_clear_failed,
             commands::transfer_clear_finished,
             commands::transfer_retry,
-            // Platform
+            // 平台命令
             commands::open_in_finder,
             commands::launch_at_login_is_enabled,
             commands::launch_at_login_set_enabled,

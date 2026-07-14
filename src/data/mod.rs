@@ -5,7 +5,9 @@
 //! 使用 rusqlite（bundled），schemaVersion=5，启用外键约束。
 //! DB 文件：`<Application Support>/io.github.yuanbaobaoo.PetalLink/petal_link.db`。
 
+/// SQLite 结构迁移。
 pub mod migrations;
+/// 同步项与传输任务仓储。
 pub mod repository;
 
 use std::path::{Path, PathBuf};
@@ -25,9 +27,7 @@ pub const DB_FILE_NAME: &str = "petal_link.db";
 /// 对齐 dart `AppDatabase`：`PRAGMA foreign_keys = ON` + 迁移策略。
 pub fn open() -> AppResult<Connection> {
     let config = ConfigStore::load()?;
-    let mount_root = config
-        .mount_configured
-        .then(|| config.expanded_mount_dir());
+    let mount_root = config.mount_configured.then(|| config.expanded_mount_dir());
     open_at_with_mount(&db_file_path()?, mount_root.as_deref())
 }
 
@@ -37,7 +37,7 @@ pub fn open_at(path: &Path) -> AppResult<Connection> {
     open_at_with_mount(path, None)
 }
 
-/// Open a database and supply a trusted mount root for legacy v5 recovery.
+/// 打开数据库并提供可信挂载根，以恢复 v5 旧任务。
 pub fn open_at_with_mount(path: &Path, mount_root: Option<&Path>) -> AppResult<Connection> {
     if let Some(parent) = path.parent() {
         if !parent.exists() {

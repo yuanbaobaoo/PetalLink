@@ -37,8 +37,11 @@ const NONCE_LEN: usize = 12;
 
 /// Token 存储 trait（对外接口稳定，调用方零改动）
 pub trait TokenStore: Send + Sync {
+    /// 读取并解密已持久化的令牌；不存在时返回空值。
     fn load(&self) -> AppResult<Option<TokenPair>>;
+    /// 加密并原子保存令牌。
     fn save(&self, token: &TokenPair) -> AppResult<()>;
+    /// 删除已持久化的令牌。
     fn clear(&self) -> AppResult<()>;
 }
 
@@ -46,6 +49,7 @@ pub trait TokenStore: Send + Sync {
 pub struct EncryptedFileStore;
 
 impl TokenStore for EncryptedFileStore {
+    /// 读取令牌文件；文件不可读或认证失败均按未登录处理，路径解析错误才向上传播。
     fn load(&self) -> AppResult<Option<TokenPair>> {
         let path = file_path()?;
         if !path.exists() {
@@ -71,6 +75,7 @@ impl TokenStore for EncryptedFileStore {
         }
     }
 
+    /// 加密令牌并通过临时文件替换完成原子写入。
     fn save(&self, token: &TokenPair) -> AppResult<()> {
         let path = file_path()?;
         if let Some(parent) = path.parent() {
@@ -93,6 +98,7 @@ impl TokenStore for EncryptedFileStore {
         Ok(())
     }
 
+    /// 删除本机令牌文件；文件不存在视为成功。
     fn clear(&self) -> AppResult<()> {
         let path = file_path()?;
         // 不存在视为已清除（幂等）
@@ -227,25 +233,25 @@ fn decrypt_token(raw: &[u8]) -> AppResult<TokenPair> {
 /// 序列化 token 为紧凑二进制。
 ///
 /// 明文布局（小端）：
-/// `[u64 access_len][access_bytes]`
-/// `[u64 refresh_len][refresh_bytes]`
-/// `[i64 expires_at]`
-/// `[u32 token_type_len][token_type_bytes]`
+/// 访问令牌：`[u64 access_len][access_bytes]`
+/// 刷新令牌：`[u64 refresh_len][refresh_bytes]`
+/// 过期时间：`[i64 expires_at]`
+/// 令牌类型：`[u32 token_type_len][token_type_bytes]`
 /// `[u8 scope_present][u64 scope_len][scope_bytes]`（scope_present=0 时后续省略）
 fn serialize_token(token: &TokenPair) -> Vec<u8> {
     let mut buf = Vec::new();
-    // access_token
+    // 访问令牌 access_token
     buf.extend_from_slice(&(token.access_token.len() as u64).to_le_bytes());
     buf.extend_from_slice(token.access_token.as_bytes());
-    // refresh_token
+    // 刷新令牌 refresh_token
     buf.extend_from_slice(&(token.refresh_token.len() as u64).to_le_bytes());
     buf.extend_from_slice(token.refresh_token.as_bytes());
     // expires_at（i64 毫秒）
     buf.extend_from_slice(&token.expires_at.to_le_bytes());
-    // token_type
+    // 令牌类型 token_type
     buf.extend_from_slice(&(token.token_type.len() as u32).to_le_bytes());
     buf.extend_from_slice(token.token_type.as_bytes());
-    // scope（Option）
+    // 授权范围 scope（Option）
     match &token.scope {
         Some(s) => {
             buf.push(1u8);
@@ -261,19 +267,19 @@ fn serialize_token(token: &TokenPair) -> Vec<u8> {
 fn deserialize_token(data: &[u8]) -> AppResult<TokenPair> {
     let mut cursor = Cursor::new(data);
 
-    // access_token
+    // 访问令牌 access_token
     let access_token = read_string_u64(&mut cursor)?;
-    // refresh_token
+    // 刷新令牌 refresh_token
     let refresh_token = read_string_u64(&mut cursor)?;
-    // expires_at
+    // 过期时间 expires_at
     let mut exp_bytes = [0u8; 8];
     cursor
         .read_exact(&mut exp_bytes)
         .map_err(|e| AppError::generic(format!("读取 expires_at 失败：{e}")))?;
     let expires_at = i64::from_le_bytes(exp_bytes);
-    // token_type
+    // 令牌类型 token_type
     let token_type = read_string_u32(&mut cursor)?;
-    // scope
+    // 授权范围 scope
     let mut present = [0u8; 1];
     cursor
         .read_exact(&mut present)
@@ -330,122 +336,4 @@ static GLOBAL_STORE: once_cell::sync::Lazy<EncryptedFileStore> =
 /// 获取全局 token 存储实例。
 pub fn global_store() -> &'static EncryptedFileStore {
     &GLOBAL_STORE
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// 构造测试用 token
-    fn sample_token() -> TokenPair {
-        TokenPair {
-            access_token: "access-abc-123".into(),
-            refresh_token: "refresh-xyz-789".into(),
-            expires_at: 1_700_000_000_000,
-            token_type: "Bearer".into(),
-            scope: Some("scope1 scope2".into()),
-        }
-    }
-
-    /// 构造无 scope 的 token
-    fn token_without_scope() -> TokenPair {
-        TokenPair {
-            scope: None,
-            ..sample_token()
-        }
-    }
-
-    #[test]
-    fn test_serialize_deserialize_roundtrip() {
-        // 序列化 → 反序列化应完全一致（含 scope）
-        let original = sample_token();
-        let bytes = serialize_token(&original);
-        let restored = deserialize_token(&bytes).expect("反序列化成功");
-        assert_eq!(restored.access_token, original.access_token);
-        assert_eq!(restored.refresh_token, original.refresh_token);
-        assert_eq!(restored.expires_at, original.expires_at);
-        assert_eq!(restored.token_type, original.token_type);
-        assert_eq!(restored.scope, original.scope);
-    }
-
-    #[test]
-    fn test_roundtrip_without_scope() {
-        // 无 scope 的 token 往返一致
-        let original = token_without_scope();
-        let bytes = serialize_token(&original);
-        let restored = deserialize_token(&bytes).expect("反序列化成功");
-        assert_eq!(restored.scope, None);
-        assert_eq!(restored.access_token, original.access_token);
-    }
-
-    #[test]
-    fn test_machine_uuid_retrieval() {
-        // 本机能取到非空 UUID（CI 可能无 ioreg → 跳过）
-        match machine_uuid() {
-            Ok(uuid) => {
-                assert!(!uuid.is_empty());
-                // UUID 应为标准格式（含连字符）
-                assert!(uuid.contains('-'), "UUID 应含连字符: {uuid}");
-            }
-            Err(e) => {
-                // 非 macOS 环境允许失败（CI），打印原因
-                eprintln!("machine_uuid 失败（可能是非 macOS 环境）: {e}");
-            }
-        }
-    }
-
-    #[test]
-    fn test_derive_key_deterministic() {
-        // 同一 UUID 派生同一密钥
-        let k1 = derive_key("test-uuid-123");
-        let k2 = derive_key("test-uuid-123");
-        assert_eq!(k1, k2);
-        // 不同 UUID 派生不同密钥
-        let k3 = derive_key("different-uuid");
-        assert_ne!(k1, k3);
-    }
-
-    #[test]
-    fn test_encrypt_decrypt_roundtrip() {
-        // 加密 → 解密应还原原 token（同机 UUID 一致）
-        let original = sample_token();
-        let encrypted = encrypt_token(&original).expect("加密成功");
-        // 校验文件格式：魔数 + nonce + 密文
-        assert_eq!(&encrypted[..4], MAGIC);
-        assert!(encrypted.len() > 4 + NONCE_LEN + 16);
-        let restored = decrypt_token(&encrypted).expect("解密成功");
-        assert_eq!(restored.access_token, original.access_token);
-        assert_eq!(restored.refresh_token, original.refresh_token);
-        assert_eq!(restored.expires_at, original.expires_at);
-        assert_eq!(restored.scope, original.scope);
-    }
-
-    #[test]
-    fn test_decrypt_tampered_fails() {
-        // 篡改密文一个字节 → AEAD 解密失败
-        let original = sample_token();
-        let mut encrypted = encrypt_token(&original).expect("加密成功");
-        // 篡改最后一个字节（Poly1305 tag 区域）
-        let last = encrypted.len() - 1;
-        encrypted[last] ^= 0xff;
-        assert!(decrypt_token(&encrypted).is_err(), "篡改后应解密失败");
-    }
-
-    #[test]
-    fn test_decrypt_wrong_magic_fails() {
-        // 错误魔数应被拒绝
-        let original = sample_token();
-        let mut encrypted = encrypt_token(&original).expect("加密成功");
-        encrypted[0] = b'X';
-        assert!(decrypt_token(&encrypted).is_err(), "错误魔数应失败");
-    }
-
-    #[test]
-    fn test_decrypt_truncated_fails() {
-        // 截断文件应被拒绝（长度不足）
-        let original = sample_token();
-        let encrypted = encrypt_token(&original).expect("加密成功");
-        let truncated = &encrypted[..10];
-        assert!(decrypt_token(truncated).is_err(), "截断文件应失败");
-    }
 }

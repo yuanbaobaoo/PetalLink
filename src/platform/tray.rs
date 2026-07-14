@@ -264,6 +264,7 @@ fn transfer_signature(tasks: &[repository::TransferTask]) -> u64 {
     hasher.finish()
 }
 
+/// 传输任务变化时重建托盘菜单，并对高频活动更新节流。
 pub fn refresh_menu(app: &AppHandle) {
     let Some(tray) = app.tray_by_id(TRAY_ID) else {
         return;
@@ -318,6 +319,7 @@ pub fn update_tooltip(app: &AppHandle, tooltip: &str) {
     }
 }
 
+/// 显示主窗口并恢复普通应用激活策略。
 fn show_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         window.show().ok();
@@ -329,6 +331,7 @@ fn show_main_window(app: &AppHandle) {
     }
 }
 
+/// 标记真实退出并终止应用。
 fn quit_app(app: &AppHandle) {
     tracing::info!("菜单栏「退出 PetalLink」— 真退出");
     #[cfg(target_os = "macos")]

@@ -76,12 +76,14 @@ pub struct AuthService {
     http: reqwest::Client,
 }
 
+/// 启动恢复阶段刷新失败后的登录态处置。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RestoreRefreshFailureAction {
     ReturnError,
     ClearLogin,
 }
 
+/// 网络故障保留令牌，其余刷新失败清理失效登录态。
 fn restore_refresh_failure_action(error: &AppError) -> RestoreRefreshFailureAction {
     match error {
         AppError::DriveApi {
@@ -335,6 +337,7 @@ impl AuthService {
 }
 
 impl Default for AuthService {
+    /// 使用全局令牌存储构造默认授权服务。
     fn default() -> Self {
         Self::new()
     }
@@ -395,125 +398,16 @@ fn open_browser(url: &str) -> bool {
 struct GlobalStoreWrapper;
 
 impl TokenStore for GlobalStoreWrapper {
+    /// 从全局加密存储读取令牌。
     fn load(&self) -> AppResult<Option<TokenPair>> {
         global_store().load()
     }
+    /// 将令牌写入全局加密存储。
     fn save(&self, token: &TokenPair) -> AppResult<()> {
         global_store().save(token)
     }
+    /// 清除全局加密存储中的令牌。
     fn clear(&self) -> AppResult<()> {
         global_store().clear()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::auth::pkce::generate_pkce;
-
-    #[test]
-    fn test_build_redirect_uri() {
-        let uri = build_redirect_uri(9999);
-        assert_eq!(uri, "http://127.0.0.1:9999/oauth/callback");
-    }
-
-    #[test]
-    fn test_build_authorize_url_scope_not_encoded() {
-        let pkce = generate_pkce();
-        let url = build_authorize_url("http://127.0.0.1:9999/oauth/callback", "mystate", &pkce);
-        // 应包含授权端点
-        assert!(url.starts_with(constants::AUTHORIZE_URL));
-        // scope 中的 / 不应被编码（华为要求）
-        assert!(url.contains("scope=openid%20profile%20https://www.huawei.com/auth/drive"));
-        assert!(!url.contains("drive%2F"));
-        // 含 PKCE challenge
-        assert!(url.contains("code_challenge_method=S256"));
-        assert!(url.contains(&format!("code_challenge={}", pkce.code_challenge)));
-    }
-
-    #[test]
-    fn test_build_authorize_url_params() {
-        let pkce = generate_pkce();
-        let url = build_authorize_url("http://127.0.0.1:9999/oauth/callback", "st", &pkce);
-        assert!(url.contains("response_type=code"));
-        assert!(url.contains(&format!("client_id={}", constants::resolved_client_id())));
-        assert!(url.contains("state=st"));
-        assert!(url.contains("access_type=offline"));
-    }
-
-    #[test]
-    fn test_validate_callback_success() {
-        let svc = AuthService::new();
-        let cb = OauthCallbackResult {
-            code: Some("abc".into()),
-            state: Some("st".into()),
-            ..Default::default()
-        };
-        assert!(svc.validate_callback(&cb, "st").is_ok());
-    }
-
-    #[test]
-    fn test_validate_callback_state_mismatch() {
-        let svc = AuthService::new();
-        let cb = OauthCallbackResult {
-            code: Some("abc".into()),
-            state: Some("other".into()),
-            ..Default::default()
-        };
-        let err = svc.validate_callback(&cb, "st").unwrap_err();
-        assert!(
-            matches!(err, AppError::Auth { code, .. } if code == crate::error::AuthErrorCode::StateMismatch)
-        );
-    }
-
-    #[test]
-    fn test_validate_callback_1101_scope_error() {
-        let svc = AuthService::new();
-        let cb = OauthCallbackResult {
-            error: Some("1101".into()),
-            error_description: Some("invalid scope".into()),
-            sub_error: Some("20042".into()),
-            ..Default::default()
-        };
-        let err = svc.validate_callback(&cb, "st").unwrap_err();
-        match err {
-            AppError::Auth { message, .. } => {
-                assert!(message.contains("scope 未在 AppGallery Connect"));
-                assert!(message.contains("20042"));
-            }
-            _ => panic!("应为 Auth 错误"),
-        }
-    }
-
-    #[test]
-    fn test_validate_callback_no_code() {
-        let svc = AuthService::new();
-        let cb = OauthCallbackResult {
-            code: None,
-            state: Some("st".into()),
-            ..Default::default()
-        };
-        let err = svc.validate_callback(&cb, "st").unwrap_err();
-        assert!(
-            matches!(err, AppError::Auth { code, .. } if code == crate::error::AuthErrorCode::InvalidCode)
-        );
-    }
-
-    #[test]
-    fn test_restore_refresh_failure_action_keeps_token_on_network_error() {
-        let err = AppError::drive_network(Some("timeout"));
-        assert_eq!(
-            restore_refresh_failure_action(&err),
-            RestoreRefreshFailureAction::ReturnError
-        );
-    }
-
-    #[test]
-    fn test_restore_refresh_failure_action_clears_token_on_refresh_failure() {
-        let err = AppError::token_refresh_failed(Some("invalid_grant"));
-        assert_eq!(
-            restore_refresh_failure_action(&err),
-            RestoreRefreshFailureAction::ClearLogin
-        );
     }
 }

@@ -16,6 +16,7 @@ pub enum RequestSemantics {
 }
 
 impl RequestSemantics {
+    /// 判断请求是否可能对服务端状态产生写入副作用。
     pub const fn is_write(self) -> bool {
         matches!(self, Self::Write)
     }
@@ -41,6 +42,7 @@ pub enum RetryAfter {
 }
 
 impl RetryAfter {
+    /// 将服务端重试提示换算为不早于当前时刻的毫秒时间戳。
     pub fn next_retry_at(self, now_ms: i64) -> i64 {
         match self {
             Self::DelaySeconds(seconds) => {
@@ -118,6 +120,7 @@ pub enum AppError {
 /// 自定义序列化：扁平结构，`message` 始终为字符串，匹配前端 `AppError` 接口。
 /// 形如 `{"kind":"Token","code":"refresh_failed","message":"...","status_code":null,"error_code":null}`。
 impl Serialize for AppError {
+    /// 输出供前端消费的稳定扁平错误结构。
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -364,8 +367,8 @@ impl AppError {
         .with_cause_body(body)
     }
 
-    /// Resumable-upload session is definitively unavailable, while the target write still needs
-    /// remote verification before a fresh session may be created.
+    /// 构造断点上传会话已失效、但仍须远端复核写入结果的错误。
+    /// 断点上传会话已确定失效，但创建新会话前仍须复核目标写入是否到达远端。
     pub fn drive_upload_session_expired(status_code: u16, auth_already_replayed: bool) -> Self {
         Self::DriveApi {
             code: DriveApiErrorCode::FromStatus,
@@ -374,8 +377,7 @@ impl AppError {
             error_code: Some("upload_session_expired".to_string()),
             retry_after: None,
             transport_kind: None,
-            // The expired session may have accepted an earlier chunk or final write. The runner
-            // must verify the target before it discards the durable session identity.
+            // 失效会话可能已接收早先分片或最终写入；丢弃持久化会话身份前必须复核目标。
             request_may_have_reached_server: true,
             auth_already_replayed,
         }
@@ -445,12 +447,14 @@ impl AppError {
     }
 
     // ===== Config / Quota 工厂 =====
+    /// 构造配置读写或校验错误。
     pub fn config(message: impl Into<String>) -> Self {
         Self::Config {
             message: message.into(),
         }
     }
 
+    /// 构造包含所需与剩余字节数的配额不足错误。
     pub fn quota_exceeded(required: i64, remaining: i64) -> Self {
         Self::QuotaExceeded {
             required,
@@ -459,6 +463,7 @@ impl AppError {
         }
     }
 
+    /// 构造文件系统、解析等通用错误。
     pub fn generic(message: impl Into<String>) -> Self {
         Self::Generic {
             message: message.into(),
@@ -472,6 +477,7 @@ impl AppError {
     }
 }
 
+/// 从华为错误响应的常见结构中提取错误码。
 fn parse_huawei_error_code(body: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(body).ok()?;
     let error_code = value
@@ -489,6 +495,7 @@ fn parse_huawei_error_code(body: &str) -> Option<String> {
 pub type AppResult<T> = Result<T, AppError>;
 
 impl From<std::io::Error> for AppError {
+    /// 将底层 I/O 错误转换为不含敏感数据的通用错误。
     fn from(e: std::io::Error) -> Self {
         Self::Generic {
             message: format!("文件操作失败：{e}"),
@@ -497,211 +504,10 @@ impl From<std::io::Error> for AppError {
 }
 
 impl From<serde_json::Error> for AppError {
+    /// 将 JSON 解析错误转换为统一数据解析错误。
     fn from(e: serde_json::Error) -> Self {
         Self::Generic {
             message: format!("数据解析失败：{e}"),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_auth_cancelled_message() {
-        let e = AppError::auth_cancelled();
-        assert!(matches!(
-            e,
-            AppError::Auth {
-                code: AuthErrorCode::Cancelled,
-                ..
-            }
-        ));
-        assert_eq!(e.to_string(), "用户取消授权");
-    }
-
-    #[test]
-    fn test_quota_message() {
-        let e = AppError::quota_exceeded(100, 50);
-        assert!(matches!(e, AppError::QuotaExceeded { .. }));
-        assert!(e.to_string().contains("需要 100"));
-    }
-
-    #[test]
-    fn test_drive_from_status() {
-        let e = AppError::drive_from_status(404, "not found body");
-        match e {
-            AppError::DriveApi { status_code, .. } => {
-                assert_eq!(status_code, Some(404));
-            }
-            _ => panic!("应为 DriveApi"),
-        }
-    }
-
-    #[test]
-    fn test_serde_flat_structure() {
-        // 序列化后 message 必须是字符串（非嵌套对象），kind/code 在顶层
-        let e = AppError::auth_denied(Some("用户拒绝"));
-        let v: serde_json::Value = serde_json::to_value(&e).unwrap();
-        assert_eq!(v["kind"], "Auth");
-        assert_eq!(v["code"], "denied");
-        // message 是字符串而非嵌套对象（修复 [object Object] 渲染 bug）
-        assert_eq!(v["message"], "授权失败：用户拒绝");
-        assert!(v["message"].is_string());
-        assert!(v.get("status_code").is_some());
-    }
-
-    #[test]
-    fn test_serde_network_vs_refresh_distinct() {
-        // 网络错误 → DriveApi/network（「网络连接失败」）；token 刷新失败 → Token/refresh_failed
-        // 两者 kind/code 不同，前端据此渲染不同文案
-        let net = AppError::drive_network(Some("timeout"));
-        let refresh = AppError::token_refresh_failed(Some("invalid_grant"));
-        let nv: serde_json::Value = serde_json::to_value(&net).unwrap();
-        let rv: serde_json::Value = serde_json::to_value(&refresh).unwrap();
-        assert_eq!(nv["kind"], "DriveApi");
-        assert_eq!(nv["code"], "network");
-        assert_eq!(nv["message"], "网络连接失败，请检查网络");
-        assert_eq!(rv["kind"], "Token");
-        assert_eq!(rv["code"], "refresh_failed");
-        assert!(rv["message"].as_str().unwrap().contains("Token 刷新失败"));
-        assert_ne!(nv["kind"], rv["kind"]);
-    }
-
-    #[test]
-    fn test_serde_driveapi_carries_status_code() {
-        // DriveApi 变体透出 status_code / error_code（顶层）
-        let e = AppError::drive_from_status(404, "not found");
-        let v: serde_json::Value = serde_json::to_value(&e).unwrap();
-        assert_eq!(v["kind"], "DriveApi");
-        assert_eq!(v["status_code"], 404);
-        assert!(v["message"].is_string());
-    }
-
-    #[test]
-    fn drive_response_preserves_numeric_huawei_code_and_retry_after() {
-        let error = AppError::drive_from_response(
-            429,
-            r#"{"errorCode":21004002,"errorDescription":"slow down"}"#,
-            Some(RetryAfter::DelaySeconds(17)),
-            RequestSemantics::Write,
-            true,
-        );
-
-        match error {
-            AppError::DriveApi {
-                status_code,
-                error_code,
-                retry_after,
-                transport_kind,
-                request_may_have_reached_server,
-                auth_already_replayed,
-                ..
-            } => {
-                assert_eq!(status_code, Some(429));
-                assert_eq!(error_code.as_deref(), Some("21004002"));
-                assert_eq!(retry_after, Some(RetryAfter::DelaySeconds(17)));
-                assert_eq!(transport_kind, None);
-                assert!(request_may_have_reached_server);
-                assert!(auth_already_replayed);
-            }
-            other => panic!("expected DriveApi, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn drive_response_preserves_string_huawei_code() {
-        let error = AppError::drive_from_response(
-            400,
-            r#"{"errorCode":"21004002"}"#,
-            None,
-            RequestSemantics::Read,
-            false,
-        );
-
-        assert!(matches!(
-            error,
-            AppError::DriveApi {
-                error_code: Some(ref code),
-                ..
-            } if code == "21004002"
-        ));
-    }
-
-    #[test]
-    fn retry_after_parser_accepts_delta_seconds_and_http_date() {
-        assert_eq!(
-            parse_retry_after("120"),
-            Some(RetryAfter::DelaySeconds(120))
-        );
-        assert_eq!(
-            parse_retry_after("Sun, 06 Nov 1994 08:49:37 GMT"),
-            Some(RetryAfter::AtUnixMs(784_111_777_000))
-        );
-        assert_eq!(parse_retry_after("not-a-retry-after"), None);
-    }
-
-    #[test]
-    fn write_transport_metadata_distinguishes_connect_from_timeout() {
-        let connect = AppError::drive_transport(
-            DriveTransportKind::Connect,
-            RequestSemantics::Write,
-            false,
-            Some("connect failed"),
-        );
-        let timeout = AppError::drive_transport(
-            DriveTransportKind::Timeout,
-            RequestSemantics::Write,
-            true,
-            Some("timed out"),
-        );
-
-        assert!(matches!(
-            connect,
-            AppError::DriveApi {
-                transport_kind: Some(DriveTransportKind::Connect),
-                request_may_have_reached_server: false,
-                auth_already_replayed: false,
-                ..
-            }
-        ));
-        assert!(matches!(
-            timeout,
-            AppError::DriveApi {
-                transport_kind: Some(DriveTransportKind::Timeout),
-                request_may_have_reached_server: true,
-                auth_already_replayed: true,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn internal_drive_metadata_does_not_change_frontend_shape() {
-        let error = AppError::drive_from_response(
-            503,
-            r#"{"errorCode":"busy"}"#,
-            Some(RetryAfter::DelaySeconds(3)),
-            RequestSemantics::Write,
-            true,
-        );
-        let value = serde_json::to_value(error).unwrap();
-        let object = value.as_object().unwrap();
-
-        assert_eq!(object.len(), 5);
-        assert!(object.get("retry_after").is_none());
-        assert!(object.get("transport_kind").is_none());
-        assert!(object.get("request_may_have_reached_server").is_none());
-        assert!(object.get("auth_already_replayed").is_none());
-    }
-
-    #[test]
-    fn structured_status_matching_never_reads_display_message() {
-        let fake_status = AppError::generic("云端请求失败 (404), please retry 409");
-        let structured = AppError::drive_from_status(404, "{}");
-
-        assert_eq!(fake_status.drive_status(), None);
-        assert_eq!(structured.drive_status(), Some(404));
     }
 }

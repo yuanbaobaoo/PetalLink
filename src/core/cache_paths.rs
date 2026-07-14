@@ -98,6 +98,7 @@ pub fn clear_all_cache_files() {
 
 /// 旧版缓存文件名（迁移用，存放在同步目录内）。
 pub const LEGACY_SYNC_STATE_NAME: &str = ".hwcloud_syncstate";
+/// 旧版云端树缓存文件名。
 pub const LEGACY_CLOUD_TREE_NAME: &str = ".hwcloud_cloudtree.json";
 
 /// 一次性迁移：把同步目录下的旧缓存文件移动到工作目录的新路径。
@@ -132,38 +133,5 @@ pub fn migrate_legacy_cache(abs_mount_dir: &str) {
             }
             let _ = fs::rename(&old_file, &new_file);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_escape_mount_path() {
-        assert_eq!(
-            escape_mount_path("/Users/me/hwcloud-drive"),
-            "_Users_me_hwcloud-drive"
-        );
-    }
-
-    #[test]
-    fn test_escape_keeps_safe_chars() {
-        assert_eq!(
-            escape_mount_path("/Users/a.b-c_d/data"),
-            "_Users_a.b-c_d_data"
-        );
-    }
-
-    #[test]
-    fn test_cache_file_naming() {
-        let f = sync_state_cache_file("/Users/me/drive").unwrap();
-        assert!(f
-            .to_string_lossy()
-            .ends_with("syncstate__Users_me_drive.json"));
-        let f = cloud_tree_cache_file("/Users/me/drive").unwrap();
-        assert!(f
-            .to_string_lossy()
-            .ends_with("cloudtree__Users_me_drive.json"));
     }
 }

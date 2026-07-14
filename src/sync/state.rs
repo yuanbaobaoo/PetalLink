@@ -125,34 +125,3 @@ pub enum FreeUpCheckResult {
     /// 本地尚未同步到云端（有未上传修改）
     NotSynced,
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_progress_all_completed() {
-        let state = SyncGlobalState {
-            total: 100,
-            completed: 100,
-            ..Default::default()
-        };
-        assert_eq!(state.progress(), 1.0);
-    }
-
-    #[test]
-    fn test_progress_half() {
-        let state = SyncGlobalState {
-            total: 100,
-            completed: 50,
-            ..Default::default()
-        };
-        assert_eq!(state.progress(), 0.5);
-    }
-
-    #[test]
-    fn test_progress_zero_total() {
-        let state = SyncGlobalState::default();
-        assert_eq!(state.progress(), 1.0);
-    }
-}

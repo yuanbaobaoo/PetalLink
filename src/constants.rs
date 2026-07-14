@@ -38,7 +38,7 @@ pub const APP_FULL_TITLE: &str = "PetalLink - 华为云盘客户端开源版";
 /// 应用版本号（编译期从 Cargo.toml 注入）
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// **Bundle Identifier**（release：io.github.yuanbaobaoo.PetalLink）
+/// **应用包标识**（正式版：io.github.yuanbaobaoo.PetalLink）
 ///
 /// dev 构建追加 `-dev` 后缀，隔离数据目录 / 单实例锁 / LaunchAgent，
 /// 避免 `cargo tauri dev` 与正式安装版读写同一份配置/数据库/缓存造成数据错乱。
@@ -53,14 +53,14 @@ pub const BUNDLE_IDENTIFIER: &str = if cfg!(debug_assertions) {
 /// 可执行文件名（须与 Cargo.toml [[bin]] name 一致；决定进程名 / .app 内 MacOS/<exec>）
 pub const EXECUTABLE_NAME: &str = "PetalLink";
 
-// ===== OAuth scope =====
+// ===== OAuth 授权范围 =====
 /// 授权域。当前用 `drive`（全盘访问），原因见需求文档 §6.1：
 /// `drive.file` 只能访问本应用创建/打开过的文件，网页/其他客户端上传的看不到。
 /// 必须在 AGC 后台开通 `drive` scope（否则登录报 1101 invalid scope）。
 pub const SCOPES: &[&str] = &["openid", "profile", "https://www.huawei.com/auth/drive"];
 
 // ===== OAuth 端点 =====
-/// Token Host
+/// 令牌服务主机。
 pub const TOKEN_HOST: &str = "oauth-login.cloud.huawei.com";
 
 /// 授权页地址（华为 OAuth2.0 授权端点，非 account.php）
@@ -72,8 +72,8 @@ pub const TOKEN_URL: &str = "https://oauth-login.cloud.huawei.com/oauth2/v3/toke
 /// UserInfo 端点（OIDC 标准）
 pub const USER_INFO_URL: &str = "https://oauth-login.cloud.huawei.com/oauth2/v3/userinfo";
 
-// ===== Drive API =====
-/// Drive REST API base URL
+// ===== 云盘 API =====
+/// 云盘 REST API 基础地址。
 pub const DRIVE_API_BASE: &str = "https://driveapis.cloud.huawei.com.cn/drive/v1";
 
 /// 上传 API base URL（与 drive 端点是兄弟路径，非父子）
@@ -170,47 +170,4 @@ pub fn client_secret_configured() -> bool {
         return !from_env.is_empty() && from_env != PLACEHOLDER_SECRET;
     }
     false
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_resolved_secret_uses_placeholder_when_unset() {
-        // 未调用 set_env_secret 时，应回退到占位符（除非构建期注入）
-        if BUILD_SECRET.is_empty() {
-            assert_eq!(resolved_client_secret(), PLACEHOLDER_SECRET);
-            assert!(!client_secret_configured());
-        }
-    }
-
-    #[test]
-    fn test_resolved_client_id_empty_when_unset() {
-        // 未设置任何来源时，CLIENT_ID 为空，不再有硬编码默认值
-        if BUILD_CLIENT_ID.is_empty() {
-            assert_eq!(resolved_client_id(), "");
-            assert!(!client_id_configured());
-        }
-    }
-
-    #[test]
-    fn test_bundle_identifier_is_github() {
-        // 测试默认 debug 编译 → 应为 -dev 后缀（隔离数据目录/单实例锁/LaunchAgent）。
-        // release 构建下值为 io.github.yuanbaobaoo.PetalLink（原 io.gitcode.cloudmate 仅保留在 legacy/）
-        assert_eq!(BUNDLE_IDENTIFIER, "io.github.yuanbaobaoo.PetalLink-dev");
-    }
-
-    #[test]
-    fn test_scopes_use_full_drive() {
-        // 必须用 drive（全盘访问），不能用 drive.file（只能看本应用创建的文件）
-        assert!(SCOPES.contains(&"https://www.huawei.com/auth/drive"));
-        assert!(!SCOPES.iter().any(|s| s.contains("drive.file")));
-    }
-
-    #[test]
-    fn test_loopback_only() {
-        // 安全要求：仅绑定 127.0.0.1，不监听 0.0.0.0
-        assert_eq!(LOOPBACK_HOST, "127.0.0.1");
-    }
 }

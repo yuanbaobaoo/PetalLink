@@ -2,13 +2,9 @@
 //!
 //! 状态/方向常量以 i32 形式持久化，提供枚举转换。
 
-use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-use crate::error::{AppError, AppResult};
-use crate::sync::transfer_state::{
-    can_transition, TransferErrorKind, TransferOperation, TransferState, TransitionError,
-};
+use crate::sync::transfer_state::TransferErrorKind;
 
 /// 统一 DB 操作错误映射：`db_err!("查询", expr)` 等价于
 /// `expr.map_err(|e| AppError::generic(format!("查询失败：{e}")))?`。
@@ -20,24 +16,43 @@ macro_rules! db_err {
     };
 }
 
+/// 同步基线记录的查询与写入实现。
+// 同步基线仓储实现。
+/// 同步基线记录的 SQLite 实现。
+mod sync_items;
+#[allow(unused_imports)]
+pub use sync_items::{
+    delete_all, delete_by_local_path, find_by_file_id, load_all, reset_stale_statuses, upsert,
+};
+
 // ===== 同步状态常量（对齐 dart SyncStatusType） =====
 /// 0=已同步 1=仅云端 2=仅本地 3=同步中 4=失败 5=冲突
 pub mod sync_status {
+    /// 已完成双向同步。
     pub const SYNCED: i32 = 0;
+    /// 仅云端存在。
     pub const CLOUD_ONLY: i32 = 1;
+    /// 仅本地存在。
     #[allow(dead_code)]
     pub const LOCAL_ONLY: i32 = 2;
+    /// 正在同步。
     pub const SYNCING: i32 = 3;
+    /// 最近同步失败。
     pub const FAILED: i32 = 4;
+    /// 本地与云端发生冲突。
     pub const CONFLICT: i32 = 5;
     /// 用户已主动删除（tombstone：防云端重建）
     pub const DELETED: i32 = 7;
 }
 
 // ===== 传输方向常量（对齐 dart TransferDirectionType） =====
+/// 传输方向的持久化数值协议。
 pub mod transfer_direction {
+    /// 上传到云端。
     pub const UPLOAD: i32 = 0;
+    /// 首次从云端下载。
     pub const DOWNLOAD: i32 = 1;
+    /// 删除目标资源。
     #[allow(dead_code)]
     pub const DELETE: i32 = 2;
     /// 云端新版本覆盖本地已有文件（语义为「更新」，区别于首次拉取的 DOWNLOAD）。
@@ -52,21 +67,31 @@ pub mod transfer_direction {
 pub const PENDING_FILE_ID_PREFIX: &str = "pending:";
 
 // ===== 传输状态常量（保持 Tauri/TypeScript 数字协议） =====
+/// 传输生命周期的持久化数值协议。
 pub mod transfer_state {
     use crate::sync::transfer_state::TransferState;
 
+    /// 等待调度。
     pub const PENDING: i32 = TransferState::Pending as i32;
+    /// 正在传输。
     pub const RUNNING: i32 = TransferState::Running as i32;
+    /// 等待网络恢复。
     #[allow(dead_code)]
     pub const WAITING_FOR_NETWORK: i32 = TransferState::WaitingForNetwork as i32;
+    /// 等待退避到期。
     #[allow(dead_code)]
     pub const BACKING_OFF: i32 = TransferState::BackingOff as i32;
+    /// 正在复核远端结果。
     #[allow(dead_code)]
     pub const VERIFYING_REMOTE: i32 = TransferState::VerifyingRemote as i32;
+    /// 必须从头重启传输。
     #[allow(dead_code)]
     pub const RESTART_REQUIRED: i32 = TransferState::RestartRequired as i32;
+    /// 传输完成。
     pub const COMPLETED: i32 = TransferState::Completed as i32;
+    /// 传输失败。
     pub const FAILED: i32 = TransferState::Failed as i32;
+    /// 传输已取消。
     pub const CANCELED: i32 = TransferState::Canceled as i32;
 }
 
@@ -161,22 +186,20 @@ pub struct TransferTask {
     pub state_revision: i64,
 }
 
-/// Explicit three-state patch for nullable transfer columns.
-// Task 1 establishes this API; the unified executor adopts it in a later task.
+/// 为可空传输列表达不改、设值或清空。
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ColumnPatch<T> {
-    /// Preserve the current database value.
+    /// 保留当前数据库值。
     #[default]
     Keep,
-    /// Replace the current value.
+    /// 替换当前值。
     Set(T),
-    /// Store SQL NULL.
+    /// 写入 SQL NULL。
     Clear,
 }
 
-/// Mutable transfer fields applied atomically with a lifecycle transition.
-// Task 1 establishes this API; the unified executor adopts it in a later task.
+/// 汇总一次状态转换附带的可变字段更新。
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TransferPatch {
@@ -186,17 +209,18 @@ pub struct TransferPatch {
     pub finished_at: ColumnPatch<i64>,
     pub remote_result_file_id: ColumnPatch<String>,
     pub session_url: ColumnPatch<String>,
-    /// `Some` replaces the non-null counter; `None` preserves it.
+    /// `Some` 替换非空计数器，`None` 保留原值。
     pub transferred: Option<i64>,
-    /// `Some` replaces the non-null offset; `None` preserves it.
+    /// `Some` 替换非空偏移量，`None` 保留原值。
     pub resume_offset: Option<i64>,
-    /// `Some` replaces the non-null attempt count; `None` preserves it.
+    /// `Some` 替换非空尝试次数，`None` 保留原值。
     pub attempt_count: Option<i64>,
 }
 
-/// Running-only progress/session patch guarded by task ID and lifecycle revision.
-/// These updates intentionally do not increment `state_revision`: a lifecycle settlement does,
-/// making every late callback fail the `(id, revision, Running)` predicate.
+/// 仅在任务仍为同一运行版本时写入的进度与会话补丁。
+/// 由任务 ID 与生命周期版本保护、仅限 Running 状态的进度和会话补丁。
+/// 更新刻意不递增 `state_revision`；生命周期收束会递增，使迟到回调无法通过
+/// `(id, revision, Running)` 条件。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RunningTransferPatch {
     pub transferred: Option<i64>,
@@ -209,7 +233,7 @@ pub struct RunningTransferPatch {
 // ===== SyncItems 仓储 =====
 
 impl SyncItem {
-    /// 从行读取
+    /// 按列名解码完整同步记录；缺列或类型不匹配时返回数据库错误。
     pub fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
         Ok(Self {
             file_id: row.get("file_id")?,
@@ -229,1032 +253,14 @@ impl SyncItem {
     }
 }
 
-/// 按 fileId 查询单条同步记录。
-pub fn find_by_file_id(conn: &Connection, file_id: &str) -> AppResult<Option<SyncItem>> {
-    let mut stmt = db_err!(
-        "查询",
-        conn.prepare("SELECT * FROM sync_items WHERE file_id = ?1 LIMIT 2")
-    );
-    let mut rows = db_err!("查询", stmt.query_map(params![file_id], SyncItem::from_row));
-    let first = match rows.next() {
-        Some(Ok(item)) => item,
-        Some(Err(error)) => return Err(AppError::generic(format!("读取同步记录失败：{error}"))),
-        None => return Ok(None),
-    };
-    if let Some(second) = rows.next() {
-        second.map_err(|error| AppError::generic(format!("读取同步记录失败：{error}")))?;
-        return Err(AppError::generic(format!(
-            "fileId {file_id} 对应多条本地路径，拒绝使用歧义同步基线"
-        )));
-    }
-    Ok(Some(first))
-}
-
-/// 加载全部同步记录（按 local_path 索引）。对齐 dart `_loadDbRecords`。
-/// 过滤 basename 以 `.hwcloud_` 开头的内部文件记录。
-pub fn load_all(conn: &Connection) -> AppResult<Vec<SyncItem>> {
-    let mut stmt = db_err!("查询", conn.prepare("SELECT * FROM sync_items"));
-    let rows = db_err!("查询", stmt.query_map([], SyncItem::from_row));
-    let mut items = Vec::new();
-    for item in rows {
-        let item = item.map_err(|error| AppError::generic(format!("读取同步记录失败：{error}")))?;
-        // 过滤内部文件（对齐 _loadDbRecords 跳过 .hwcloud_ 前缀）
-        let basename = std::path::Path::new(&item.local_path)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("");
-        if !basename.starts_with(crate::constants::INTERNAL_FILE_PREFIX) {
-            items.push(item);
-        }
-    }
-    Ok(items)
-}
-
-/// 插入或更新（冲突时替换）。对齐 dart `insertOnConflictUpdate`。
-pub fn upsert(conn: &Connection, item: &SyncItem) -> AppResult<()> {
-    db_err!(
-        "写入",
-        conn.execute(
-            "INSERT OR REPLACE INTO sync_items
-                (file_id, local_path, parent_folder_id, name, is_folder, size, local_size,
-                 sha256, local_mtime, cloud_edited_time, last_sync_time, status, error_message)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
-            params![
-                item.file_id,
-                item.local_path,
-                item.parent_folder_id,
-                item.name,
-                item.is_folder as i64,
-                item.size,
-                item.local_size,
-                item.sha256,
-                item.local_mtime,
-                item.cloud_edited_time,
-                item.last_sync_time,
-                item.status,
-                item.error_message,
-            ],
-        )
-    );
-    Ok(())
-}
-
-/// 按 local_path 删除记录。
-#[allow(dead_code)]
-pub fn delete_by_local_path(conn: &Connection, local_path: &str) -> AppResult<()> {
-    db_err!(
-        "删除",
-        conn.execute(
-            "DELETE FROM sync_items WHERE local_path = ?1",
-            params![local_path],
-        )
-    );
-    Ok(())
-}
-
-/// 清空全部同步记录（退出登录/清空缓存用）。
-pub fn delete_all(conn: &Connection) -> AppResult<()> {
-    db_err!("清空", conn.execute("DELETE FROM sync_items", []));
-    Ok(())
-}
-
-/// 重置过期状态：syncing(3)/failed(4) → 根据情况重置。
-/// 对齐 dart `_resetStaleStatuses`：文件夹→synced；文件→缺失则 synced，
-/// elif 占位则 cloudOnly，否则 synced。
-pub fn reset_stale_statuses(conn: &Connection) -> AppResult<()> {
-    // 简化实现：syncing→synced，failed→保留（需用户重试）。
-    // 完整逻辑在 sync_engine 启动时根据本地文件存在性细化。
-    db_err!(
-        "重置状态",
-        conn.execute(
-            "UPDATE sync_items SET status = ?1 WHERE status = ?2",
-            params![sync_status::SYNCED, sync_status::SYNCING],
-        )
-    );
-    Ok(())
-}
-
-// ===== TransferQueue 仓储 =====
-
-impl TransferTask {
-    /// 从行读取
-    pub fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
-        Ok(Self {
-            id: row.get("id")?,
-            direction: row.get("direction")?,
-            file_id: row.get("file_id")?,
-            local_path: row.get("local_path")?,
-            name: row.get("name")?,
-            total_size: row.get("total_size")?,
-            transferred: row.get("transferred")?,
-            state: row.get("state")?,
-            error_message: row.get("error_message")?,
-            created_at: row.get("created_at")?,
-            finished_at: row.get("finished_at")?,
-            server_id: row.get("server_id")?,
-            upload_id: row.get("upload_id")?,
-            resume_offset: row.get("resume_offset")?,
-            session_url: row.get("session_url")?,
-            relative_path: row.get("relative_path")?,
-            parent_file_id: row.get("parent_file_id")?,
-            operation: row.get("operation")?,
-            source_mtime: row.get("source_mtime")?,
-            source_size: row.get("source_size")?,
-            expected_cloud_edited_time: row.get("expected_cloud_edited_time")?,
-            attempt_count: row.get("attempt_count")?,
-            next_retry_at: row.get("next_retry_at")?,
-            error_kind: row.get("error_kind")?,
-            remote_result_file_id: row.get("remote_result_file_id")?,
-            state_revision: row.get("state_revision")?,
-        })
-    }
-
-    /// Parse the persisted numeric lifecycle state.
-    pub fn state_kind(&self) -> Result<TransferState, TransitionError> {
-        TransferState::try_from(self.state)
-    }
-
-    /// Parse the optional persisted numeric operation.
-    pub fn operation_kind(&self) -> Result<Option<TransferOperation>, TransitionError> {
-        self.operation.map(TransferOperation::try_from).transpose()
-    }
-
-    /// Parse the optional persisted numeric structured error kind.
-    pub fn error_kind_typed(&self) -> Result<Option<TransferErrorKind>, TransitionError> {
-        self.error_kind.map(TransferErrorKind::try_from).transpose()
-    }
-}
-
-/// 插入传输任务，返回自增 id。
-pub fn insert_transfer(conn: &Connection, task: &TransferTask) -> AppResult<i64> {
-    db_err!(
-        "插入传输任务",
-        conn.execute(
-            "INSERT INTO transfer_queue
-                (direction, file_id, local_path, name, total_size, transferred, state,
-                 error_message, created_at, finished_at, server_id, upload_id, resume_offset,
-                 session_url, relative_path, parent_file_id, operation, source_mtime,
-                 source_size, expected_cloud_edited_time, attempt_count, next_retry_at,
-                 error_kind, remote_result_file_id, state_revision)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,
-                     ?17,?18,?19,?20,?21,?22,?23,?24,?25)",
-            params![
-                task.direction,
-                task.file_id,
-                task.local_path,
-                task.name,
-                task.total_size,
-                task.transferred,
-                task.state,
-                task.error_message,
-                task.created_at,
-                task.finished_at,
-                task.server_id,
-                task.upload_id,
-                task.resume_offset,
-                task.session_url,
-                task.relative_path,
-                task.parent_file_id,
-                task.operation,
-                task.source_mtime,
-                task.source_size,
-                task.expected_cloud_edited_time,
-                task.attempt_count,
-                task.next_retry_at,
-                task.error_kind,
-                task.remote_result_file_id,
-                task.state_revision,
-            ],
-        )
-    );
-    Ok(conn.last_insert_rowid())
-}
-
-/// 按 id 查询单个传输任务。
-pub fn get_transfer_by_id(conn: &Connection, id: i64) -> AppResult<Option<TransferTask>> {
-    conn.query_row(
-        "SELECT * FROM transfer_queue WHERE id = ?1",
-        params![id],
-        TransferTask::from_row,
-    )
-    .optional()
-    .map_err(|e| AppError::generic(format!("查询失败：{e}")))
-}
-
-#[allow(dead_code)]
-fn nullable_patch<T>(patch: ColumnPatch<T>) -> (i32, Option<T>) {
-    match patch {
-        ColumnPatch::Keep => (0, None),
-        ColumnPatch::Set(value) => (1, Some(value)),
-        ColumnPatch::Clear => (2, None),
-    }
-}
-
-/// Atomically transition a task by ID and expected state revision.
-// Task 1 establishes this API; the unified executor adopts it in a later task.
-#[allow(dead_code)]
-pub fn transition_transfer(
-    conn: &Connection,
-    task_id: i64,
-    expected_revision: i64,
-    next_state: TransferState,
-    patch: TransferPatch,
-) -> Result<TransferTask, TransitionError> {
-    let transaction = conn.unchecked_transaction()?;
-    let updated = transition_transfer_in_transaction(
-        &transaction,
-        task_id,
-        expected_revision,
-        next_state,
-        patch,
-    )?;
-    transaction.commit()?;
-    Ok(updated)
-}
-
-/// Atomically invalidate every durable resumable-upload identity while applying a lifecycle
-/// transition. A caller may use this only after remote verification has proved the target write
-/// absent; keeping this as one transaction prevents a fresh attempt from observing a half-cleared
-/// session.
-pub fn transition_transfer_clearing_upload_session(
-    conn: &Connection,
-    task_id: i64,
-    expected_revision: i64,
-    next_state: TransferState,
-    mut patch: TransferPatch,
-) -> Result<TransferTask, TransitionError> {
-    patch.session_url = ColumnPatch::Clear;
-    patch.transferred = Some(0);
-    patch.resume_offset = Some(0);
-
-    let transaction = conn.unchecked_transaction()?;
-    let transitioned = transition_transfer_in_transaction(
-        &transaction,
-        task_id,
-        expected_revision,
-        next_state,
-        patch,
-    )?;
-    let changed = transaction.execute(
-        "UPDATE transfer_queue
-         SET server_id=NULL, upload_id=NULL
-         WHERE id=?1 AND state_revision=?2 AND state=?3",
-        params![task_id, transitioned.state_revision, i32::from(next_state)],
-    )?;
-    if changed != 1 {
-        return Err(TransitionError::Database {
-            message: format!("清理上传会话失败：task {task_id} 未保持目标状态"),
-        });
-    }
-    let updated = transaction
-        .query_row(
-            "SELECT * FROM transfer_queue WHERE id=?1",
-            params![task_id],
-            TransferTask::from_row,
-        )
-        .optional()?
-        .ok_or(TransitionError::NotFound { task_id })?;
-    transaction.commit()?;
-    Ok(updated)
-}
-
-/// Update mutable error/retry fields without changing lifecycle state.
-/// This is only for truthful same-state facts such as a rejected manual retry that remains
-/// Failed; lifecycle changes must use [`transition_transfer`].
-pub fn patch_transfer_in_state(
-    conn: &Connection,
-    task_id: i64,
-    expected_revision: i64,
-    expected_state: TransferState,
-    patch: TransferPatch,
-) -> Result<TransferTask, TransitionError> {
-    let current = conn
-        .query_row(
-            "SELECT * FROM transfer_queue WHERE id=?1",
-            params![task_id],
-            TransferTask::from_row,
-        )
-        .optional()?
-        .ok_or(TransitionError::NotFound { task_id })?;
-    if current.state_revision != expected_revision || current.state_kind()? != expected_state {
-        return Err(TransitionError::StaleRevision {
-            task_id,
-            expected_revision,
-        });
-    }
-
-    let TransferPatch {
-        error_kind,
-        error_message,
-        next_retry_at,
-        finished_at,
-        remote_result_file_id,
-        session_url,
-        transferred,
-        resume_offset,
-        attempt_count,
-    } = patch;
-    let (error_kind_mode, error_kind) = nullable_patch(error_kind);
-    let error_kind = error_kind.map(i32::from);
-    let (error_message_mode, error_message) = nullable_patch(error_message);
-    let (next_retry_at_mode, next_retry_at) = nullable_patch(next_retry_at);
-    let (finished_at_mode, finished_at) = nullable_patch(finished_at);
-    let (remote_result_file_id_mode, remote_result_file_id) = nullable_patch(remote_result_file_id);
-    let (session_url_mode, session_url) = nullable_patch(session_url);
-    let changed = conn.execute(
-        "UPDATE transfer_queue SET
-            error_kind=CASE ?1 WHEN 0 THEN error_kind WHEN 1 THEN ?2 ELSE NULL END,
-            error_message=CASE ?3 WHEN 0 THEN error_message WHEN 1 THEN ?4 ELSE NULL END,
-            next_retry_at=CASE ?5 WHEN 0 THEN next_retry_at WHEN 1 THEN ?6 ELSE NULL END,
-            finished_at=CASE ?7 WHEN 0 THEN finished_at WHEN 1 THEN ?8 ELSE NULL END,
-            remote_result_file_id=CASE ?9 WHEN 0 THEN remote_result_file_id WHEN 1 THEN ?10 ELSE NULL END,
-            session_url=CASE ?11 WHEN 0 THEN session_url WHEN 1 THEN ?12 ELSE NULL END,
-            transferred=CASE WHEN ?13 IS NULL THEN transferred ELSE ?13 END,
-            resume_offset=CASE WHEN ?14 IS NULL THEN resume_offset ELSE ?14 END,
-            attempt_count=CASE WHEN ?15 IS NULL THEN attempt_count ELSE ?15 END,
-            state_revision=state_revision+1
-         WHERE id=?16 AND state_revision=?17 AND state=?18",
-        params![
-            error_kind_mode,
-            error_kind,
-            error_message_mode,
-            error_message,
-            next_retry_at_mode,
-            next_retry_at,
-            finished_at_mode,
-            finished_at,
-            remote_result_file_id_mode,
-            remote_result_file_id,
-            session_url_mode,
-            session_url,
-            transferred,
-            resume_offset,
-            attempt_count,
-            task_id,
-            expected_revision,
-            i32::from(expected_state),
-        ],
-    )?;
-    if changed != 1 {
-        return Err(TransitionError::StaleRevision {
-            task_id,
-            expected_revision,
-        });
-    }
-    conn.query_row(
-        "SELECT * FROM transfer_queue WHERE id=?1",
-        params![task_id],
-        TransferTask::from_row,
-    )
-    .optional()?
-    .ok_or(TransitionError::NotFound { task_id })
-}
-
-/// Update progress/session data only while the exact task revision is Running.
-pub fn update_running_transfer(
-    conn: &Connection,
-    task_id: i64,
-    expected_revision: i64,
-    patch: RunningTransferPatch,
-) -> Result<TransferTask, TransitionError> {
-    let (server_mode, server_id) = nullable_patch(patch.server_id);
-    let (upload_mode, upload_id) = nullable_patch(patch.upload_id);
-    let (session_mode, session_url) = nullable_patch(patch.session_url);
-    let changed = conn.execute(
-        "UPDATE transfer_queue SET
-            transferred=CASE WHEN ?1 IS NULL THEN transferred ELSE ?1 END,
-            resume_offset=CASE WHEN ?2 IS NULL THEN resume_offset ELSE ?2 END,
-            server_id=CASE ?3 WHEN 0 THEN server_id WHEN 1 THEN ?4 ELSE NULL END,
-            upload_id=CASE ?5 WHEN 0 THEN upload_id WHEN 1 THEN ?6 ELSE NULL END,
-            session_url=CASE ?7 WHEN 0 THEN session_url WHEN 1 THEN ?8 ELSE NULL END
-         WHERE id=?9 AND state_revision=?10 AND state=?11",
-        params![
-            patch.transferred,
-            patch.resume_offset,
-            server_mode,
-            server_id,
-            upload_mode,
-            upload_id,
-            session_mode,
-            session_url,
-            task_id,
-            expected_revision,
-            i32::from(TransferState::Running),
-        ],
-    )?;
-    if changed != 1 {
-        return Err(TransitionError::StaleRevision {
-            task_id,
-            expected_revision,
-        });
-    }
-    conn.query_row(
-        "SELECT * FROM transfer_queue WHERE id=?1",
-        params![task_id],
-        TransferTask::from_row,
-    )
-    .optional()?
-    .ok_or(TransitionError::NotFound { task_id })
-}
-
-/// Transition core for callers that must settle related rows in the same transaction.
-pub(crate) fn transition_transfer_in_transaction(
-    conn: &Connection,
-    task_id: i64,
-    expected_revision: i64,
-    next_state: TransferState,
-    patch: TransferPatch,
-) -> Result<TransferTask, TransitionError> {
-    let current = conn
-        .query_row(
-            "SELECT * FROM transfer_queue WHERE id=?1",
-            params![task_id],
-            TransferTask::from_row,
-        )
-        .optional()?
-        .ok_or(TransitionError::NotFound { task_id })?;
-
-    if current.state_revision != expected_revision {
-        return Err(TransitionError::StaleRevision {
-            task_id,
-            expected_revision,
-        });
-    }
-
-    let from = current.state_kind()?;
-    if !can_transition(from, next_state) {
-        return Err(TransitionError::IllegalTransition {
-            from,
-            to: next_state,
-        });
-    }
-
-    let TransferPatch {
-        error_kind,
-        error_message,
-        next_retry_at,
-        finished_at,
-        remote_result_file_id,
-        session_url,
-        transferred,
-        resume_offset,
-        attempt_count,
-    } = patch;
-    let (error_kind_mode, error_kind) = nullable_patch(error_kind);
-    let error_kind = error_kind.map(i32::from);
-    let (error_message_mode, error_message) = nullable_patch(error_message);
-    let (next_retry_at_mode, next_retry_at) = nullable_patch(next_retry_at);
-    let (finished_at_mode, finished_at) = nullable_patch(finished_at);
-    let (remote_result_file_id_mode, remote_result_file_id) = nullable_patch(remote_result_file_id);
-    let (session_url_mode, session_url) = nullable_patch(session_url);
-
-    let changed = conn.execute(
-        "UPDATE transfer_queue SET
-            state=?1,
-            error_kind=CASE ?2 WHEN 0 THEN error_kind WHEN 1 THEN ?3 ELSE NULL END,
-            error_message=CASE ?4 WHEN 0 THEN error_message WHEN 1 THEN ?5 ELSE NULL END,
-            next_retry_at=CASE ?6 WHEN 0 THEN next_retry_at WHEN 1 THEN ?7 ELSE NULL END,
-            finished_at=CASE ?8 WHEN 0 THEN finished_at WHEN 1 THEN ?9 ELSE NULL END,
-            remote_result_file_id=CASE ?10 WHEN 0 THEN remote_result_file_id WHEN 1 THEN ?11 ELSE NULL END,
-            session_url=CASE ?12 WHEN 0 THEN session_url WHEN 1 THEN ?13 ELSE NULL END,
-            transferred=CASE WHEN ?14 IS NULL THEN transferred ELSE ?14 END,
-            resume_offset=CASE WHEN ?15 IS NULL THEN resume_offset ELSE ?15 END,
-            attempt_count=CASE WHEN ?16 IS NULL THEN attempt_count ELSE ?16 END,
-            state_revision=state_revision+1
-         WHERE id=?17 AND state_revision=?18",
-        params![
-            i32::from(next_state),
-            error_kind_mode,
-            error_kind,
-            error_message_mode,
-            error_message,
-            next_retry_at_mode,
-            next_retry_at,
-            finished_at_mode,
-            finished_at,
-            remote_result_file_id_mode,
-            remote_result_file_id,
-            session_url_mode,
-            session_url,
-            transferred,
-            resume_offset,
-            attempt_count,
-            task_id,
-            expected_revision,
-        ],
-    )?;
-    if changed != 1 {
-        return Err(TransitionError::StaleRevision {
-            task_id,
-            expected_revision,
-        });
-    }
-
-    let updated = conn
-        .query_row(
-            "SELECT * FROM transfer_queue WHERE id=?1",
-            params![task_id],
-            TransferTask::from_row,
-        )
-        .optional()?
-        .ok_or(TransitionError::NotFound { task_id })?;
-    Ok(updated)
-}
-
-/// 按状态+方向查询传输任务（按 created_at 倒序）。对齐 dart 传输队列列表。
-#[allow(dead_code)]
-pub fn list_transfers(
-    conn: &Connection,
-    direction: Option<i32>,
-    state_filter: Option<i32>,
-) -> AppResult<Vec<TransferTask>> {
-    match (direction, state_filter) {
-        (Some(d), Some(s)) => {
-            let mut stmt = db_err!(
-                "查询",
-                conn.prepare(
-                    "SELECT * FROM transfer_queue WHERE direction = ?1 AND state = ?2 ORDER BY created_at DESC",
-                )
-            );
-            collect_tasks(stmt.query_map(params![d, s], TransferTask::from_row))
-        }
-        (Some(d), None) => list_transfers_with_dir(conn, d),
-        (None, Some(s)) => list_transfers_with_state(conn, s),
-        (None, None) => list_all_transfers(conn),
-    }
-}
-
-/// 收集迭代结果为 Vec<TransferTask>；任一行损坏时整体失败，禁止把活动任务漏读为空闲。
-/// 接收 query_map 返回的 MappedRows（迭代产出 rusqlite::Result<TransferTask>）。
-fn collect_tasks<I>(rows_result: rusqlite::Result<I>) -> AppResult<Vec<TransferTask>>
-where
-    I: Iterator<Item = rusqlite::Result<TransferTask>>,
-{
-    let rows = db_err!("查询", rows_result);
-    let mut tasks = Vec::new();
-    for task in rows {
-        tasks.push(task.map_err(|error| AppError::generic(format!("读取传输任务失败：{error}")))?);
-    }
-    Ok(tasks)
-}
-
-#[allow(dead_code)]
-fn list_transfers_with_dir(conn: &Connection, d: i32) -> AppResult<Vec<TransferTask>> {
-    let mut stmt = db_err!(
-        "查询",
-        conn.prepare("SELECT * FROM transfer_queue WHERE direction = ?1 ORDER BY created_at DESC")
-    );
-    collect_tasks(stmt.query_map(params![d], TransferTask::from_row))
-}
-
-#[allow(dead_code)]
-fn list_transfers_with_state(conn: &Connection, s: i32) -> AppResult<Vec<TransferTask>> {
-    let mut stmt = db_err!(
-        "查询",
-        conn.prepare("SELECT * FROM transfer_queue WHERE state = ?1 ORDER BY created_at DESC")
-    );
-    collect_tasks(stmt.query_map(params![s], TransferTask::from_row))
-}
-
-/// 查询指定持久化状态是否至少存在一个传输任务。
-pub fn has_transfer_in_state(conn: &Connection, state: TransferState) -> AppResult<bool> {
-    let exists: i64 = db_err!(
-        "查询",
-        conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM transfer_queue WHERE state=?1)",
-            params![i32::from(state)],
-            |row| row.get(0),
-        )
-    );
-    Ok(exists != 0)
-}
-
-/// 查询所有传输任务（created_at 倒序）。
-pub fn list_all_transfers(conn: &Connection) -> AppResult<Vec<TransferTask>> {
-    let mut stmt = db_err!(
-        "查询",
-        conn.prepare("SELECT * FROM transfer_queue ORDER BY created_at DESC")
-    );
-    collect_tasks(stmt.query_map([], TransferTask::from_row))
-}
-
-/// 清空传输队列表。
-pub fn delete_all_transfers(conn: &Connection) -> AppResult<()> {
-    db_err!("清空", conn.execute("DELETE FROM transfer_queue", []));
-    Ok(())
-}
-
-/// 修剪传输历史：保留最近 N 条已结束任务（completed/failed/canceled）。
-/// 对齐 dart `_pruneTransferHistory`（保留最近 100 条）。
-pub fn prune_transfer_history(conn: &Connection, keep: usize) -> AppResult<()> {
-    db_err!(
-        "修剪历史",
-        conn.execute(
-            "DELETE FROM transfer_queue
-             WHERE id IN (
-                SELECT id FROM transfer_queue
-                WHERE state IN (?1, ?2, ?3)
-                ORDER BY id DESC
-                LIMIT -1 OFFSET ?4
-             )",
-            params![
-                transfer_state::COMPLETED,
-                transfer_state::FAILED,
-                transfer_state::CANCELED,
-                keep as i64,
-            ],
-        )
-    );
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::sync::transfer_state::{
-        TransferErrorKind, TransferOperation, TransferState, TransitionError,
-    };
-
-    fn fresh_db() -> Connection {
-        // 注意：tempdir() 返回的 TempDir 在 drop 时会删除目录及文件，
-        // 必须用 into_path() 固化为持久路径，否则连接在写入前文件已被删除 → readonly。
-        let dir = tempfile::tempdir().unwrap().keep();
-        let path = dir.join("test.db");
-        let conn = Connection::open(&path).unwrap();
-        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
-        crate::data::migrations::run(&conn).unwrap();
-        conn
-    }
-
-    fn sample_item(file_id: &str, status: i32) -> SyncItem {
-        SyncItem {
-            file_id: file_id.to_string(),
-            local_path: format!("/tmp/{file_id}.txt"),
-            parent_folder_id: None,
-            name: format!("{file_id}.txt"),
-            is_folder: false,
-            size: 100,
-            local_size: Some(100),
-            sha256: None,
-            local_mtime: Some(1000),
-            cloud_edited_time: Some(1000),
-            last_sync_time: Some(1000),
-            status,
-            error_message: None,
-        }
-    }
-
-    fn sample_transfer_task(state: TransferState) -> TransferTask {
-        TransferTask {
-            id: 0,
-            direction: transfer_direction::UPLOAD,
-            file_id: Some("f1".into()),
-            local_path: Some("/tmp/f1.txt".into()),
-            name: "f1.txt".into(),
-            total_size: 1000,
-            transferred: 500,
-            state: state.into(),
-            error_message: Some("original error".into()),
-            created_at: 1000,
-            finished_at: Some(1500),
-            server_id: Some("server-1".into()),
-            upload_id: Some("upload-1".into()),
-            resume_offset: 500,
-            session_url: Some("https://upload/session".into()),
-            relative_path: Some("folder/f1.txt".into()),
-            parent_file_id: Some("parent-1".into()),
-            operation: Some(TransferOperation::Create.into()),
-            source_mtime: Some(900),
-            source_size: Some(1000),
-            expected_cloud_edited_time: Some(800),
-            attempt_count: 2,
-            next_retry_at: Some(2000),
-            error_kind: Some(TransferErrorKind::Network.into()),
-            remote_result_file_id: Some("remote-1".into()),
-            state_revision: 0,
-        }
-    }
-
-    #[test]
-    fn test_upsert_and_find() {
-        let conn = fresh_db();
-        let item = sample_item("f1", sync_status::SYNCED);
-        upsert(&conn, &item).unwrap();
-        let found = find_by_file_id(&conn, "f1").unwrap();
-        assert!(found.is_some());
-        assert_eq!(found.unwrap().name, "f1.txt");
-    }
-
-    #[test]
-    fn test_upsert_replaces() {
-        let conn = fresh_db();
-        let mut item = sample_item("f1", sync_status::SYNCED);
-        upsert(&conn, &item).unwrap();
-        item.status = sync_status::FAILED;
-        item.error_message = Some("err".into());
-        upsert(&conn, &item).unwrap();
-        let found = find_by_file_id(&conn, "f1").unwrap().unwrap();
-        assert_eq!(found.status, sync_status::FAILED);
-        assert_eq!(found.error_message.as_deref(), Some("err"));
-    }
-
-    #[test]
-    fn test_delete_by_path() {
-        let conn = fresh_db();
-        upsert(&conn, &sample_item("f1", sync_status::SYNCED)).unwrap();
-        delete_by_local_path(&conn, "/tmp/f1.txt").unwrap();
-        assert!(find_by_file_id(&conn, "f1").unwrap().is_none());
-    }
-
-    #[test]
-    fn test_load_all_filters_internal() {
-        let conn = fresh_db();
-        let normal = sample_item("f1", sync_status::SYNCED);
-        upsert(&conn, &normal).unwrap();
-        // 内部文件（.hwcloud_ 前缀）应被 load_all 过滤
-        let internal = SyncItem {
-            file_id: "internal".into(),
-            local_path: "/tmp/.hwcloud_cache.json".into(),
-            name: ".hwcloud_cache.json".into(),
-            ..sample_item("internal", sync_status::SYNCED)
-        };
-        upsert(&conn, &internal).unwrap();
-        let all = load_all(&conn).unwrap();
-        assert_eq!(all.len(), 1); // 仅 normal
-        assert_eq!(all[0].file_id, "f1");
-    }
-
-    #[test]
-    fn test_transfer_crud() {
-        let conn = fresh_db();
-        let task = sample_transfer_task(TransferState::Running);
-        let id = insert_transfer(&conn, &task).unwrap();
-        assert!(id > 0);
-        let found = get_transfer_by_id(&conn, id).unwrap().unwrap();
-        assert_eq!(found.state_kind().unwrap(), TransferState::Running);
-        assert_eq!(
-            found.operation_kind().unwrap(),
-            Some(TransferOperation::Create)
-        );
-        assert_eq!(
-            found.error_kind_typed().unwrap(),
-            Some(TransferErrorKind::Network)
-        );
-        assert_eq!(found.session_url, task.session_url);
-        assert_eq!(found.relative_path, task.relative_path);
-        assert_eq!(found.parent_file_id, task.parent_file_id);
-        assert_eq!(found.source_mtime, task.source_mtime);
-        assert_eq!(found.source_size, task.source_size);
-        assert_eq!(
-            found.expected_cloud_edited_time,
-            task.expected_cloud_edited_time
-        );
-        assert_eq!(found.attempt_count, task.attempt_count);
-        assert_eq!(found.next_retry_at, task.next_retry_at);
-        assert_eq!(found.remote_result_file_id, task.remote_result_file_id);
-        assert_eq!(found.state_revision, 0);
-    }
-
-    #[test]
-    fn typed_accessors_reject_invalid_persisted_values() {
-        let mut task = sample_transfer_task(TransferState::Pending);
-        task.state = 99;
-        task.operation = Some(98);
-        task.error_kind = Some(97);
-
-        assert!(matches!(
-            task.state_kind(),
-            Err(TransitionError::InvalidStoredValue {
-                field: "state",
-                value: 99
-            })
-        ));
-        assert!(matches!(
-            task.operation_kind(),
-            Err(TransitionError::InvalidStoredValue {
-                field: "operation",
-                value: 98
-            })
-        ));
-        assert!(matches!(
-            task.error_kind_typed(),
-            Err(TransitionError::InvalidStoredValue {
-                field: "error_kind",
-                value: 97
-            })
-        ));
-    }
-
-    #[test]
-    fn legal_transition_applies_patch_and_increments_revision_once() {
-        let conn = fresh_db();
-        let id = insert_transfer(&conn, &sample_transfer_task(TransferState::Running)).unwrap();
-        let patch = TransferPatch {
-            error_kind: ColumnPatch::Set(TransferErrorKind::RateLimit),
-            error_message: ColumnPatch::Set("retry later".into()),
-            next_retry_at: ColumnPatch::Set(9000),
-            finished_at: ColumnPatch::Clear,
-            remote_result_file_id: ColumnPatch::Set("remote-2".into()),
-            session_url: ColumnPatch::Clear,
-            transferred: Some(750),
-            resume_offset: Some(750),
-            attempt_count: Some(3),
-        };
-
-        let updated = transition_transfer(&conn, id, 0, TransferState::BackingOff, patch).unwrap();
-
-        assert_eq!(updated.state_kind().unwrap(), TransferState::BackingOff);
-        assert_eq!(updated.state_revision, 1);
-        assert_eq!(
-            updated.error_kind_typed().unwrap(),
-            Some(TransferErrorKind::RateLimit)
-        );
-        assert_eq!(updated.error_message.as_deref(), Some("retry later"));
-        assert_eq!(updated.next_retry_at, Some(9000));
-        assert_eq!(updated.finished_at, None);
-        assert_eq!(updated.remote_result_file_id.as_deref(), Some("remote-2"));
-        assert_eq!(updated.session_url, None);
-        assert_eq!(updated.transferred, 750);
-        assert_eq!(updated.resume_offset, 750);
-        assert_eq!(updated.attempt_count, 3);
-    }
-
-    #[test]
-    fn legal_default_patch_keeps_all_patchable_fields() {
-        let conn = fresh_db();
-        let original = sample_transfer_task(TransferState::Running);
-        let id = insert_transfer(&conn, &original).unwrap();
-
-        let updated = transition_transfer(
-            &conn,
-            id,
-            0,
-            TransferState::VerifyingRemote,
-            TransferPatch::default(),
-        )
-        .unwrap();
-
-        assert_eq!(
-            updated.state_kind().unwrap(),
-            TransferState::VerifyingRemote
-        );
-        assert_eq!(updated.state_revision, 1);
-        assert_eq!(updated.error_kind, original.error_kind);
-        assert_eq!(updated.error_message, original.error_message);
-        assert_eq!(updated.next_retry_at, original.next_retry_at);
-        assert_eq!(updated.finished_at, original.finished_at);
-        assert_eq!(
-            updated.remote_result_file_id,
-            original.remote_result_file_id
-        );
-        assert_eq!(updated.session_url, original.session_url);
-        assert_eq!(updated.transferred, original.transferred);
-        assert_eq!(updated.resume_offset, original.resume_offset);
-        assert_eq!(updated.attempt_count, original.attempt_count);
-    }
-
-    #[test]
-    fn illegal_transition_does_not_mutate_task() {
-        let conn = fresh_db();
-        let id = insert_transfer(&conn, &sample_transfer_task(TransferState::Pending)).unwrap();
-
-        let error = transition_transfer(
-            &conn,
-            id,
-            0,
-            TransferState::Completed,
-            TransferPatch::default(),
-        )
-        .unwrap_err();
-
-        assert_eq!(
-            error,
-            TransitionError::IllegalTransition {
-                from: TransferState::Pending,
-                to: TransferState::Completed,
-            }
-        );
-        let unchanged = get_transfer_by_id(&conn, id).unwrap().unwrap();
-        assert_eq!(unchanged.state_kind().unwrap(), TransferState::Pending);
-        assert_eq!(unchanged.state_revision, 0);
-    }
-
-    #[test]
-    fn stale_revision_does_not_mutate_task() {
-        let conn = fresh_db();
-        let id = insert_transfer(&conn, &sample_transfer_task(TransferState::Pending)).unwrap();
-
-        let error = transition_transfer(
-            &conn,
-            id,
-            7,
-            TransferState::Running,
-            TransferPatch::default(),
-        )
-        .unwrap_err();
-
-        assert_eq!(
-            error,
-            TransitionError::StaleRevision {
-                task_id: id,
-                expected_revision: 7,
-            }
-        );
-        let unchanged = get_transfer_by_id(&conn, id).unwrap().unwrap();
-        assert_eq!(unchanged.state_kind().unwrap(), TransferState::Pending);
-        assert_eq!(unchanged.state_revision, 0);
-    }
-
-    #[test]
-    fn terminal_states_reject_all_transitions() {
-        let conn = fresh_db();
-        for terminal in [TransferState::Completed, TransferState::Canceled] {
-            let id = insert_transfer(&conn, &sample_transfer_task(terminal)).unwrap();
-            let error = transition_transfer(
-                &conn,
-                id,
-                0,
-                TransferState::Running,
-                TransferPatch::default(),
-            )
-            .unwrap_err();
-            assert!(matches!(
-                error,
-                TransitionError::IllegalTransition { from, to }
-                    if from == terminal && to == TransferState::Running
-            ));
-            assert_eq!(
-                get_transfer_by_id(&conn, id)
-                    .unwrap()
-                    .unwrap()
-                    .state_revision,
-                0
-            );
-        }
-    }
-
-    #[test]
-    fn transition_reports_missing_task() {
-        let conn = fresh_db();
-
-        let error = transition_transfer(
-            &conn,
-            404,
-            0,
-            TransferState::Running,
-            TransferPatch::default(),
-        )
-        .unwrap_err();
-
-        assert_eq!(error, TransitionError::NotFound { task_id: 404 });
-    }
-
-    #[test]
-    fn test_prune_history() {
-        let conn = fresh_db();
-        // 插入 5 条已完成 + 1 条运行中
-        for i in 0..5 {
-            let mut t = sample_transfer_task(TransferState::Completed);
-            t.file_id = None;
-            t.local_path = None;
-            t.name = format!("t{i}");
-            t.created_at = i;
-            t.finished_at = Some(i);
-            insert_transfer(&conn, &t).unwrap();
-            t.state = TransferState::Running.into();
-            t.name = "running".into();
-            insert_transfer(&conn, &t).unwrap();
-        }
-        // 保留最近 2 条已完成
-        prune_transfer_history(&conn, 2).unwrap();
-        let completed: Vec<_> =
-            list_transfers(&conn, None, Some(transfer_state::COMPLETED)).unwrap();
-        assert_eq!(completed.len(), 2);
-    }
-
-    #[test]
-    fn has_transfer_in_state_is_exact() {
-        let conn = fresh_db();
-
-        assert!(!has_transfer_in_state(&conn, TransferState::WaitingForNetwork).unwrap());
-
-        let completed_id =
-            insert_transfer(&conn, &sample_transfer_task(TransferState::Completed)).unwrap();
-        assert!(!has_transfer_in_state(&conn, TransferState::WaitingForNetwork).unwrap());
-
-        let waiting_id = insert_transfer(
-            &conn,
-            &sample_transfer_task(TransferState::WaitingForNetwork),
-        )
-        .unwrap();
-        assert!(has_transfer_in_state(&conn, TransferState::WaitingForNetwork).unwrap());
-
-        conn.execute(
-            "DELETE FROM transfer_queue WHERE id=?1",
-            params![waiting_id],
-        )
-        .unwrap();
-        assert!(!has_transfer_in_state(&conn, TransferState::WaitingForNetwork).unwrap());
-        assert!(get_transfer_by_id(&conn, completed_id).unwrap().is_some());
-    }
-}
+/// 传输队列的状态转换与查询实现。
+// 传输队列仓储实现。
+/// 传输任务的 SQLite 仓储实现。
+mod transfer_queue;
+pub(crate) use transfer_queue::transition_transfer_in_transaction;
+#[allow(unused_imports)]
+pub use transfer_queue::{
+    delete_all_transfers, get_transfer_by_id, has_transfer_in_state, insert_transfer,
+    list_all_transfers, list_transfers, patch_transfer_in_state, prune_transfer_history,
+    transition_transfer, transition_transfer_clearing_upload_session, update_running_transfer,
+};

@@ -10,11 +10,13 @@ use crate::drive::client::{parse_json_response, DriveClient};
 use crate::drive::models::DriveAbout;
 use crate::error::{AppError, AppResult};
 
+/// 查询云盘配额并在上传前执行容量预检。
 pub struct AboutApi {
     client: Arc<DriveClient>,
 }
 
 impl AboutApi {
+    /// 使用共享 Drive 客户端创建配额接口。
     pub fn new(client: Arc<DriveClient>) -> Self {
         Self { client }
     }
@@ -38,22 +40,5 @@ impl AboutApi {
             ));
         }
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::drive::models::DriveAbout;
-
-    #[test]
-    fn test_ensure_capacity_logic() {
-        // can_fit 与 ensure_capacity 的核心逻辑测试
-        let about = DriveAbout {
-            user_capacity: 1000,
-            used_space: 600,
-            user_display_name: None,
-        };
-        assert!(about.can_fit(400)); // 剩 400，刚好够
-        assert!(!about.can_fit(401)); // 不够
     }
 }

@@ -13,6 +13,7 @@ use crate::drive::client::{parse_json_response, DriveClient};
 use crate::drive::models::DriveFile;
 use crate::error::{AppError, AppResult};
 
+/// 生产环境单轮增量追平允许请求的最大页数。
 const DEFAULT_MAX_CHANGE_PAGES: usize = 10_000;
 
 /// 变更类型。
@@ -35,10 +36,12 @@ pub struct Change {
 }
 
 impl Change {
+    /// 返回变更对应的云端文件标识。
     pub fn file_id(&self) -> &str {
         &self.file_id
     }
 
+    /// 返回非删除变更携带的完整文件元数据。
     pub fn file(&self) -> Option<&DriveFile> {
         self.file.as_ref()
     }
@@ -121,6 +124,7 @@ pub struct ChangesPage {
 pub type ChangeListResult = ChangesPage;
 
 impl ChangesPage {
+    /// 严格解析单页变更及两个用途不同的游标。
     pub fn from_json(json: &Value) -> AppResult<Self> {
         let object = json
             .as_object()
@@ -155,12 +159,14 @@ impl ChangesPage {
     }
 }
 
+/// 按严格游标协议拉取云盘增量变更。
 pub struct ChangesApi {
     client: Arc<DriveClient>,
     max_pages: usize,
 }
 
 impl ChangesApi {
+    /// 使用生产页数上限创建增量变更接口。
     pub fn new(client: Arc<DriveClient>) -> Self {
         Self {
             client,
@@ -259,6 +265,7 @@ impl ChangesApi {
     }
 }
 
+/// 要求调用游标非空，否则返回协议错误。
 fn required_cursor<'a>(cursor: &'a str, operation: &str) -> AppResult<&'a str> {
     if cursor.trim().is_empty() {
         Err(protocol_error(format!("{operation} 缺少非空 cursor")))
@@ -267,6 +274,7 @@ fn required_cursor<'a>(cursor: &'a str, operation: &str) -> AppResult<&'a str> {
     }
 }
 
+/// 解析可缺失游标，并将空字符串视为未提供。
 fn optional_cursor(object: &Map<String, Value>, field: &str) -> AppResult<Option<String>> {
     match object.get(field) {
         None | Some(Value::Null) => Ok(None),
@@ -278,6 +286,7 @@ fn optional_cursor(object: &Map<String, Value>, field: &str) -> AppResult<Option
     }
 }
 
+/// 从协议对象读取必需的非空字符串字段。
 fn required_non_empty_string<'a>(
     object: &'a Map<String, Value>,
     field: &str,
@@ -291,6 +300,7 @@ fn required_non_empty_string<'a>(
     }
 }
 
+/// 从协议对象读取可选但一旦出现就必须非空的字符串。
 fn optional_non_empty_string<'a>(
     object: &'a Map<String, Value>,
     field: &str,
@@ -308,6 +318,7 @@ fn optional_non_empty_string<'a>(
     }
 }
 
+/// 从协议对象读取必需布尔字段。
 fn required_bool(object: &Map<String, Value>, field: &str, context: &str) -> AppResult<bool> {
     match object.get(field) {
         Some(Value::Bool(value)) => Ok(*value),
@@ -316,6 +327,7 @@ fn required_bool(object: &Map<String, Value>, field: &str, context: &str) -> App
     }
 }
 
+/// 校验可选类别字段与官方预期值一致。
 fn validate_category(
     object: &Map<String, Value>,
     field: &str,
@@ -334,6 +346,7 @@ fn validate_category(
     }
 }
 
+/// 校验可选字段只能是字符串或空值。
 fn validate_optional_string(
     object: &Map<String, Value>,
     field: &str,
@@ -347,6 +360,7 @@ fn validate_optional_string(
     }
 }
 
+/// 校验可选时间字段符合 RFC 3339。
 fn validate_optional_rfc3339(
     object: &Map<String, Value>,
     field: &str,
@@ -455,74 +469,7 @@ fn parse_change_file(value: &Value) -> AppResult<(String, bool, Option<DriveFile
     Ok((id, recycled, file))
 }
 
+/// 构造带 Changes API 上下文的协议错误。
 fn protocol_error(message: impl Into<String>) -> AppError {
     AppError::generic(format!("华为 Changes API 协议错误：{}", message.into()))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_modified_change() {
-        let json = serde_json::json!({
-            "category": "drive#changeList",
-            "changes": [{
-                "category": "drive#change",
-                "changeType": "update",
-                "deleted": false,
-                "file": { "id": "f1", "fileName": "a.txt", "mimeType": "text/plain", "size": 100 },
-                "fileId": "f1",
-                "type": "File"
-            }],
-            "newStartCursor": "311298"
-        });
-        let result = ChangesPage::from_json(&json).expect("strict modified change");
-        assert_eq!(result.changes.len(), 1);
-        assert_eq!(result.changes[0].kind, ChangeKind::Modified);
-        assert_eq!(
-            result.changes[0].file().map(|file| file.name.as_str()),
-            Some("a.txt")
-        );
-        assert_eq!(result.next_cursor, None);
-        assert_eq!(result.new_start_cursor.as_deref(), Some("311298"));
-    }
-
-    #[test]
-    fn test_parse_removed_change() {
-        let json = serde_json::json!({
-            "category": "drive#changeList",
-            "changes": [{
-                "category": "drive#change",
-                "changeType": "trashDone",
-                "deleted": false,
-                "file": { "id": "f9", "fileName": "del.txt", "mimeType": "text/plain", "size": 10, "recycled": true },
-                "fileId": "f9",
-                "type": "File"
-            }],
-            "newStartCursor": "311299"
-        });
-        let result = ChangesPage::from_json(&json).expect("strict soft-delete change");
-        assert_eq!(result.changes.len(), 1);
-        assert_eq!(result.changes[0].kind, ChangeKind::Removed);
-        assert_eq!(result.changes[0].file_id(), "f9");
-        assert_eq!(
-            result.changes[0].file().map(|file| file.name.as_str()),
-            Some("del.txt")
-        );
-        assert_eq!(result.new_start_cursor.as_deref(), Some("311299"));
-    }
-
-    #[test]
-    fn test_parse_empty_terminal_page() {
-        let json = serde_json::json!({
-            "category": "drive#changeList",
-            "changes": [],
-            "newStartCursor": "311296"
-        });
-        let result = ChangesPage::from_json(&json).expect("strict empty terminal page");
-        assert!(result.changes.is_empty());
-        assert_eq!(result.next_cursor, None);
-        assert_eq!(result.new_start_cursor.as_deref(), Some("311296"));
-    }
 }

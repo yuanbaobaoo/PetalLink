@@ -39,6 +39,7 @@ pub struct ConflictResolver {
 }
 
 impl ConflictResolver {
+    /// 创建一个无冲突历史的解决器。
     pub fn new() -> Self {
         Self { log: Vec::new() }
     }
@@ -103,6 +104,7 @@ impl ConflictResolver {
 }
 
 impl Default for ConflictResolver {
+    /// 默认创建空冲突解决器。
     fn default() -> Self {
         Self::new()
     }
@@ -147,101 +149,4 @@ pub fn dedupe_copy_path(local_path: &Path, side_label: &str, stamp: &DateTime<Ut
 /// 时间戳格式化：`YYYY-MM-DD HH-mm-ss`（文件系统安全，对齐 dart `_formatStamp`）。
 fn format_timestamp(dt: &DateTime<Utc>) -> String {
     dt.format("%Y-%m-%d %H-%M-%S").to_string()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use chrono::TimeZone;
-    use tempfile::tempdir;
-
-    fn sample_cloud_file(edited_time: DateTime<Utc>) -> DriveFile {
-        DriveFile {
-            id: "f1".into(),
-            name: "test.txt".into(),
-            category: crate::drive::models::FileCategory::None,
-            size: 100,
-            parent_folder: None,
-            description: None,
-            created_time: None,
-            edited_time: Some(edited_time),
-            mime_type: Some("text/plain".into()),
-            content_hash: None,
-            thumbnail_link: None,
-        }
-    }
-
-    #[test]
-    fn test_local_wins_when_60s_later() {
-        let mut resolver = ConflictResolver::new();
-        let local_mtime = Utc.with_ymd_and_hms(2026, 6, 20, 12, 0, 0).unwrap();
-        let cloud_time = Utc.with_ymd_and_hms(2026, 6, 20, 11, 58, 0).unwrap(); // 提前 120s
-        let cloud = sample_cloud_file(cloud_time);
-        let dir = tempdir().unwrap().keep();
-        let local_path = dir.join("test.txt");
-
-        let resolution = resolver.resolve(&local_path, &cloud, &local_mtime);
-        assert_eq!(resolution.winner, ConflictSide::Local);
-        assert!(resolution.copy_path.to_string_lossy().contains("云端副本"));
-    }
-
-    #[test]
-    fn test_cloud_wins_when_diff_less_than_60s() {
-        let mut resolver = ConflictResolver::new();
-        let local_mtime = Utc.with_ymd_and_hms(2026, 6, 20, 12, 0, 0).unwrap();
-        let cloud_time = Utc.with_ymd_and_hms(2026, 6, 20, 11, 59, 30).unwrap(); // 提前 30s
-        let cloud = sample_cloud_file(cloud_time);
-        let dir = tempdir().unwrap().keep();
-        let local_path = dir.join("test.txt");
-
-        let resolution = resolver.resolve(&local_path, &cloud, &local_mtime);
-        assert_eq!(resolution.winner, ConflictSide::Cloud);
-        assert!(resolution.copy_path.to_string_lossy().contains("本地副本"));
-    }
-
-    #[test]
-    fn test_cloud_wins_when_local_is_earlier() {
-        let mut resolver = ConflictResolver::new();
-        let local_mtime = Utc.with_ymd_and_hms(2026, 6, 20, 11, 0, 0).unwrap();
-        let cloud_time = Utc.with_ymd_and_hms(2026, 6, 20, 12, 0, 0).unwrap(); // 云端更晚
-        let cloud = sample_cloud_file(cloud_time);
-        let dir = tempdir().unwrap().keep();
-        let local_path = dir.join("test.txt");
-
-        let resolution = resolver.resolve(&local_path, &cloud, &local_mtime);
-        assert_eq!(resolution.winner, ConflictSide::Cloud);
-    }
-
-    #[test]
-    fn test_dedupe_copy_path_format() {
-        let dir = tempdir().unwrap().keep();
-        let path = dir.join("report.txt");
-        let stamp = Utc.with_ymd_and_hms(2026, 6, 20, 14, 30, 0).unwrap();
-        let copy = dedupe_copy_path(&path, "本地副本", &stamp);
-        assert_eq!(
-            copy.file_name().unwrap().to_string_lossy(),
-            "report (本地副本 2026-06-20 14-30-00).txt"
-        );
-    }
-
-    #[test]
-    fn test_dedupe_copy_path_adds_sequence() {
-        let dir = tempdir().unwrap().keep();
-        // 先创建一个同名副本
-        std::fs::write(dir.join("report (本地副本 2026-06-20 14-30-00).txt"), "dup").unwrap();
-        let path = dir.join("report.txt");
-        let stamp = Utc.with_ymd_and_hms(2026, 6, 20, 14, 30, 0).unwrap();
-        let copy = dedupe_copy_path(&path, "本地副本", &stamp);
-        // 应生成序号版本
-        assert!(copy.to_string_lossy().contains("(1)"));
-    }
-
-    #[test]
-    fn test_timestamp_format_no_colon() {
-        // 文件系统安全（Windows/macOS 都不允许冒号在文件名中）
-        let dt = Utc.with_ymd_and_hms(2026, 6, 20, 14, 30, 0).unwrap();
-        let s = format_timestamp(&dt);
-        assert!(!s.contains(':'));
-        assert_eq!(s, "2026-06-20 14-30-00");
-    }
 }

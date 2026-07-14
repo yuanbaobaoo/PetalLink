@@ -6,14 +6,17 @@ use std::sync::Arc;
 use parking_lot::{Mutex, RwLock};
 
 use super::contracts::TaskStateSink;
-use super::{publish_state_best_effort, transition_error};
+use super::persistence::transition_error;
+use super::publication::publish_state_best_effort;
 use crate::data::repository::{self, ColumnPatch, RunningTransferPatch};
 use crate::error::{AppError, AppResult};
 use crate::sync::transfer_state::TransferState;
 
+/// 可见传输进度的最小持久间隔。
 const PROGRESS_THROTTLE_MS: i64 = 500;
 
 #[derive(Clone)]
+/// 以 Running 修订号为门禁的传输进度报告器。
 pub struct TaskProgressReporter {
     db: Arc<Mutex<rusqlite::Connection>>,
     task_id: i64,
@@ -25,6 +28,7 @@ pub struct TaskProgressReporter {
 }
 
 impl TaskProgressReporter {
+    /// 为指定 Running 任务创建进度报告器。
     pub(super) fn new(
         db: Arc<Mutex<rusqlite::Connection>>,
         task_id: i64,
@@ -44,6 +48,7 @@ impl TaskProgressReporter {
         }
     }
 
+    /// 节流持久已传输字节数，并拒绝越界进度。
     pub fn update_transferred(&self, transferred: i64) -> AppResult<()> {
         if transferred < 0 || transferred > self.total_size {
             return Err(AppError::generic("传输进度超出任务总大小"));
@@ -79,6 +84,7 @@ impl TaskProgressReporter {
         })
     }
 
+    /// 持久上传会话身份、断点与可见进度。
     pub fn update_resume(
         &self,
         server_id: &str,
@@ -101,6 +107,7 @@ impl TaskProgressReporter {
         })
     }
 
+    /// 确认报告器仍指向同一 Running 修订。
     pub fn ensure_current(&self) -> AppResult<()> {
         let task = repository::get_transfer_by_id(&self.db.lock(), self.task_id)?
             .ok_or_else(|| AppError::generic("传输任务不存在"))?;
@@ -112,6 +119,7 @@ impl TaskProgressReporter {
         Ok(())
     }
 
+    /// 以预期修订更新 Running 任务，并发布新状态。
     pub(super) fn update(&self, patch: RunningTransferPatch) -> AppResult<()> {
         {
             let conn = self.db.lock();

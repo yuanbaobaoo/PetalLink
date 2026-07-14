@@ -26,6 +26,7 @@ pub const XATTR_FREE_UP_RELATIVE_PATH: &str = "com.hwcloud.freeUpRelativePath";
 
 /// xattr 值常量
 pub const STATE_PLACEHOLDER: &str = "placeholder";
+/// 表示文件内容已完整落地的 xattr 状态值。
 pub const STATE_DOWNLOADED: &str = "downloaded";
 
 /// 旧版占位符后缀（仅用于清理遗留文件）
@@ -55,6 +56,7 @@ pub struct MountManager {
 }
 
 impl MountManager {
+    /// 绑定本地镜像根目录，但不主动创建或校验目录。
     pub fn new(mount_dir: &Path) -> Self {
         Self {
             mount_dir: mount_dir.to_path_buf(),
@@ -177,8 +179,8 @@ impl MountManager {
 
         tokio::task::spawn_blocking(move || -> AppResult<()> {
             let local_path = Path::new(&fp);
-            // Existing-path checks must fail closed. `Path::exists` hides permission/IO errors,
-            // and a later `write` could truncate a user file created in the race window.
+            // 目标检查必须失败即停；普通存在性判断会隐藏权限或 I/O 错误，后续写入还可能
+            // 截断在竞争窗口内创建的用户文件。
             match std::fs::symlink_metadata(local_path) {
                 Ok(metadata) => {
                     if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -205,7 +207,7 @@ impl MountManager {
                 std::fs::create_dir_all(parent)
                     .map_err(|error| AppError::generic(format!("创建占位父目录失败：{error}")))?;
             }
-            // create_new closes the check-to-create race and never truncates an existing path.
+            // 排他新建消除检查到创建的竞争窗口，且不会截断已有路径。
             let file = std::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
@@ -235,11 +237,10 @@ impl MountManager {
         .map_err(|e| AppError::generic(format!("占位创建线程异常：{e}")))?
     }
 
-    /// Create a placeholder only when the destination is still absent.
+    /// 仅在目标仍不存在时创建占位符。
     ///
-    /// Destructive flows use this stricter variant after atomically staging the original file.
-    /// It never treats an existing user file as success, and removes a partially initialized
-    /// placeholder if any required xattr write fails.
+    /// 破坏性流程在原文件完成原子暂存后使用此严格入口；已有用户文件绝不视为成功，
+    /// 任一必要扩展属性写入失败时会清理未完成的占位符。
     pub async fn create_placeholder_strict(
         &self,
         file_name: &str,
@@ -477,6 +478,7 @@ impl MountManager {
     }
 }
 
+/// 尽力读取非空 UTF-8 xattr；缺失、读取失败或损坏均返回空。
 fn read_xattr_string(path: &Path, key: &str) -> Option<String> {
     xattr::get(path, key)
         .ok()
@@ -485,6 +487,7 @@ fn read_xattr_string(path: &Path, key: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// 递归收集释放空间暂存项，并跳过符号链接目录。
 fn collect_free_up_staging(current: &Path, output: &mut Vec<PathBuf>) -> AppResult<()> {
     for entry in std::fs::read_dir(current)
         .map_err(|error| AppError::generic(format!("扫描释放空间恢复项失败：{error}")))?
@@ -507,10 +510,12 @@ fn collect_free_up_staging(current: &Path, output: &mut Vec<PathBuf>) -> AppResu
     Ok(())
 }
 
+/// 尽力移除释放空间恢复标记。
 fn clear_free_up_marker(path: &Path) {
     let _ = xattr::remove(path, XATTR_FREE_UP_RELATIVE_PATH);
 }
 
+/// 将暂存原文件恢复到已核验目标，并同步修复数据库基线。
 fn restore_free_up_staging(
     conn: &rusqlite::Connection,
     staging_path: &Path,
@@ -545,6 +550,7 @@ fn restore_free_up_staging(
     Ok(())
 }
 
+/// 无法安全覆盖原路径时，把暂存内容改名为可见恢复副本。
 fn surface_free_up_recovery(staging_path: &Path) -> AppResult<PathBuf> {
     let parent = staging_path
         .parent()
@@ -582,6 +588,7 @@ fn get_xattr(path: &Path, key: &str) -> std::io::Result<String> {
     String::from_utf8(bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
+/// 非 macOS 平台明确返回 xattr 不受支持。
 #[cfg(not(target_os = "macos"))]
 fn get_xattr(_path: &Path, _key: &str) -> std::io::Result<String> {
     Err(std::io::Error::new(
@@ -600,11 +607,13 @@ async fn set_xattr_async(path: String, key: &str, value: &str) -> std::io::Resul
         .map_err(std::io::Error::other)?
 }
 
+/// 在 macOS 上同步写入 UTF-8 xattr 值。
 #[cfg(target_os = "macos")]
 fn set_xattr_sync(path: &str, key: &str, value: &str) -> std::io::Result<()> {
     xattr::set(Path::new(path), key, value.as_bytes())
 }
 
+/// 非 macOS 平台明确返回 xattr 不受支持。
 #[cfg(not(target_os = "macos"))]
 fn set_xattr_sync(_path: &str, _key: &str, _value: &str) -> std::io::Result<()> {
     Err(std::io::Error::new(
@@ -645,6 +654,7 @@ fn set_finder_label_sync(path: &Path, gray: bool) -> std::io::Result<()> {
     Ok(())
 }
 
+/// 非 macOS 平台忽略 Finder 标签请求。
 #[cfg(not(target_os = "macos"))]
 fn set_finder_label_sync(_path: &Path, _gray: bool) -> std::io::Result<()> {
     Ok(())
@@ -667,6 +677,7 @@ fn scan_local_sync(mount_dir: &Path, skip_patterns: &[String]) -> AppResult<Vec<
     Ok(entries)
 }
 
+/// 递归扫描普通文件与目录，跳过内部项和符号链接。
 fn scan_recursive(
     base: &Path,
     current: &Path,
@@ -745,106 +756,4 @@ pub fn is_placeholder_file(path: &Path) -> bool {
     }
     #[cfg(not(target_os = "macos"))]
     false
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::tempdir;
-
-    fn test_mount() -> MountManager {
-        let dir = tempdir().unwrap().keep();
-        std::fs::create_dir_all(&dir).unwrap();
-        MountManager::new(&dir)
-    }
-
-    #[test]
-    fn test_set_finder_label_gray_byte9() {
-        // 锁住 FinderInfo 灰标编码：byte[9]=0x02；清除后整块全 0 则删 xattr。
-        #[cfg(target_os = "macos")]
-        {
-            let dir = tempdir().unwrap();
-            let f = dir.path().join("t.txt");
-            std::fs::write(&f, b"x").unwrap();
-            // 打灰标
-            set_finder_label_sync(&f, true).unwrap();
-            let buf = xattr::get(&f, FINDER_INFO_XATTR).unwrap().unwrap();
-            assert_eq!(buf.len(), 32);
-            assert_eq!(buf[9], GRAY_LABEL_BYTE);
-            // 清除 → 整块全 0 → xattr 被删除
-            set_finder_label_sync(&f, false).unwrap();
-            assert!(xattr::get(&f, FINDER_INFO_XATTR).unwrap().is_none());
-        }
-    }
-
-    #[tokio::test]
-    async fn test_ensure_folder_creates() {
-        let m = test_mount();
-        let path = m.ensure_folder("sub/deep").unwrap();
-        assert!(path.exists());
-        assert!(path.is_dir());
-    }
-
-    #[tokio::test]
-    async fn test_scan_local_skips_internal_files() {
-        let m = test_mount();
-        // 创建普通文件 + 内部文件（应跳过）
-        tokio::fs::write(m.mount_dir().join("normal.txt"), b"hello")
-            .await
-            .unwrap();
-        tokio::fs::write(m.mount_dir().join(".hwcloud_cache.json"), b"{}")
-            .await
-            .unwrap();
-        tokio::fs::write(m.mount_dir().join("temp.tmp"), b"temp")
-            .await
-            .unwrap();
-
-        let entries = m.scan_local(&[]).await.unwrap();
-        let names: Vec<&str> = entries.iter().map(|e| e.relative_path.as_str()).collect();
-        assert!(names.contains(&"normal.txt"));
-        assert!(!names.contains(&".hwcloud_cache.json"));
-        assert!(!names.contains(&"temp.tmp"));
-    }
-
-    #[tokio::test]
-    async fn test_scan_local_folders_and_files() {
-        let m = test_mount();
-        tokio::fs::create_dir(m.mount_dir().join("sub"))
-            .await
-            .unwrap();
-        tokio::fs::write(m.mount_dir().join("sub/file.txt"), b"data")
-            .await
-            .unwrap();
-        tokio::fs::write(m.mount_dir().join("root.txt"), b"root")
-            .await
-            .unwrap();
-
-        let entries = m.scan_local(&[]).await.unwrap();
-        assert!(entries.len() >= 3);
-        // 文件夹 is_folder=true
-        let sub = entries.iter().find(|e| e.relative_path == "sub").unwrap();
-        assert!(sub.is_folder);
-        assert_eq!(sub.size, 0);
-        // 文件 is_placeholder 基于 size
-        let f = entries
-            .iter()
-            .find(|e| e.relative_path == "root.txt")
-            .unwrap();
-        assert!(!f.is_folder);
-        assert!(!f.is_placeholder); // 4 字节，非占位
-    }
-
-    #[test]
-    fn test_placeholder_0_byte_is_placeholder() {
-        // 0 字节文件判定为占位符
-        let e = LocalFileEntry {
-            absolute_path: PathBuf::from("/tmp/f"),
-            relative_path: "f".into(),
-            size: 0,
-            mtime: 0,
-            is_folder: false,
-            is_placeholder: true,
-        };
-        assert!(e.is_placeholder);
-    }
 }

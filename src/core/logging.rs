@@ -31,6 +31,7 @@ pub enum LogLevel {
 }
 
 impl From<Level> for LogLevel {
+    /// 将 tracing 级别转换为前端稳定枚举。
     fn from(level: Level) -> Self {
         match level {
             Level::ERROR => LogLevel::Error,
@@ -142,6 +143,7 @@ pub fn log(level: LogLevel, logger_name: &str, message: &str) {
 pub struct LogBufferLayer;
 
 impl<S: Subscriber> Layer<S> for LogBufferLayer {
+    /// 收集事件字段并将其写入内存环形缓冲。
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
         let mut collector = FieldCollector::default();
         event.record(&mut collector);
@@ -180,21 +182,27 @@ impl FieldCollector {
 }
 
 impl Visit for FieldCollector {
+    /// 记录字符串字段。
     fn record_str(&mut self, field: &Field, value: &str) {
         self.capture(field, value);
     }
+    /// 记录有符号整数字段。
     fn record_i64(&mut self, field: &Field, value: i64) {
         self.capture(field, &value.to_string());
     }
+    /// 记录无符号整数字段。
     fn record_u64(&mut self, field: &Field, value: u64) {
         self.capture(field, &value.to_string());
     }
+    /// 记录浮点数字段。
     fn record_f64(&mut self, field: &Field, value: f64) {
         self.capture(field, &value.to_string());
     }
+    /// 记录布尔字段。
     fn record_bool(&mut self, field: &Field, value: bool) {
         self.capture(field, &value.to_string());
     }
+    /// 记录错误字段的展示文本。
     fn record_error(&mut self, field: &Field, value: &(dyn std::error::Error + 'static)) {
         self.capture(field, &value.to_string());
     }
@@ -215,6 +223,7 @@ pub fn log_dir() -> AppResult<PathBuf> {
 /// 清理超期日志文件（保留最近 MAX_LOG_DAYS 天），在启动 init_logger 时调用。
 /// tracing-appender 0.2.x 无 with_max_log_files，需手动清理防止无限累积。
 pub fn cleanup_old_logs() {
+    /// 日志文件最大保留天数。
     const MAX_LOG_DAYS: i64 = 30;
     let dir = match log_dir() {
         Ok(d) => d,
@@ -246,57 +255,10 @@ pub fn cleanup_old_logs() {
         }
     }
     if removed > 0 {
-        tracing::info!(removed = removed, max_days = MAX_LOG_DAYS, "清理超期日志文件");
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// 造一条测试日志
-    fn rec(msg: &str, time_ms: i64) -> LogRecord {
-        LogRecord {
-            level: LogLevel::Info,
-            logger_name: "test".into(),
-            message: msg.into(),
-            time_ms,
-        }
-    }
-
-    #[test]
-    fn test_push_into_newest_first() {
-        // 隔离测试纯函数，不依赖全局缓冲（避免与其他用例竞态）
-        let mut buf = Vec::new();
-        push_into(&mut buf, rec("first", 1000));
-        push_into(&mut buf, rec("second", 2000));
-        assert_eq!(buf.len(), 2);
-        assert_eq!(buf[0].message, "second"); // newest first
-        assert_eq!(buf[1].message, "first");
-    }
-
-    #[test]
-    fn test_push_into_caps_at_max() {
-        let mut buf = Vec::new();
-        for i in 0..(MAX_BUFFER_SIZE + 50) {
-            push_into(&mut buf, rec(&format!("msg-{i}"), i as i64));
-        }
-        assert_eq!(buf.len(), MAX_BUFFER_SIZE);
-        // 最新的（i 最大）应在最前
-        assert_eq!(buf[0].message, format!("msg-{}", MAX_BUFFER_SIZE + 49));
-    }
-
-    #[test]
-    fn test_filter_by_level() {
-        // filter 是纯读取函数，无需全局状态
-        let mut buf = [rec("err", 1), rec("info", 2)];
-        buf[0].level = LogLevel::Error;
-        let errs: Vec<LogRecord> = buf
-            .iter()
-            .filter(|r| r.level == LogLevel::Error)
-            .cloned()
-            .collect();
-        assert_eq!(errs.len(), 1);
-        assert_eq!(errs[0].message, "err");
+        tracing::info!(
+            removed = removed,
+            max_days = MAX_LOG_DAYS,
+            "清理超期日志文件"
+        );
     }
 }

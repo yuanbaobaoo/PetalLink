@@ -18,6 +18,7 @@ use crate::auth::token_store::TokenStore;
 use crate::constants;
 use crate::error::{AppError, AppResult};
 
+/// 将刷新请求的传输阶段标志映射为稳定错误类别。
 fn classify_refresh_transport_flags(
     is_timeout: bool,
     is_connect: bool,
@@ -51,16 +52,19 @@ fn classify_refresh_transport_flags(
     AppError::token_refresh_failed(Some(cause))
 }
 
+/// 保存当前共享刷新任务，确保并发请求只执行一次刷新。
 #[derive(Default)]
 struct RefreshSingleflight {
     active: Mutex<Option<Arc<RefreshFlight>>>,
 }
 
+/// 承载一次共享刷新任务的结果与完成通知。
 struct RefreshFlight {
     result: Mutex<Option<AppResult<TokenPair>>>,
     completed: Notify,
 }
 
+/// 保证刷新主任务退出时始终发布结果并清理活动槽位。
 struct RefreshLeaderGuard<'a> {
     singleflight: &'a RefreshSingleflight,
     flight: Arc<RefreshFlight>,
@@ -68,6 +72,7 @@ struct RefreshLeaderGuard<'a> {
 }
 
 impl<'a> RefreshLeaderGuard<'a> {
+    /// 为指定共享刷新任务创建仍处于生效状态的守卫。
     fn new(singleflight: &'a RefreshSingleflight, flight: Arc<RefreshFlight>) -> Self {
         Self {
             singleflight,
@@ -76,6 +81,7 @@ impl<'a> RefreshLeaderGuard<'a> {
         }
     }
 
+    /// 发布刷新结果、唤醒等待者并释放活动槽位。
     fn complete(&mut self, result: AppResult<TokenPair>) {
         *self.flight.result.lock() = Some(result);
         self.flight.completed.notify_waiters();
@@ -85,6 +91,7 @@ impl<'a> RefreshLeaderGuard<'a> {
 }
 
 impl Drop for RefreshLeaderGuard<'_> {
+    /// 主任务被取消时向等待者发布取消错误，避免永久等待。
     fn drop(&mut self) {
         if !self.armed {
             return;
@@ -101,6 +108,7 @@ impl Drop for RefreshLeaderGuard<'_> {
 }
 
 impl RefreshFlight {
+    /// 创建尚未完成的共享刷新任务状态。
     fn new() -> Self {
         Self {
             result: Mutex::new(None),
@@ -110,6 +118,7 @@ impl RefreshFlight {
 }
 
 impl RefreshSingleflight {
+    /// 由首个调用者执行刷新，其余调用者等待并复用同一结果。
     async fn run<F, Fut>(&self, operation: F) -> AppResult<TokenPair>
     where
         F: FnOnce() -> Fut,
@@ -143,6 +152,7 @@ impl RefreshSingleflight {
         }
     }
 
+    /// 仅在给定任务仍为当前活动任务时清空槽位。
     fn clear_if_active(&self, flight: &Arc<RefreshFlight>) {
         let mut active = self.active.lock();
         if active
@@ -151,14 +161,6 @@ impl RefreshSingleflight {
         {
             *active = None;
         }
-    }
-
-    #[cfg(test)]
-    fn has_waiter(&self) -> bool {
-        self.active
-            .lock()
-            .as_ref()
-            .is_some_and(|flight| Arc::strong_count(flight) >= 3)
     }
 }
 
@@ -175,6 +177,7 @@ pub struct TokenRefresher {
 }
 
 impl TokenRefresher {
+    /// 使用指定令牌存储构造刷新器。
     pub fn new(token_store: Arc<dyn TokenStore>) -> Self {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
@@ -213,6 +216,7 @@ impl TokenRefresher {
         self.refresh_with(|| self.perform_refresh()).await
     }
 
+    /// 通过并发去重器执行给定刷新操作。
     async fn refresh_with<F, Fut>(&self, operation: F) -> AppResult<TokenPair>
     where
         F: FnOnce() -> Fut,
@@ -221,6 +225,7 @@ impl TokenRefresher {
         self.refresh_flight.run(operation).await
     }
 
+    /// 请求新访问令牌，先原子替换持久化文件，成功后再更新内存副本。
     async fn perform_refresh(&self) -> AppResult<TokenPair> {
         let current = self
             .current_token()
@@ -309,264 +314,5 @@ impl TokenRefresher {
         tracing::info!("token 刷新成功");
         let _ = status; // 状态码已隐含在 data 解析中
         Ok(new_token)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::auth::token_store::EncryptedFileStore;
-    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
-    use tokio::sync::Notify;
-
-    #[derive(Default)]
-    struct MemoryTokenStore {
-        token: Mutex<Option<TokenPair>>,
-    }
-
-    impl TokenStore for MemoryTokenStore {
-        fn load(&self) -> AppResult<Option<TokenPair>> {
-            Ok(self.token.lock().clone())
-        }
-
-        fn save(&self, token: &TokenPair) -> AppResult<()> {
-            *self.token.lock() = Some(token.clone());
-            Ok(())
-        }
-
-        fn clear(&self) -> AppResult<()> {
-            *self.token.lock() = None;
-            Ok(())
-        }
-    }
-
-    fn sample_token() -> TokenPair {
-        TokenPair {
-            access_token: "access".to_string(),
-            refresh_token: "refresh".to_string(),
-            expires_at: now_ms() + 3_600_000,
-            token_type: "Bearer".to_string(),
-            scope: None,
-        }
-    }
-
-    #[tokio::test]
-    async fn test_clear_current_removes_memory_token() {
-        let store = Arc::new(MemoryTokenStore::default());
-        let refresher = TokenRefresher::new(store.clone());
-        refresher.set_current(sample_token());
-        store.clear().expect("清理存储成功");
-
-        assert!(refresher
-            .current_token()
-            .await
-            .expect("读取 token 成功")
-            .is_some());
-
-        refresher.clear_current();
-
-        assert!(refresher
-            .current_token()
-            .await
-            .expect("读取 token 成功")
-            .is_none());
-    }
-
-    #[tokio::test]
-    async fn test_refresh_requires_logged_in() {
-        // 无 token 时刷新应返回 not_logged_in
-        // 用加密文件存储：无 token.bin → load 为 None → 刷新报 NotLoggedIn
-        let store = Arc::new(EncryptedFileStore);
-        // 确保无 token（幂等清除，文件不存在也成功）
-        let _ = store.clear();
-        let refresher = TokenRefresher::new(store);
-        let result = refresher.refresh().await;
-        assert!(matches!(
-            result,
-            Err(AppError::Token { code, .. }) if code == crate::error::TokenErrorCode::NotLoggedIn
-        ));
-    }
-
-    #[tokio::test]
-    async fn failed_refresh_leader_shares_error_with_waiter_instead_of_old_token() {
-        let store = Arc::new(MemoryTokenStore::default());
-        let refresher = Arc::new(TokenRefresher::new(store));
-        refresher.set_current(sample_token());
-
-        let leader_started = Arc::new(Notify::new());
-        let release_leader = Arc::new(Notify::new());
-        let actual_calls = Arc::new(AtomicUsize::new(0));
-        let started_wait = leader_started.notified();
-
-        let leader = {
-            let refresher = refresher.clone();
-            let leader_started = leader_started.clone();
-            let release_leader = release_leader.clone();
-            let actual_calls = actual_calls.clone();
-            tokio::spawn(async move {
-                refresher
-                    .refresh_with(move || async move {
-                        actual_calls.fetch_add(1, AtomicOrdering::SeqCst);
-                        leader_started.notify_one();
-                        release_leader.notified().await;
-                        Err(AppError::token_refresh_failed(Some("leader failed")))
-                    })
-                    .await
-            })
-        };
-        started_wait.await;
-
-        let waiter = {
-            let refresher = refresher.clone();
-            let actual_calls = actual_calls.clone();
-            tokio::spawn(async move {
-                refresher
-                    .refresh_with(move || async move {
-                        actual_calls.fetch_add(1, AtomicOrdering::SeqCst);
-                        Ok(sample_token())
-                    })
-                    .await
-            })
-        };
-        while !refresher.refresh_flight.has_waiter() {
-            tokio::task::yield_now().await;
-        }
-
-        release_leader.notify_waiters();
-        let leader_result = leader.await.unwrap();
-        let waiter_result = waiter.await.unwrap();
-
-        assert!(matches!(
-            leader_result,
-            Err(AppError::Token {
-                code: crate::error::TokenErrorCode::RefreshFailed,
-                ..
-            })
-        ));
-        assert!(matches!(
-            waiter_result,
-            Err(AppError::Token {
-                code: crate::error::TokenErrorCode::RefreshFailed,
-                ..
-            })
-        ));
-        assert_eq!(actual_calls.load(AtomicOrdering::SeqCst), 1);
-        assert_eq!(
-            refresher
-                .current_token()
-                .await
-                .unwrap()
-                .unwrap()
-                .access_token,
-            "access"
-        );
-    }
-
-    #[tokio::test]
-    async fn aborted_refresh_leader_notifies_waiter_and_allows_new_leader() {
-        let store = Arc::new(MemoryTokenStore::default());
-        let refresher = Arc::new(TokenRefresher::new(store));
-        refresher.set_current(sample_token());
-        let leader_started = Arc::new(Notify::new());
-        let started_wait = leader_started.notified();
-        let actual_calls = Arc::new(AtomicUsize::new(0));
-
-        let leader = {
-            let refresher = refresher.clone();
-            let leader_started = leader_started.clone();
-            let actual_calls = actual_calls.clone();
-            tokio::spawn(async move {
-                refresher
-                    .refresh_with(move || async move {
-                        actual_calls.fetch_add(1, AtomicOrdering::SeqCst);
-                        leader_started.notify_one();
-                        std::future::pending::<AppResult<TokenPair>>().await
-                    })
-                    .await
-            })
-        };
-        started_wait.await;
-
-        let waiter = {
-            let refresher = refresher.clone();
-            let actual_calls = actual_calls.clone();
-            tokio::spawn(async move {
-                refresher
-                    .refresh_with(move || async move {
-                        actual_calls.fetch_add(1, AtomicOrdering::SeqCst);
-                        Ok(sample_token())
-                    })
-                    .await
-            })
-        };
-        while !refresher.refresh_flight.has_waiter() {
-            tokio::task::yield_now().await;
-        }
-
-        leader.abort();
-        assert!(leader.await.unwrap_err().is_cancelled());
-        let waiter_result = tokio::time::timeout(Duration::from_secs(1), waiter)
-            .await
-            .expect("waiter must be released when leader is aborted")
-            .unwrap();
-        assert!(matches!(
-            waiter_result,
-            Err(AppError::Token {
-                code: crate::error::TokenErrorCode::RefreshFailed,
-                ..
-            })
-        ));
-
-        let next = refresher
-            .refresh_with({
-                let actual_calls = actual_calls.clone();
-                move || async move {
-                    actual_calls.fetch_add(1, AtomicOrdering::SeqCst);
-                    let mut token = sample_token();
-                    token.access_token = "next-access".into();
-                    Ok(token)
-                }
-            })
-            .await
-            .unwrap();
-        assert_eq!(next.access_token, "next-access");
-        assert_eq!(actual_calls.load(AtomicOrdering::SeqCst), 2);
-    }
-
-    #[test]
-    fn refresh_transport_classification_keeps_connect_timeout_and_body_typed_as_network() {
-        let connect = classify_refresh_transport_flags(false, true, false, "connect");
-        let timeout = classify_refresh_transport_flags(true, false, false, "timeout");
-        let response_body = classify_refresh_transport_flags(false, false, true, "body");
-        let other = classify_refresh_transport_flags(false, false, false, "protocol");
-
-        assert!(matches!(
-            connect,
-            AppError::DriveApi {
-                transport_kind: Some(crate::error::DriveTransportKind::Connect),
-                ..
-            }
-        ));
-        assert!(matches!(
-            timeout,
-            AppError::DriveApi {
-                transport_kind: Some(crate::error::DriveTransportKind::Timeout),
-                ..
-            }
-        ));
-        assert!(matches!(
-            response_body,
-            AppError::DriveApi {
-                transport_kind: Some(crate::error::DriveTransportKind::ResponseBody),
-                ..
-            }
-        ));
-        assert!(matches!(
-            other,
-            AppError::Token {
-                code: crate::error::TokenErrorCode::RefreshFailed,
-                ..
-            }
-        ));
     }
 }

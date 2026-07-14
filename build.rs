@@ -1,3 +1,5 @@
+//! Tauri 构建脚本：注入 OAuth 凭据并同步应用图标。
+
 // Tauri 构建脚本：
 // 1. 注入凭证：读取 .env 中的 HWCLOUD_CLIENT_ID / HWCLOUD_CLIENT_SECRET，
 //    通过 rustc-env 注入编译期常量（option_env! 可获取）。缺失任一则 panic 阻断构建。
@@ -15,10 +17,15 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+/// 应用图标源目录。
 const ASSETS_DIR: &str = "assets";
+/// Tauri 打包图标目录。
 const ICONS_DIR: &str = "icons";
+/// OAuth 客户端标识环境变量名。
 const ENV_CLIENT_ID_KEY: &str = "HWCLOUD_CLIENT_ID";
+/// OAuth 客户端密钥环境变量名。
 const ENV_CLIENT_SECRET_KEY: &str = "HWCLOUD_CLIENT_SECRET";
+/// 构建期凭据文件名。
 const ENV_FILE: &str = ".env";
 
 /// assets/ PNG → icons/ PNG 映射（对齐 tauri.conf.json bundle.icon 所列文件）。
@@ -48,6 +55,7 @@ const ICONSET_MAP: &[(&str, &str)] = &[
     ("icon_512x512@2x.png", "icon_512x512@2x.png"),
 ];
 
+/// 注入构建配置并同步图标资源。
 fn main() {
     // ★ 最早阶段：注入凭证（缺失则 panic 阻断构建）
     inject_env_credentials();

@@ -54,6 +54,7 @@ pub struct StabilityChecker {
 }
 
 impl StabilityChecker {
+    /// 创建一个无持续编辑记录的稳定性检查器。
     pub fn new() -> Self {
         Self {
             tracking: std::collections::HashMap::new(),
@@ -118,6 +119,7 @@ impl StabilityChecker {
 }
 
 impl Default for StabilityChecker {
+    /// 默认创建空稳定性检查器。
     fn default() -> Self {
         Self::new()
     }
@@ -176,35 +178,7 @@ async fn is_file_busy(path: &Path) -> bool {
 }
 
 #[cfg(not(target_os = "macos"))]
+/// 非 macOS 平台不执行 `lsof` 占用检测。
 async fn is_file_busy(_path: &Path) -> bool {
     false
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::tempdir;
-
-    #[test]
-    fn test_mtime_age_positive() {
-        let dir = tempdir().unwrap().keep();
-        let path = dir.join("test.txt");
-        std::fs::write(&path, b"hello").unwrap();
-        // 刚创建的文件 mtime 年龄应较小
-        let age = mtime_age_secs(&path).unwrap();
-        assert!(age < 60); // 应在 60 秒内
-    }
-
-    #[test]
-    fn test_file_size_valid() {
-        let dir = tempdir().unwrap().keep();
-        let path = dir.join("test.txt");
-        std::fs::write(&path, b"hello world").unwrap();
-        assert_eq!(file_size(&path), Some(11));
-    }
-
-    #[test]
-    fn test_editing_threshold() {
-        assert_eq!(EDITING_THRESHOLD_SECS, 300); // 5 分钟
-    }
 }

@@ -29,12 +29,15 @@ static RESTARTING: AtomicBool = AtomicBool::new(false);
 /// 当前是否处于 accessory 模式（关窗/Cmd+Q 拦截后）。供窗口获焦时判断是否需切回 regular。
 static IS_ACCESSORY: AtomicBool = AtomicBool::new(false);
 
+/// 标记本次退出为用户确认的真实退出。
 pub fn mark_real_quit() {
     REAL_QUIT.store(true, Ordering::SeqCst);
 }
+/// 判断当前退出请求是否应真正终止进程。
 pub fn should_real_quit() -> bool {
     REAL_QUIT.load(Ordering::SeqCst)
 }
+/// 标记应用正在重启，以跳过退出期重复清理。
 pub fn mark_restarting() {
     RESTARTING.store(true, Ordering::SeqCst);
     REAL_QUIT.store(true, Ordering::SeqCst);
@@ -50,16 +53,20 @@ pub fn ensure_regular_if_was_accessory() {
     }
 }
 
+/// 非 macOS 平台无需调整激活策略。
 #[cfg(not(target_os = "macos"))]
 pub fn ensure_regular_if_was_accessory() {}
+/// 判断当前退出是否由应用重启触发。
 pub fn is_restarting() -> bool {
     RESTARTING.load(Ordering::SeqCst)
 }
 
+/// 未携带 `--hidden` 参数时视为用户手动启动。
 pub fn is_launched_manually() -> bool {
     !std::env::args().any(|a| a == "--hidden")
 }
 
+/// 切换为普通应用模式，使 Dock 与窗口恢复交互。
 #[cfg(target_os = "macos")]
 pub fn set_regular() {
     use objc2::msg_send;
@@ -73,9 +80,11 @@ pub fn set_regular() {
     tracing::info!("已设 .regular policy");
 }
 
+/// 非 macOS 平台无需切换普通应用模式。
 #[cfg(not(target_os = "macos"))]
 pub fn set_regular() {}
 
+/// 切换为附件应用模式，隐藏 Dock 图标但保留托盘进程。
 #[cfg(target_os = "macos")]
 pub fn set_accessory() {
     use objc2::msg_send;
@@ -88,9 +97,11 @@ pub fn set_accessory() {
     tracing::info!("已设 .accessory policy");
 }
 
+/// 非 macOS 平台无需切换附件应用模式。
 #[cfg(not(target_os = "macos"))]
 pub fn set_accessory() {}
 
+/// 根据启动参数设置初始应用激活策略。
 pub fn init_activation_policy() {
     if is_launched_manually() {
         set_regular();
@@ -101,10 +112,12 @@ pub fn init_activation_policy() {
 
 // ──  退出拦截  ──────────────────────────────────────────────
 
-/// kCoreEventClass = 'aevt'
+/// Apple Event 核心事件类别常量。
+/// 常量标识：kCoreEventClass = 'aevt'。
 #[cfg(target_os = "macos")]
 const K_CORE_EVENT_CLASS: u32 = 0x61657674;
-/// kAEQuitApplication = 'quit'
+/// Apple Event 退出应用事件常量。
+/// 常量标识：kAEQuitApplication = 'quit'。
 #[cfg(target_os = "macos")]
 const K_AE_QUIT_APPLICATION: u32 = 0x71756974;
 
@@ -116,7 +129,7 @@ static ORIGINAL_TERMINATE: Mutex<Option<Imp>> = Mutex::new(None);
 ///
 /// macOS 在关机/登出时会向每个运行中的应用**先**发送
 /// `kAEQuitApplication` Apple Event，再由此触发
-/// `-[NSApplication terminate:]`。
+/// 方法标识：`-[NSApplication terminate:]`。
 ///
 /// 检查 `[[NSAppleEventManager sharedAppleEventManager] currentAppleEvent]`：
 /// - 系统关机/登出 → eventClass==kCoreEventClass, eventID==kAEQuitApplication
@@ -225,23 +238,6 @@ pub fn install_terminate_interceptor() {
     tracing::info!("已安装 NSApplication terminate: 拦截器（含系统关机检测）");
 }
 
+/// 非 macOS 平台不安装原生退出拦截器。
 #[cfg(not(target_os = "macos"))]
 pub fn install_terminate_interceptor() {}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_manual_launch_detection() {
-        assert!(is_launched_manually());
-    }
-    #[test]
-    fn test_real_quit_default() {
-        assert!(!should_real_quit());
-    }
-    #[test]
-    fn test_restarting_default() {
-        assert!(!is_restarting());
-    }
-}

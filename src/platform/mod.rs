@@ -9,7 +9,11 @@
 //! - --hidden 参数区分开机自启 vs 手动打开（Cmd+Q/Dock Quit/关闭按钮仅隐藏）
 //! - 仅「退出 PetalLink」真正终止进程
 
+/// 应用激活策略与退出拦截。
 pub mod activation;
+/// macOS 登录项注册。
 pub mod launch_at_login;
+/// 真实退出时的同步收束。
 pub mod shutdown;
+/// 系统托盘菜单与状态刷新。
 pub mod tray;

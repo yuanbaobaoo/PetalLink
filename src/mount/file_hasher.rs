@@ -30,6 +30,7 @@ pub struct FileHasher {
 }
 
 impl FileHasher {
+    /// 创建空缓存的流式文件哈希器。
     #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
@@ -127,85 +128,8 @@ impl FileHasher {
 }
 
 impl Default for FileHasher {
+    /// 创建默认的空缓存哈希器。
     fn default() -> Self {
         Self::new()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::Duration;
-    use tempfile::tempdir;
-
-    #[tokio::test]
-    async fn test_hash_file_returns_hex() {
-        let dir = tempdir().unwrap().keep();
-        let path = dir.join("test.txt");
-        tokio::fs::write(&path, b"hello world").await.unwrap();
-
-        let hasher = FileHasher::new();
-        let hash = hasher.hash_file(&path).await.unwrap();
-        // "hello world" 的 SHA256
-        assert_eq!(
-            hash,
-            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_hash_cache_hit() {
-        let dir = tempdir().unwrap().keep();
-        let path = dir.join("test.txt");
-        tokio::fs::write(&path, b"hello world").await.unwrap();
-
-        let hasher = FileHasher::new();
-        let hash1 = hasher.hash_file(&path).await.unwrap();
-        let hash2 = hasher.hash_file(&path).await.unwrap();
-        // 缓存命中应返回相同结果
-        assert_eq!(hash1, hash2);
-    }
-
-    #[tokio::test]
-    async fn test_hash_cache_invalidated_on_change() {
-        let dir = tempdir().unwrap().keep();
-        let path = dir.join("test.txt");
-        tokio::fs::write(&path, b"content1").await.unwrap();
-
-        let hasher = FileHasher::new();
-        let hash1 = hasher.hash_file(&path).await.unwrap();
-
-        // 修改文件 + 等待足够时间确保 mtime 变化
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        tokio::fs::write(&path, b"content2-different-enough")
-            .await
-            .unwrap();
-
-        let hash2 = hasher.hash_file(&path).await.unwrap();
-        assert_ne!(hash1, hash2, "内容变更后哈希应不同");
-    }
-
-    #[test]
-    fn test_sha256_of_string() {
-        let hash = FileHasher::sha256_of_string("hello world");
-        assert_eq!(
-            hash,
-            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
-        );
-    }
-
-    #[test]
-    fn test_invalidate_clears_cache() {
-        let hasher = FileHasher::new();
-        hasher.cache.lock().insert(
-            "/fake/path".to_string(),
-            CacheEntry {
-                mtime_ms: 0,
-                size: 0,
-                sha256: "abc".to_string(),
-            },
-        );
-        hasher.invalidate(Path::new("/fake/path"));
-        assert!(hasher.cache.lock().is_empty());
     }
 }

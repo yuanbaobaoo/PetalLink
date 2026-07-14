@@ -15,8 +15,11 @@ use petal_link_lib::sync::state::{ActionResult, SyncAction, SyncActionType};
 use petal_link_lib::sync::status_aggregator::StatusAggregator;
 use rusqlite::{params, Connection};
 
+/// 持久化同步成功状态值。
 const SYNCED: i32 = 0;
+/// 持久化同步失败状态值。
 const FAILED: i32 = 4;
+/// 同步基线测试表结构。
 const SYNC_ITEMS_DDL: &str = "
     CREATE TABLE sync_items (
         file_id           TEXT    NOT NULL,
@@ -36,6 +39,7 @@ const SYNC_ITEMS_DDL: &str = "
     );
 ";
 
+/// 用于比较同步基线全部可变字段的快照。
 type BaselineSnapshot = (
     Option<String>,
     String,
@@ -137,6 +141,7 @@ fn baseline_snapshot(connection: &Connection, file_id: &str, local_path: &str) -
         .unwrap()
 }
 
+/// 验证引擎启动前手动同步报错且不伪造内容变化。
 #[tokio::test]
 async fn manual_sync_before_start_returns_error_without_false_content_change() {
     let (engine, _) = new_engine();
@@ -147,6 +152,7 @@ async fn manual_sync_before_start_returns_error_without_false_content_change() {
     assert!(!engine.current_state().content_changed);
 }
 
+/// 验证启动前批量重试失败且不改写失败基线。
 #[tokio::test]
 async fn bulk_retry_before_start_rejects_without_mutating_failed_sync_items() {
     let (engine, db) = new_engine();
@@ -277,6 +283,7 @@ fn test_apply_results_delete_from_cloud_clears_state() {
     assert_eq!(row_count, 0);
 }
 
+/// 验证失败动作只更新复合身份完全匹配的基线。
 #[test]
 fn failed_action_updates_only_exact_baseline_identity() {
     let (engine, db) = new_engine();

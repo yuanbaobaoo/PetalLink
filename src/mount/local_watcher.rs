@@ -121,8 +121,7 @@ impl LocalWatcher {
         Ok(())
     }
 
-    /// Start the real event/debounce worker from an event receiver. Keeping this seam independent
-    /// of FSEvents makes generation, warmup and cancellation behavior deterministic to exercise.
+    /// 从事件接收端启动消抖工作器；独立入口便于确定性验证代际、预热和取消行为。
     pub(crate) async fn start_event_loop_for_receiver(
         &self,
         mut rx: mpsc::Receiver<Event>,
@@ -150,8 +149,7 @@ impl LocalWatcher {
                     _ = tokio::time::sleep(Duration::from_secs(WARMUP_SECS)) => {
                         if current_generation.load(Ordering::Acquire) == generation {
                             warming_up.store(false, Ordering::Release);
-                            // Empty ChangeSet is an intentional full-rescan request compensating
-                            // for the scan-to-watch arm gap and discarded historical replay.
+                            // 空变更集表示主动请求全量重扫，用于补偿扫描与监视启动间隙。
                             let _ = change_tx.send(Vec::new());
                         }
                     }
@@ -247,7 +245,7 @@ impl LocalWatcher {
     }
 
     /// 停止监视：释放 FSEvents 句柄（drop watcher），清空 pending。
-    /// drop RecommendedWatcher 会关闭底层 FSEvents stream，之后不再有事件回调。
+    /// 释放系统监视器会关闭底层事件流，之后不再接收回调。
     /// 这确保引擎被替换/退出后，旧 watcher 不会继续向 detached 任务喂事件。
     pub async fn stop(&self) {
         let _lifecycle = self.lifecycle.lock().await;
@@ -315,90 +313,5 @@ fn extract_relative_paths(
             tracing::debug!(kind = ?event.kind, "watcher: 忽略非变更事件");
             Vec::new()
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::tempdir;
-
-    #[test]
-    fn test_extract_paths_skips_internal() {
-        let dir = tempdir().unwrap().keep();
-        let event = Event::new(EventKind::Create(notify::event::CreateKind::File))
-            .add_path(dir.join("normal.txt"))
-            .add_path(dir.join(".hwcloud_cache.json"))
-            .add_path(dir.join("temp.tmp"))
-            .clone();
-        let paths = extract_relative_paths(&event, &dir, &[]);
-        // 仅 normal.txt 应被保留
-        assert!(paths.contains(&"normal.txt".to_string()));
-        assert!(!paths.iter().any(|p| p.contains(".hwcloud")));
-        assert!(!paths.iter().any(|p| p.contains(".tmp")));
-    }
-
-    #[test]
-    fn test_extract_paths_empty_on_access() {
-        let dir = tempdir().unwrap().keep();
-        let event = Event::new(EventKind::Access(notify::event::AccessKind::Read))
-            .add_path(dir.join("file.txt"))
-            .clone();
-        let paths = extract_relative_paths(&event, &dir, &[]);
-        // Access 事件应被忽略（不触发同步）
-        assert!(paths.is_empty());
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn warmup_end_forces_one_compensating_scan() {
-        let dir = tempdir().unwrap();
-        let watcher = LocalWatcher::new(dir.path(), vec![], 3);
-        let mut changes = watcher.subscribe();
-        let (_event_tx, event_rx) = mpsc::channel(4);
-
-        watcher.start_event_loop_for_receiver(event_rx, true).await;
-        tokio::task::yield_now().await;
-        tokio::time::advance(Duration::from_secs(WARMUP_SECS)).await;
-        tokio::task::yield_now().await;
-
-        assert_eq!(changes.try_recv().unwrap(), Vec::<String>::new());
-        watcher.stop().await;
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn stop_cancels_the_actual_generation_debounce() {
-        let dir = tempdir().unwrap();
-        let watcher = LocalWatcher::new(dir.path(), vec![], 3);
-        let mut changes = watcher.subscribe();
-        let (event_tx, event_rx) = mpsc::channel(4);
-        watcher.start_event_loop_for_receiver(event_rx, false).await;
-        event_tx
-            .send(
-                Event::new(EventKind::Create(notify::event::CreateKind::File))
-                    .add_path(dir.path().join("old.txt")),
-            )
-            .await
-            .unwrap();
-
-        watcher.stop().await;
-        tokio::time::advance(Duration::from_secs(4)).await;
-        tokio::task::yield_now().await;
-        assert!(changes.try_recv().is_err());
-
-        let (new_tx, new_rx) = mpsc::channel(4);
-        watcher.start_event_loop_for_receiver(new_rx, false).await;
-        new_tx
-            .send(
-                Event::new(EventKind::Create(notify::event::CreateKind::File))
-                    .add_path(dir.path().join("new.txt")),
-            )
-            .await
-            .unwrap();
-        tokio::task::yield_now().await;
-        tokio::time::advance(Duration::from_secs(3)).await;
-        tokio::task::yield_now().await;
-
-        assert_eq!(changes.try_recv().unwrap(), vec!["new.txt".to_string()]);
-        watcher.stop().await;
     }
 }

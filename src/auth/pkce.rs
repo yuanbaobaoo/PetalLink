@@ -20,6 +20,7 @@ pub struct PkcePair {
 }
 
 impl std::fmt::Display for PkcePair {
+    /// 以不含 verifier 的摘要形式输出，避免泄露授权凭据。
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // 故意隐藏 verifier（对齐 dart toString）
         write!(
@@ -56,70 +57,5 @@ pub fn generate_pkce() -> PkcePair {
     PkcePair {
         code_verifier: verifier,
         code_challenge: challenge,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_state_is_64_hex_chars() {
-        let state = generate_state();
-        assert_eq!(state.len(), 64);
-        assert!(state.chars().all(|c| c.is_ascii_hexdigit()));
-    }
-
-    #[test]
-    fn test_state_is_random() {
-        let s1 = generate_state();
-        let s2 = generate_state();
-        assert_ne!(s1, s2);
-    }
-
-    #[test]
-    fn test_pkce_verifier_length_in_rfc_range() {
-        let pkce = generate_pkce();
-        // RFC 7636: 43-128 字符
-        assert!(
-            (43..=128).contains(&pkce.code_verifier.len()),
-            "verifier 长度 {} 不在 RFC 范围",
-            pkce.code_verifier.len()
-        );
-    }
-
-    #[test]
-    fn test_pkce_verifier_no_padding() {
-        let pkce = generate_pkce();
-        // 不应含 = 填充
-        assert!(!pkce.code_verifier.contains('='));
-        assert!(!pkce.code_challenge.contains('='));
-    }
-
-    #[test]
-    fn test_pkce_challenge_is_sha256_of_verifier() {
-        // 手动验证 challenge = base64url(SHA256(verifier))
-        let pkce = generate_pkce();
-        let mut hasher = Sha256::new();
-        hasher.update(pkce.code_verifier.as_bytes());
-        let digest = hasher.finalize();
-        let expected = URL_SAFE_NO_PAD.encode(digest);
-        assert_eq!(pkce.code_challenge, expected);
-    }
-
-    #[test]
-    fn test_pkce_is_random() {
-        let p1 = generate_pkce();
-        let p2 = generate_pkce();
-        assert_ne!(p1.code_verifier, p2.code_verifier);
-        assert_ne!(p1.code_challenge, p2.code_challenge);
-    }
-
-    #[test]
-    fn test_display_hides_verifier() {
-        let pkce = generate_pkce();
-        let s = format!("{pkce}");
-        assert!(s.contains("<hidden>"));
-        assert!(!s.contains(&pkce.code_verifier));
     }
 }

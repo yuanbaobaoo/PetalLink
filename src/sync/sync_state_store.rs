@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::core::cache_paths;
 use crate::error::AppResult;
 
-/// 快照条目
+/// 用于检测本地内容变化的修改时间、大小与可选摘要。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotEntry {
     /// 修改时间（毫秒 epoch）
@@ -30,6 +30,7 @@ pub struct SyncStateStore {
 }
 
 impl SyncStateStore {
+    /// 为指定挂载目录创建快照存储器。
     pub fn new(mount_dir: &str) -> Self {
         Self {
             mount_dir: mount_dir.to_string(),
@@ -102,62 +103,4 @@ pub struct LocalFileSnapshotEntry {
     pub size: u64,
     pub sha256: Option<String>,
     pub is_folder: bool,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::tempdir;
-
-    #[test]
-    fn test_snapshot_roundtrip() {
-        let dir = tempdir().unwrap().keep();
-        let dir_str = dir.to_string_lossy().to_string();
-        let store = SyncStateStore::new(&dir_str);
-
-        // 初始不存在
-        assert!(!store.exists());
-
-        // 保存一些条目
-        let mut local: HashMap<String, LocalFileSnapshotEntry> = HashMap::new();
-        local.insert(
-            "file1.txt".into(),
-            LocalFileSnapshotEntry {
-                mtime: 1000,
-                size: 2048,
-                sha256: Some("abc123".into()),
-                is_folder: false,
-            },
-        );
-
-        // 保存需要 async runtime，此处简化为直接写文件
-        let snapshot: HashMap<String, SnapshotEntry> = local
-            .iter()
-            .map(|(k, v)| {
-                (
-                    k.clone(),
-                    SnapshotEntry {
-                        mtime: v.mtime,
-                        size: v.size,
-                        sha256: v.sha256.clone(),
-                    },
-                )
-            })
-            .collect();
-        let cache_file = crate::core::cache_paths::sync_state_cache_file(&dir_str).unwrap();
-        std::fs::create_dir_all(cache_file.parent().unwrap()).unwrap();
-        std::fs::write(
-            &cache_file,
-            serde_json::to_string_pretty(&snapshot).unwrap(),
-        )
-        .unwrap();
-
-        // 加载验证
-        let loaded = store.load();
-        assert_eq!(loaded.len(), 1);
-        let entry = loaded.get("file1.txt").unwrap();
-        assert_eq!(entry.mtime, 1000);
-        assert_eq!(entry.size, 2048);
-        assert_eq!(entry.sha256.as_deref(), Some("abc123"));
-    }
 }

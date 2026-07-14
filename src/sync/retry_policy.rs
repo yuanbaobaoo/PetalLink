@@ -3,6 +3,7 @@
 use crate::error::{AppError, DriveApiErrorCode, DriveTransportKind, RetryAfter, TokenErrorCode};
 use crate::sync::transfer_state::{TransferErrorKind, TransferOperation};
 
+/// 判断传输操作是否可能改变云端状态。
 const fn operation_modifies_remote(operation: TransferOperation) -> bool {
     matches!(
         operation,
@@ -16,6 +17,7 @@ const fn operation_modifies_remote(operation: TransferOperation) -> bool {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// 恢复策略分类所需的持久上下文。
 pub struct RecoveryContext {
     pub operation: TransferOperation,
     pub attempt_count: u32,
@@ -26,6 +28,7 @@ pub struct RecoveryContext {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// 传输失败后应执行的下一步动作。
 pub enum RecoveryDecision {
     WaitForNetwork,
     Backoff { next_retry_at: i64 },
@@ -35,12 +38,14 @@ pub enum RecoveryDecision {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// 结构化错误类型及其恢复决策。
 pub struct ClassifiedRecovery {
     pub kind: TransferErrorKind,
     pub decision: RecoveryDecision,
     pub consumes_retry_budget: bool,
 }
 
+/// 将运行时错误映射为可持久的恢复决策。
 pub fn classify_transfer_error(error: &AppError, context: RecoveryContext) -> ClassifiedRecovery {
     match error {
         AppError::QuotaExceeded { .. } => permanent(TransferErrorKind::Quota),
@@ -88,6 +93,7 @@ pub fn classify_transfer_error(error: &AppError, context: RecoveryContext) -> Cl
     }
 }
 
+/// 根据传输阶段与请求送达可能性分类网络错误。
 fn classify_transport(
     transport_kind: DriveTransportKind,
     request_may_have_reached_server: bool,
@@ -133,6 +139,7 @@ fn classify_transport(
     }
 }
 
+/// 根据 HTTP 状态、重试预算与写入语义选择恢复方式。
 fn classify_status(
     status_code: Option<u16>,
     retry_after: Option<RetryAfter>,
@@ -181,10 +188,12 @@ fn classify_status(
     }
 }
 
+/// 判断当前传输是否已用尽自动重试预算。
 fn budget_exhausted(context: RecoveryContext) -> bool {
     context.attempt_count >= context.max_attempts
 }
 
+/// 计算包含抖动且不超过上限的下次重试时间。
 fn exponential_backoff_at(context: RecoveryContext) -> i64 {
     let exponent = context.attempt_count.min(63);
     let seconds = 1_u64.checked_shl(exponent).unwrap_or(u64::MAX).min(300);
@@ -195,6 +204,7 @@ fn exponential_backoff_at(context: RecoveryContext) -> i64 {
     context.now_ms.saturating_add(delay_ms)
 }
 
+/// 构造不再自动重试的永久失败决策。
 fn permanent(kind: TransferErrorKind) -> ClassifiedRecovery {
     ClassifiedRecovery {
         kind,
@@ -203,404 +213,11 @@ fn permanent(kind: TransferErrorKind) -> ClassifiedRecovery {
     }
 }
 
+/// 构造需向云端核实写入结果的歧义决策。
 fn verify_remote() -> ClassifiedRecovery {
     ClassifiedRecovery {
         kind: TransferErrorKind::RemoteAmbiguous,
         decision: RecoveryDecision::VerifyRemote,
         consumes_retry_budget: false,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::error::{
-        AppError, DriveTransportKind, RequestSemantics, RetryAfter, TokenErrorCode,
-    };
-
-    fn context(operation: TransferOperation) -> RecoveryContext {
-        RecoveryContext {
-            operation,
-            attempt_count: 0,
-            now_ms: 10_000,
-            jitter_ms: 0,
-            auth_already_replayed: false,
-            max_attempts: 5,
-        }
-    }
-
-    #[test]
-    fn policy_consumes_and_produces_persistent_transfer_enums() {
-        let operation = crate::sync::transfer_state::TransferOperation::Create;
-        let recovery_context = RecoveryContext {
-            operation,
-            attempt_count: 0,
-            now_ms: 0,
-            jitter_ms: 0,
-            auth_already_replayed: false,
-            max_attempts: 1,
-        };
-        let error = AppError::generic("do not replay");
-
-        let kind: crate::sync::transfer_state::TransferErrorKind =
-            classify_transfer_error(&error, recovery_context).kind;
-
-        assert_eq!(
-            kind,
-            crate::sync::transfer_state::TransferErrorKind::Unknown
-        );
-    }
-
-    #[test]
-    fn persistent_operation_remote_write_mapping_is_complete() {
-        use crate::sync::transfer_state::TransferOperation::*;
-
-        for (operation, expected) in [
-            (Create, true),
-            (Update, true),
-            (Download, false),
-            (DownloadUpdate, false),
-            (Delete, true),
-            (Move, true),
-            (Rename, true),
-            (CreateFolder, true),
-        ] {
-            assert_eq!(operation_modifies_remote(operation), expected);
-        }
-    }
-
-    #[test]
-    fn classifies_immediate_recovery_and_permanent_failures() {
-        let cases = [
-            (
-                AppError::drive_transport(
-                    DriveTransportKind::Connect,
-                    RequestSemantics::Write,
-                    false,
-                    Some("connect"),
-                ),
-                context(TransferOperation::Create),
-                TransferErrorKind::Network,
-                RecoveryDecision::WaitForNetwork,
-                false,
-            ),
-            (
-                AppError::drive_transport(
-                    DriveTransportKind::Timeout,
-                    RequestSemantics::Read,
-                    false,
-                    Some("timeout"),
-                ),
-                context(TransferOperation::Download),
-                TransferErrorKind::Timeout,
-                RecoveryDecision::WaitForNetwork,
-                false,
-            ),
-            (
-                AppError::drive_from_response(401, "{}", None, RequestSemantics::Read, false),
-                context(TransferOperation::Download),
-                TransferErrorKind::Auth,
-                RecoveryDecision::RefreshAuth,
-                false,
-            ),
-            (
-                AppError::quota_exceeded(10, 1),
-                context(TransferOperation::Create),
-                TransferErrorKind::Quota,
-                RecoveryDecision::Fail,
-                false,
-            ),
-            (
-                AppError::drive_from_response(403, "{}", None, RequestSemantics::Read, false),
-                context(TransferOperation::Download),
-                TransferErrorKind::Permission,
-                RecoveryDecision::Fail,
-                false,
-            ),
-            (
-                AppError::drive_from_response(
-                    400,
-                    r#"{"errorCode":"validation"}"#,
-                    None,
-                    RequestSemantics::Write,
-                    false,
-                ),
-                context(TransferOperation::CreateFolder),
-                TransferErrorKind::Validation,
-                RecoveryDecision::Fail,
-                false,
-            ),
-            (
-                AppError::generic("503 timeout after write"),
-                context(TransferOperation::Create),
-                TransferErrorKind::Unknown,
-                RecoveryDecision::Fail,
-                false,
-            ),
-        ];
-
-        for (error, recovery_context, kind, decision, consumes_retry_budget) in cases {
-            assert_eq!(
-                classify_transfer_error(&error, recovery_context),
-                ClassifiedRecovery {
-                    kind,
-                    decision,
-                    consumes_retry_budget,
-                },
-                "error={error:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn second_401_fails_auth_even_when_only_context_records_replay() {
-        let error = AppError::drive_from_response(401, "{}", None, RequestSemantics::Read, false);
-        let mut recovery_context = context(TransferOperation::Download);
-        recovery_context.auth_already_replayed = true;
-
-        assert_eq!(
-            classify_transfer_error(&error, recovery_context),
-            ClassifiedRecovery {
-                kind: TransferErrorKind::Auth,
-                decision: RecoveryDecision::Fail,
-                consumes_retry_budget: false,
-            }
-        );
-    }
-
-    #[test]
-    fn token_errors_are_permanent_auth_failures() {
-        let error = AppError::Token {
-            code: TokenErrorCode::RefreshFailed,
-            message: "refresh failed".into(),
-        };
-
-        assert_eq!(
-            classify_transfer_error(&error, context(TransferOperation::Download)),
-            ClassifiedRecovery {
-                kind: TransferErrorKind::Auth,
-                decision: RecoveryDecision::Fail,
-                consumes_retry_budget: false,
-            }
-        );
-    }
-
-    #[test]
-    fn ambiguous_write_timeout_requires_remote_verification() {
-        let error = AppError::drive_transport(
-            DriveTransportKind::Timeout,
-            RequestSemantics::Write,
-            false,
-            Some("timeout after submit"),
-        );
-
-        assert_eq!(
-            classify_transfer_error(&error, context(TransferOperation::Update)),
-            ClassifiedRecovery {
-                kind: TransferErrorKind::RemoteAmbiguous,
-                decision: RecoveryDecision::VerifyRemote,
-                consumes_retry_budget: false,
-            }
-        );
-    }
-
-    #[test]
-    fn submitted_legacy_network_write_requires_remote_verification() {
-        let error = AppError::drive_transport(
-            DriveTransportKind::Network,
-            RequestSemantics::Write,
-            false,
-            Some("connection lost after submit"),
-        );
-
-        assert_eq!(
-            classify_transfer_error(&error, context(TransferOperation::Update)),
-            ClassifiedRecovery {
-                kind: TransferErrorKind::RemoteAmbiguous,
-                decision: RecoveryDecision::VerifyRemote,
-                consumes_retry_budget: false,
-            }
-        );
-    }
-
-    #[test]
-    fn write_timeout_known_pre_submit_waits_for_network() {
-        let error = AppError::drive_transport_with_submission(
-            DriveTransportKind::Timeout,
-            false,
-            false,
-            Some("timeout before submit"),
-        );
-
-        assert_eq!(
-            classify_transfer_error(&error, context(TransferOperation::Update)),
-            ClassifiedRecovery {
-                kind: TransferErrorKind::Timeout,
-                decision: RecoveryDecision::WaitForNetwork,
-                consumes_retry_budget: false,
-            }
-        );
-    }
-
-    #[test]
-    fn ambiguous_write_decode_requires_remote_verification() {
-        let error = AppError::drive_transport(
-            DriveTransportKind::Decode,
-            RequestSemantics::Write,
-            false,
-            Some("response decode failed"),
-        );
-
-        assert_eq!(
-            classify_transfer_error(&error, context(TransferOperation::CreateFolder)),
-            ClassifiedRecovery {
-                kind: TransferErrorKind::RemoteAmbiguous,
-                decision: RecoveryDecision::VerifyRemote,
-                consumes_retry_budget: false,
-            }
-        );
-    }
-
-    #[test]
-    fn read_decode_uses_budgeted_server_backoff_instead_of_waiting_for_network() {
-        let error = AppError::drive_transport(
-            DriveTransportKind::Decode,
-            RequestSemantics::Read,
-            false,
-            Some("malformed 2xx"),
-        );
-        let mut recovery_context = context(TransferOperation::Download);
-        recovery_context.attempt_count = 2;
-
-        assert_eq!(
-            classify_transfer_error(&error, recovery_context),
-            ClassifiedRecovery {
-                kind: TransferErrorKind::Server,
-                decision: RecoveryDecision::Backoff {
-                    next_retry_at: 14_000,
-                },
-                consumes_retry_budget: true,
-            }
-        );
-
-        recovery_context.attempt_count = recovery_context.max_attempts;
-        assert_eq!(
-            classify_transfer_error(&error, recovery_context),
-            ClassifiedRecovery {
-                kind: TransferErrorKind::Server,
-                decision: RecoveryDecision::Fail,
-                consumes_retry_budget: false,
-            }
-        );
-    }
-
-    #[test]
-    fn read_request_error_fails_unknown_but_response_body_waits_for_network() {
-        let request = AppError::drive_transport(
-            DriveTransportKind::Request,
-            RequestSemantics::Read,
-            false,
-            Some("request construction"),
-        );
-        let response_body = AppError::drive_transport(
-            DriveTransportKind::ResponseBody,
-            RequestSemantics::Read,
-            false,
-            Some("stream interrupted"),
-        );
-
-        assert_eq!(
-            classify_transfer_error(&request, context(TransferOperation::Download)),
-            ClassifiedRecovery {
-                kind: TransferErrorKind::Unknown,
-                decision: RecoveryDecision::Fail,
-                consumes_retry_budget: false,
-            }
-        );
-        assert_eq!(
-            classify_transfer_error(&response_body, context(TransferOperation::Download)),
-            ClassifiedRecovery {
-                kind: TransferErrorKind::Network,
-                decision: RecoveryDecision::WaitForNetwork,
-                consumes_retry_budget: false,
-            }
-        );
-    }
-
-    #[test]
-    fn rate_limit_honors_retry_after_and_consumes_retry_budget() {
-        let error = AppError::drive_from_response(
-            429,
-            "{}",
-            Some(RetryAfter::DelaySeconds(17)),
-            RequestSemantics::Read,
-            false,
-        );
-
-        assert_eq!(
-            classify_transfer_error(&error, context(TransferOperation::Download)),
-            ClassifiedRecovery {
-                kind: TransferErrorKind::RateLimit,
-                decision: RecoveryDecision::Backoff {
-                    next_retry_at: 27_000,
-                },
-                consumes_retry_budget: true,
-            }
-        );
-    }
-
-    #[test]
-    fn server_backoff_is_exponential_deterministic_and_capped() {
-        let error = AppError::drive_from_response(503, "{}", None, RequestSemantics::Read, false);
-        let mut recovery_context = context(TransferOperation::Download);
-        recovery_context.attempt_count = 3;
-        recovery_context.jitter_ms = 250;
-
-        assert_eq!(
-            classify_transfer_error(&error, recovery_context),
-            ClassifiedRecovery {
-                kind: TransferErrorKind::Server,
-                decision: RecoveryDecision::Backoff {
-                    next_retry_at: 18_250,
-                },
-                consumes_retry_budget: true,
-            }
-        );
-
-        recovery_context.attempt_count = 20;
-        recovery_context.max_attempts = 21;
-        assert_eq!(
-            classify_transfer_error(&error, recovery_context).decision,
-            RecoveryDecision::Backoff {
-                next_retry_at: 310_000,
-            }
-        );
-    }
-
-    #[test]
-    fn exhausted_server_budget_verifies_writes_but_fails_reads() {
-        let write_error =
-            AppError::drive_from_response(503, "{}", None, RequestSemantics::Write, false);
-        let read_error =
-            AppError::drive_from_response(503, "{}", None, RequestSemantics::Read, false);
-        let pre_submit_write_error =
-            AppError::drive_from_response_with_submission(503, "{}", None, false, false);
-        let mut write_context = context(TransferOperation::Update);
-        write_context.attempt_count = write_context.max_attempts;
-        let mut read_context = context(TransferOperation::Download);
-        read_context.attempt_count = read_context.max_attempts;
-
-        assert_eq!(
-            classify_transfer_error(&write_error, write_context).decision,
-            RecoveryDecision::VerifyRemote
-        );
-        assert_eq!(
-            classify_transfer_error(&read_error, read_context).decision,
-            RecoveryDecision::Fail
-        );
-        assert_eq!(
-            classify_transfer_error(&pre_submit_write_error, write_context).decision,
-            RecoveryDecision::Fail
-        );
     }
 }

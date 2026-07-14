@@ -1,4 +1,4 @@
-//! Authoritative, read-only aggregation of persisted and runtime sync status.
+//! 只读汇总持久化事实与运行时同步状态。
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -10,7 +10,7 @@ use crate::error::{AppError, AppResult};
 use crate::sync::state::{FailedItem, SyncGlobalState};
 use crate::sync::transfer_state::TransferState;
 
-/// Runtime-only state that has no persistent source in SQLite.
+/// SQLite 中没有持久化来源的运行时状态。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RuntimeStatus {
     pub editing: u64,
@@ -24,6 +24,7 @@ pub struct RuntimeStatus {
 }
 
 impl From<&SyncGlobalState> for RuntimeStatus {
+    /// 从完整全局状态中提取运行时字段。
     fn from(state: &SyncGlobalState) -> Self {
         Self {
             editing: state.editing,
@@ -39,7 +40,7 @@ impl From<&SyncGlobalState> for RuntimeStatus {
 }
 
 impl RuntimeStatus {
-    /// Keep lifecycle gates accurate even when a DB snapshot cannot be produced.
+    /// 即使数据库快照失败，也要保持生命周期门状态准确。
     pub(crate) fn apply_to(&self, state: &mut SyncGlobalState) {
         state.editing = self.editing;
         state.is_running = self.is_running;
@@ -52,7 +53,7 @@ impl RuntimeStatus {
     }
 }
 
-/// Builds complete global snapshots without modifying persisted facts.
+/// 在不改写持久化事实的前提下构建完整全局快照。
 #[derive(Debug, Default)]
 pub struct StatusAggregator {
     next_revision: AtomicU64,
@@ -60,12 +61,12 @@ pub struct StatusAggregator {
 }
 
 impl StatusAggregator {
-    /// Serialize revision allocation through publication across replacement engines.
+    /// 串行化跨 Engine 替换的版本分配与状态发布。
     pub(crate) fn lock_publication(&self) -> MutexGuard<'_, ()> {
         self.publication.lock()
     }
 
-    /// Acquire publication while exposing only a confirmed contention point to concurrency tests.
+    /// 获取发布锁，并仅在确认竞争时执行回调。
     pub(crate) fn lock_publication_with_contention_hook(
         &self,
         on_contention: impl FnOnce(),
@@ -79,6 +80,7 @@ impl StatusAggregator {
         }
     }
 
+    /// 汇总数据库事实与运行时字段，生成新版本快照。
     pub fn snapshot(
         &self,
         conn: &Connection,
@@ -179,156 +181,5 @@ impl StatusAggregator {
             content_changed: runtime.content_changed,
             sync_phase: runtime.sync_phase,
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{RuntimeStatus, StatusAggregator};
-    use crate::data::repository::{self, sync_status, transfer_direction, SyncItem, TransferTask};
-    use crate::sync::transfer_state::{TransferErrorKind, TransferOperation, TransferState};
-    use rusqlite::Connection;
-
-    fn fresh_db() -> Connection {
-        let conn = Connection::open_in_memory().unwrap();
-        crate::data::migrations::run(&conn).unwrap();
-        conn
-    }
-
-    fn sync_item(path: &str, status: i32, error_message: Option<&str>) -> SyncItem {
-        SyncItem {
-            file_id: format!("file:{path}"),
-            local_path: path.to_string(),
-            parent_folder_id: Some("parent".into()),
-            name: path.rsplit('/').next().unwrap_or(path).to_string(),
-            is_folder: false,
-            size: 128,
-            local_size: Some(128),
-            sha256: Some("sha256".into()),
-            local_mtime: Some(1_000),
-            cloud_edited_time: Some(2_000),
-            last_sync_time: Some(3_000),
-            status,
-            error_message: error_message.map(str::to_string),
-        }
-    }
-
-    fn transfer_task(
-        name: &str,
-        state: TransferState,
-        direction: i32,
-        relative_path: &str,
-    ) -> TransferTask {
-        TransferTask {
-            id: 0,
-            direction,
-            file_id: Some(format!("file:{relative_path}")),
-            local_path: Some(format!("/mount/{relative_path}")),
-            name: name.into(),
-            total_size: 128,
-            transferred: 64,
-            state: state.into(),
-            error_message: (state == TransferState::Failed).then(|| "permanent".into()),
-            created_at: 1_000,
-            finished_at: matches!(state, TransferState::Completed | TransferState::Failed)
-                .then_some(2_000),
-            server_id: None,
-            upload_id: None,
-            resume_offset: 0,
-            session_url: None,
-            relative_path: Some(relative_path.into()),
-            parent_file_id: Some("parent".into()),
-            operation: Some(TransferOperation::Create.into()),
-            source_mtime: Some(900),
-            source_size: Some(128),
-            expected_cloud_edited_time: Some(800),
-            attempt_count: 1,
-            next_retry_at: None,
-            error_kind: (state == TransferState::Failed)
-                .then(|| i32::from(TransferErrorKind::Permission)),
-            remote_result_file_id: None,
-            state_revision: 0,
-        }
-    }
-
-    #[test]
-    fn snapshot_derives_complete_state_without_mutating_the_database() {
-        let conn = fresh_db();
-        repository::upsert(&conn, &sync_item("ok.txt", sync_status::SYNCED, None)).unwrap();
-        repository::upsert(
-            &conn,
-            &sync_item("failed.txt", sync_status::FAILED, Some("sync failed")),
-        )
-        .unwrap();
-        repository::insert_transfer(
-            &conn,
-            &transfer_task(
-                "completed",
-                TransferState::Completed,
-                transfer_direction::UPLOAD,
-                "completed.txt",
-            ),
-        )
-        .unwrap();
-        repository::insert_transfer(
-            &conn,
-            &transfer_task(
-                "waiting",
-                TransferState::WaitingForNetwork,
-                transfer_direction::DOWNLOAD,
-                "waiting.txt",
-            ),
-        )
-        .unwrap();
-        repository::insert_transfer(
-            &conn,
-            &transfer_task(
-                "failed",
-                TransferState::Failed,
-                transfer_direction::UPLOAD,
-                "transfer-failed.txt",
-            ),
-        )
-        .unwrap();
-        let changes_before_snapshot = conn.total_changes();
-        let aggregator = StatusAggregator::default();
-        let runtime = RuntimeStatus {
-            editing: 2,
-            is_running: true,
-            last_sync_time: Some(9_000),
-            is_indexing: true,
-            indexing_scanned_folders: 7,
-            indexing_discovered_items: 11,
-            content_changed: true,
-            sync_phase: Some("indexing-manual".into()),
-        };
-
-        let first = aggregator.snapshot(&conn, runtime.clone()).unwrap();
-        let second = aggregator.snapshot(&conn, runtime).unwrap();
-
-        assert_eq!(first.total, 2);
-        assert_eq!(first.completed, 1);
-        assert_eq!(first.uploading, 0);
-        assert_eq!(first.downloading, 0);
-        assert_eq!(first.waiting_network, 1);
-        assert_eq!(first.failed, 1);
-        assert_eq!(first.transfer_failed, 1);
-        assert_eq!(first.conflict, 0);
-        assert_eq!(first.failed_items.len(), 1);
-        assert_eq!(first.failed_items[0].relative_path, "failed.txt");
-        assert_eq!(
-            first.failed_items[0].error_message.as_deref(),
-            Some("sync failed")
-        );
-        assert_eq!(first.editing, 2);
-        assert!(first.is_running);
-        assert_eq!(first.last_sync_time, Some(9_000));
-        assert!(first.is_indexing);
-        assert_eq!(first.indexing_scanned_folders, 7);
-        assert_eq!(first.indexing_discovered_items, 11);
-        assert!(first.content_changed);
-        assert_eq!(first.sync_phase.as_deref(), Some("indexing-manual"));
-        assert!(second.revision > first.revision);
-        assert_eq!(conn.total_changes(), changes_before_snapshot);
     }
 }

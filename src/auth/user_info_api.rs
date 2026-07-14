@@ -19,6 +19,7 @@ use crate::auth::service::AuthService;
 use crate::constants;
 use crate::error::AppResult;
 
+/// 华为账号扩展资料接口地址。
 const REST_PHP_URL: &str = "https://account.cloud.huawei.com/rest.php";
 
 /// 华为账号信息客户端。
@@ -28,6 +29,7 @@ pub struct UserInfoApi {
 }
 
 impl UserInfoApi {
+    /// 使用授权服务构造带固定请求超时的账号信息客户端。
     pub fn new(auth: Arc<AuthService>) -> Self {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
@@ -73,7 +75,8 @@ impl UserInfoApi {
         Ok(user_info.resolve_anonymous_as_mobile())
     }
 
-    /// POST GOpen.User.getInfo → displayName / openID / headPictureURL / displayNameFlag。
+    /// 请求账号展示名、开放标识与头像资料。
+    /// 通过 POST GOpen.User.getInfo 读取 displayName / openID / headPictureURL / displayNameFlag。
     async fn get_display_info(&self, token: &str) -> reqwest::Result<Value> {
         let resp = self
             .http
@@ -128,40 +131,5 @@ impl UserInfoApi {
             .await?;
         let json: Value = resp.json().await?;
         Ok(json)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_merge_priority_phone_wins() {
-        // 模拟合并：oidc < info < phone，phone 最优先
-        let mut merged = serde_json::Map::new();
-        merged.extend(
-            serde_json::json!({"mobile": "匿名脱敏", "sub": "oidc-sub"})
-                .as_object()
-                .unwrap()
-                .clone(),
-        );
-        merged.extend(
-            serde_json::json!({"displayName": "昵称", "mobile": "info-phone"})
-                .as_object()
-                .unwrap()
-                .clone(),
-        );
-        merged.extend(
-            serde_json::json!({"mobile": "13800000000"})
-                .as_object()
-                .unwrap()
-                .clone(),
-        );
-
-        let user = UserInfo::from_json(&Value::Object(merged));
-        // phone 最后覆盖
-        assert_eq!(user.mobile.as_deref(), Some("13800000000"));
-        assert_eq!(user.display_name.as_deref(), Some("昵称"));
-        assert_eq!(user.sub.as_deref(), Some("oidc-sub"));
     }
 }

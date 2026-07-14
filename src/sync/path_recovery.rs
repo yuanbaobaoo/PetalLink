@@ -1,9 +1,8 @@
-//! Crash recovery for direct remote rename/move commands.
+//! 直接云端重命名或移动命令的崩溃恢复。
 //!
-//! The command persists the cloud fileId as an xattr on the local source before the remote write.
-//! Once a trusted cloud tree places that same fileId at another path, this module can safely finish
-//! the local rename and atomically re-key the `sync_items` subtree without inventing a new content
-//! baseline.
+//! 命令在云端写入前先把 fileId 持久到本地源路径 xattr。可信云树确认
+//! 同一 fileId 出现在新路径后，本模块才完成本地重命名并原子重键 `sync_items`
+//! 子树，且不伪造新的内容基线。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -17,13 +16,13 @@ use crate::mount::manager::XATTR_FILE_ID;
 use crate::sync::transfer_state::TransferState;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// 远程路径恢复的收敛统计。
 pub struct PathRecoverySummary {
     pub rekeyed_roots: usize,
     pub skipped_unmarked: usize,
 }
 
-/// Finish direct path changes only from a current, complete cloud tree. Callers own that trust
-/// decision; this function deliberately performs no network fallback.
+/// 仅依据当前完整云树收敛直接路径变更，不执行网络回退。
 pub(crate) fn recover_verified_remote_path_changes<F, G>(
     mount_root: &Path,
     conn: &Connection,
@@ -41,7 +40,7 @@ where
                 entry.insert(Some((path.clone(), file.clone())));
             }
             std::collections::hash_map::Entry::Occupied(mut entry) => {
-                // A duplicated fileId makes path identity non-unique. Never choose either path.
+                // 重复 fileId 会使路径身份不唯一，因此两个候选都不采用。
                 entry.insert(None);
             }
         }
@@ -54,8 +53,7 @@ where
             (new_path != &record.local_path).then(|| (record, new_path.clone(), cloud_file.clone()))
         })
         .collect::<Vec<_>>();
-    // A moved folder re-keys its descendants. Process shallow folders first so stale child
-    // candidates disappear before they can attempt a second filesystem rename.
+    // 移动目录会重键所有后代；先处理浅层目录，避免旧子候选重复重命名。
     candidates.sort_by_key(|(record, _, _)| {
         (
             Path::new(&record.local_path).components().count(),
@@ -71,8 +69,7 @@ where
         }) else {
             continue;
         };
-        // Hold source and target leases across the final identity checks, filesystem rename and
-        // DB transaction. This closes the race with a newly admitted transfer or direct command.
+        // 从最终身份校验到文件系统重命名与 DB 事务全程持有源/目标租约。
         let _path_leases = acquire_path_leases(&current.local_path, &new_path)?;
         match recover_one(
             mount_root,
@@ -92,12 +89,14 @@ where
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// 单个路径候选的恢复结果。
 enum RecoveryOutcome {
     Rekeyed,
     Unmarked,
 }
 
 #[allow(clippy::too_many_arguments)]
+/// 在身份、类型、占用与子树一致性均通过后恢复单个路径。
 fn recover_one(
     mount_root: &Path,
     conn: &Connection,
@@ -236,6 +235,7 @@ fn recover_one(
     Ok(RecoveryOutcome::Rekeyed)
 }
 
+/// 确认源、目标子树与 fileId 均没有活动传输。
 fn ensure_no_active_transfer(
     conn: &Connection,
     file_id: &str,
@@ -265,6 +265,7 @@ fn ensure_no_active_transfer(
     Ok(())
 }
 
+/// 在单一事务中删除旧路径并写入重键后的子树。
 fn rekey_db_subtree(
     conn: &Connection,
     subtree: &[SyncItem],
@@ -297,8 +298,7 @@ fn rekey_db_subtree(
                 .edited_time
                 .map(|edited_time| edited_time.timestamp_millis());
         }
-        // Preserve local mtime/size/hash and sync status: a structural move proves no content
-        // version and must not manufacture a new successful content baseline.
+        // 结构移动不能证明内容版本，必须保留本地时间/大小/哈希与同步状态。
         repository::upsert(&transaction, &moved)?;
     }
     transaction
@@ -307,6 +307,7 @@ fn rekey_db_subtree(
     Ok(())
 }
 
+/// 将旧子树中的相对路径映射到新根路径。
 fn rekey_path(path: &str, old_root: &str, new_root: &str) -> AppResult<String> {
     if path == old_root {
         return Ok(new_root.to_string());
@@ -318,6 +319,7 @@ fn rekey_path(path: &str, old_root: &str, new_root: &str) -> AppResult<String> {
     Ok(format!("{new_root}{suffix}"))
 }
 
+/// 判断路径是否等于或位于指定子树根下。
 fn is_in_subtree(path: &str, root: &str) -> bool {
     path == root
         || path
@@ -325,6 +327,7 @@ fn is_in_subtree(path: &str, root: &str) -> bool {
             .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
+/// 读取不跟随符号链接的元数据，路径不存在时返回 `None`。
 pub(crate) fn optional_metadata(path: &Path) -> AppResult<Option<std::fs::Metadata>> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) => Ok(Some(metadata)),
@@ -336,6 +339,7 @@ pub(crate) fn optional_metadata(path: &Path) -> AppResult<Option<std::fs::Metada
     }
 }
 
+/// 确认本地实体与持久基线的文件/目录类型一致。
 pub(crate) fn validate_local_type(
     metadata: &std::fs::Metadata,
     record: &SyncItem,
@@ -354,6 +358,7 @@ pub(crate) fn validate_local_type(
     Ok(())
 }
 
+/// 读取用于路径恢复身份校验的 fileId xattr。
 pub(crate) fn read_file_id(path: &Path) -> AppResult<Option<String>> {
     xattr::get(path, XATTR_FILE_ID)
         .map_err(|error| {
@@ -367,7 +372,7 @@ pub(crate) fn read_file_id(path: &Path) -> AppResult<Option<String>> {
         .map_err(|_| AppError::generic("路径恢复 fileId 标记损坏，拒绝继续"))
 }
 
-/// Create each missing parent component without traversing an existing symlink.
+/// 逐级创建缺失的目标父目录，且不穿越已有符号链接。
 pub(crate) fn ensure_safe_target_parent(mount_root: &Path, new_root: &str) -> AppResult<()> {
     let parent = Path::new(new_root)
         .parent()
@@ -405,8 +410,7 @@ pub(crate) fn ensure_safe_target_parent(mount_root: &Path, new_root: &str) -> Ap
     Ok(())
 }
 
-/// Atomic no-clobber rename on macOS. The fallback keeps the explicit existence check for
-/// non-macOS development builds; PetalLink's production target uses `RENAME_EXCL`.
+/// macOS 使用不覆盖的原子重命名，非 macOS 回退保留显式存在性检查。
 pub fn rename_no_replace(source: &Path, target: &Path) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
     {
@@ -414,9 +418,12 @@ pub fn rename_no_replace(source: &Path, target: &Path) -> std::io::Result<()> {
         use std::os::raw::{c_char, c_int, c_uint};
         use std::os::unix::ffi::OsStrExt;
 
+        /// 表示相对当前工作目录解析路径。
         const AT_FDCWD: c_int = -2;
+        /// 禁止重命名覆盖已有目标。
         const RENAME_EXCL: c_uint = 0x0000_0004;
         extern "C" {
+            /// 调用 macOS 原子不覆盖重命名系统接口。
             fn renameatx_np(
                 from_fd: c_int,
                 from: *const c_char,
@@ -430,8 +437,7 @@ pub fn rename_no_replace(source: &Path, target: &Path) -> std::io::Result<()> {
             .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "源路径含 NUL"))?;
         let target = CString::new(target.as_os_str().as_bytes())
             .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "目标路径含 NUL"))?;
-        // SAFETY: both C strings are NUL-terminated and remain alive for the call; AT_FDCWD and
-        // RENAME_EXCL are the constants declared by the macOS SDK.
+        // 安全性：两个 C 字符串均以 NUL 结尾且在调用期间保持存活，常量与 macOS SDK 一致。
         let result = unsafe {
             renameatx_np(
                 AT_FDCWD,
