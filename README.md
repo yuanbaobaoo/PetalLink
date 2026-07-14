@@ -5,8 +5,6 @@
 华为云盘 Mac 客户端 —— 基于 Tauri 2.x，将华为云空间挂载到本地，双向实时同步。
 
 > 华为云空间目前并不支持 macOS。PetalLink 通过华为 Drive REST API 直连，不依赖 HMS Core SDK，为 macOS 用户提供接近原生的云盘体验。
->
-> 灵感来自 [ccdarkness/huaweicloud](https://github.com/ccdarkness/huaweicloud)，一个 Node.js 实现的华为云盘同步脚本，验证了 REST API 方案的可行性。
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Tauri](https://img.shields.io/badge/Tauri-2.x-FFC131?logo=tauri)](https://v2.tauri.app/)
@@ -123,7 +121,7 @@ HWCLOUD_TEST_FILE="<file_path>" cargo test --test upload_tester -- --ignored --n
 |---|---|
 | 核心合同测试 | auth / config / paths / logging / platform / error contract |
 | Drive 协议测试 | Files / Changes / download / upload / ASCII JSON / model parsing / client error |
-| 同步测试 | cloud tree / conflict / engine / retry policy / stability / state / transfer state / checkpoint store |
+| 同步测试 | cloud tree / conflict / engine / path recovery / retry policy / stability / state / task recovery / transfer state / checkpoint store |
 | 手工集成测试 | `upload_tester.rs`，需要真实 OAuth 环境和 `HWCLOUD_TEST_FILE`，默认 `#[ignore]` |
 
 ---
@@ -223,3 +221,9 @@ PetalLink/
 [Apache License 2.0](LICENSE) © 2026 PetalLink
 
 本项目仅供个人学习与自用。华为云空间服务及相关 API 归华为所有，请遵守华为开发者联盟相关协议。使用本项目产生的任何数据丢失、账号封禁等问题，项目维护者不承担责任。
+
+---
+
+## 相关项目
+
+[ccdarkness/huaweicloud](https://github.com/ccdarkness/huaweicloud)：一个 Node.js 实现的华为云盘同步脚本，曾验证了 REST API 方案的可行性。
