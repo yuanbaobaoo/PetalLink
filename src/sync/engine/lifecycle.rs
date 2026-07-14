@@ -123,6 +123,11 @@ impl SyncEngine {
             .ok_or_else(|| AppError::generic("TaskRunner 未初始化"))
     }
 
+    /// 返回当前引擎使用的统一文件跳过规则。
+    pub(crate) fn skip_patterns(&self) -> &[String] {
+        &self.skip_patterns
+    }
+
     /// 判断引擎是否已进入运行生命周期。
     pub fn is_running(&self) -> bool {
         *self.running.lock()
@@ -280,20 +285,28 @@ impl SyncEngine {
     /// - 上传有断点（session_url 非空 + 本地文件在）：尝试续传，失败则标记 FAILED
     /// - 上传无断点：标记 FAILED（planner 下轮重新创建上传任务）
     /// - 删除：标记 FAILED
-    pub(super) async fn recover_interrupted_transfers(&self) {
+    pub(super) async fn recover_interrupted_transfers(
+        &self,
+    ) -> crate::sync::task_runner::StartupRecoverySummary {
         let Some(task_runner) = &self.task_runner else {
             tracing::warn!("TaskRunner 未初始化，跳过中断任务恢复");
-            return;
+            return crate::sync::task_runner::StartupRecoverySummary::default();
         };
         match task_runner.recover_startup().await {
-            Ok(summary) => tracing::info!(
-                completed = summary.completed,
-                waiting_network = summary.waiting_network,
-                verifying_remote = summary.verifying_remote,
-                failed = summary.failed,
-                "中断传输已通过统一 TaskRunner 恢复"
-            ),
-            Err(error) => tracing::warn!(%error, "统一中断任务恢复失败"),
+            Ok(summary) => {
+                tracing::info!(
+                    completed = summary.completed,
+                    waiting_network = summary.waiting_network,
+                    verifying_remote = summary.verifying_remote,
+                    failed = summary.failed,
+                    "中断传输已通过统一 TaskRunner 恢复"
+                );
+                summary
+            }
+            Err(error) => {
+                tracing::warn!(%error, "统一中断任务恢复失败");
+                crate::sync::task_runner::StartupRecoverySummary::default()
+            }
         }
     }
     /// 启动本地文件监听器，并把变更合并为重扫请求。

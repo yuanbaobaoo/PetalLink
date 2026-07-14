@@ -45,6 +45,24 @@ pub struct TaskExecutionOutcome {
     pub disposition: TaskDisposition,
 }
 
+/// 单个恢复任务已确认并结算的云端文件。
+#[derive(Debug, Clone)]
+pub struct RecoveredCloudFile {
+    /// 任务持久化的规范相对路径。
+    pub relative_path: String,
+    /// 经过后端校验的完整云端元数据。
+    pub file: DriveFile,
+}
+
+/// 在线恢复入口实际完成的任务及其权威云端结果。
+#[derive(Debug, Clone, Default)]
+pub struct TaskRecoverySummary {
+    /// 本轮已进入 Completed 的任务数量。
+    pub completed: usize,
+    /// 需同步发布到云树检查点的远端写入结果。
+    pub recovered_cloud_files: Vec<RecoveredCloudFile>,
+}
+
 #[derive(Debug, Clone)]
 /// 对远程写入是否已提交的核验结果。
 pub enum RemoteVerification {
@@ -123,13 +141,15 @@ impl BackendPreflightFailure {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 /// 启动恢复期各类任务去向的统计。
 pub struct StartupRecoverySummary {
     pub completed: usize,
     pub waiting_network: usize,
     pub verifying_remote: usize,
     pub failed: usize,
+    /// 启动期已确认的远端写入结果。
+    pub recovered_cloud_files: Vec<RecoveredCloudFile>,
 }
 
 #[derive(Debug, Clone)]

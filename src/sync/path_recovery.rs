@@ -15,15 +15,30 @@ use crate::error::{AppError, AppResult};
 use crate::mount::manager::XATTR_FILE_ID;
 use crate::sync::transfer_state::TransferState;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 /// 远程路径恢复的收敛统计。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PathRecoverySummary {
+    /// 已完成数据库重键的路径根数量。
     pub rekeyed_roots: usize,
+    /// 缺少本地持久身份而交回 planner 的路径数量。
     pub skipped_unmarked: usize,
+    /// 因活动传输暂时不能重键的路径身份。
+    pub blocked_changes: Vec<BlockedPathChange>,
+}
+
+/// 描述需从本轮同步规划中隔离的远端路径变化。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockedPathChange {
+    /// 保存在数据库基线中的旧路径。
+    pub old_path: String,
+    /// 可信云端树中的新路径。
+    pub new_path: String,
+    /// 源、目标路径共同对应的稳定 fileId。
+    pub file_id: String,
 }
 
 /// 仅依据当前完整云树收敛直接路径变更，不执行网络回退。
-pub(crate) fn recover_verified_remote_path_changes<F, G>(
+pub fn recover_verified_remote_path_changes<F, G>(
     mount_root: &Path,
     conn: &Connection,
     cloud_tree: &HashMap<String, DriveFile>,
@@ -62,7 +77,32 @@ where
     });
 
     let mut summary = PathRecoverySummary::default();
+    let mut rekeyed_subtrees = Vec::<(String, String)>::new();
     for (candidate, new_path, cloud_file) in candidates {
+        // 目录根成功重键时已原子覆盖全部后代；跳过失效候选，避免大目录反复全表读取。
+        if rekeyed_subtrees.iter().any(|(old_root, new_root)| {
+            is_in_subtree(&candidate.local_path, old_root) || is_in_subtree(&new_path, new_root)
+        }) {
+            continue;
+        }
+        // 目录根被活动传输阻止后，其后代必须随根一起隔离，禁止拆散子树逐项重键。
+        if let Some(blocked) = summary.blocked_changes.iter().find(|blocked| {
+            is_in_subtree(&candidate.local_path, &blocked.old_path)
+                || is_in_subtree(&new_path, &blocked.new_path)
+        }) {
+            // 后代又跨出被隔离的新子树时，必须把外部端点继续加入隔离闭包。
+            if !is_in_subtree(&candidate.local_path, &blocked.old_path)
+                || !is_in_subtree(&new_path, &blocked.new_path)
+            {
+                push_blocked_change(
+                    &mut summary.blocked_changes,
+                    &candidate.local_path,
+                    &new_path,
+                    &candidate.file_id,
+                );
+            }
+            continue;
+        }
         let records = repository::load_all(conn)?;
         let Some(current) = records.iter().find(|record| {
             record.file_id == candidate.file_id && record.local_path == candidate.local_path
@@ -70,7 +110,25 @@ where
             continue;
         };
         // 从最终身份校验到文件系统重命名与 DB 事务全程持有源/目标租约。
-        let _path_leases = acquire_path_leases(&current.local_path, &new_path)?;
+        let _path_leases = match acquire_path_leases(&current.local_path, &new_path) {
+            Ok(leases) => leases,
+            Err(error) => {
+                tracing::warn!(
+                    old = %current.local_path,
+                    new = %new_path,
+                    file_id = %current.file_id,
+                    %error,
+                    "路径租约暂不可用，本轮仅隔离当前身份"
+                );
+                push_blocked_change(
+                    &mut summary.blocked_changes,
+                    &current.local_path,
+                    &new_path,
+                    &current.file_id,
+                );
+                continue;
+            }
+        };
         match recover_one(
             mount_root,
             conn,
@@ -80,19 +138,68 @@ where
             current,
             &new_path,
             &cloud_file,
-        )? {
-            RecoveryOutcome::Rekeyed => summary.rekeyed_roots += 1,
-            RecoveryOutcome::Unmarked => summary.skipped_unmarked += 1,
+        ) {
+            Err(error) => {
+                tracing::warn!(
+                    old = %current.local_path,
+                    new = %new_path,
+                    file_id = %current.file_id,
+                    %error,
+                    "单个远端路径变化暂不能安全恢复，本轮仅隔离当前身份"
+                );
+                push_blocked_change(
+                    &mut summary.blocked_changes,
+                    &current.local_path,
+                    &new_path,
+                    &current.file_id,
+                );
+            }
+            Ok(RecoveryOutcome::Rekeyed) => {
+                if current.is_folder {
+                    rekeyed_subtrees.push((current.local_path.clone(), new_path.clone()));
+                }
+                summary.rekeyed_roots += 1;
+            }
+            Ok(RecoveryOutcome::Unmarked) => summary.skipped_unmarked += 1,
+            Ok(RecoveryOutcome::BlockedByActiveTransfer) => {
+                push_blocked_change(
+                    &mut summary.blocked_changes,
+                    &current.local_path,
+                    &new_path,
+                    &current.file_id,
+                );
+            }
         }
     }
     Ok(summary)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// 去重追加一个需隔离的稳定路径身份。
+fn push_blocked_change(
+    blocked_changes: &mut Vec<BlockedPathChange>,
+    old_path: &str,
+    new_path: &str,
+    file_id: &str,
+) {
+    if blocked_changes.iter().any(|blocked| {
+        blocked.file_id == file_id && blocked.old_path == old_path && blocked.new_path == new_path
+    }) {
+        return;
+    }
+    blocked_changes.push(BlockedPathChange {
+        old_path: old_path.to_string(),
+        new_path: new_path.to_string(),
+        file_id: file_id.to_string(),
+    });
+}
+
 /// 单个路径候选的恢复结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RecoveryOutcome {
     Rekeyed,
     Unmarked,
+    /// 活动传输必须先核验或结算，当前路径暂不参与恢复。
+    BlockedByActiveTransfer,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -131,6 +238,29 @@ fn recover_one(
             "远端路径恢复拒绝把目录移入自身：{} -> {new_root}",
             root.local_path
         )));
+    }
+    if !root.is_folder {
+        let cloud_edited_time = cloud_root
+            .edited_time
+            .map(|edited_time| edited_time.timestamp_millis());
+        if cloud_edited_time
+            .zip(root.cloud_edited_time)
+            .map_or(true, |(cloud, baseline)| cloud <= baseline)
+        {
+            return Err(AppError::generic(format!(
+                "云端路径变化缺少更新版本证明或版本不新，等待 checkpoint 追平：{} -> {new_root}",
+                root.local_path
+            )));
+        }
+    }
+    if has_active_transfer(conn, &root.file_id, &root.local_path, new_root)? {
+        tracing::warn!(
+            old = %root.local_path,
+            new = %new_root,
+            file_id = %root.file_id,
+            "路径恢复等待活动传输结算，本轮隔离争议路径"
+        );
+        return Ok(RecoveryOutcome::BlockedByActiveTransfer);
     }
 
     let old_absolute = crate::core::paths::safe_join_under(mount_root, &root.local_path, false)?;
@@ -212,8 +342,6 @@ fn recover_one(
             "可信云树无法确认目标 fileId，拒绝路径恢复：{new_root}"
         )));
     }
-    ensure_no_active_transfer(conn, &root.file_id, &root.local_path, new_root)?;
-
     if !local_already_moved {
         ensure_safe_target_parent(mount_root, new_root)?;
         rename_no_replace(&old_absolute, &new_absolute).map_err(|error| {
@@ -235,21 +363,29 @@ fn recover_one(
     Ok(RecoveryOutcome::Rekeyed)
 }
 
-/// 确认源、目标子树与 fileId 均没有活动传输。
-fn ensure_no_active_transfer(
+/// 判断源、目标子树或 fileId 是否仍被活动传输占用。
+fn has_active_transfer(
     conn: &Connection,
     file_id: &str,
     old_root: &str,
     new_root: &str,
-) -> AppResult<()> {
+) -> AppResult<bool> {
     let active = repository::list_all_transfers(conn)?
         .into_iter()
         .any(|task| {
             let state_is_active = task.state_kind().is_ok_and(|state| {
-                !matches!(
+                matches!(
                     state,
-                    TransferState::Completed | TransferState::Failed | TransferState::Canceled
-                )
+                    TransferState::Pending
+                        | TransferState::Running
+                        | TransferState::WaitingForNetwork
+                        | TransferState::BackingOff
+                        | TransferState::VerifyingRemote
+                ) || (state == TransferState::RestartRequired
+                    && task
+                        .remote_result_file_id
+                        .as_deref()
+                        .is_some_and(|file_id| !file_id.trim().is_empty()))
             });
             state_is_active
                 && (task.file_id.as_deref() == Some(file_id)
@@ -257,12 +393,7 @@ fn ensure_no_active_transfer(
                         is_in_subtree(path, old_root) || is_in_subtree(path, new_root)
                     }))
         });
-    if active {
-        return Err(AppError::generic(format!(
-            "路径恢复涉及活动传输，拒绝并发重键：{old_root} -> {new_root}"
-        )));
-    }
-    Ok(())
+    Ok(active)
 }
 
 /// 在单一事务中删除旧路径并写入重键后的子树。
@@ -301,6 +432,38 @@ fn rekey_db_subtree(
         // 结构移动不能证明内容版本，必须保留本地时间/大小/哈希与同步状态。
         repository::upsert(&transaction, &moved)?;
     }
+    let old_prefix = format!("{old_root}/");
+    let new_prefix = format!("{new_root}/");
+    transaction
+        .execute(
+            "UPDATE transfer_queue
+             SET state=?1,
+                 error_kind=NULL,
+                 error_message='路径恢复已使旧重规划任务失效',
+                 finished_at=?2,
+                 next_retry_at=NULL,
+                 state_revision=state_revision+1
+             WHERE state=?3
+               AND (remote_result_file_id IS NULL OR trim(remote_result_file_id)='')
+               AND (
+                    file_id=?4
+                    OR relative_path=?5
+                    OR relative_path=?6
+                    OR substr(relative_path, 1, length(?7))=?7
+                    OR substr(relative_path, 1, length(?8))=?8
+               )",
+            rusqlite::params![
+                i32::from(TransferState::Canceled),
+                chrono::Utc::now().timestamp_millis(),
+                i32::from(TransferState::RestartRequired),
+                cloud_root.id,
+                old_root,
+                new_root,
+                old_prefix,
+                new_prefix,
+            ],
+        )
+        .map_err(|error| AppError::generic(format!("取消旧重规划任务失败：{error}")))?;
     transaction
         .commit()
         .map_err(|error| AppError::generic(format!("提交路径恢复事务失败：{error}")))?;

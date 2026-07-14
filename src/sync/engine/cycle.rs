@@ -12,7 +12,8 @@ use crate::sync::transfer_state::TransferState;
 
 use super::action_filters::{
     add_rescue_folder_recreations, dedupe_directory_deletes, dedupe_local_descendants,
-    fill_parent_file_ids, filter_anti_oscillation, preserve_dirs_with_pending_backups,
+    fill_parent_file_ids, filter_active_transfer_actions, filter_anti_oscillation,
+    filter_blocked_path_changes, filter_skipped_paths, preserve_dirs_with_pending_backups,
 };
 use super::coordination::CycleRequest;
 use super::{recoverable_cycle_retry_delay, ResetFlag, SyncEngine};
@@ -154,6 +155,19 @@ impl SyncEngine {
         }
     }
 
+    /// 提交一组恢复结果；失败时强制下一轮重建本地与云端可信视图。
+    fn commit_recovery_checkpoint(
+        &self,
+        recovered: &[crate::sync::task_runner::RecoveredCloudFile],
+    ) -> AppResult<()> {
+        if let Err(error) = self.commit_recovered_cloud_files(recovered) {
+            self.cycle
+                .request(CycleRequest::LOCAL_RESCAN | CycleRequest::CLOUD_FULL);
+            return Err(error);
+        }
+        Ok(())
+    }
+
     /// 由唯一 owner 合并并排空待处理请求。
     async fn drain_cycle_requests_for(&self, awaited: Option<u64>) -> AppResult<()> {
         let _owner = self.cycle.lock_owner().await;
@@ -290,6 +304,15 @@ impl SyncEngine {
                 return Ok(());
             }
 
+            // 保存了远端结果 ID 的 RestartRequired 仍有重复写风险，必须先恢复为核验态。
+            if let Some(task_runner) = &self.task_runner {
+                let promoted = task_runner.promote_ambiguous_restarts()?;
+                if promoted > 0 {
+                    tracing::warn!(promoted, "已将含远端结果的重规划任务恢复为核验态");
+                    self.notify_backoff_schedule_changed();
+                }
+            }
+
             // 本地扫描前先基于可信 fileId/path 收敛已提交的远端改名或移动。
             let path_recovery = {
                 let _activity = self.begin_external_activity()?;
@@ -314,7 +337,7 @@ impl SyncEngine {
                     },
                 )
             };
-            match path_recovery {
+            let blocked_path_changes = match path_recovery {
                 Ok(summary) => {
                     if summary.rekeyed_roots > 0 {
                         tracing::info!(
@@ -322,26 +345,34 @@ impl SyncEngine {
                             "已在同步规划前收敛中断的远端路径变更"
                         );
                     }
+                    if !summary.blocked_changes.is_empty() {
+                        tracing::warn!(
+                            blocked = summary.blocked_changes.len(),
+                            "活动传输尚未结算，争议路径将在本轮同步中隔离"
+                        );
+                    }
+                    summary.blocked_changes
                 }
                 Err(error) => {
-                    // 路径争议时 fail-closed，禁止 planner 将目标解释为上传、下载或删除。
-                    tracing::error!(%error, "远端路径变更恢复被安全条件阻止，跳过本轮同步规划");
-                    if request.contains(CycleRequest::STARTUP) {
-                        // 启动恢复仍复核版本，不让争议路径进入本周期删除规划。
-                        self.recover_interrupted_transfers().await;
-                    }
-                    return Ok(());
+                    // 只有数据库读取等全局错误会到达这里；保留请求等待外部条件恢复。
+                    self.cycle.restore(request);
+                    tracing::error!(%error, "远端路径变更恢复发生全局错误，本轮不进入同步规划");
+                    return Err(error);
                 }
-            }
+            };
             self.ensure_cycle_active()?;
-            self.purge_deleted_tombstones_if_trusted()?;
+            self.purge_deleted_tombstones_if_trusted(&blocked_path_changes)?;
 
+            let mut completed_recoveries = 0usize;
             if request.contains(CycleRequest::STARTUP) {
                 self.ensure_cycle_active()?;
-                self.recover_interrupted_transfers().await;
+                let summary = self.recover_interrupted_transfers().await;
+                completed_recoveries += summary.completed;
+                self.commit_recovery_checkpoint(&summary.recovered_cloud_files)?;
             }
 
-            // 云端 catch-up 后再恢复稳定在线队列，避免基于旧 checkpoint 重放更新。
+            // 路径恢复先隔离活动任务，再核验远端写入。核验不能提前到这里之前，
+            // 否则 Changes 尚未可见时，新基线可能被旧云树反向重键。
             if request.contains(CycleRequest::ONLINE_RECOVERY) {
                 if !self.is_online() {
                     self.cycle.restore(request);
@@ -350,14 +381,24 @@ impl SyncEngine {
                 self.ensure_cycle_active()?;
                 if let Some(task_runner) = &self.task_runner {
                     (self.cycle_observer)("verify-remote");
-                    task_runner.resume_verifying().await?;
+                    let verifying = task_runner.resume_verifying().await?;
+                    completed_recoveries += verifying.completed;
+                    self.commit_recovery_checkpoint(&verifying.recovered_cloud_files)?;
                     self.ensure_cycle_active()?;
                     (self.cycle_observer)("resume-waiting");
-                    task_runner.resume_waiting().await?;
+                    let waiting = task_runner.resume_waiting().await?;
+                    completed_recoveries += waiting.completed;
+                    self.commit_recovery_checkpoint(&waiting.recovered_cloud_files)?;
                     self.ensure_cycle_active()?;
                     (self.cycle_observer)("resume-due");
-                    task_runner.resume_due_backoff().await?;
+                    let backing_off = task_runner.resume_due_backoff().await?;
+                    completed_recoveries += backing_off.completed;
+                    self.commit_recovery_checkpoint(&backing_off.recovered_cloud_files)?;
                 }
+            }
+            if completed_recoveries > 0 {
+                self.cycle
+                    .request(CycleRequest::LOCAL_RESCAN | CycleRequest::CLOUD_INCREMENTAL);
             }
 
             // 全局重试仅在云端视图与恢复预检完成后接受；REPLAN 不清理无关失败项。
@@ -408,7 +449,8 @@ impl SyncEngine {
             }
             self.ensure_cycle_active()?;
             (self.cycle_observer)("local-rescan");
-            self.run_sync_cycle_inner(triggered_by).await
+            self.run_sync_cycle_inner(triggered_by, &blocked_path_changes)
+                .await
         }
         .await;
         let needs_idle_restore = {
@@ -431,7 +473,11 @@ impl SyncEngine {
     }
 
     /// 在可信快照和活动门保护下完成规划、执行与结算。
-    async fn run_sync_cycle_inner(&self, triggered_by: &str) -> AppResult<()> {
+    async fn run_sync_cycle_inner(
+        &self,
+        triggered_by: &str,
+        blocked_path_changes: &[crate::sync::path_recovery::BlockedPathChange],
+    ) -> AppResult<()> {
         let local = self.scan_local().await?;
         (self.cycle_observer)("local-scan-complete");
         self.ensure_cycle_active()?;
@@ -461,13 +507,18 @@ impl SyncEngine {
 
         // 只有可信云端快照才能制造成功基线。
         if cloud_tree_trusted {
-            self.reconcile_db_records(&local, &db)?;
-            let reconciliation = self.reconcile_failed_and_purge_stale_records(&local, &cloud)?;
+            self.reconcile_db_records(&local, &db, blocked_path_changes)?;
+            let reconciliation = self.reconcile_failed_and_purge_stale_records(
+                &local,
+                &cloud,
+                blocked_path_changes,
+            )?;
             db = self.load_db_snapshot()?;
             tracing::info!(
                 healed = reconciliation.healed,
                 purged = reconciliation.purged,
                 remaining_failed = reconciliation.remaining_failed,
+                blocked = blocked_path_changes.len(),
                 "可信同步周期已完成失败状态复核与残余清理"
             );
         } else {
@@ -485,14 +536,18 @@ impl SyncEngine {
             cloud_tree_trusted,
         };
         let mut actions = self.planner.plan(&snapshot);
+        filter_skipped_paths(&mut actions, &self.skip_patterns);
         // 用 xattr fileId 识别同目录改名，避免误判为上传加删除。
         if cloud_tree_trusted {
             self.detect_renames(&mut actions)?;
         }
+        let transfer_tasks = repository::list_all_transfers(&self.db.lock())?;
+        filter_active_transfer_actions(&mut actions, &snapshot.db, &transfer_tasks);
         filter_anti_oscillation(&mut actions, &self.recently_deleted_paths.lock());
         fill_parent_file_ids(&mut actions, &self.path_to_id.lock());
         // 为云端已删但仍需救援内容的路径补建目录链。
         add_rescue_folder_recreations(&mut actions, &snapshot, &self.recently_deleted_paths.lock());
+        filter_blocked_path_changes(&mut actions, blocked_path_changes);
 
         // 实际复核本地路径，避免漏扫导致误删云端。
         self.validate_delete_from_cloud(&mut actions);
@@ -544,6 +599,24 @@ impl SyncEngine {
         // 已提交远端写可由 TaskRunner 结算；替换后的旧引擎不得继续修改数据库或缓存。
         self.ensure_cycle_active()?;
         let _apply_activity = self.begin_external_activity()?;
+
+        // 远端路径写入必须先落入可信 checkpoint，再提交 DB 路径基线。进程若在两者之间退出，
+        // 下次启动会按新 checkpoint 正向恢复 DB，而不会用旧 checkpoint 反向改名。
+        let recovered_moves = actions
+            .iter()
+            .zip(results.iter())
+            .filter(|(action, result)| {
+                result.success
+                    && action.action_type == crate::sync::state::SyncActionType::MoveInCloud
+            })
+            .filter_map(|(action, result)| {
+                Some(crate::sync::task_runner::RecoveredCloudFile {
+                    relative_path: action.relative_path.clone()?,
+                    file: result.cloud_file.clone()?,
+                })
+            })
+            .collect::<Vec<_>>();
+        self.commit_recovery_checkpoint(&recovered_moves)?;
 
         // 结算数据库并发布云树与路径索引。
         self.apply_results(&actions, &results)?;

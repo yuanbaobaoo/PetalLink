@@ -94,7 +94,7 @@ async fn sync_folder_recursive_impl(
         let _operation = eng.begin_external_activity()?;
         let children = FILES_API.list_all(Some(id.as_str())).await?;
         for f in children {
-            if f.name.starts_with(crate::constants::INTERNAL_FILE_PREFIX) {
+            if crate::mount::skip::should_skip(&f.name, eng.skip_patterns()) {
                 continue;
             }
             crate::core::paths::validate_path_segment(&f.name)?;
@@ -127,9 +127,10 @@ async fn sync_folder_recursive_impl(
 
     // 扫描本地真实文件，排除临时文件与占位符。
     let dest_dir_clone = dest_dir.clone();
+    let skip_patterns = eng.skip_patterns().to_vec();
     let local_files: HashMap<String, PathBuf> = tokio::task::spawn_blocking(move || {
         let mut out: HashMap<String, PathBuf> = HashMap::new();
-        let _ = scan_dir_for_real_files(&dest_dir_clone, &dest_dir_clone, &mut out);
+        let _ = scan_dir_for_real_files(&dest_dir_clone, &dest_dir_clone, &skip_patterns, &mut out);
         out
     })
     .await
@@ -183,10 +184,18 @@ async fn sync_folder_recursive_impl(
             } else {
                 folder_rel_to_id.get(&parent_rel).map(|s| s.as_str())
             };
+            let Some(parent_id) = parent_id else {
+                tracing::warn!(
+                    dir = %dir_rel,
+                    parent = %parent_rel,
+                    "sync_folder_recursive: 父目录尚无云端 ID，跳过创建以避免错误平铺"
+                );
+                continue;
+            };
             let create_result = {
                 eng.ensure_cycle_active()?;
                 let _operation = eng.begin_external_activity()?;
-                FILES_API.create_folder(dir_name, parent_id).await
+                FILES_API.create_folder(dir_name, Some(parent_id)).await
             };
             match create_result {
                 Ok(f) => {
@@ -198,22 +207,20 @@ async fn sync_folder_recursive_impl(
                 Err(e) => {
                     // 409/400 时查同名已存在目录，存在则视为成功
                     if matches!(e.drive_status(), Some(400 | 409)) {
-                        if let Some(pid) = parent_id {
-                            eng.ensure_cycle_active()?;
-                            let _operation = eng.begin_external_activity()?;
-                            if let Ok(list) = FILES_API.list_all(Some(pid)).await {
-                                if let Some(existing) =
-                                    list.iter().find(|c| c.is_folder() && c.name == dir_name)
-                                {
-                                    folder_rel_to_id.insert(dir_rel.clone(), existing.id.clone());
-                                    let _ = tokio::fs::create_dir_all(dest_dir.join(dir_rel)).await;
-                                    tracing::info!(dir = %dir_rel, cloud_id = %existing.id, "sync_folder_recursive: 父目录已存在（409容错）");
-                                    continue;
-                                }
+                        eng.ensure_cycle_active()?;
+                        let _operation = eng.begin_external_activity()?;
+                        if let Ok(list) = FILES_API.list_all(Some(parent_id)).await {
+                            if let Some(existing) =
+                                list.iter().find(|c| c.is_folder() && c.name == dir_name)
+                            {
+                                folder_rel_to_id.insert(dir_rel.clone(), existing.id.clone());
+                                let _ = tokio::fs::create_dir_all(dest_dir.join(dir_rel)).await;
+                                tracing::info!(dir = %dir_rel, cloud_id = %existing.id, "sync_folder_recursive: 父目录已存在（409容错）");
+                                continue;
                             }
                         }
                     }
-                    tracing::warn!(dir = %dir_rel, error = %e, "sync_folder_recursive: 补建云端父目录失败，其内文件将继续上传（可能平铺）");
+                    tracing::warn!(dir = %dir_rel, error = %e, "sync_folder_recursive: 补建云端父目录失败，其内文件将延期");
                 }
             }
         }
@@ -298,10 +305,27 @@ async fn sync_folder_recursive_impl(
     for (subrel, local_path) in &to_upload {
         eng.ensure_cycle_active()?;
         let parent_subrel = parent_subrel_of(subrel);
-        let parent_id = folder_rel_to_id
-            .get(&parent_subrel)
-            .map(|s| s.as_str())
-            .unwrap_or(folder_id);
+        let parent_id = if parent_subrel.is_empty() {
+            Some(folder_id)
+        } else {
+            folder_rel_to_id.get(&parent_subrel).map(String::as_str)
+        };
+        let Some(parent_id) = parent_id else {
+            tracing::warn!(
+                subrel = %subrel,
+                parent = %parent_subrel,
+                "sync_folder_recursive: 云端父目录缺失，文件延期以避免上传到错误层级"
+            );
+            done += 1;
+            let _ = app.emit(
+                "folder_sync_progress",
+                FolderSyncProgress {
+                    done: done as usize,
+                    total,
+                },
+            );
+            continue;
+        };
         let full_rel = if rel_path.is_empty() {
             subrel.clone()
         } else {
@@ -383,19 +407,20 @@ async fn sync_folder_recursive_impl(
 fn scan_dir_for_real_files(
     base: &Path,
     current: &Path,
+    skip_patterns: &[String],
     out: &mut HashMap<String, PathBuf>,
 ) -> std::io::Result<()> {
     for entry in std::fs::read_dir(current)? {
         let entry = entry?;
         let path = entry.path();
         let ft = entry.file_type()?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if crate::mount::skip::should_skip(&name, skip_patterns) {
+            continue;
+        }
         if ft.is_dir() {
-            scan_dir_for_real_files(base, &path, out)?;
+            scan_dir_for_real_files(base, &path, skip_patterns, out)?;
         } else if ft.is_file() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.ends_with(".tmp") || name.starts_with(crate::constants::INTERNAL_FILE_PREFIX) {
-                continue;
-            }
             let meta = entry.metadata()?;
             // 跳过占位符（xattr state=placeholder），0 字节用户文件（如空配置）不是占位符
             if meta.len() == 0 && crate::mount::manager::is_placeholder_file(&path) {
@@ -417,5 +442,33 @@ fn parent_subrel_of(subrel: &str) -> String {
     match subrel.rfind('/') {
         Some(i) => subrel[..i].to_string(),
         None => String::new(),
+    }
+}
+
+/// 覆盖手动同步文件夹所依赖的私有递归扫描合同。
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 手动目录扫描必须在所有层级排除 skipPatterns，避免上传系统文件和被排除目录。
+    #[test]
+    fn recursive_scan_excludes_skip_patterns() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let nested_dir = temp_dir.path().join("nested");
+        let trash_dir = temp_dir.path().join(".Trash");
+        std::fs::create_dir_all(&nested_dir).unwrap();
+        std::fs::create_dir_all(&trash_dir).unwrap();
+        std::fs::write(temp_dir.path().join(".DS_Store"), b"system").unwrap();
+        std::fs::write(nested_dir.join(".DS_Store"), b"system").unwrap();
+        std::fs::write(nested_dir.join("keep.txt"), b"content").unwrap();
+        std::fs::write(trash_dir.join("deleted.txt"), b"content").unwrap();
+        let skip_patterns = vec![".DS_Store".to_string(), ".Trash".to_string()];
+        let mut files = HashMap::new();
+
+        scan_dir_for_real_files(temp_dir.path(), temp_dir.path(), &skip_patterns, &mut files)
+            .unwrap();
+
+        assert_eq!(files.len(), 1);
+        assert!(files.contains_key("nested/keep.txt"));
     }
 }

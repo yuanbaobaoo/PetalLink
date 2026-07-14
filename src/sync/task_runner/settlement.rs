@@ -8,6 +8,7 @@ use crate::data::repository::{self, ColumnPatch, TransferPatch, TransferTask};
 use crate::error::{AppError, AppResult};
 use crate::sync::retry_policy::{classify_transfer_error, RecoveryContext, RecoveryDecision};
 use crate::sync::transfer_state::{TransferErrorKind, TransferOperation, TransferState};
+use rusqlite::OptionalExtension;
 
 /// 单个持久任务允许的最大自动重试次数。
 const MAX_AUTOMATIC_ATTEMPTS: u32 = 5;
@@ -298,6 +299,22 @@ impl TaskRunner {
             let transaction = conn
                 .unchecked_transaction()
                 .map_err(|error| AppError::generic(format!("开始传输结算事务失败：{error}")))?;
+            let preserved_cloud_edited_time =
+                if operation == TransferOperation::Update && cloud_edited_time.is_none() {
+                    transaction
+                        .query_row(
+                            "SELECT cloud_edited_time FROM sync_items WHERE file_id=?1 LIMIT 1",
+                            [file_id.as_str()],
+                            |row| row.get::<_, Option<i64>>(0),
+                        )
+                        .optional()
+                        .map_err(|error| {
+                            AppError::generic(format!("读取更新前云端版本基线失败：{error}"))
+                        })?
+                        .flatten()
+                } else {
+                    None
+                };
             let completed = repository::transition_transfer_in_transaction(
                 &transaction,
                 running.id,
@@ -346,7 +363,7 @@ impl TaskRunner {
                     local_size: Some(local_size),
                     sha256: None,
                     local_mtime: Some(local_mtime),
-                    cloud_edited_time,
+                    cloud_edited_time: cloud_edited_time.or(preserved_cloud_edited_time),
                     last_sync_time: Some(finished_at),
                     status: repository::sync_status::SYNCED,
                     error_message: None,

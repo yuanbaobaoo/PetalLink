@@ -12,7 +12,13 @@ fn test_parse_modified_change() {
             "category": "drive#change",
             "changeType": "update",
             "deleted": false,
-            "file": { "id": "f1", "fileName": "a.txt", "mimeType": "text/plain", "size": 100 },
+            "file": {
+                "id": "f1",
+                "fileName": "a.txt",
+                "mimeType": "text/plain",
+                "size": 100,
+                "parentFolder": ["root-folder-id"]
+            },
             "fileId": "f1",
             "type": "File"
         }],

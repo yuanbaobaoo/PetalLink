@@ -363,7 +363,8 @@ impl SyncEngine {
                     sha256,
                     local_mtime,
                     cloud_edited_time: cloud_file
-                        .and_then(|f| f.edited_time.map(|t| t.timestamp_millis())),
+                        .and_then(|f| f.edited_time.map(|t| t.timestamp_millis()))
+                        .or_else(|| move_baseline.and_then(|baseline| baseline.cloud_edited_time)),
                     last_sync_time,
                     status,
                     // 结构性移动保留已有内容失败，其他已确认成功会清理过期兼容错误。

@@ -36,6 +36,14 @@ pub fn should_skip(name: &str, skip_patterns: &[String]) -> bool {
     false
 }
 
+/// 判断规范相对路径中是否包含任一应跳过的目录或文件名。
+pub fn should_skip_relative_path(relative_path: &str, skip_patterns: &[String]) -> bool {
+    relative_path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .any(|segment| should_skip(segment, skip_patterns))
+}
+
 /// 简化 glob 匹配（对齐 dart `_shouldSkipNameTopLevel` 的 glob 实现）。
 /// `*` → `.*`，`?` → `.`，转义 `\` 和 `.`，全匹配。
 pub fn glob_matches(pattern: &str, name: &str) -> bool {
@@ -57,5 +65,32 @@ pub fn glob_matches(pattern: &str, name: &str) -> bool {
     match Regex::new(&regex_str) {
         Ok(re) => re.is_match(name),
         Err(_) => false,
+    }
+}
+
+/// 覆盖只能通过内部统一规则入口验证的路径级跳过合同。
+#[cfg(test)]
+mod tests {
+    use super::{should_skip, should_skip_relative_path};
+
+    /// 文件名与任意层级相对路径必须使用同一组 skipPatterns。
+    #[test]
+    fn relative_path_skip_matches_entry_name_rules() {
+        let patterns = vec![".DS_Store".to_string(), "~$*".to_string()];
+
+        assert!(should_skip(".DS_Store", &patterns));
+        assert!(should_skip_relative_path(
+            "projects/legal/.DS_Store",
+            &patterns
+        ));
+        assert!(should_skip_relative_path(
+            "projects/~$contract.docx",
+            &patterns
+        ));
+        assert!(should_skip_relative_path("projects/cache.tmp", &patterns));
+        assert!(!should_skip_relative_path(
+            "projects/contract.docx",
+            &patterns
+        ));
     }
 }

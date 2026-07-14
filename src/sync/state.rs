@@ -16,8 +16,7 @@ pub enum SyncActionType {
     CreateConflictCopy,
     Skip,
     CreateFolder,
-    /// 本地文件跨目录移动：远端保持同一 fileId，通过 Files:update 成对 parent 参数移动，
-    /// 并可在同一个 PATCH 中完成改名。
+    /// 本地文件改名或跨目录移动：远端保持同一 fileId，通过 Files:update 更新名称与父目录。
     MoveInCloud,
     /// 云端已删除该文件，但本地有未上传的真实修改 → 改名备份副本（保内容），
     /// 原路径腾空即满足云端删除。副本清掉占位 xattr，下轮作为全新本地文件上传。

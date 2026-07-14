@@ -10,8 +10,10 @@ use crate::sync::planner::DbSnapshotEntry;
 use crate::sync::state::FreeUpCheckResult;
 use crate::sync::transfer_state::TransferState;
 
+use super::action_filters::is_blocked_path_identity;
 use super::coordination::CycleRequest;
 use super::{FailedRecordReconciliation, SyncEngine};
+use crate::sync::path_recovery::BlockedPathChange;
 
 impl SyncEngine {
     /// 用可信云树和本地身份补齐缺失的数据库基线。
@@ -20,6 +22,7 @@ impl SyncEngine {
         &self,
         local: &HashMap<String, LocalFileEntry>,
         db: &HashMap<String, DbSnapshotEntry>,
+        blocked_changes: &[BlockedPathChange],
     ) -> AppResult<()> {
         let conn = self.db.lock();
         let durable_records = repository::load_all(&conn)?;
@@ -27,6 +30,9 @@ impl SyncEngine {
         let mount_dir =
             crate::core::paths::expand_tilde(&self.mount_dir.lock().clone().unwrap_or_default());
         for (rel, entry) in local {
+            if is_blocked_path_identity(Some(rel), None, blocked_changes) {
+                continue;
+            }
             if let Some(db_entry) = db.get(rel) {
                 // 若 DB 记录标记为 DELETED 但用户重新粘贴了文件 → 复活为正常状态
                 if db_entry.status == repository::sync_status::DELETED {
@@ -97,6 +103,9 @@ impl SyncEngine {
                 .unwrap_or_default();
             if file_id.is_empty() {
                 continue; // 无 fileId 无法 upsert（本地新增文件由 planner Upload 处理）
+            }
+            if is_blocked_path_identity(Some(rel), Some(&file_id), blocked_changes) {
+                continue;
             }
             // 仅当 xattr fileId 与可信云树同路径记录一致时创建基线；复制文件交由正常上传规划。
             let Some(cloud_file) = ct.get(rel) else {
@@ -240,6 +249,7 @@ impl SyncEngine {
         &self,
         local: &HashMap<String, LocalFileEntry>,
         cloud: &HashMap<String, DriveFile>,
+        blocked_changes: &[BlockedPathChange],
     ) -> AppResult<FailedRecordReconciliation> {
         let conn = self.db.lock();
         let transaction = conn
@@ -251,6 +261,13 @@ impl SyncEngine {
         for item in items
             .iter()
             .filter(|item| item.status == repository::sync_status::FAILED)
+            .filter(|item| {
+                !is_blocked_path_identity(
+                    Some(&item.local_path),
+                    Some(&item.file_id),
+                    blocked_changes,
+                )
+            })
         {
             let (local_entry, cloud_file) =
                 match (local.get(&item.local_path), cloud.get(&item.local_path)) {
@@ -354,9 +371,19 @@ impl SyncEngine {
             }
         }
 
-        for item in items.iter().filter(|item| {
-            !local.contains_key(&item.local_path) && !cloud.contains_key(&item.local_path)
-        }) {
+        for item in items
+            .iter()
+            .filter(|item| {
+                !is_blocked_path_identity(
+                    Some(&item.local_path),
+                    Some(&item.file_id),
+                    blocked_changes,
+                )
+            })
+            .filter(|item| {
+                !local.contains_key(&item.local_path) && !cloud.contains_key(&item.local_path)
+            })
+        {
             let deleted = transaction
                 .execute(
                     "DELETE FROM sync_items
@@ -492,6 +519,8 @@ impl SyncEngine {
 
             action.file_id = Some(fid.clone());
             action.cloud_file = Some(cloud_file.clone());
+            // 同目录改名与跨目录移动都只修改远端路径元数据；内容差异留给下一轮版本校验。
+            action.action_type = SyncActionType::MoveInCloud;
             if current_parent_path == new_parent_path {
                 action.parent_file_id = cloud_file
                     .parent_folder
@@ -502,7 +531,6 @@ impl SyncEngine {
                     old_record.local_path, new_relative_path, fid,
                 ));
             } else {
-                action.action_type = SyncActionType::MoveInCloud;
                 action.parent_file_id = if new_parent_path.is_empty() {
                     root_folder_id.clone()
                 } else {

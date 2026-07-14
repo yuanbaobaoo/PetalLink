@@ -10,10 +10,79 @@ use crate::data::repository;
 use crate::drive::models::DriveFile;
 use crate::error::{AppError, AppResult};
 use crate::sync::cloud_tree;
+use crate::sync::task_runner::RecoveredCloudFile;
 
+use super::action_filters::is_blocked_path_identity;
 use super::{SyncEngine, INCREMENTAL_FORCED_FULL_THRESHOLD};
 
 impl SyncEngine {
+    /// 将任务恢复确认的远端写入合并并原子持久化到当前可信检查点。
+    pub(super) fn commit_recovered_cloud_files(
+        &self,
+        recovered: &[RecoveredCloudFile],
+    ) -> AppResult<()> {
+        if recovered.is_empty() {
+            return Ok(());
+        }
+        if !self.cloud_tree_is_trusted() {
+            return Err(AppError::generic("云端检查点不可信，拒绝发布恢复任务结果"));
+        }
+
+        let mut tree = self.cloud_tree.lock().clone();
+        let mut path_to_id = self.path_to_id.lock().clone();
+        for recovered_file in recovered {
+            let stale_paths = tree
+                .iter()
+                .filter(|(path, file)| {
+                    path.as_str() != recovered_file.relative_path
+                        && file.id == recovered_file.file.id
+                })
+                .map(|(path, _)| path.clone())
+                .collect::<Vec<_>>();
+            for stale_path in stale_paths {
+                tree.remove(&stale_path);
+                path_to_id.remove(&stale_path);
+            }
+            tree.insert(
+                recovered_file.relative_path.clone(),
+                recovered_file.file.clone(),
+            );
+            path_to_id.insert(
+                recovered_file.relative_path.clone(),
+                recovered_file.file.id.clone(),
+            );
+        }
+
+        let cursor = self
+            .cloud_cursor
+            .lock()
+            .clone()
+            .filter(|cursor| !cursor.trim().is_empty())
+            .ok_or_else(|| AppError::generic("可信云端检查点缺少 cursor"))?;
+        let checkpoint = cloud_tree::CloudTreeCache::new_trusted(
+            self.root_folder_id.lock().clone(),
+            tree,
+            path_to_id,
+            cursor,
+        )?;
+        let mount_dir = self
+            .mount_dir
+            .lock()
+            .clone()
+            .ok_or_else(|| AppError::generic("同步挂载尚未初始化，无法持久化云端检查点"))?;
+        let absolute_mount = crate::core::paths::expand_tilde(&mount_dir);
+        if let Err(error) = cloud_tree::persist_cloud_checkpoint(&absolute_mount, &checkpoint) {
+            self.set_cloud_tree_trusted(false);
+            return Err(error);
+        }
+        self.install_cloud_checkpoint(checkpoint);
+        tracing::info!(
+            recovered = recovered.len(),
+            "已将恢复任务的权威远端结果提交到云端检查点"
+        );
+        Ok(())
+    }
+
     /// 向云树插入条目。
     pub fn cloud_tree_insert(&self, rel: String, file: DriveFile) {
         self.cloud_tree.lock().insert(rel, file);
@@ -109,7 +178,10 @@ impl SyncEngine {
     }
 
     /// 仅在云树可信时清理已删除墓碑。
-    pub(super) fn purge_deleted_tombstones_if_trusted(&self) -> AppResult<()> {
+    pub(super) fn purge_deleted_tombstones_if_trusted(
+        &self,
+        blocked_changes: &[crate::sync::path_recovery::BlockedPathChange],
+    ) -> AppResult<()> {
         if !self.cloud_tree_is_trusted() {
             return Err(AppError::generic("云端树尚未 catch-up，拒绝清理墓碑"));
         }
@@ -117,17 +189,21 @@ impl SyncEngine {
         let cloud = self.cloud_tree.lock();
         let to_purge: Vec<String> = {
             let mut statement = conn
-                .prepare("SELECT local_path FROM sync_items WHERE status=?1")
+                .prepare("SELECT local_path, file_id FROM sync_items WHERE status=?1")
                 .map_err(|error| AppError::generic(format!("查询墓碑失败：{error}")))?;
             let rows = statement
                 .query_map(rusqlite::params![repository::sync_status::DELETED], |row| {
-                    row.get::<_, String>(0)
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
                 })
                 .map_err(|error| AppError::generic(format!("读取墓碑失败：{error}")))?;
             rows.collect::<Result<Vec<_>, _>>()
                 .map_err(|error| AppError::generic(format!("读取墓碑失败：{error}")))?
                 .into_iter()
-                .filter(|path| !cloud.contains_key(path))
+                .filter(|(path, file_id)| {
+                    !is_blocked_path_identity(Some(path), Some(file_id), blocked_changes)
+                })
+                .filter(|(path, _)| !cloud.contains_key(path))
+                .map(|(path, _)| path)
                 .collect()
         };
         drop(cloud);

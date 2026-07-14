@@ -414,7 +414,7 @@ impl TaskRunner {
     }
 
     /// 将含歧义远端结果的重启任务提升为待核验。
-    fn promote_restart_to_verifying(
+    pub(super) fn promote_restart_to_verifying(
         &self,
         conn: &rusqlite::Connection,
         restart: &TransferTask,

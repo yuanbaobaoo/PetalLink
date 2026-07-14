@@ -238,6 +238,102 @@ fn apply_results_upload_preserves_task_runner_baseline_and_updates_cloud_cache()
     );
 }
 
+/// 验证同目录改名按结构变化结算，并保留最后确认的内容基线。
+#[test]
+fn apply_results_same_folder_rename_rekeys_without_advancing_content_baseline() {
+    let (engine, db) = new_engine();
+    insert_baseline(
+        &db.lock(),
+        "rename-file-id",
+        "contracts/old.docx",
+        SYNCED,
+        None,
+    );
+    engine.cloud_tree_insert(
+        "contracts/old.docx".into(),
+        DriveFile {
+            id: "rename-file-id".into(),
+            name: "old.docx".into(),
+            size: 333,
+            parent_folder: Some(vec!["contracts-folder-id".into()]),
+            ..Default::default()
+        },
+    );
+    engine.path_to_id_insert("contracts/old.docx".into(), "rename-file-id".into());
+    let edited_time = chrono::DateTime::from_timestamp_millis(4_444).unwrap();
+    let renamed = DriveFile {
+        id: "rename-file-id".into(),
+        name: "new.docx".into(),
+        size: 333,
+        parent_folder: Some(vec!["contracts-folder-id".into()]),
+        edited_time: Some(edited_time),
+        ..Default::default()
+    };
+    let action = SyncAction {
+        action_type: SyncActionType::MoveInCloud,
+        relative_path: Some("contracts/new.docx".into()),
+        file_id: Some("rename-file-id".into()),
+        parent_file_id: Some("contracts-folder-id".into()),
+        local_path: Some("/mount/contracts/new.docx".into()),
+        cloud_file: None,
+        reason: Some("同目录改名检测".into()),
+    };
+    let result = ActionResult {
+        success: true,
+        error_message: None,
+        deferred: false,
+        cloud_file: Some(renamed.clone()),
+    };
+
+    engine.apply_results(&[action], &[result]).unwrap();
+
+    let connection = db.lock();
+    let old_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sync_items WHERE file_id=?1 AND local_path=?2",
+            params!["rename-file-id", "contracts/old.docx"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let new_baseline = baseline_snapshot(&connection, "rename-file-id", "contracts/new.docx");
+    assert_eq!(old_count, 0, "改名成功后必须清理旧路径基线");
+    assert_eq!(
+        new_baseline,
+        (
+            Some("contracts-folder-id".to_string()),
+            "new.docx".to_string(),
+            0,
+            333,
+            Some(222),
+            Some("baseline-sha".to_string()),
+            Some(1_111),
+            Some(4_444),
+            Some(3_333),
+            SYNCED,
+            None,
+        ),
+        "结构改名不得伪造新的内容同步基线"
+    );
+    drop(connection);
+
+    assert!(!engine.cloud_tree_lock().contains_key("contracts/old.docx"));
+    assert_eq!(
+        engine
+            .cloud_tree_lock()
+            .get("contracts/new.docx")
+            .map(|file| file.id.as_str()),
+        Some("rename-file-id")
+    );
+    assert!(!engine.path_to_id_lock().contains_key("contracts/old.docx"));
+    assert_eq!(
+        engine
+            .path_to_id_lock()
+            .get("contracts/new.docx")
+            .map(String::as_str),
+        Some("rename-file-id")
+    );
+}
+
 /// 云端删除成功后，同一路径的持久基线和缓存都应被清理。
 #[test]
 fn test_apply_results_delete_from_cloud_clears_state() {

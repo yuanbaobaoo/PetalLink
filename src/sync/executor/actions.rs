@@ -320,7 +320,7 @@ impl SyncExecutor {
         result
     }
 
-    /// 在本地身份与目标去重校验通过后移动云端文件。
+    /// 在本地身份与目标去重校验通过后更新云端文件路径。
     async fn do_move_in_cloud(&self, action: &SyncAction) -> ActionResult {
         let deferred = |message: String| ActionResult {
             success: false,
@@ -329,16 +329,16 @@ impl SyncExecutor {
             cloud_file: None,
         };
         let Some(file_id) = action.file_id.as_deref() else {
-            return deferred("跨目录移动缺少 fileId，等待重新规划".to_string());
+            return deferred("云端路径变更缺少 fileId，等待重新规划".to_string());
         };
         let Some(target_parent) = action.parent_file_id.as_deref() else {
-            return deferred("跨目录移动的目标父目录尚未取得 fileId，等待重新规划".to_string());
+            return deferred("云端路径变更的目标父目录尚未取得 fileId，等待重新规划".to_string());
         };
         let Some(relative_path) = action.relative_path.as_deref() else {
-            return deferred("跨目录移动缺少目标相对路径，等待重新规划".to_string());
+            return deferred("云端路径变更缺少目标相对路径，等待重新规划".to_string());
         };
         let Some(local_path) = action.local_path.as_deref().map(PathBuf::from) else {
-            return deferred("跨目录移动缺少本地路径，等待重新规划".to_string());
+            return deferred("云端路径变更缺少本地路径，等待重新规划".to_string());
         };
 
         // 写入前确认目标仍携带同一远端身份；本地再次移动时等待重新规划。
@@ -352,7 +352,9 @@ impl SyncExecutor {
             })
             .and_then(|bytes| String::from_utf8(bytes).ok());
         if local_identity.as_deref() != Some(file_id) {
-            return deferred("跨目录移动执行前本地路径或 fileId 已变化，等待重新规划".to_string());
+            return deferred(
+                "云端路径变更执行前本地路径或 fileId 已变化，等待重新规划".to_string(),
+            );
         }
 
         let target_name = relative_path
@@ -375,7 +377,7 @@ impl SyncExecutor {
             ));
         }
 
-        // 更新前先读取当前父目录，使已提交但响应丢失的重试收敛为幂等改名。
+        // 写入后按 fileId 复核名称和父目录，使响应丢失的路径变更仍可幂等收敛。
         let result = match self
             .files_api
             .update(file_id, Some(target_name), Some(target_parent), None)
@@ -400,7 +402,7 @@ impl SyncExecutor {
                         target_parent,
                         target_name,
                         %error,
-                        "移动响应不确定，但 fileId GET 已确认目标名称与父目录"
+                        "路径变更响应不确定，但 fileId GET 已确认目标名称与父目录"
                     );
                     ActionResult {
                         success: true,
@@ -410,17 +412,17 @@ impl SyncExecutor {
                     }
                 }
                 Ok(_) => deferred(format!(
-                    "远端跨目录移动尚未生效，保留原基线等待重新规划：{error}"
+                    "远端路径变更尚未生效，保留原基线等待重新规划：{error}"
                 )),
                 Err(verification_error) => deferred(format!(
-                    "远端跨目录移动结果不确定，保留原基线等待重新规划：{error}；核验失败：{verification_error}"
+                    "远端路径变更结果不确定，保留原基线等待重新规划：{error}；核验失败：{verification_error}"
                 )),
             },
         };
         Self::log_action_result(
             relative_path,
-            "移动云端文件成功",
-            "移动云端文件失败",
+            "更新云端文件路径成功",
+            "更新云端文件路径失败",
             &result,
         );
         result

@@ -24,10 +24,13 @@ mod recovery;
 /// 结算成功、重试、失败与取消状态。
 mod settlement;
 
+/// 持久传输任务的公开合同类型。
+pub use crate::data::repository::TransferTask;
 pub use contracts::{
-    BackendPreflightFailure, EnqueuedTaskOutcome, NowMs, OnlineCheck, RemoteVerification,
-    StartupRecoverySummary, TaskActivityGate, TaskDisposition, TaskExecutionError,
-    TaskExecutionOutcome, TaskStateSink, TransferOperations,
+    BackendPreflightFailure, EnqueuedTaskOutcome, NowMs, OnlineCheck, RecoveredCloudFile,
+    RemoteVerification, StartupRecoverySummary, TaskActivityGate, TaskDisposition,
+    TaskExecutionError, TaskExecutionOutcome, TaskRecoverySummary, TaskStateSink,
+    TransferOperations,
 };
 pub use progress::TaskProgressReporter;
 
