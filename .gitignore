@@ -78,6 +78,7 @@ ai-context/
 
 # superpowers 执行计划/过程文件，本地保留不入库
 docs/superpowers/
+.superpowers
 
 # ===== 前端构建产物 =====
 app/node_modules/
