@@ -140,7 +140,7 @@ fn second_401_fails_auth_even_when_only_context_records_replay() {
     );
 }
 
-/// 验证令牌错误被分类为永久认证失败。
+/// 验证 token 错误被分类为永久认证失败。
 #[test]
 fn token_errors_are_permanent_auth_failures() {
     let error = AppError::Token {

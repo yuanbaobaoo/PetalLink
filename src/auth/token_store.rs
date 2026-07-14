@@ -37,11 +37,11 @@ const NONCE_LEN: usize = 12;
 
 /// Token 存储 trait（对外接口稳定，调用方零改动）
 pub trait TokenStore: Send + Sync {
-    /// 读取并解密已持久化的令牌；不存在时返回空值。
+    /// 读取并解密已持久化的 token；不存在时返回空值。
     fn load(&self) -> AppResult<Option<TokenPair>>;
-    /// 加密并原子保存令牌。
+    /// 加密并原子保存 token。
     fn save(&self, token: &TokenPair) -> AppResult<()>;
-    /// 删除已持久化的令牌。
+    /// 删除已持久化的 token。
     fn clear(&self) -> AppResult<()>;
 }
 
@@ -49,7 +49,7 @@ pub trait TokenStore: Send + Sync {
 pub struct EncryptedFileStore;
 
 impl TokenStore for EncryptedFileStore {
-    /// 读取令牌文件；文件不可读或认证失败均按未登录处理，路径解析错误才向上传播。
+    /// 读取 token 文件；文件不可读或认证失败均按未登录处理，路径解析错误才向上传播。
     fn load(&self) -> AppResult<Option<TokenPair>> {
         let path = file_path()?;
         if !path.exists() {
@@ -75,7 +75,7 @@ impl TokenStore for EncryptedFileStore {
         }
     }
 
-    /// 加密令牌并通过临时文件替换完成原子写入。
+    /// 加密 token 并通过临时文件替换完成原子写入。
     fn save(&self, token: &TokenPair) -> AppResult<()> {
         let path = file_path()?;
         if let Some(parent) = path.parent() {
@@ -98,7 +98,7 @@ impl TokenStore for EncryptedFileStore {
         Ok(())
     }
 
-    /// 删除本机令牌文件；文件不存在视为成功。
+    /// 删除本机 token 文件；文件不存在视为成功。
     fn clear(&self) -> AppResult<()> {
         let path = file_path()?;
         // 不存在视为已清除（幂等）
@@ -233,22 +233,22 @@ fn decrypt_token(raw: &[u8]) -> AppResult<TokenPair> {
 /// 序列化 token 为紧凑二进制。
 ///
 /// 明文布局（小端）：
-/// 访问令牌：`[u64 access_len][access_bytes]`
-/// 刷新令牌：`[u64 refresh_len][refresh_bytes]`
+/// access token 布局：`[u64 access_len][access_bytes]`
+/// refresh token 布局：`[u64 refresh_len][refresh_bytes]`
 /// 过期时间：`[i64 expires_at]`
-/// 令牌类型：`[u32 token_type_len][token_type_bytes]`
+/// token type 布局：`[u32 token_type_len][token_type_bytes]`
 /// `[u8 scope_present][u64 scope_len][scope_bytes]`（scope_present=0 时后续省略）
 fn serialize_token(token: &TokenPair) -> Vec<u8> {
     let mut buf = Vec::new();
-    // 访问令牌 access_token
+    // 写入 access token。
     buf.extend_from_slice(&(token.access_token.len() as u64).to_le_bytes());
     buf.extend_from_slice(token.access_token.as_bytes());
-    // 刷新令牌 refresh_token
+    // 写入 refresh token。
     buf.extend_from_slice(&(token.refresh_token.len() as u64).to_le_bytes());
     buf.extend_from_slice(token.refresh_token.as_bytes());
     // expires_at（i64 毫秒）
     buf.extend_from_slice(&token.expires_at.to_le_bytes());
-    // 令牌类型 token_type
+    // 写入 token type。
     buf.extend_from_slice(&(token.token_type.len() as u32).to_le_bytes());
     buf.extend_from_slice(token.token_type.as_bytes());
     // 授权范围 scope（Option）
@@ -267,9 +267,9 @@ fn serialize_token(token: &TokenPair) -> Vec<u8> {
 fn deserialize_token(data: &[u8]) -> AppResult<TokenPair> {
     let mut cursor = Cursor::new(data);
 
-    // 访问令牌 access_token
+    // 读取 access token。
     let access_token = read_string_u64(&mut cursor)?;
-    // 刷新令牌 refresh_token
+    // 读取 refresh token。
     let refresh_token = read_string_u64(&mut cursor)?;
     // 过期时间 expires_at
     let mut exp_bytes = [0u8; 8];
@@ -277,7 +277,7 @@ fn deserialize_token(data: &[u8]) -> AppResult<TokenPair> {
         .read_exact(&mut exp_bytes)
         .map_err(|e| AppError::generic(format!("读取 expires_at 失败：{e}")))?;
     let expires_at = i64::from_le_bytes(exp_bytes);
-    // 令牌类型 token_type
+    // 读取 token type。
     let token_type = read_string_u32(&mut cursor)?;
     // 授权范围 scope
     let mut present = [0u8; 1];

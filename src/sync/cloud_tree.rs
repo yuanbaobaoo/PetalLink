@@ -2,8 +2,8 @@
 //!
 //! 对齐 `legacy/lib/sync/sync_engine.dart` 的 BFS 部分 + cloudtree 持久化。
 //!
-//! 广度优先扫描并发数为 8（每个目录独立拉取），失败节点重试 2 次。
-//! 广度优先扫描只构建候选树，不直接替换磁盘检查点。调用方必须在完整应用变更后，
+//! BFS 并发数为 8（每个 folder 独立 fetch），失败节点重试 2 次。
+//! BFS 只构建候选树，不直接替换磁盘 checkpoint。调用方必须在完整应用 Changes 后，
 //! 将 tree/path map/final cursor 作为同一个 [`CloudTreeCache`] 原子提交，再安装到 live state。
 //!
 //! # 可信边界
@@ -26,7 +26,7 @@ use crate::drive::models::DriveFile;
 use crate::error::{AppError, AppResult};
 use crate::mount::manager::MountManager;
 
-/// 广度优先扫描的最大并发数。
+/// BFS 最大并发数。
 const INDEXING_CONCURRENCY: usize = 8;
 
 /// 可原子提交的云端树、路径索引与增量游标检查点。
@@ -251,7 +251,7 @@ pub async fn refresh_cloud_tree(
     Ok((tree, path_to_id, root_folder_id))
 }
 
-/// 广度优先扫描中的目录节点。
+/// BFS folder 节点。
 #[derive(Debug, Clone)]
 struct BfsNode {
     folder_id: Option<String>,

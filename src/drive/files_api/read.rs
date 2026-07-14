@@ -48,7 +48,7 @@ impl FilesApi {
         parse_file_list_page(&body, "list", auth_already_replayed)
     }
 
-    /// 列举目录全部内容（自动翻页）。
+    /// 连续 GET 目录全部内容（自动翻页）。
     /// 固定使用华为官方上限 pageSize=100；空的非终止页仍按 nextCursor 继续。
     pub async fn list_all(&self, parent_id: Option<&str>) -> AppResult<Vec<DriveFile>> {
         let mut all = Vec::new();
@@ -86,7 +86,7 @@ impl FilesApi {
         Err(files_protocol_error("listAll", "分页策略无可用页数", false))
     }
 
-    /// 获取单个文件元数据。对齐 dart `FilesApi.get(id)`。
+    /// GET 单个文件元数据。对齐 dart `FilesApi.get(id)`。
     pub async fn get(&self, id: &str) -> AppResult<DriveFile> {
         let path = format!("{}?fields=*", file_path(id));
         let resp = self.send_get(&path).await?;
@@ -96,7 +96,7 @@ impl FilesApi {
         parse_drive_file_strict(&body, "get", auth_already_replayed, None)
     }
 
-    /// 搜索文件。对齐 dart `FilesApi.search(keyword, {parentId?, ...})`。
+    /// GET 搜索文件。对齐 dart `FilesApi.search(keyword, {parentId?, ...})`。
     ///
     /// 关键：用官方 `fileName contains 'keyword'` 单引号 DSL，整段只编码一次。
     /// 官方未定义单引号和反斜线的转义规则，因此这些输入在发请求前 fail closed。

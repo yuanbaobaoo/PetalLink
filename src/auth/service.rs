@@ -83,7 +83,7 @@ enum RestoreRefreshFailureAction {
     ClearLogin,
 }
 
-/// 网络故障保留令牌，其余刷新失败清理失效登录态。
+/// 网络故障保留 token，其余刷新失败清理失效登录态。
 fn restore_refresh_failure_action(error: &AppError) -> RestoreRefreshFailureAction {
     match error {
         AppError::DriveApi {
@@ -337,7 +337,7 @@ impl AuthService {
 }
 
 impl Default for AuthService {
-    /// 使用全局令牌存储构造默认授权服务。
+    /// 使用全局 token store 构造默认授权服务。
     fn default() -> Self {
         Self::new()
     }
@@ -398,15 +398,15 @@ fn open_browser(url: &str) -> bool {
 struct GlobalStoreWrapper;
 
 impl TokenStore for GlobalStoreWrapper {
-    /// 从全局加密存储读取令牌。
+    /// 从全局加密 store 读取 token。
     fn load(&self) -> AppResult<Option<TokenPair>> {
         global_store().load()
     }
-    /// 将令牌写入全局加密存储。
+    /// 将 token 写入全局加密 store。
     fn save(&self, token: &TokenPair) -> AppResult<()> {
         global_store().save(token)
     }
-    /// 清除全局加密存储中的令牌。
+    /// 清除全局加密 store 中的 token。
     fn clear(&self) -> AppResult<()> {
         global_store().clear()
     }

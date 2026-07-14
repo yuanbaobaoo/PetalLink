@@ -22,7 +22,7 @@ pub async fn sync_check_safe_free_up(rel_path: String, file_id: String) -> AppRe
         }
         .to_string());
     }
-    // 未启动引擎时缺少可信云端检查点与活动门禁，按不安全处理。
+    // 未启动引擎时缺少可信云端 checkpoint 与 activity gate，按不安全处理。
     let _ = (rel_path, file_id);
     Ok("not_synced".to_string())
 }

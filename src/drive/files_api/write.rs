@@ -1,4 +1,4 @@
-//! Files API 的创建、更新、移动与软删除写操作。
+//! Files API 的 POST 创建与 PATCH 更新、移动、软删除操作。
 
 use serde_json::Value;
 
@@ -18,7 +18,7 @@ use crate::drive::models::DriveFile;
 use crate::error::{AppError, AppResult, RequestSemantics};
 
 impl FilesApi {
-    /// 创建文件夹。对齐 dart `FilesApi.createFolder({name, parentId?})`。
+    /// POST 创建文件夹。对齐 dart `FilesApi.createFolder({name, parentId?})`。
     ///
     /// 这是非幂等 POST，因此必须先在目标父目录内查重；写请求失败后也必须再次按
     /// `parentFolder + fileName` 唯一核验。唯一匹配视为已经提交，零匹配把原错误返回给
@@ -303,7 +303,7 @@ impl FilesApi {
         Ok(file)
     }
 
-    /// 发送带请求体的创建写入，并沿用客户端的严格成功与认证重放规则。
+    /// 发送带 body 的 POST，并沿用客户端的严格成功与认证重放规则。
     async fn send_post(
         &self,
         path: &str,
@@ -313,7 +313,7 @@ impl FilesApi {
         self.client.post(path, Some(body), content_type).await
     }
 
-    /// 发送更新写入，并让客户端保留可能已提交的结构化失败语义。
+    /// 发送 PATCH，并让客户端保留可能已提交的结构化失败语义。
     async fn send_patch(
         &self,
         path: &str,

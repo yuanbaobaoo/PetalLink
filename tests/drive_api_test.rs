@@ -39,7 +39,7 @@ async fn test_create_folder_root_omits_parent() {
     assert_eq!(body["mimeType"], "application/vnd.huawei-apps.folder");
 }
 
-/// 验证显式 `root` 父目录同样从创建请求体省略。
+/// 验证显式 `root` parentFolder 同样从 POST body 省略。
 #[test]
 fn test_build_create_folder_body_root_id_omitted() {
     use petal_link_lib::drive::files_api::build_create_folder_body;

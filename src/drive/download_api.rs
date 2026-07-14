@@ -373,7 +373,7 @@ impl DownloadApi {
         Ok(length)
     }
 
-    /// 发送内容请求；遇到 401 时刷新认证并原样重放一次。
+    /// 发送内容 GET；遇到 401 时刷新 token 并原样重放一次。
     async fn send_content_request(
         &self,
         file_id: &str,

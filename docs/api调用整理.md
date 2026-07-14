@@ -111,7 +111,7 @@
 | **调用场景** | 浏览目录内容（侧边栏 + 文件列表）；翻页加载更多 |
 | **关键细节** | **不用** `parentFolder` 参数！华为只认 `queryParam='id' in parentFolder` 语法。根目录用 `'root'`。单引号必须存在。 |
 | **可选参数** | `cursor={nextCursor}`（翻页），`pageSize`（官方范围 1-100；生产固定 100） |
-| **代码位置** | `src/drive/files_api.rs:list()` |
+| **代码位置** | `src/drive/files_api/read.rs:list()` |
 | **官方文档** | https://developer.huawei.com/consumer/en/doc/HMSCore-References/server-api-fileslist-0000001050153649 |
 
 ### 9. 列举文件（全量翻页）
@@ -122,7 +122,7 @@
 | **方法** | `GET`（循环） |
 | **调用场景** | BFS 构建云端文件树（`refreshCloudTree`）；首次启动全量拉取 |
 | **关键细节** | `pageSize=100`；空页仍按 nextCursor 继续；重复 cursor、缺失/坏字段或超过安全页上限均返回错误，绝不把截断结果当完整树 |
-| **代码位置** | `src/drive/files_api.rs:list_all()` |
+| **代码位置** | `src/drive/files_api/read.rs:list_all()` |
 | **官方文档** | https://developer.huawei.com/consumer/en/doc/HMSCore-References/server-api-fileslist-0000001050153649 |
 
 ### 10. 获取单个文件元数据
@@ -132,7 +132,7 @@
 | **API 端点** | `https://driveapis.cloud.huawei.com.cn/drive/v1/files/{fileId}?fields=*` |
 | **方法** | `GET` |
 | **调用场景** | 查询单个文件详细信息；upload resume 尾部兜底确认；属性面板 |
-| **代码位置** | `src/drive/files_api.rs:get()` |
+| **代码位置** | `src/drive/files_api/read.rs:get()` |
 | **官方文档** | https://developer.huawei.com/consumer/en/doc/HMSCore-References/server-api-filesget-0000001050153637 |
 
 ### 11. 创建文件夹
@@ -145,7 +145,7 @@
 | **调用场景** | 用户点击「新建目录」；同步引擎发现本地有新文件夹 |
 | **请求体** | `{ "fileName": "名称", "mimeType": "application/vnd.huawei-apps.folder", "parentFolder": ["{parentId}"] }` |
 | **关键细节** | ① `mimeType` 必填（否则 21004001 LACK_OF_PARAM）② root 目录**省略** `parentFolder`（对齐官方文档）③ 中文名称必须用 **ASCII 转义**（`asciiJsonEncode`，否则 21004002 fileName can not be blank）④ 400/409 时检查同名已存在文件夹，存在则视为成功（竞态容错） |
-| **代码位置** | `src/drive/files_api.rs:create_folder()` |
+| **代码位置** | `src/drive/files_api/write.rs:create_folder()` |
 | **官方文档** | https://developer.huawei.com/consumer/en/doc/HMSCore-References/server-api-filescreate-0000001050153629 |
 
 ### 12. 更新文件（重命名/移动/改描述）
@@ -158,7 +158,7 @@
 | **调用场景** | 用户重命名文件/文件夹；移动文件到其他目录；改名检测 |
 | **请求体** | `{ "fileName": "新名", "description": "新描述" }`（仅传元数据变更；移动不在 body 写 parentFolder） |
 | **关键细节** | 中文名使用 `asciiJsonEncode`；成功必须是 `200 + File`，核验同一 id 及目标 name/唯一 parent；响应丢失后按 fileId GET 核验，不能盲目重复或直接结算 |
-| **代码位置** | `src/drive/files_api.rs:update()` |
+| **代码位置** | `src/drive/files_api/write.rs:update()` |
 | **官方文档** | https://developer.huawei.com/consumer/en/doc/HMSCore-References/server-api-filesupdate-0000001050153633 |
 
 ### 13. 删除文件（移入回收站）
@@ -170,7 +170,7 @@
 | **请求体** | `{"recycled": true}` |
 | **调用场景** | 用户删除文件；同步引擎发现本地已删且云端存在 → 双向删除 |
 | **关键细节** | ⚠️ `DELETE` 是永久删除。软删除只在收到并核验 `HTTP 200 + File.id==请求 id + recycled=true` 后成功；响应丢失时 GET 得到 404 或 recycled=true 才能结算本地删除 |
-| **代码位置** | `src/drive/files_api.rs:delete()` |
+| **代码位置** | `src/drive/files_api/write.rs:delete()` / `delete_verified()` |
 | **官方文档** | https://developer.huawei.com/consumer/en/doc/HMS-References/drivekit-server-api-filesupdate |
 
 ### 14. 搜索文件
@@ -181,7 +181,7 @@
 | **方法** | `GET` |
 | **调用场景** | AppBar 搜索框输入关键词搜索文件和文件夹 |
 | **关键细节** | 官方 DSL：`fileName contains 'keyword'`，可叠加 `and 'parentId' in parentFolder`；整段 query 只 URL encode 一次。官方未定义单引号/反斜线转义，当前对这两类输入 fail closed。 |
-| **代码位置** | `src/drive/files_api.rs:search()` |
+| **代码位置** | `src/drive/files_api/read.rs:search()` |
 | **官方文档** | https://developer.huawei.com/consumer/en/doc/HMSCore-References/server-api-fileslist-0000001050153649 |
 
 ### 15. 缩略图
@@ -195,7 +195,7 @@
 | **代码位置** | `src/drive/thumbnail_api.rs:get()` |
 | **官方文档** | https://developer.huawei.com/consumer/en/doc/HMSCore-References/server-api-thumbnails-0000001050153621 |
 
-### 16. 增量变更 —— 获取初始游标（getStartCursor）
+### 16. 增量变更 —— 获取初始 cursor（getStartCursor）
 
 | 项目 | 内容 |
 |------|------|
@@ -225,12 +225,12 @@
 | **必选参数** | `cursor`（**必填且不能为空**，由 getStartCursor 或上一次响应的 newStartCursor 提供） |
 | **可选参数** | `fields=*`、`pageSize`（分页大小） |
 | **调用场景** | 自动云端刷新的增量路径：用持久化 cursor 拉取自上次以来的文件变更，merge 进内存 cloud_tree |
-| **分页** | `nextCursor` 仅表示本轮下一页，非空就必须继续；末页 `nextCursor` 缺失/空且 `newStartCursor` 非空，后者才是可提交的新检查点。两个字段不能合并。 |
+| **分页** | `nextCursor` 仅表示本轮下一页，非空就必须继续；末页 `nextCursor` 缺失/空且 `newStartCursor` 非空，后者才是可提交的新 checkpoint。两个字段不能合并。 |
 | **追平判定** | 只能以“末页 + 有效 newStartCursor”结束；空的非末页仍继续，不能用 `changes.length==0` 提前结束。 |
 | **自动分页** | `list_all_changes()` 使用 `pageSize=100`，检测 cursor 循环并设安全页上限；任一坏页使整批失败且旧 cursor 不推进。 |
 | **全量回退** | 增量先在内存候选完整 merge；未知 parent、路径冲突、多 parent、坏 tombstone 等任一不支持语义都 fail closed 并回退全量。 |
-| **错误处理** | cursor 无效 → 400 "Cursor is invalid"（`21004002`）；cursor 过期 → 410 "Cursor has expired"（`21084100` CURSOR_EXPIRED）。调用方撤销 destructive trust 并执行“扫描前 startCursor → BFS → replay”；新检查点提交成功前保留旧 tree/cursor 文件 |
-| **代码位置** | `src/drive/changes_api.rs:list_changes()` / `list_all_changes()`；`src/sync/engine.rs:apply_changes_to_candidate()` |
+| **错误处理** | cursor 无效 → 400 "Cursor is invalid"（`21004002`）；cursor 过期 → 410 "Cursor has expired"（`21084100` CURSOR_EXPIRED）。调用方撤销 destructive trust 并执行“扫描前 startCursor → BFS → replay”；新 checkpoint 提交成功前保留旧 tree/cursor 文件 |
+| **代码位置** | `src/drive/changes_api.rs:list_changes()` / `list_all_changes()`；`src/sync/engine/cache.rs:apply_changes_to_candidate()` |
 | **官方文档** | https://developer.huawei.com/consumer/cn/doc/HMSCore-References-V5/server-api-changeslist-0000001050151710-V5 |
 
 **响应示例（含一条删除变更）：**
@@ -256,7 +256,7 @@
 
 | 字段/行为 | GDrive 协议 | 华为实际 |
 |---|---|---|
-| 分页游标字段 | 单一 next token | Huawei 同时有 **`nextCursor`（翻页）** 与 **`newStartCursor`（末页 checkpoint）** |
+| 分页 cursor 字段 | 单一 next token | Huawei 同时有 **`nextCursor`（翻页）** 与 **`newStartCursor`（末页 checkpoint）** |
 | 硬删除判定 | `removed: true` | Huawei 官方 `deleted=true`；允许只有 fileId、没有 File 的 tombstone |
 | 软删除兼容 | — | 本地抓包出现 `changeType="trashDone"` 或 `file.recycled=true`，作为兼容删除信号 |
 | 删除事件 file | 可缺失 | 代码同时支持官方无 File tombstone 与本地抓包的完整 recycled File |
@@ -281,7 +281,7 @@
 | **调用场景** | 用户上传文件、同步引擎上传本地新增/修改的文件（≤20MB） |
 | **请求体** | Google Drive 风格 multipart/related：第 1 部分 `application/json`（metadata `{fileName, parentFolder?}`），第 2 部分 `application/octet-stream`（文件二进制） |
 | **关键细节** | 必须用 `multipart/related`（**不是** `multipart/form-data`，后者华为返回 400）；metadata 用普通 JSON（容忍 UTF-8，不需要 asciiJsonEncode） |
-| **代码位置** | `src/drive/upload_api.rs:upload_small()` |
+| **代码位置** | `src/drive/upload_api/multipart.rs:upload_small()` |
 | **官方文档** | https://developer.huawei.com/consumer/en/doc/HMSCore-References/server-api-filescreate-0000001050153629 |
 
 ### 19. 大文件分片上传 —— 初始化会话
@@ -295,7 +295,7 @@
 | **请求体** | `{ "fileName": "name", "parentFolder": ["{parentId}"] }`（JSON） |
 | **响应 body** | `{"sliceSize": 10485760}` — 仅返回推荐分片大小（10MB），**不含** `serverId`/`uploadId` |
 | **★ 响应头 Location** | 会话 URL，格式 `https://driveapis.cloud.huawei.com.cn/upload/drive/v1/{token}/files?uploadType=resume&uploadId={id}`。**后续所有分片 PUT 必须直接使用此 URL**，不能用 `serverId`/`uploadId` 拼接 |
-| **代码位置** | `src/drive/upload_api.rs:init_resume_session()` |
+| **代码位置** | `src/drive/upload_api/resumable.rs:init_resume_session()` |
 
 ### 20. 大文件分片上传 —— 上传分片
 
@@ -310,7 +310,7 @@
 | **★ 中间响应** | **HTTP 308 Resume Incomplete**，body `{"sliceSize":10485760, "rangeList":["0-10485759"], "processTime":8000}`。`rangeList` 最后一段的 `end+1` 即为下一个 offset。**308 是正常响应（非错误）**，不应重试 |
 | **最终响应** | HTTP 200/201，body 含完整文件元数据 `{"id", "fileName", "size", ...}`（可能直到最后一片才返回） |
 | **恢复策略** | 308 解析连续 `rangeList`；401 刷新后对同一 session URL/body/Content-Range 最多重放一次。连接/超时/5xx/响应体丢失等不确定结果先对同一 session 发状态查询，只按服务端确认 offset 前进，禁止用 `offset+chunkLen` 推算。 |
-| **代码位置** | `src/drive/upload_api.rs:put_chunk()` |
+| **代码位置** | `src/drive/upload_api/chunk.rs:put_chunk()` |
 
 ### 21. 大文件分片上传 —— 查询最终状态
 
@@ -322,7 +322,7 @@
 | **请求头** | `Content-Range: bytes */{totalSize}`, `Content-Length: 0` |
 | **响应** | HTTP 200，body 含完整文件元数据 `{"category":"drive#file","fileName":"...","id":"...","mimeType":"..."}` |
 | **关键细节** | `bytes */total` 是 Google Drive 协议的标准上传状态查询方式；需在分片循环结束后调用 |
-| **代码位置** | `src/drive/upload_api.rs:upload_resume()` / `upload_resume_with_token()` |
+| **代码位置** | `src/drive/upload_api/resumable.rs:upload_resume()` / `upload_resume_with_token()` |
 
 ### 22. 上传覆盖已有文件（PATCH）
 
@@ -334,7 +334,7 @@
 | **调用场景** | 冲突解决（local wins）：用本地内容覆盖云端已有文件 |
 | **请求体** | 同小文件上传（metadata `{fileName}` + 文件二进制） |
 | **回退策略** | **禁止 Update→Create**。PATCH 响应不确定时按既有 fileId 核验；当前 >20MiB 既有文件替换明确进入 RestartRequired，保留远端原文件。 |
-| **代码位置** | `src/drive/upload_api.rs:upload_update()` |
+| **代码位置** | `src/drive/upload_api/multipart.rs:upload_update()` |
 | **官方文档** | https://developer.huawei.com/consumer/en/doc/HMSCore-References/server-api-filesupdate-0000001050153633 |
 
 ---

@@ -12,7 +12,7 @@ use crate::error::AppResult;
 
 use super::{drop_runtime_async, AUTH_SERVICE, DB};
 
-/// 仅清理数据库同步行与缓存文件，不删除当前数据库文件或新令牌。
+/// 仅清理数据库同步行与缓存文件，不删除当前数据库文件或新 token。
 fn clear_account_caches() {
     {
         let conn = DB.lock();
@@ -36,7 +36,7 @@ pub fn auth_check_secret() -> bool {
     crate::constants::client_id_configured() && crate::constants::client_secret_configured()
 }
 
-/// 从令牌存储恢复登录状态，并返回当前认证配置快照。
+/// 从 token store 恢复登录状态，并返回当前认证配置快照。
 #[tauri::command]
 pub async fn auth_restore() -> AppResult<AuthState> {
     let logged_in = AUTH_SERVICE.restore().await?;
@@ -90,7 +90,7 @@ pub async fn auth_cancel_login() -> AppResult<()> {
     Ok(())
 }
 
-/// 停止同步运行时，清理当前账号的同步数据与目录配置，然后删除登录令牌。
+/// 停止同步运行时，清理当前账号的同步数据与目录配置，然后删除登录 token。
 #[tauri::command]
 pub async fn auth_logout() -> AppResult<()> {
     // 清空当前账号同步状态
@@ -107,7 +107,7 @@ pub async fn auth_get_user_info() -> AppResult<UserInfo> {
     api.get().await
 }
 
-/// 以本地令牌存储是否存在有效记录判断登录状态。
+/// 以本地 token store 是否存在有效记录判断登录状态。
 #[tauri::command]
 pub async fn auth_is_logged_in() -> AppResult<bool> {
     use crate::auth::token_store::global_store;

@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::core::cache_paths;
 use crate::error::AppResult;
 
-/// 用于检测本地内容变化的修改时间、大小与可选摘要。
+/// 用于检测本地内容变化的 mtime、size 与可选 SHA256。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotEntry {
     /// 修改时间（毫秒 epoch）

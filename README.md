@@ -22,7 +22,7 @@
 | **授权登录** | OAuth 2.0 + PKCE（S256）；`openid profile drive` 全盘访问；Token 自动刷新 + 机器码绑定的 `token.bin` 加密存储 |
 | **网盘主界面** | 双栏布局（侧边栏递归目录树 + 文件列表）；面包屑导航；搜索；新建文件夹 |
 | **文件操作** | 上传（≤20MB multipart + >20MB 分片续传）、Range 断点下载、删除、重命名、移动、缩略图；写操作按 fileId 核验后才结算 |
-| **双向同步** | 本地 FSEvents + 3s debounce；华为 Changes 增量同步 + BFS 兜底；tree/path/cursor 原子可信检查点；三段式稳定性检查 |
+| **双向同步** | 本地 FSEvents + 3s debounce；华为 Changes 增量同步 + BFS 兜底；tree/path/cursor 原子可信 checkpoint；三段式稳定性检查 |
 | **后台运行** | 关闭窗口 / ⌘Q 不退出，仅隐藏 UI 层；系统菜单栏图标始终保留；同步引擎在后台持续运行 |
 | **开机自启动** | 设置页开关，LaunchAgent plist（带 `--hidden` 参数，开机只显示菜单栏图标） |
 | **冲突处理** | 自动重命名副本（60s 容忍窗口 + 副本去重 + 云端删除时保护本地修改） |
@@ -31,7 +31,7 @@
 | **释放空间** | 执行时复核可信云树、远端 fileId、成功基线、本地 mtime/size 与活动任务，防止 TOCTOU 误删 |
 | **日志系统** | 三层输出（终端 + 滚动文件 + 环形缓冲）；日志查看导出页面 |
 
-断网或频繁网络抖动时，未完成任务不会被当成永久失败：上传分片恢复前先查询服务端确认偏移，下载保留带版本身份的 `.tmp` 并用 `Range` 继续；响应丢失的创建、更新和删除先核验远端结果，禁止盲目重放。离线启动只加载检查点作为增量基线，在 Changes 追平前不会恢复上传、执行删除或进入同步规划。
+断网或频繁网络抖动时，未完成任务不会被当成永久失败：上传分片恢复前先查询服务端确认偏移，下载保留带版本身份的 `.tmp` 并用 `Range` 继续；响应丢失的创建、更新和删除先核验远端结果，禁止盲目重放。离线启动只加载 checkpoint 作为增量基线，在 Changes 追平前不会恢复上传、执行删除或进入同步规划。
 
 ---
 
@@ -45,7 +45,7 @@
 | **HTTP** | reqwest（rustls-tls） |
 | **文件监听** | notify（macOS FSEvents） |
 | **安全存储** | `token.bin` + ChaCha20-Poly1305 AEAD（密钥由本机 IOPlatformUUID 派生） |
-| **UI 设计** | Mate 组件库 + 自建设计令牌（主色 `#0052D9`） |
+| **UI 设计** | Mate 组件库 + 自建 design token（主色 `#0052D9`） |
 | **日志** | tracing + tracing-appender |
 
 ---
@@ -104,12 +104,11 @@ cargo tauri dev --config tauri.dev.conf.json
 ## 测试
 
 ```bash
-# Rust 单元测试（数量以命令输出为准）
-cargo test --lib
+# 查看当前测试清单（不在文档中维护固定数量）
+cargo test -- --list
 
-# Rust 集成测试（wiremock 模拟华为 API，12 个）
-cargo test --test drive_api_test
-cargo test --test oauth_flow_test
+# 编译全部 target 与测试，但不执行
+cargo test --all-targets --no-run
 
 # 全部 Rust 测试
 cargo test
@@ -118,13 +117,14 @@ cargo test
 HWCLOUD_TEST_FILE="<file_path>" cargo test --test upload_tester -- --ignored --nocapture
 ```
 
-测试覆盖范围：
+测试集中在根目录 `tests/`，覆盖以下核心合同：
 
-| 类型 | 数量 | 覆盖模块 |
-|---|---|---|
-| Rust 单元测试 | 以 `cargo test --lib` 输出为准 | auth / config / pkce / conflict / sync / stability / constants / drive |
-| Rust 集成测试 | 12 | Drive API（7）+ OAuth 流程（5） |
-| 上传 wiremock 测试 | 8 | Location 头捕获 / HTTP 308 / rangeList / 端到端 22MB |
+| 类型 | 覆盖模块 |
+|---|---|
+| 核心合同测试 | auth / config / paths / logging / platform / error contract |
+| Drive 协议测试 | Files / Changes / download / upload / ASCII JSON / model parsing / client error |
+| 同步测试 | cloud tree / conflict / engine / retry policy / stability / state / transfer state / checkpoint store |
+| 手工集成测试 | `upload_tester.rs`，需要真实 OAuth 环境和 `HWCLOUD_TEST_FILE`，默认 `#[ignore]` |
 
 ---
 
@@ -181,10 +181,11 @@ PetalLink/
 ├── src/                         # Rust 后端（Tauri）
 │   ├── main.rs                  # 入口
 │   ├── lib.rs                   # 应用装配 + 命令注册 + setup
-│   ├── commands.rs              # 42 个 Tauri 命令
+│   ├── commands.rs              # 命令运行时与统一导出
+│   ├── commands/                # Tauri 命令按领域拆分
 │   ├── auth/                    # OAuth + PKCE + token.bin 加密存储
-│   ├── drive/                   # 华为 Drive REST API 客户端
-│   ├── sync/                    # 同步引擎（planner/executor/conflict/stability）
+│   ├── drive/                   # 华为 Drive REST API 客户端（Files/Upload 已按职责拆分）
+│   ├── sync/                    # 同步引擎（engine/executor/TaskRunner 均按职责拆分）
 │   ├── mount/                   # 本地镜像 + FSEvents 监听
 │   ├── data/                    # SQLite 数据层
 │   ├── core/                    # 配置/日志/缓存
@@ -193,8 +194,8 @@ PetalLink/
 │   ├── views/                   # 页面（Login/Main/Settings/LogViewer）
 │   ├── stores/                  # Pinia 状态管理
 │   ├── api/                     # Tauri invoke 封装
-│   ├── components/mate/         # Mate 组件库（20+ 组件）
-│   └── styles/                  # 设计令牌
+│   ├── components/mate/         # Mate 组件库
+│   └── styles/                  # design token
 ├── assets/                      # 品牌图标资源（唯一图源）
 ├── design/prototype/            # UI 设计原型
 ├── tests/                       # 集成测试
@@ -212,7 +213,7 @@ PetalLink/
 | 文档 | 说明 |
 |---|---|
 | [docs/概要设计文档.md](./docs/概要设计文档.md) | 项目架构、功能需求、数据流、API 接口、设计决策 |
-| [docs/api调用整理.md](./docs/api调用整理.md) | 华为 Drive REST API 完整清单（22 个接口，含分片上传 308/Location 详解） |
+| [docs/api调用整理.md](./docs/api调用整理.md) | 华为 Drive REST API 完整清单（23 个调用场景，含分片上传 308/Location 详解） |
 | [design/prototype/](./design/prototype/) | UI 设计原型（login / main / settings） |
 
 ---

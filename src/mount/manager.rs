@@ -240,7 +240,7 @@ impl MountManager {
     /// 仅在目标仍不存在时创建占位符。
     ///
     /// 破坏性流程在原文件完成原子暂存后使用此严格入口；已有用户文件绝不视为成功，
-    /// 任一必要扩展属性写入失败时会清理未完成的占位符。
+    /// 任一必要 xattr 写入失败时会清理未完成的 placeholder。
     pub async fn create_placeholder_strict(
         &self,
         file_name: &str,

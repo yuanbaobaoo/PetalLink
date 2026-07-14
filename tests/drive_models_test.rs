@@ -122,7 +122,7 @@ fn test_drive_about_default_on_non_object() {
     assert_eq!(about.used_space, 0);
 }
 
-/// 验证文件列表分页游标判定。
+/// 验证文件列表分页 cursor 判定。
 #[test]
 fn test_file_list_result_pagination() {
     let json = json!({

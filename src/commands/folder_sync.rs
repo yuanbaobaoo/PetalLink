@@ -82,7 +82,7 @@ async fn sync_folder_recursive_impl(
     let dest_dir = crate::core::paths::safe_join_under(m.mount_dir(), rel_path, true)?;
     tracing::info!(folder_id, rel = %rel_path, "sync_folder_recursive: 开始递归同步");
 
-    // 广度优先读取云端子树。
+    // BFS 读取云端子树。
     let mut cloud_files: Vec<(String, DriveFile)> = Vec::new(); // (subrel, DriveFile)
     let mut cloud_folders: Vec<String> = Vec::new();
     let mut folder_rel_to_id: HashMap<String, String> = HashMap::new();

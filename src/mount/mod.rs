@@ -6,7 +6,7 @@
 pub mod file_hasher;
 /// 本地文件系统变更监听与防抖。
 pub mod local_watcher;
-/// 镜像目录、占位符与扩展属性管理。
+/// 镜像目录、占位符 与 xattr 管理。
 pub mod manager;
 /// 内部文件及用户模式的跳过规则。
 pub mod skip;

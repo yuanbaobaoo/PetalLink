@@ -18,8 +18,7 @@ impl ThumbnailApi {
         Self { client }
     }
 
-    /// 获取缩略图二进制。对齐 dart `ThumbnailApi.get(fileId)`。
-    /// GET /thumbnails/{fileId}?form=content
+    /// GET `/thumbnails/{fileId}?form=content` 获取缩略图二进制。
     pub async fn get(&self, file_id: &str) -> AppResult<Vec<u8>> {
         let token = self.client.auth().ensure_valid_access_token().await?;
         let url = format!(

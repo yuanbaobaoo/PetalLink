@@ -50,7 +50,7 @@ fn test_serde_flat_structure() {
     assert!(v.get("status_code").is_some());
 }
 
-/// 验证网络错误与令牌刷新错误可区分。
+/// 验证网络错误与 token 刷新错误可区分。
 #[test]
 fn test_serde_network_vs_refresh_distinct() {
     let net = AppError::drive_network(Some("timeout"));

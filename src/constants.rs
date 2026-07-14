@@ -60,7 +60,7 @@ pub const EXECUTABLE_NAME: &str = "PetalLink";
 pub const SCOPES: &[&str] = &["openid", "profile", "https://www.huawei.com/auth/drive"];
 
 // ===== OAuth 端点 =====
-/// 令牌服务主机。
+/// OAuth token 服务主机。
 pub const TOKEN_HOST: &str = "oauth-login.cloud.huawei.com";
 
 /// 授权页地址（华为 OAuth2.0 授权端点，非 account.php）

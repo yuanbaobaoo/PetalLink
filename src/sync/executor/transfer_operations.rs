@@ -90,7 +90,7 @@ impl ExecutorTransferOperations {
         Ok(Some(sha256))
     }
 
-    /// 仅为仍匹配上传源快照的文件写入远端标识。
+    /// 仅为仍匹配上传源快照的文件写入远端 fileId。
     async fn set_upload_file_id_if_current(
         &self,
         task: &TransferTask,

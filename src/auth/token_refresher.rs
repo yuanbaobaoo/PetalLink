@@ -177,7 +177,7 @@ pub struct TokenRefresher {
 }
 
 impl TokenRefresher {
-    /// 使用指定令牌存储构造刷新器。
+    /// 使用指定 token store 构造 refresher。
     pub fn new(token_store: Arc<dyn TokenStore>) -> Self {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
@@ -225,7 +225,7 @@ impl TokenRefresher {
         self.refresh_flight.run(operation).await
     }
 
-    /// 请求新访问令牌，先原子替换持久化文件，成功后再更新内存副本。
+    /// 请求新 access token，先原子替换持久化文件，成功后再更新内存副本。
     async fn perform_refresh(&self) -> AppResult<TokenPair> {
         let current = self
             .current_token()

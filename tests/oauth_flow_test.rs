@@ -1,6 +1,6 @@
 //! OAuth 与认证模块公开合同测试。
 //!
-//! 覆盖令牌模型、用户信息、PKCE、回调服务、授权 URL 与配置常量。
+//! 覆盖 token 模型、用户信息、PKCE、回调服务、授权 URL 与配置常量。
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -20,7 +20,7 @@ async fn test_oauth_constants_consistent() {
     assert_eq!(constants::LOOPBACK_HOST, "127.0.0.1");
 }
 
-/// 验证缺省过期时间仍生成有效令牌。
+/// 验证缺省过期时间仍生成有效 token。
 #[test]
 fn test_token_defaults_expires_in() {
     let json = json!({"access_token": "at", "refresh_token": "rt"});
@@ -28,7 +28,7 @@ fn test_token_defaults_expires_in() {
     assert!(!token.is_expired());
 }
 
-/// 验证令牌过期窗口按缓冲时间判断。
+/// 验证 token 过期窗口按缓冲时间判断。
 #[test]
 fn test_will_expire_within() {
     let json = json!({

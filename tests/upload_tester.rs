@@ -11,9 +11,9 @@ use petal_link_lib::auth::service::AuthService;
 use petal_link_lib::drive::client::DriveClient;
 use petal_link_lib::drive::upload_api::UploadApi;
 
-/// 从环境变量或 OAuth 授权流程获取测试令牌。
+/// 从环境变量或 OAuth 授权流程获取测试 token。
 async fn get_token() -> Result<String> {
-    // 优先使用显式提供的测试令牌。
+    // 优先使用显式提供的测试 token。
     if let Ok(token) = std::env::var("HWCLOUD_TEST_TOKEN") {
         if !token.is_empty() {
             eprintln!("✓ 从环境变量读取 token");
@@ -21,7 +21,7 @@ async fn get_token() -> Result<String> {
         }
     }
 
-    // 未找到有效令牌时启动 OAuth 授权流程。
+    // 未找到有效 token 时启动 OAuth 授权流程。
     eprintln!();
     eprintln!("══════════════════════════════════════════════");
     eprintln!("  未找到有效 token，开始 OAuth 授权流程...");
@@ -49,7 +49,7 @@ async fn get_token() -> Result<String> {
     }
 }
 
-/// 使用真实令牌将指定文件上传到华为云盘。
+/// 使用真实 token 将指定文件上传到华为云盘。
 #[tokio::test]
 #[ignore = "需要真实华为云盘令牌与 HWCLOUD_TEST_FILE"]
 async fn upload_real_file_to_huawei_cloud() -> Result<()> {

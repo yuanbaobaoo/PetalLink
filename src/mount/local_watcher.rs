@@ -85,7 +85,7 @@ impl LocalWatcher {
         }
     }
 
-    /// 订阅变更事件流。
+    /// 订阅文件变更 event stream。
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<ChangeSet> {
         self.change_tx.subscribe()
     }
@@ -245,7 +245,7 @@ impl LocalWatcher {
     }
 
     /// 停止监视：释放 FSEvents 句柄（drop watcher），清空 pending。
-    /// 释放系统监视器会关闭底层事件流，之后不再接收回调。
+    /// drop watcher 会关闭底层 FSEvents stream，之后不再接收回调。
     /// 这确保引擎被替换/退出后，旧 watcher 不会继续向 detached 任务喂事件。
     pub async fn stop(&self) {
         let _lifecycle = self.lifecycle.lock().await;

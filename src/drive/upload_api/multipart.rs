@@ -27,7 +27,7 @@ impl UploadApi {
             .await
     }
 
-    /// 使用给定令牌覆盖小文件，并严格核验返回文件的名称和长度。
+    /// 使用给定 token 覆盖小文件，并严格核验返回文件的名称和长度。
     async fn upload_update_with_token(
         &self,
         file_id: &str,

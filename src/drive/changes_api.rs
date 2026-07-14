@@ -36,7 +36,7 @@ pub struct Change {
 }
 
 impl Change {
-    /// 返回变更对应的云端文件标识。
+    /// 返回变更对应的云端 fileId。
     pub fn file_id(&self) -> &str {
         &self.file_id
     }
@@ -124,7 +124,7 @@ pub struct ChangesPage {
 pub type ChangeListResult = ChangesPage;
 
 impl ChangesPage {
-    /// 严格解析单页变更及两个用途不同的游标。
+    /// 严格解析单页变更及两个用途不同的 cursor。
     pub fn from_json(json: &Value) -> AppResult<Self> {
         let object = json
             .as_object()

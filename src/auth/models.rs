@@ -18,7 +18,7 @@ pub struct TokenPair {
     pub scope: Option<String>,
 }
 
-/// 返回缺省的 Bearer 令牌类型。
+/// 返回缺省的 Bearer token 类型。
 fn default_token_type() -> String {
     "Bearer".to_string()
 }

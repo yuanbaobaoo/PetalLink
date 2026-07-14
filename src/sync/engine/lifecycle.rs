@@ -195,7 +195,7 @@ impl SyncEngine {
         }
         let _ = self.shutdown_tx.send(true);
         self.backoff_changed.notify_waiters();
-        // 取出并释放监视器句柄，同步关闭底层文件事件流。
+        // 取出并释放 watcher，同步关闭底层 FSEvents stream。
         let taken = self.watcher.lock().take();
         drop(taken);
         tracing::info!("SyncEngine shutdown_sync（shutdown 标志置位、FSEvents 释放）");

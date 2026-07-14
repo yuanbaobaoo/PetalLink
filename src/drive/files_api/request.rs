@@ -45,7 +45,7 @@ pub(super) fn update_path(id: &str, move_parents: Option<(&str, &str)>) -> Strin
     path
 }
 
-/// 将文件标识按单一路径段编码为资源路径。
+/// 将 fileId 按单一 path segment 编码为资源路径。
 pub(super) fn file_path(id: &str) -> String {
     let encoded_id = percent_encoding::utf8_percent_encode(id, &URL_PATH_SEGMENT_ENCODE_SET);
     format!("/files/{encoded_id}")
@@ -149,12 +149,12 @@ pub fn build_create_folder_body(name: &str, parent_id: Option<&str>) -> Value {
     Value::Object(body)
 }
 
-/// 校验通用文件标识非空。
+/// 校验通用 fileId 非空。
 pub(super) fn validate_file_id(id: &str) -> AppResult<()> {
     validate_file_id_value(id, "fileId")
 }
 
-/// 校验指定语义字段中的文件标识非空。
+/// 校验指定语义字段中的 fileId 非空。
 pub(super) fn validate_file_id_value(id: &str, field: &str) -> AppResult<()> {
     if id.trim().is_empty() {
         Err(AppError::generic(format!("{field} 不能为空")))

@@ -5,7 +5,7 @@
 use std::sync::Arc;
 use tauri::Manager;
 
-/// OAuth 授权与令牌生命周期。
+/// OAuth 授权与 token 生命周期。
 pub mod auth;
 /// Tauri 命令入口。
 pub mod commands;

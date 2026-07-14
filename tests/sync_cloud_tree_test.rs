@@ -105,7 +105,7 @@ fn test_old_cache_without_complete_field_treated_incomplete() {
     );
 }
 
-/// 验证检查点持久化后正式文件可读且无临时文件残留。
+/// 验证 checkpoint 持久化后正式文件可读且无临时文件残留。
 #[test]
 fn test_persist_internal_atomic_and_readable() {
     let dir = tempfile::tempdir().unwrap();

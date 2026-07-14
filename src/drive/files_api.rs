@@ -1,4 +1,4 @@
-//! Files API —— 列举 / 创建 / 更新 / 删除 / 搜索。
+//! Files API —— GET 列举/搜索、POST 创建、PATCH 更新/软删除。
 //!
 //! 对齐 `legacy/lib/drive/api/files_api.dart`。
 //!

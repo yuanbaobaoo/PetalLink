@@ -21,8 +21,7 @@ impl AboutApi {
         Self { client }
     }
 
-    /// 获取配额信息。对齐 dart `AboutApi.get()`。
-    /// GET /about?fields=*
+    /// GET `/about?fields=*` 获取配额信息；对齐 dart `AboutApi.get()`。
     pub async fn get(&self) -> AppResult<DriveAbout> {
         let resp = self.client.get("/about?fields=*").await?;
         let body: serde_json::Value = parse_json_response(resp, "about").await?;
