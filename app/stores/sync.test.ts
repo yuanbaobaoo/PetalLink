@@ -53,5 +53,6 @@ describe("sync store 权威快照字段", () => {
 
     expect(store.revision).toBe(8);
     expect(store.failed).toBe(0);
+    expect(store.failedItems).toEqual([]);
   });
 });

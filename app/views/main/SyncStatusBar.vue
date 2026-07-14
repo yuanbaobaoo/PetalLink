@@ -1,6 +1,6 @@
 <!-- 同步状态条，全局进度 + 失败数点击查看详情 -->
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { useSyncStore } from "@/stores/sync";
 import { useTransferStore } from "@/stores/transfer";
 import { MateIcon, MateDialog, MateButton } from "@/components/mate";
@@ -69,6 +69,13 @@ onMounted(async () => {
   } catch {
     // IPC/引擎瞬时失败：保留默认状态，等待下一次事件纠正
   }
+});
+
+/**
+ * 自动自愈完成后关闭失败详情，避免保留“失败项 (0)”的陈旧弹窗。
+ */
+watch(() => sync.failed, (failed) => {
+  if (failed === 0) showFailedDialog.value = false;
 });
 
 /** 打开失败项弹窗 */

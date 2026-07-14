@@ -458,6 +458,20 @@ impl Drop for ResetFlag<'_> {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct FailedRecordReconciliation {
+    healed: usize,
+    purged: usize,
+    remaining_failed: usize,
+    pending_id: usize,
+    missing_side: usize,
+    id_mismatch: usize,
+    type_conflict: usize,
+    baseline_changed: usize,
+    transfer_blocked: usize,
+    stale_transfer_blocked: usize,
+}
+
 pub struct SyncEngine {
     files_api: Arc<FilesApi>,
     changes_api: Arc<crate::drive::changes_api::ChangesApi>,
@@ -512,6 +526,8 @@ pub struct SyncEngine {
     request_network_failure_reporter: Arc<dyn Fn() -> bool + Send + Sync>,
     known_waiting_count: Mutex<Option<(u64, u64)>>,
     cycle_observer: Arc<dyn Fn(&'static str) + Send + Sync>,
+    #[cfg(test)]
+    planning_snapshot_observer: Option<Arc<dyn Fn(&SyncSnapshot) + Send + Sync>>,
     #[cfg(test)]
     incremental_refresh_hook: Option<Arc<dyn Fn() -> AppResult<()> + Send + Sync>>,
     #[cfg(test)]
@@ -584,6 +600,8 @@ impl SyncEngine {
             known_waiting_count: Mutex::new(None),
             cycle_observer: Arc::new(|_| {}),
             #[cfg(test)]
+            planning_snapshot_observer: None,
+            #[cfg(test)]
             incremental_refresh_hook: None,
             #[cfg(test)]
             startup_cloud_hook: None,
@@ -624,6 +642,14 @@ impl SyncEngine {
 
     pub fn set_cycle_observer(&mut self, cycle_observer: Arc<dyn Fn(&'static str) + Send + Sync>) {
         self.cycle_observer = cycle_observer;
+    }
+
+    #[cfg(test)]
+    fn set_planning_snapshot_observer_for_test(
+        &mut self,
+        observer: Arc<dyn Fn(&SyncSnapshot) + Send + Sync>,
+    ) {
+        self.planning_snapshot_observer = Some(observer);
     }
 
     #[cfg(test)]
@@ -1956,7 +1982,7 @@ impl SyncEngine {
         self.ensure_cycle_active()?;
         let planning_activity = self.begin_external_activity()?;
         let cloud = self.cloud_tree.lock().clone();
-        let db = self.load_db_snapshot()?;
+        let mut db = self.load_db_snapshot()?;
 
         // 诊断日志：统计三方数据
         let local_in_cloud_not_db: Vec<&str> = local
@@ -1981,8 +2007,16 @@ impl SyncEngine {
         // 只有可信云端快照才能据“云端存在/缺失”制造成功 baseline。
         if cloud_tree_trusted {
             self.reconcile_db_records(&local, &db)?;
+            let reconciliation = self.reconcile_failed_and_purge_stale_records(&local, &cloud)?;
+            db = self.load_db_snapshot()?;
+            tracing::info!(
+                healed = reconciliation.healed,
+                purged = reconciliation.purged,
+                remaining_failed = reconciliation.remaining_failed,
+                "可信同步周期已完成失败状态复核与残余清理"
+            );
         } else {
-            tracing::warn!("云端树不可信，跳过 DB reconcile");
+            tracing::warn!("云端树不可信，跳过 DB reconcile、失败复核与残余清理");
         }
 
         let db_len = db.len();
@@ -1995,6 +2029,10 @@ impl SyncEngine {
             is_startup_resume: triggered_by == "startup-resume",
             cloud_tree_trusted,
         };
+        #[cfg(test)]
+        if let Some(observer) = &self.planning_snapshot_observer {
+            observer(&snapshot);
+        }
         let mut actions = self.planner.plan(&snapshot);
         // §2.8 改名检测：在本地新文件上检查 xattr fileId，匹配 → 改名而非 upload+delete
         if cloud_tree_trusted {
@@ -2075,14 +2113,6 @@ impl SyncEngine {
             // content baseline. Re-scan immediately so a file edited during/around the move is
             // uploaded in a second, version-checked step instead of being falsely marked synced.
             self.cycle.request(CycleRequest::LOCAL_RESCAN);
-        }
-
-        // ★ 清理残余 DB 记录：planner 不再为"双方都删了"生成 DeleteFromCloud（避免
-        // 无意义的 404 API 调用），改为此处直接清理 local 和 cloud 都不存在的 DB 行。
-        if cloud_tree_trusted {
-            self.purge_stale_db_records(&local, &cloud)?;
-        } else {
-            tracing::warn!("云端树不可信，跳过 stale DB purge");
         }
 
         // #7 contentChanged 逻辑（对齐 dart：仅结构性操作成功才 true）
@@ -2905,6 +2935,175 @@ impl SyncEngine {
         Ok(())
     }
 
+    fn reconcile_failed_and_purge_stale_records(
+        &self,
+        local: &HashMap<String, LocalFileEntry>,
+        cloud: &HashMap<String, DriveFile>,
+    ) -> AppResult<FailedRecordReconciliation> {
+        let conn = self.db.lock();
+        let transaction = conn
+            .unchecked_transaction()
+            .map_err(|error| AppError::generic(format!("开始失败状态复核事务失败：{error}")))?;
+        let items = repository::load_all(&transaction)?;
+        let mut reconciliation = FailedRecordReconciliation::default();
+
+        for item in items
+            .iter()
+            .filter(|item| item.status == repository::sync_status::FAILED)
+        {
+            let (local_entry, cloud_file) =
+                match (local.get(&item.local_path), cloud.get(&item.local_path)) {
+                    (None, None) => continue,
+                    (Some(local_entry), Some(cloud_file)) => (local_entry, cloud_file),
+                    _ => {
+                        reconciliation.missing_side += 1;
+                        if item.file_id.starts_with(repository::PENDING_FILE_ID_PREFIX) {
+                            reconciliation.pending_id += 1;
+                        }
+                        continue;
+                    }
+                };
+            if item.file_id.starts_with(repository::PENDING_FILE_ID_PREFIX) {
+                reconciliation.pending_id += 1;
+                continue;
+            }
+            if item.file_id != cloud_file.id {
+                reconciliation.id_mismatch += 1;
+                continue;
+            }
+            if local_entry.is_folder != cloud_file.is_folder() {
+                reconciliation.type_conflict += 1;
+                continue;
+            }
+            if local_entry.is_folder && cloud_file.is_folder() {
+                let updated = transaction
+                    .execute(
+                        "UPDATE sync_items SET
+                            parent_folder_id=?1, name=?2, is_folder=1, size=?3,
+                            local_size=?4, sha256=NULL, local_mtime=?5, cloud_edited_time=?6,
+                            last_sync_time=?7, status=?8, error_message=NULL
+                         WHERE file_id=?9 AND local_path=?10 AND status=?11
+                           AND NOT EXISTS (
+                               SELECT 1 FROM transfer_queue
+                               WHERE relative_path=?10 AND state NOT IN (?12, ?13)
+                           )",
+                        rusqlite::params![
+                            cloud_file
+                                .parent_folder
+                                .as_ref()
+                                .and_then(|parents| parents.first()),
+                            cloud_file.name,
+                            cloud_file.size,
+                            local_entry.size as i64,
+                            local_entry.mtime,
+                            cloud_file.edited_time.map(|time| time.timestamp_millis()),
+                            chrono::Utc::now().timestamp_millis(),
+                            repository::sync_status::SYNCED,
+                            item.file_id,
+                            item.local_path,
+                            repository::sync_status::FAILED,
+                            i32::from(TransferState::Completed),
+                            i32::from(TransferState::Canceled),
+                        ],
+                    )
+                    .map_err(|error| AppError::generic(format!("恢复目录失败状态失败：{error}")))?;
+                reconciliation.healed += updated;
+                if updated == 0 {
+                    reconciliation.transfer_blocked += 1;
+                }
+                continue;
+            }
+
+            let cloud_edited_time = cloud_file.edited_time.map(|time| time.timestamp_millis());
+            if item.is_folder {
+                reconciliation.type_conflict += 1;
+                continue;
+            }
+            let file_converged = !local_entry.is_placeholder
+                && item.local_size == Some(local_entry.size as i64)
+                && item.local_mtime == Some(local_entry.mtime)
+                && item.size == cloud_file.size
+                && item.cloud_edited_time.is_some()
+                && item.cloud_edited_time == cloud_edited_time;
+            if file_converged {
+                let updated = transaction
+                    .execute(
+                        "UPDATE sync_items SET status=?1, error_message=NULL
+                         WHERE file_id=?2 AND local_path=?3 AND status=?4
+                           AND NOT EXISTS (
+                               SELECT 1 FROM transfer_queue
+                               WHERE relative_path=?3 AND state NOT IN (?5, ?6)
+                           )",
+                        rusqlite::params![
+                            repository::sync_status::SYNCED,
+                            item.file_id,
+                            item.local_path,
+                            repository::sync_status::FAILED,
+                            i32::from(TransferState::Completed),
+                            i32::from(TransferState::Canceled),
+                        ],
+                    )
+                    .map_err(|error| AppError::generic(format!("恢复文件失败状态失败：{error}")))?;
+                reconciliation.healed += updated;
+                if updated == 0 {
+                    reconciliation.transfer_blocked += 1;
+                }
+            } else {
+                reconciliation.baseline_changed += 1;
+            }
+        }
+
+        for item in items.iter().filter(|item| {
+            !local.contains_key(&item.local_path) && !cloud.contains_key(&item.local_path)
+        }) {
+            let deleted = transaction
+                .execute(
+                    "DELETE FROM sync_items
+                     WHERE local_path=?1
+                       AND NOT EXISTS (
+                           SELECT 1 FROM transfer_queue
+                           WHERE relative_path=?1 AND state NOT IN (?2, ?3)
+                       )",
+                    rusqlite::params![
+                        item.local_path,
+                        i32::from(TransferState::Completed),
+                        i32::from(TransferState::Canceled),
+                    ],
+                )
+                .map_err(|error| AppError::generic(format!("清理残余基线失败：{error}")))?;
+            reconciliation.purged += deleted;
+            if deleted == 0 {
+                reconciliation.transfer_blocked += 1;
+                reconciliation.stale_transfer_blocked += 1;
+            }
+        }
+        reconciliation.remaining_failed = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM sync_items WHERE status=?1",
+                rusqlite::params![repository::sync_status::FAILED],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|error| AppError::generic(format!("统计剩余失败状态失败：{error}")))?
+            as usize;
+        transaction
+            .commit()
+            .map_err(|error| AppError::generic(format!("提交失败状态复核事务失败：{error}")))?;
+        tracing::debug!(
+            healed = reconciliation.healed,
+            purged = reconciliation.purged,
+            remaining_failed = reconciliation.remaining_failed,
+            pending_id = reconciliation.pending_id,
+            missing_side = reconciliation.missing_side,
+            id_mismatch = reconciliation.id_mismatch,
+            type_conflict = reconciliation.type_conflict,
+            baseline_changed = reconciliation.baseline_changed,
+            transfer_blocked = reconciliation.transfer_blocked,
+            stale_transfer_blocked = reconciliation.stale_transfer_blocked,
+            "失败状态复核完成"
+        );
+        Ok(reconciliation)
+    }
+
     /// §2.8 改名检测：本地新文件若 xattr 含已知 fileId → 改名而非 upload+delete。
     /// 通过 xattr 匹配"本地新文件"与"缺失原路径的 DB 记录"，调用 update 同步改名到云端
     /// （先于内容同步），避免先删后传导致云端短暂不可用。
@@ -3578,50 +3777,6 @@ impl SyncEngine {
         }
     }
 
-    /// 清理残余 DB 记录：删除 local 和 cloud 都不再存在的 DB 行。
-    /// planner 不再为"双方都删了"生成 DeleteFromCloud（避免无意义的 404 API 调用），
-    /// 改为每轮 sync cycle 末尾统一在此清理。
-    fn purge_stale_db_records(
-        &self,
-        local: &HashMap<String, crate::mount::manager::LocalFileEntry>,
-        cloud: &HashMap<String, crate::drive::models::DriveFile>,
-    ) -> AppResult<()> {
-        let conn = self.db.lock();
-        // 收集 local 和 cloud 都缺失但 DB 有的路径
-        let stale: Vec<String> = {
-            let mut stmt = conn
-                .prepare("SELECT local_path FROM sync_items")
-                .map_err(|error| AppError::generic(format!("准备残余基线清理失败：{error}")))?;
-            let rows = stmt
-                .query_map([], |row| row.get::<_, String>(0))
-                .map_err(|error| AppError::generic(format!("查询残余基线失败：{error}")))?;
-            rows.collect::<Result<Vec<_>, _>>()
-                .map_err(|error| AppError::generic(format!("读取残余基线失败：{error}")))?
-                .into_iter()
-                .filter(|p| !local.contains_key(p) && !cloud.contains_key(p))
-                .collect()
-        };
-        if stale.is_empty() {
-            return Ok(());
-        }
-        let transaction = conn
-            .unchecked_transaction()
-            .map_err(|error| AppError::generic(format!("开始残余基线清理事务失败：{error}")))?;
-        for path in &stale {
-            transaction
-                .execute(
-                    "DELETE FROM sync_items WHERE local_path=?1",
-                    rusqlite::params![path],
-                )
-                .map_err(|error| AppError::generic(format!("清理残余基线失败：{error}")))?;
-        }
-        transaction
-            .commit()
-            .map_err(|error| AppError::generic(format!("提交残余基线清理失败：{error}")))?;
-        tracing::info!(count = stale.len(), "清理残余 DB 记录（双方都已不存在）");
-        Ok(())
-    }
-
     pub async fn retry_failed(&self) -> AppResult<()> {
         self.run_sync_cycle("retry-failed").await
     }
@@ -3955,7 +4110,9 @@ mod tests {
     use crate::drive::files_api::FilesApi;
     use crate::drive::models::DriveFile;
     use crate::drive::upload_api::UploadApi;
+    use crate::mount::manager::LocalFileEntry;
     use crate::sync::state::{ActionResult, SyncAction, SyncActionType};
+    use std::collections::HashMap;
     use tempfile::tempdir;
 
     struct SchedulerBackend {
@@ -7148,6 +7305,645 @@ mod tests {
             status: repository::sync_status::FAILED,
             error_message: Some("old sync failure".into()),
         }
+    }
+
+    #[tokio::test]
+    async fn no_action_cycle_broadcasts_healed_folder_failure() {
+        let (mut engine, db) = build_engine();
+        let mount_dir = tempfile::tempdir().unwrap();
+        let relative_path = "工作/已收敛目录";
+        std::fs::create_dir_all(mount_dir.path().join(relative_path)).unwrap();
+        engine.set_mount(std::sync::Arc::new(
+            crate::mount::manager::MountManager::new(mount_dir.path()),
+        ));
+
+        let mut failed = failed_sync_item(relative_path);
+        failed.file_id = "folder-id".into();
+        failed.name = "已收敛目录".into();
+        failed.is_folder = false;
+        repository::upsert(&db.lock(), &failed).unwrap();
+        engine.cloud_tree.lock().insert(
+            relative_path.into(),
+            DriveFile {
+                id: "folder-id".into(),
+                name: "已收敛目录".into(),
+                category: crate::drive::models::FileCategory::Folder,
+                parent_folder: Some(vec!["parent-id".into()]),
+                ..Default::default()
+            },
+        );
+        engine.set_cloud_tree_trusted(true);
+        let planned_db_entry = std::sync::Arc::new(std::sync::Mutex::new(None));
+        engine.set_planning_snapshot_observer_for_test({
+            let planned_db_entry = planned_db_entry.clone();
+            let relative_path = relative_path.to_string();
+            std::sync::Arc::new(move |snapshot| {
+                *planned_db_entry.lock().unwrap() = snapshot.db.get(&relative_path).cloned();
+            })
+        });
+
+        let mut state_rx = engine.state_receiver();
+        let before = engine.recompute_and_broadcast_state().unwrap();
+        assert_eq!(before.failed, 1);
+        assert_eq!(before.failed_items.len(), 1);
+        assert_eq!(state_rx.try_recv().unwrap().revision, before.revision);
+
+        engine.run_sync_cycle_inner("local-watcher").await.unwrap();
+
+        let healed = repository::find_by_file_id(&db.lock(), "folder-id")
+            .unwrap()
+            .unwrap();
+        assert_eq!(healed.status, repository::sync_status::SYNCED);
+        assert_eq!(healed.error_message, None);
+        assert!(healed.is_folder);
+        let planned_db_entry = planned_db_entry.lock().unwrap().clone().unwrap();
+        assert_eq!(planned_db_entry.status, repository::sync_status::SYNCED);
+        assert!(planned_db_entry.is_folder);
+        let snapshot = state_rx.try_recv().unwrap();
+        assert_eq!(snapshot.failed, 0);
+        assert!(snapshot.failed_items.is_empty());
+        assert!(snapshot.revision > before.revision);
+        assert!(!snapshot.content_changed);
+        assert_eq!(engine.current_state().revision, snapshot.revision);
+    }
+
+    #[test]
+    fn converged_folder_failure_is_automatically_healed() {
+        let (engine, db) = build_engine();
+        let relative_path = "工作/已收敛目录";
+        let mut failed = failed_sync_item(relative_path);
+        failed.file_id = "folder-id".into();
+        failed.is_folder = false;
+        repository::upsert(&db.lock(), &failed).unwrap();
+
+        let local = HashMap::from([(
+            relative_path.to_string(),
+            LocalFileEntry {
+                absolute_path: std::path::PathBuf::from("/mount/工作/已收敛目录"),
+                relative_path: relative_path.into(),
+                size: 128,
+                mtime: 4_444,
+                is_folder: true,
+                is_placeholder: false,
+            },
+        )]);
+        let cloud = HashMap::from([(
+            relative_path.to_string(),
+            DriveFile {
+                id: "folder-id".into(),
+                name: "已收敛目录".into(),
+                category: crate::drive::models::FileCategory::Folder,
+                parent_folder: Some(vec!["parent-id".into()]),
+                ..Default::default()
+            },
+        )]);
+
+        assert_eq!(
+            engine
+                .reconcile_failed_and_purge_stale_records(&local, &cloud)
+                .unwrap()
+                .healed,
+            1,
+        );
+        let healed = repository::find_by_file_id(&db.lock(), "folder-id")
+            .unwrap()
+            .unwrap();
+        assert_eq!(healed.status, repository::sync_status::SYNCED);
+        assert_eq!(healed.error_message, None);
+        assert!(healed.is_folder);
+        assert_eq!(healed.local_mtime, Some(4_444));
+        assert_eq!(healed.sha256, None);
+    }
+
+    #[test]
+    fn failed_healing_rolls_back_when_later_stale_delete_fails() {
+        let (engine, db) = build_engine();
+        let healed_path = "工作/已收敛目录";
+        let stale_path = "missing/stale.txt";
+        let mut failed = failed_sync_item(healed_path);
+        failed.file_id = "folder-id".into();
+        failed.is_folder = false;
+        let mut stale = failed_sync_item(stale_path);
+        stale.file_id = "stale-id".into();
+        repository::upsert(&db.lock(), &failed).unwrap();
+        repository::upsert(&db.lock(), &stale).unwrap();
+        db.lock()
+            .execute_batch(
+                "CREATE TRIGGER fail_stale_delete
+                 BEFORE DELETE ON sync_items
+                 WHEN OLD.local_path = 'missing/stale.txt'
+                 BEGIN
+                     SELECT RAISE(ABORT, 'forced stale delete failure');
+                 END;",
+            )
+            .unwrap();
+
+        let local = HashMap::from([(
+            healed_path.to_string(),
+            LocalFileEntry {
+                absolute_path: std::path::PathBuf::from("/mount/工作/已收敛目录"),
+                relative_path: healed_path.into(),
+                size: 128,
+                mtime: 4_444,
+                is_folder: true,
+                is_placeholder: false,
+            },
+        )]);
+        let cloud = HashMap::from([(
+            healed_path.to_string(),
+            DriveFile {
+                id: "folder-id".into(),
+                name: "已收敛目录".into(),
+                category: crate::drive::models::FileCategory::Folder,
+                ..Default::default()
+            },
+        )]);
+
+        let result = engine.reconcile_failed_and_purge_stale_records(&local, &cloud);
+
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("forced stale delete failure"));
+        let preserved_failed = repository::find_by_file_id(&db.lock(), "folder-id")
+            .unwrap()
+            .unwrap();
+        assert_eq!(preserved_failed.status, repository::sync_status::FAILED);
+        assert_eq!(
+            preserved_failed.error_message.as_deref(),
+            Some("old sync failure")
+        );
+        assert!(repository::find_by_file_id(&db.lock(), "stale-id")
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn untrusted_checkpoint_preserves_failed_and_stale_records() {
+        let (mut engine, db) = build_engine();
+        let mount_dir = tempfile::tempdir().unwrap();
+        let failed_path = "工作/未可信目录";
+        let stale_path = "missing/stale.txt";
+        std::fs::create_dir_all(mount_dir.path().join(failed_path)).unwrap();
+        engine.set_mount(std::sync::Arc::new(
+            crate::mount::manager::MountManager::new(mount_dir.path()),
+        ));
+        let mut failed = failed_sync_item(failed_path);
+        failed.file_id = "folder-id".into();
+        let mut stale = failed_sync_item(stale_path);
+        stale.file_id = "stale-id".into();
+        repository::upsert(&db.lock(), &failed).unwrap();
+        repository::upsert(&db.lock(), &stale).unwrap();
+        engine.cloud_tree.lock().insert(
+            failed_path.into(),
+            DriveFile {
+                id: "folder-id".into(),
+                name: "未可信目录".into(),
+                category: crate::drive::models::FileCategory::Folder,
+                ..Default::default()
+            },
+        );
+        engine.set_cloud_tree_trusted(false);
+
+        engine.run_sync_cycle_inner("local-watcher").await.unwrap();
+
+        let preserved = repository::find_by_file_id(&db.lock(), "folder-id")
+            .unwrap()
+            .unwrap();
+        assert_eq!(preserved.status, repository::sync_status::FAILED);
+        assert_eq!(preserved.error_message.as_deref(), Some("old sync failure"));
+        assert!(repository::find_by_file_id(&db.lock(), "stale-id")
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn cloud_id_mismatch_preserves_failed_record() {
+        let (engine, db) = build_engine();
+        let relative_path = "工作/ID不一致目录";
+        let mut failed = failed_sync_item(relative_path);
+        failed.file_id = "db-folder-id".into();
+        repository::upsert(&db.lock(), &failed).unwrap();
+        let local = HashMap::from([(
+            relative_path.to_string(),
+            LocalFileEntry {
+                absolute_path: std::path::PathBuf::from("/mount/工作/ID不一致目录"),
+                relative_path: relative_path.into(),
+                size: 0,
+                mtime: 4_444,
+                is_folder: true,
+                is_placeholder: false,
+            },
+        )]);
+        let cloud = HashMap::from([(
+            relative_path.to_string(),
+            DriveFile {
+                id: "cloud-folder-id".into(),
+                name: "ID不一致目录".into(),
+                category: crate::drive::models::FileCategory::Folder,
+                ..Default::default()
+            },
+        )]);
+
+        let reconciliation = engine
+            .reconcile_failed_and_purge_stale_records(&local, &cloud)
+            .unwrap();
+        assert_eq!(reconciliation.healed, 0);
+        assert_eq!(reconciliation.id_mismatch, 1);
+        assert_eq!(reconciliation.remaining_failed, 1);
+        let preserved = repository::find_by_file_id(&db.lock(), "db-folder-id")
+            .unwrap()
+            .unwrap();
+        assert_eq!(preserved.status, repository::sync_status::FAILED);
+        assert_eq!(preserved.error_message.as_deref(), Some("old sync failure"));
+    }
+
+    #[test]
+    fn local_cloud_type_conflict_preserves_failed_record() {
+        let variants = [(true, false), (false, true)];
+        let mut actual = Vec::new();
+
+        for (local_is_folder, cloud_is_folder) in variants {
+            let (engine, db) = build_engine();
+            let relative_path = "工作/类型冲突";
+            let failed = failed_sync_item(relative_path);
+            repository::upsert(&db.lock(), &failed).unwrap();
+            let local = HashMap::from([(
+                relative_path.to_string(),
+                LocalFileEntry {
+                    absolute_path: std::path::PathBuf::from("/mount/工作/类型冲突"),
+                    relative_path: relative_path.into(),
+                    size: 222,
+                    mtime: 1_111,
+                    is_folder: local_is_folder,
+                    is_placeholder: false,
+                },
+            )]);
+            let cloud = HashMap::from([(
+                relative_path.to_string(),
+                DriveFile {
+                    id: failed.file_id.clone(),
+                    name: "类型冲突".into(),
+                    category: if cloud_is_folder {
+                        crate::drive::models::FileCategory::Folder
+                    } else {
+                        crate::drive::models::FileCategory::Document
+                    },
+                    size: failed.size,
+                    edited_time: chrono::DateTime::<chrono::Utc>::from_timestamp_millis(2_222),
+                    ..Default::default()
+                },
+            )]);
+
+            let reconciliation = engine
+                .reconcile_failed_and_purge_stale_records(&local, &cloud)
+                .unwrap();
+            assert_eq!(reconciliation.type_conflict, 1);
+            let status = repository::find_by_file_id(&db.lock(), &failed.file_id)
+                .unwrap()
+                .unwrap()
+                .status;
+            actual.push((
+                local_is_folder,
+                cloud_is_folder,
+                reconciliation.healed,
+                status,
+            ));
+        }
+
+        let expected = variants.map(|(local_is_folder, cloud_is_folder)| {
+            (
+                local_is_folder,
+                cloud_is_folder,
+                0,
+                repository::sync_status::FAILED,
+            )
+        });
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn unsettled_transfer_preserves_legacy_folder_failure() {
+        let (engine, db) = build_engine();
+        let relative_path = "工作/legacy目录";
+        let mut failed = failed_sync_item(relative_path);
+        failed.file_id = "folder-id".into();
+        failed.is_folder = false;
+        let mut task = failed_transfer_task(Some(relative_path));
+        task.file_id = Some("folder-id".into());
+        repository::upsert(&db.lock(), &failed).unwrap();
+        repository::insert_transfer(&db.lock(), &task).unwrap();
+        let local = HashMap::from([(
+            relative_path.to_string(),
+            LocalFileEntry {
+                absolute_path: std::path::PathBuf::from("/mount/工作/legacy目录"),
+                relative_path: relative_path.into(),
+                size: 0,
+                mtime: 4_444,
+                is_folder: true,
+                is_placeholder: false,
+            },
+        )]);
+        let cloud = HashMap::from([(
+            relative_path.to_string(),
+            DriveFile {
+                id: "folder-id".into(),
+                name: "legacy目录".into(),
+                category: crate::drive::models::FileCategory::Folder,
+                ..Default::default()
+            },
+        )]);
+
+        let reconciliation = engine
+            .reconcile_failed_and_purge_stale_records(&local, &cloud)
+            .unwrap();
+        assert_eq!(reconciliation.healed, 0);
+        assert_eq!(reconciliation.transfer_blocked, 1);
+        assert_eq!(reconciliation.stale_transfer_blocked, 0);
+        let preserved = repository::find_by_file_id(&db.lock(), "folder-id")
+            .unwrap()
+            .unwrap();
+        assert_eq!(preserved.status, repository::sync_status::FAILED);
+        assert_eq!(preserved.error_message.as_deref(), Some("old sync failure"));
+    }
+
+    fn converged_file_entries(
+        relative_path: &str,
+    ) -> (HashMap<String, LocalFileEntry>, HashMap<String, DriveFile>) {
+        let local = HashMap::from([(
+            relative_path.to_string(),
+            LocalFileEntry {
+                absolute_path: std::path::PathBuf::from(format!("/mount/{relative_path}")),
+                relative_path: relative_path.into(),
+                size: 222,
+                mtime: 1_111,
+                is_folder: false,
+                is_placeholder: false,
+            },
+        )]);
+        let cloud = HashMap::from([(
+            relative_path.to_string(),
+            DriveFile {
+                id: "baseline-file-id".into(),
+                name: "retry.txt".into(),
+                category: crate::drive::models::FileCategory::Document,
+                size: 333,
+                edited_time: chrono::DateTime::<chrono::Utc>::from_timestamp_millis(2_222),
+                ..Default::default()
+            },
+        )]);
+        (local, cloud)
+    }
+
+    const UNSETTLED_TRANSFER_STATES: [crate::sync::transfer_state::TransferState; 7] = [
+        crate::sync::transfer_state::TransferState::Pending,
+        crate::sync::transfer_state::TransferState::Running,
+        crate::sync::transfer_state::TransferState::WaitingForNetwork,
+        crate::sync::transfer_state::TransferState::BackingOff,
+        crate::sync::transfer_state::TransferState::VerifyingRemote,
+        crate::sync::transfer_state::TransferState::RestartRequired,
+        crate::sync::transfer_state::TransferState::Failed,
+    ];
+    const SETTLED_TRANSFER_STATES: [crate::sync::transfer_state::TransferState; 2] = [
+        crate::sync::transfer_state::TransferState::Completed,
+        crate::sync::transfer_state::TransferState::Canceled,
+    ];
+
+    #[test]
+    fn unchanged_file_failure_is_automatically_healed() {
+        let (engine, db) = build_engine();
+        let relative_path = "folder/retry.txt";
+        let before = failed_sync_item(relative_path);
+        repository::upsert(&db.lock(), &before).unwrap();
+        let (local, cloud) = converged_file_entries(relative_path);
+
+        assert_eq!(
+            engine
+                .reconcile_failed_and_purge_stale_records(&local, &cloud)
+                .unwrap()
+                .healed,
+            1,
+        );
+        let healed = repository::find_by_file_id(&db.lock(), &before.file_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(healed.status, repository::sync_status::SYNCED);
+        assert_eq!(healed.error_message, None);
+        assert_eq!(healed.parent_folder_id, before.parent_folder_id);
+        assert_eq!(healed.name, before.name);
+        assert_eq!(healed.is_folder, before.is_folder);
+        assert_eq!(healed.size, before.size);
+        assert_eq!(healed.local_size, before.local_size);
+        assert_eq!(healed.sha256, before.sha256);
+        assert_eq!(healed.local_mtime, before.local_mtime);
+        assert_eq!(healed.cloud_edited_time, before.cloud_edited_time);
+        assert_eq!(healed.last_sync_time, before.last_sync_time);
+    }
+
+    #[test]
+    fn ambiguous_file_failure_is_preserved() {
+        let variants = ["missing-baseline-edited-time", "missing-cloud-edited-time"];
+        let mut actual = Vec::new();
+
+        for variant in variants {
+            let (engine, db) = build_engine();
+            let relative_path = "folder/retry.txt";
+            let mut before = failed_sync_item(relative_path);
+            let (local, mut cloud) = converged_file_entries(relative_path);
+            match variant {
+                "missing-baseline-edited-time" => before.cloud_edited_time = None,
+                "missing-cloud-edited-time" => {
+                    cloud.get_mut(relative_path).unwrap().edited_time = None
+                }
+                _ => unreachable!(),
+            }
+            repository::upsert(&db.lock(), &before).unwrap();
+
+            let healed = engine
+                .reconcile_failed_and_purge_stale_records(&local, &cloud)
+                .unwrap()
+                .healed;
+            let preserved = repository::find_by_file_id(&db.lock(), &before.file_id)
+                .unwrap()
+                .unwrap();
+            actual.push((variant, healed, preserved.status, preserved.error_message));
+        }
+
+        let expected = variants.map(|variant| {
+            (
+                variant,
+                0,
+                repository::sync_status::FAILED,
+                Some("old sync failure".to_string()),
+            )
+        });
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn changed_or_placeholder_file_failure_is_preserved() {
+        let variants = [
+            "placeholder",
+            "missing-local-size",
+            "changed-local-size",
+            "missing-local-mtime",
+            "changed-local-mtime",
+            "changed-cloud-size",
+            "changed-cloud-edited-time",
+        ];
+        let mut actual = Vec::new();
+
+        for variant in variants {
+            let (engine, db) = build_engine();
+            let relative_path = "folder/retry.txt";
+            let mut before = failed_sync_item(relative_path);
+            let (mut local, mut cloud) = converged_file_entries(relative_path);
+            match variant {
+                "placeholder" => local.get_mut(relative_path).unwrap().is_placeholder = true,
+                "missing-local-size" => before.local_size = None,
+                "changed-local-size" => local.get_mut(relative_path).unwrap().size += 1,
+                "missing-local-mtime" => before.local_mtime = None,
+                "changed-local-mtime" => local.get_mut(relative_path).unwrap().mtime += 1,
+                "changed-cloud-size" => cloud.get_mut(relative_path).unwrap().size += 1,
+                "changed-cloud-edited-time" => {
+                    cloud.get_mut(relative_path).unwrap().edited_time =
+                        chrono::DateTime::<chrono::Utc>::from_timestamp_millis(2_223)
+                }
+                _ => unreachable!(),
+            }
+            repository::upsert(&db.lock(), &before).unwrap();
+
+            let healed = engine
+                .reconcile_failed_and_purge_stale_records(&local, &cloud)
+                .unwrap()
+                .healed;
+            let preserved = repository::find_by_file_id(&db.lock(), &before.file_id)
+                .unwrap()
+                .unwrap();
+            actual.push((variant, healed, preserved.status, preserved.error_message));
+        }
+
+        let expected = variants.map(|variant| {
+            (
+                variant,
+                0,
+                repository::sync_status::FAILED,
+                Some("old sync failure".to_string()),
+            )
+        });
+        assert_eq!(actual, expected);
+    }
+
+    fn reconcile_file_failure_with_transfer(
+        state: crate::sync::transfer_state::TransferState,
+    ) -> (usize, i32) {
+        let (engine, db) = build_engine();
+        let relative_path = "folder/retry.txt";
+        let before = failed_sync_item(relative_path);
+        let mut task = failed_transfer_task(Some(relative_path));
+        task.state = state.into();
+        repository::upsert(&db.lock(), &before).unwrap();
+        repository::insert_transfer(&db.lock(), &task).unwrap();
+        let (local, cloud) = converged_file_entries(relative_path);
+
+        let healed = engine
+            .reconcile_failed_and_purge_stale_records(&local, &cloud)
+            .unwrap()
+            .healed;
+        let status = repository::find_by_file_id(&db.lock(), &before.file_id)
+            .unwrap()
+            .unwrap()
+            .status;
+        (healed, status)
+    }
+
+    #[test]
+    fn unsettled_transfer_blocks_failure_healing() {
+        let states = UNSETTLED_TRANSFER_STATES;
+        let actual = states.map(|state| {
+            let (healed, status) = reconcile_file_failure_with_transfer(state);
+            (state, healed, status)
+        });
+        let expected = states.map(|state| (state, 0, repository::sync_status::FAILED));
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn completed_and_canceled_transfer_history_do_not_block_healing() {
+        let states = SETTLED_TRANSFER_STATES;
+        let actual = states.map(|state| {
+            let (healed, status) = reconcile_file_failure_with_transfer(state);
+            (state, healed, status)
+        });
+        let expected = states.map(|state| (state, 1, repository::sync_status::SYNCED));
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn trusted_absence_purges_stale_failed_root_and_descendants() {
+        let (engine, db) = build_engine();
+        let root = failed_sync_item("missing");
+        let mut child = failed_sync_item("missing/child.txt");
+        child.file_id = "child-id".into();
+        child.status = repository::sync_status::SYNCED;
+        child.error_message = None;
+        repository::upsert(&db.lock(), &root).unwrap();
+        repository::upsert(&db.lock(), &child).unwrap();
+
+        assert_eq!(
+            engine
+                .reconcile_failed_and_purge_stale_records(&HashMap::new(), &HashMap::new())
+                .unwrap()
+                .purged,
+            2,
+        );
+        assert!(repository::load_all(&db.lock()).unwrap().is_empty());
+    }
+
+    fn purge_stale_record_with_transfer(
+        state: crate::sync::transfer_state::TransferState,
+    ) -> (usize, usize, usize) {
+        let (engine, db) = build_engine();
+        let relative_path = "missing/retry.txt";
+        let before = failed_sync_item(relative_path);
+        let mut task = failed_transfer_task(Some(relative_path));
+        task.state = state.into();
+        repository::upsert(&db.lock(), &before).unwrap();
+        repository::insert_transfer(&db.lock(), &task).unwrap();
+
+        let reconciliation = engine
+            .reconcile_failed_and_purge_stale_records(&HashMap::new(), &HashMap::new())
+            .unwrap();
+        let remaining = repository::load_all(&db.lock()).unwrap().len();
+        (
+            reconciliation.purged,
+            remaining,
+            reconciliation.stale_transfer_blocked,
+        )
+    }
+
+    #[test]
+    fn unsettled_transfer_blocks_stale_record_purge() {
+        let states = UNSETTLED_TRANSFER_STATES;
+        let actual = states.map(|state| {
+            let (purged, remaining, stale_transfer_blocked) =
+                purge_stale_record_with_transfer(state);
+            (state, purged, remaining, stale_transfer_blocked)
+        });
+        let expected = states.map(|state| (state, 0, 1, 1));
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn completed_and_canceled_transfer_history_do_not_block_stale_record_purge() {
+        let states = SETTLED_TRANSFER_STATES;
+        let actual = states.map(|state| {
+            let (purged, remaining, stale_transfer_blocked) =
+                purge_stale_record_with_transfer(state);
+            (state, purged, remaining, stale_transfer_blocked)
+        });
+        let expected = states.map(|state| (state, 1, 0, 0));
+        assert_eq!(actual, expected);
     }
 
     fn failed_transfer_task(relative_path: Option<&str>) -> repository::TransferTask {

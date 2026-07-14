@@ -14,6 +14,7 @@ import {
 } from "@/api/transfer";
 import { useSyncStore } from "@/stores/sync";
 import { useTransferStore } from "@/stores/transfer";
+import { MateDialog } from "@/components/mate";
 import SyncStatusBar from "./SyncStatusBar.vue";
 import TransferPopover from "./TransferPopover.vue";
 
@@ -203,5 +204,59 @@ describe("SyncStatusBar 活动态与失败事实", () => {
 
     expect(wrapper.text()).toContain("同步失败 1");
     expect(wrapper.text()).not.toContain("历史失败 3");
+  });
+
+  it("权威快照清空失败后自动关闭失败详情并显示同步完成", async () => {
+    // 同步状态 store
+    const sync = useSyncStore();
+    sync.applyState({
+      revision: 1,
+      total: 1,
+      completed: 0,
+      uploading: 0,
+      downloading: 0,
+      waiting_network: 0,
+      failed: 1,
+      transfer_failed: 0,
+      failed_items: [{ relative_path: "failed.txt", error_message: "sync failed" }],
+      conflict: 0,
+      editing: 0,
+      is_running: false,
+      last_sync_time: null,
+      is_indexing: false,
+      indexing_scanned_folders: 0,
+      indexing_discovered_items: 0,
+      content_changed: false,
+    });
+
+    // 同步状态条包装器
+    const wrapper = shallowMount(SyncStatusBar);
+    await wrapper.find(".tag--error").trigger("click");
+
+    expect(wrapper.findComponent(MateDialog).props("open")).toBe(true);
+
+    sync.applyState({
+      revision: 2,
+      total: 1,
+      completed: 1,
+      uploading: 0,
+      downloading: 0,
+      waiting_network: 0,
+      failed: 0,
+      transfer_failed: 0,
+      failed_items: [],
+      conflict: 0,
+      editing: 0,
+      is_running: false,
+      last_sync_time: null,
+      is_indexing: false,
+      indexing_scanned_folders: 0,
+      indexing_discovered_items: 0,
+      content_changed: false,
+    });
+    await wrapper.vm.$nextTick();
+
+    expect(wrapper.findComponent(MateDialog).props("open")).toBe(false);
+    expect(wrapper.text()).toContain("同步完成");
   });
 });
