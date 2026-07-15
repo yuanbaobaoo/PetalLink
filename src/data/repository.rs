@@ -53,7 +53,6 @@ pub mod transfer_direction {
     /// 首次从云端下载。
     pub const DOWNLOAD: i32 = 1;
     /// 删除目标资源。
-    #[allow(dead_code)]
     pub const DELETE: i32 = 2;
     /// 云端新版本覆盖本地已有文件（语义为「更新」，区别于首次拉取的 DOWNLOAD）。
     /// 仅同步引擎的 Download 动作在本地已有真实内容时使用；与 DOWNLOAD 共享下载执行路径。

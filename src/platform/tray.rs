@@ -80,7 +80,7 @@ fn build_menu(app: &AppHandle<Wry>) -> tauri::Result<Menu<Wry>> {
     let version_item = MenuItem::with_id(
         app,
         "version",
-        "PetalLink - 华为云盘 Mac 客户端开源版 v1.0",
+        "PetalLink - 华为云盘 Mac 客户端开源版",
         false,
         None::<&str>,
     )?;

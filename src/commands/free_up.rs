@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 
 use crate::data::repository;
@@ -9,6 +10,32 @@ use crate::error::{AppError, AppResult};
 use crate::sync::state::FreeUpCheckResult;
 
 use super::{mount, sync_engine, try_sync_engine, DB, FILES_API};
+
+/// 可释放空间候选项（基于 DB 基线枚举，实际释放前再逐项安全核验）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FreeableItem {
+    /// 云端文件 ID
+    pub file_id: String,
+    /// 相对挂载目录的路径
+    pub rel_path: String,
+    /// 文件名
+    pub name: String,
+    /// 本地已下载字节数
+    pub size: i64,
+}
+
+/// 批量释放空间结果统计。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FreeUpBatchResult {
+    /// 成功释放的文件数
+    pub freed_count: usize,
+    /// 因不满足条件被跳过的文件数
+    pub skipped_count: usize,
+    /// 成功释放的总字节数
+    pub freed_bytes: i64,
+    /// 被跳过项的错误原因（与跳过项一一对应，便于前端提示）
+    pub errors: Vec<String>,
+}
 
 /// 检查文件是否可安全释放本地空间。
 #[tauri::command]
@@ -127,6 +154,7 @@ pub async fn sync_free_up_space(
 ) -> AppResult<()> {
     let engine = sync_engine()?;
     let m = mount()?;
+    // 校验前端传入的绝对路径与 rel_path 一致，避免路径错配释放错误文件。
     let frontend_rel = crate::core::paths::relative_path_from_mount(
         m.mount_dir(),
         &std::path::PathBuf::from(&local_path),
@@ -136,6 +164,30 @@ pub async fn sync_free_up_space(
             "释放空间路径不一致：rel_path={rel_path}, local_path={local_path}"
         )));
     }
+    free_up_one(&engine, &m, &file_id, &rel_path, size).await?;
+    Ok(())
+}
+
+/// 释放单个已同步文件的本地空间：安全核验通过后把原文件替换为占位符。
+///
+/// 所有前置条件（可信云树、本地非占位、基线一致、远端核验、无活动传输）与原子 staging/回滚
+/// 逻辑均集中在此，供单文件命令与目录批量释放复用。返回成功释放的字节数。
+///
+/// - `engine` 同步引擎，提供可信云树与路径租约
+/// - `m` 挂载管理器，用于占位符创建
+/// - `file_id` 云端文件 ID
+/// - `rel_path` 相对挂载目录的路径
+/// - `size` 预期本地字节数（与基线核验）
+async fn free_up_one(
+    engine: &crate::sync::engine::SyncEngine,
+    m: &crate::mount::manager::MountManager,
+    file_id: &str,
+    rel_path: &str,
+    size: i64,
+) -> AppResult<i64> {
+    // 转为拥有所有权的 String，使下游 baseline/staging/DB 等处的引用与格式化写法保持一致。
+    let file_id = file_id.to_string();
+    let rel_path = rel_path.to_string();
     let lp = crate::core::paths::safe_join_under(m.mount_dir(), &rel_path, false)?;
     let _path_lease = engine.begin_exclusive_path_activity(&rel_path)?;
 
@@ -341,7 +393,94 @@ pub async fn sync_free_up_space(
         )));
     }
 
-    Ok(())
+    // 实际释放的字节数（供批量释放统计）
+    Ok(source_size)
+}
+
+/// 枚举目录（含子树）下可释放空间的文件候选项。
+///
+/// 仅基于 DB 成功同步基线筛选 status=SYNCED 且非目录的记录，供前端弹窗预览；
+/// 实际释放前由 `free_up_one` 逐项重新核验，避免预览与释放之间状态漂移造成误释放。
+/// 路径匹配用精确前缀加路径分隔符边界，避免 `docs` 误匹配 `docs-backup` 这类同级异名目录。
+///
+/// - `folder_rel_path` 目录相对挂载根的路径，传空串表示从根枚举
+#[tauri::command]
+pub fn sync_list_freeable_in_folder(folder_rel_path: String) -> AppResult<Vec<FreeableItem>> {
+    let conn = DB.lock();
+    // 根目录（空路径）枚举全部 SYNCED 文件；子目录用「等于自身 或 以「dir/」为前缀」匹配，
+    // 带分隔符边界杜绝 `docs` 误匹配 `docs-backup` 这类同级异名。
+    let rows: Vec<repository::SyncItem> = if folder_rel_path.is_empty() {
+        let mut stmt = conn
+            .prepare("SELECT * FROM sync_items WHERE status=?1 AND is_folder=0")
+            .map_err(|error| AppError::generic(format!("查询可释放候选项失败：{error}")))?;
+        let collected = stmt
+            .query_map(
+                rusqlite::params![repository::sync_status::SYNCED],
+                repository::SyncItem::from_row,
+            )
+            .map_err(|error| AppError::generic(format!("读取可释放候选项失败：{error}")))?;
+        collected
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| AppError::generic(format!("解析可释放候选项失败：{error}")))?
+    } else {
+        let prefix = format!("{folder_rel_path}/");
+        let mut stmt = conn
+            .prepare(
+                "SELECT * FROM sync_items
+                 WHERE status=?1 AND is_folder=0
+                   AND (local_path=?2 OR substr(local_path, 1, length(?3))=?3)",
+            )
+            .map_err(|error| AppError::generic(format!("查询可释放候选项失败：{error}")))?;
+        let collected = stmt
+            .query_map(
+                rusqlite::params![repository::sync_status::SYNCED, folder_rel_path, prefix,],
+                repository::SyncItem::from_row,
+            )
+            .map_err(|error| AppError::generic(format!("读取可释放候选项失败：{error}")))?;
+        collected
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| AppError::generic(format!("解析可释放候选项失败：{error}")))?
+    };
+    Ok(rows
+        .into_iter()
+        .map(|record| FreeableItem {
+            file_id: record.file_id,
+            rel_path: record.local_path,
+            name: record.name,
+            size: record.local_size.unwrap_or(0),
+        })
+        .collect())
+}
+
+/// 批量释放多个文件的本地空间，逐项独立执行。
+///
+/// 单项失败（如并发改动、远端版本漂移）只记录原因并跳过，不中断整体释放；
+/// 每项独立持有路径租约，互不阻塞。返回成功/跳过计数与释放总字节。
+///
+/// - `items` 由前端弹窗确认的可释放候选项清单
+#[tauri::command]
+pub async fn sync_free_up_batch(items: Vec<FreeableItem>) -> AppResult<FreeUpBatchResult> {
+    let engine = sync_engine()?;
+    let m = mount()?;
+    let mut result = FreeUpBatchResult {
+        freed_count: 0,
+        skipped_count: 0,
+        freed_bytes: 0,
+        errors: Vec::new(),
+    };
+    for item in items {
+        match free_up_one(&engine, &m, &item.file_id, &item.rel_path, item.size).await {
+            Ok(bytes) => {
+                result.freed_count += 1;
+                result.freed_bytes += bytes;
+            }
+            Err(error) => {
+                result.skipped_count += 1;
+                result.errors.push(format!("{}：{}", item.name, error));
+            }
+        }
+    }
+    Ok(result)
 }
 
 /// 按需下载占位文件。

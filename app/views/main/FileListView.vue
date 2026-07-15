@@ -127,6 +127,15 @@ const showPropsDialog = ref(false);
 // 属性目标文件
 const propsTarget = ref<DriveFile | null>(null);
 
+// 释放空间预览对话框状态
+const showFreeUpDialog = ref(false);
+// 释放空间预览候选项（用户确认后据此批量执行）
+const freeUpPreviewItems = ref<syncApi.FreeableItem[]>([]);
+// 释放空间预览执行中标记
+const freeUpConfirmLoading = ref(false);
+// 释放空间预览候选项总字节数
+const freeUpTotalBytes = computed(() => freeUpPreviewItems.value.reduce((sum, it) => sum + it.size, 0));
+
 // 批量文件同步状态缓存（fileId → "synced" | "placeholder" | "not_synced" | "folder"）
 const fileStatuses = ref<Record<string, string>>({});
 
@@ -381,11 +390,15 @@ async function handleSyncFile(f: DriveFile): Promise<void> {
  */
 async function handleShowActionMenu(e: MouseEvent, f: DriveFile): Promise<void> {
   e.preventDefault();
-  // 释放空间仅对已同步到本地（有真实内容、非占位）的文件显示：打开菜单前查一次
-  // check_safe_free_up=="safe"。文件夹不支持释放空间（后端为文件级），故跳过。
+  // 释放空间：文件夹只要挂载已配置即可（后端会递归枚举可释放文件）；
+  // 单文件需 check_safe_free_up=="safe"（已下载、非占位、无活动传输）才显示。
   let canFreeUp = false;
-  if (sync.mountConfigured && !driveApi.isFolder(f)) {
-    try { canFreeUp = await syncApi.checkSafeFreeUp(relPathOf(f), f.id) === "safe"; } catch {}
+  if (sync.mountConfigured) {
+    if (driveApi.isFolder(f)) {
+      canFreeUp = true;
+    } else {
+      try { canFreeUp = await syncApi.checkSafeFreeUp(relPathOf(f), f.id) === "safe"; } catch {}
+    }
   }
   contextMenu.value = { show: true, x: e.clientX, y: e.clientY, file: f, canFreeUp };
   nextTick(clampMenuToViewport);
@@ -478,10 +491,22 @@ async function handleDelete(f: DriveFile): Promise<void> {
     content,
   });
   if (!ok) return;
-  await fileOp.runAction(
-    { errorPrefix: "删除", successToast: "已删除" },
-    () => driveApi.deleteFile(f.id),
-  );
+  // 手动处理而非 runAction，以区分「真删除失败」与「文件已删但留痕失败」。
+  try {
+    await driveApi.deleteFile(f.id, f.name);
+    showToast("已删除");
+  } catch (e) {
+    // 错误信息
+    const msg = extractErrorMessage(e);
+    if (msg.startsWith(driveApi.DELETE_TRACE_ERROR_PREFIX)) {
+      // 文件已删除，仅传输记录未写入
+      showToast(`已删除「${f.name}」，但传输记录未写入`, { variant: "warning" });
+    } else {
+      showToast(`删除失败：${msg}`, { variant: "error" });
+    }
+  } finally {
+    await browser.refresh();
+  }
 }
 
 /**
@@ -492,22 +517,53 @@ async function handleDelete(f: DriveFile): Promise<void> {
 async function handleFreeUpSpace(f: DriveFile): Promise<void> {
   closeMenu();
   if (!fileOp.guard()) return;
-  const result = await syncApi.checkSafeFreeUp(relPathOf(f), f.id);
-  if (result === "not_in_cloud") {
-    showToast("云端不存在此文件，已阻止释放", { variant: "error" }); return;
+  // 文件夹递归枚举子树可释放文件；单文件只取自身（后端按 SYNCED 基线过滤）
+  try {
+    // 可释放候选清单（文件夹递归、单文件取自身）
+    const items = await syncApi.listFreeableInFolder(relPathOf(f));
+    if (items.length === 0) {
+      showToast(driveApi.isFolder(f) ? "该目录下没有可释放的文件" : "该文件未同步到本地，无可释放项", { variant: "warning" });
+      return;
+    }
+    freeUpPreviewItems.value = items;
+    showFreeUpDialog.value = true;
+  } catch (e) {
+    showToast("查询可释放文件失败：" + extractErrorMessage(e), { variant: "error" });
   }
-  if (result === "not_synced") {
-    showToast("本地有未上传修改，请等待同步完成后再释放", { variant: "warning" }); return;
+}
+
+/**
+ * 确认释放预览弹窗中的候选项：逐项释放，统计结果
+ */
+async function handleConfirmFreeUp(): Promise<void> {
+  if (freeUpPreviewItems.value.length === 0) return;
+  // 待释放候选项快照（确认期间预览不变）
+  const items = [...freeUpPreviewItems.value];
+  freeUpConfirmLoading.value = true;
+  try {
+    // 批量释放结果（成功/跳过计数与原因）
+    const result = await syncApi.freeUpBatch(items);
+    // 跳过项附带前若干条原因，便于用户定位未释放文件。
+    const skipDetail = result.skippedCount > 0 && result.errors.length > 0
+      ? `\n跳过 ${result.skippedCount} 项：\n${result.errors.slice(0, 5).join("\n")}${result.errors.length > 5 ? `\n…等 ${result.errors.length} 条` : ""}`
+      : (result.skippedCount > 0 ? `\n跳过 ${result.skippedCount} 项` : "");
+    showToast(
+      result.freedCount > 0
+        ? `已释放 ${result.freedCount} 项（${formatFileSize(result.freedBytes)}）${skipDetail}`
+        : `没有文件被释放（可能已被同步状态变更）${skipDetail}`,
+      // 有跳过项时即使部分成功也用 warning，避免用户误认为全部完成
+      { variant: result.freedCount > 0 && result.skippedCount === 0 ? "success" : "warning" },
+    );
+    showFreeUpDialog.value = false;
+    freeUpPreviewItems.value = [];
+    // 批量释放场景需清空选中
+    if (checked.value.size > 0) checked.value.clear();
+    await browser.refresh();
+  } catch (e) {
+    showToast("释放空间失败：" + extractErrorMessage(e), { variant: "error" });
+  } finally {
+    freeUpConfirmLoading.value = false;
   }
-  const ok = await confirmDialog({
-    title: "释放空间", titleIcon: "cloud", danger: true, confirmText: "释放",
-    content: `确定释放「${f.name}」的本地空间吗？文件内容将从本地删除，仅保留云端占位。`,
-  });
-  if (!ok) return;
-  await fileOp.runAction(
-    { errorPrefix: "释放空间", successToast: "已释放空间" },
-    () => syncApi.freeUpSpace(f.id, relPathOf(f), `${mountDir.value}/${relPathOf(f)}`, f.name, f.size),
-  );
 }
 
 /**
@@ -536,16 +592,53 @@ async function handleBulkDelete(): Promise<void> {
       content,
     });
     if (!ok) return;
-    // 批量循环：逐项删除，统计成功数（失败项静默跳过）
-    let n = 0;
-    const ok2 = await fileOp.runAction(
+    // 批量循环：逐项删除。留痕失败（文件已删但记录未写入）算删除成功，单独统计；
+    // 其他错误才是真失败。所有失败项收集原因并展示，不静默吞错。
+    // 已删除文件数（含留痕失败）
+    let deletedCount = 0;
+    // 留痕失败项数（文件已删但传输记录未写入）
+    let traceFailedCount = 0;
+    // 真正删除失败的项（文件未删）
+    const failedItems: string[] = [];
+    // 留痕失败的项名（提示用户记录缺失）
+    const traceFailedItems: string[] = [];
+    await fileOp.runAction(
       { errorPrefix: "批量删除", refreshAfter: true, clearSelectionAfter: true },
       async () => {
-        for (const id of checked.value) { try { await driveApi.deleteFile(id); n++; } catch { /* 部分失败静默 */ } }
+        for (const f of sortedFiles.value) {
+          if (!checked.value.has(f.id)) continue;
+          try {
+            await driveApi.deleteFile(f.id, f.name);
+            deletedCount++;
+          } catch (e) {
+            // 错误信息
+            const msg = extractErrorMessage(e);
+            if (msg.startsWith(driveApi.DELETE_TRACE_ERROR_PREFIX)) {
+              // 留痕失败：文件已删，仅记录未写入
+              deletedCount++;
+              traceFailedCount++;
+              traceFailedItems.push(f.name);
+            } else {
+              failedItems.push(`${f.name}：${msg}`);
+            }
+          }
+        }
       },
     );
-    void ok2;
-    showToast(`已删除 ${n} 项`);
+    // 失败详情（真失败 + 留痕失败分别提示）
+    const failDetail = failedItems.length > 0
+      ? `\n删除失败 ${failedItems.length} 项：\n${failedItems.slice(0, 5).join("\n")}${failedItems.length > 5 ? `\n…等 ${failedItems.length} 条` : ""}`
+      : "";
+    // 留痕失败详情（展示具体文件名，让用户知道哪些缺记录）
+    const traceDetail = traceFailedCount > 0
+      ? `\n${traceFailedCount} 项已删除但传输记录未写入：\n${traceFailedItems.slice(0, 5).join("\n")}${traceFailedItems.length > 5 ? `\n…等 ${traceFailedItems.length} 项` : ""}`
+      : "";
+    // 真删除失败或留痕失败时都用 warning（传输记录缺失也是需关注的状态）
+    const hasIssue = failedItems.length > 0 || traceFailedCount > 0;
+    showToast(
+      `已删除 ${deletedCount} 项${failDetail}${traceDetail}`,
+      { variant: hasIssue ? "warning" : "success" },
+    );
   });
 }
 
@@ -577,31 +670,34 @@ async function handleBulkFreeUp(): Promise<void> {
   await runBulkFreeUp(async () => {
     if (checked.value.size === 0) return;
     if (!fileOp.guard()) return;
-    const ok = await confirmDialog({
-      title: "批量释放空间", titleIcon: "cloud", danger: true, confirmText: "释放",
-      content: `确定释放选中的 ${checked.value.size} 项的本地空间吗？（未同步到本地的将自动跳过）`,
-    });
-    if (!ok) return;
-    let freed = 0, skipped = 0;
-    await fileOp.runAction(
-      { errorPrefix: "批量释放空间", refreshAfter: true, clearSelectionAfter: true },
-      async () => {
-        for (const f of sortedFiles.value) {
-          if (!checked.value.has(f.id) || driveApi.isFolder(f)) continue;
-          try {
-            // 仅释放已同步到本地（safe）的文件，占位/未下载自动跳过
-            if (await syncApi.checkSafeFreeUp(relPathOf(f), f.id) !== "safe") { skipped++; continue; }
-            await syncApi.freeUpSpace(f.id, relPathOf(f), `${mountDir.value}/${relPathOf(f)}`, f.name, f.size);
-            freed++;
-          } catch { skipped++; }
-        }
-      },
-    );
-    showToast(
-      freed > 0
-        ? `已释放 ${freed} 项${skipped ? `，跳过 ${skipped} 项（未同步到本地）` : ""}`
-        : `选中的文件均未同步到本地，无可释放项`
-    );
+    // 逐个选中项枚举可释放候选项（文件取自身、目录递归子树），合并进同一预览弹窗。
+    // 枚举失败收集原因：全部失败时报错；部分失败时预览弹窗提示清单可能不完整。
+    // 合并后的全部可释放候选清单
+    const all: syncApi.FreeableItem[] = [];
+    // 枚举失败项的原因（用于部分失败提示）
+    const enumErrors: string[] = [];
+    for (const f of sortedFiles.value) {
+      if (!checked.value.has(f.id)) continue;
+      try {
+        // 当前选中项的可释放候选
+        const items = await syncApi.listFreeableInFolder(relPathOf(f));
+        all.push(...items);
+      } catch (e) {
+        enumErrors.push(`${f.name}：${extractErrorMessage(e)}`);
+      }
+    }
+    if (all.length === 0) {
+      const reason = enumErrors.length > 0
+        ? `无可释放项，且 ${enumErrors.length} 项枚举失败：\n${enumErrors.slice(0, 3).join("\n")}`
+        : "选中的项均未同步到本地，无可释放项";
+      showToast(reason, { variant: "warning" });
+      return;
+    }
+    if (enumErrors.length > 0) {
+      showToast(`部分目录枚举失败（${enumErrors.length} 项），预览清单可能不完整`, { variant: "warning" });
+    }
+    freeUpPreviewItems.value = all;
+    showFreeUpDialog.value = true;
   });
 }
 
@@ -742,6 +838,27 @@ function handleSort(field: "name" | "size" | "modifiedTime"): void {
         <span class="dl-name">{{ downloading.name }}</span>
       </div>
     </MateDialog>
+
+    <!-- 释放空间预览对话框 -->
+    <MateDialog :open="showFreeUpDialog" title="释放空间" title-icon="cloud" danger :close-on-overlay="!freeUpConfirmLoading" @update:open="(v) => (showFreeUpDialog = v)">
+      <div class="freeup-pane">
+        <p class="freeup-summary">
+          共 {{ freeUpPreviewItems.length }} 项，可释放
+          <strong>{{ formatFileSize(freeUpTotalBytes) }}</strong>
+        </p>
+        <div class="freeup-list">
+          <div v-for="it in freeUpPreviewItems" :key="it.fileId" class="freeup-row">
+            <MateIcon name="file" :size="14" />
+            <span class="freeup-row__name" :title="it.name">{{ it.name }}</span>
+            <span class="freeup-row__size">{{ formatFileSize(it.size) }}</span>
+          </div>
+        </div>
+      </div>
+      <template #footer>
+        <MateButton variant="text" :disabled="freeUpConfirmLoading" @click="showFreeUpDialog = false">取消</MateButton>
+        <MateButton variant="primary" icon="cloud" :loading="freeUpConfirmLoading" @click="handleConfirmFreeUp">确认释放</MateButton>
+      </template>
+    </MateDialog>
   </div>
 </template>
 
@@ -810,4 +927,12 @@ function handleSort(field: "name" | "size" | "modifiedTime"): void {
 /* 下载进度 */
 .dl-pane { display: flex; align-items: center; gap: var(--space-md); }
 .dl-name { font-size: var(--font-body); color: var(--text-primary); }
+
+/* 释放空间预览 */
+.freeup-pane { display: flex; flex-direction: column; gap: var(--space-sm); }
+.freeup-summary { font-size: var(--font-body-sm); color: var(--text-secondary); margin: 0; }
+.freeup-list { max-height: 280px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+.freeup-row { display: flex; align-items: center; gap: var(--space-xs); padding: 4px 0; font-size: var(--font-body-sm); color: var(--text-primary); }
+.freeup-row__name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.freeup-row__size { flex-shrink: 0; color: var(--text-secondary); }
 </style>

@@ -156,6 +156,8 @@ pub fn run() {
             commands::sync_check_file_local_status,
             commands::sync_batch_file_status,
             commands::sync_free_up_space,
+            commands::sync_free_up_batch,
+            commands::sync_list_freeable_in_folder,
             commands::sync_download_on_demand,
             commands::sync_folder_recursive,
             commands::sync_retry_failed,

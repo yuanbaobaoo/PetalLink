@@ -2,13 +2,13 @@
 
 use std::collections::HashMap;
 
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
 
-use crate::data::repository;
+use crate::data::repository::{self, transfer_direction, TransferTask};
 use crate::drive::about_api::AboutApi;
 use crate::drive::models::{DriveAbout, DriveFile, FileListResult};
 use crate::error::{AppError, AppResult};
-use crate::sync::transfer_state::TransferState;
+use crate::sync::transfer_state::{TransferOperation, TransferState};
 
 use super::{
     emit_folder_content_changed, mount, sync_engine, try_sync_engine, DB, DRIVE_CLIENT, FILES_API,
@@ -113,7 +113,7 @@ fn ensure_no_db_path_collision(old_root: &str, new_root: &str) -> AppResult<()> 
 
 /// 删除云盘文件并结算本地同步状态。
 #[tauri::command]
-pub async fn drive_delete_file(app: AppHandle, id: String) -> AppResult<()> {
+pub async fn drive_delete_file(app: AppHandle, id: String, name: Option<String>) -> AppResult<()> {
     // 索引中（云端树 BFS 重建）：删除会与索引并发改云端，且 cloud_tree 不完整
     // 无法正确反映删除后的状态 → 拒绝，等索引完成。
     ensure_not_indexing()?;
@@ -169,8 +169,8 @@ pub async fn drive_delete_file(app: AppHandle, id: String) -> AppResult<()> {
             }
         }
     }
-    if let Some(record) = local_info {
-        let local_path = record.local_path;
+    if let Some(record) = local_info.as_ref() {
+        let local_path = record.local_path.clone();
         let is_folder = record.is_folder;
         let mount = mount()?;
         let absolute_path =
@@ -240,7 +240,74 @@ pub async fn drive_delete_file(app: AppHandle, id: String) -> AppResult<()> {
             engine.add_recently_deleted(&local_path);
         }
     }
+    // 文件已删除，先刷新文件列表（无论留痕是否成功，删除结果都已落地）。
     emit_folder_content_changed(&app);
+    // 留痕：写入 Completed 删除记录使传输队列可见。留痕失败时返回错误（带固定前缀，
+    // 前端据此区分「文件未删」与「文件已删但记录未写入」）；不进入 TaskRunner 执行体系。
+    record_completed_delete(&DB.lock(), &id, name.as_deref(), local_info.as_ref())?;
+    // 留痕写入成功后广播传输队列变化，使已打开的传输面板实时刷新出删除记录。
+    let _ = app.emit("transfer_update", ());
+    Ok(())
+}
+
+/// 留痕失败错误的稳定标识符，前端据此区分「文件未删」（真失败）与「文件已删但记录未写入」。
+/// 必须与 app/api/drive.ts 的 DELETE_TRACE_ERROR_PREFIX 保持完全一致，改动任一侧需同步另一侧。
+pub(crate) const DELETE_TRACE_ERROR_PREFIX: &str = "TRACE_FAILED:";
+
+/// 删除成功后写入一条 Completed 删除记录到传输队列，仅作历史可见性，不进入 TaskRunner 执行体系。
+///
+/// 仅负责 DB 写入与修剪；留痕失败时返回带 `DELETE_TRACE_ERROR_PREFIX` 前缀的错误，
+/// 让前端区分两种失败。广播 transfer_update 由调用处负责。
+fn record_completed_delete(
+    conn: &rusqlite::Connection,
+    file_id: &str,
+    fallback_name: Option<&str>,
+    local_info: Option<&repository::SyncItem>,
+) -> AppResult<()> {
+    let now = chrono::Utc::now().timestamp_millis();
+    let relative_path = local_info.map(|record| record.local_path.clone());
+    // 名称优先级：DB 基线 > 命令传入（前端已知文件名）> fileId 兜底。
+    let name = local_info
+        .map(|record| record.name.clone())
+        .or_else(|| fallback_name.map(str::to_string))
+        .unwrap_or_else(|| file_id.to_string());
+    let task = TransferTask {
+        id: 0,
+        direction: transfer_direction::DELETE,
+        file_id: Some(file_id.to_string()),
+        local_path: None,
+        name,
+        total_size: 0,
+        transferred: 0,
+        state: i32::from(TransferState::Completed),
+        error_message: None,
+        created_at: now,
+        finished_at: Some(now),
+        server_id: None,
+        upload_id: None,
+        resume_offset: 0,
+        session_url: None,
+        relative_path,
+        parent_file_id: None,
+        operation: Some(i32::from(TransferOperation::Delete)),
+        source_mtime: None,
+        source_size: None,
+        expected_cloud_edited_time: None,
+        attempt_count: 0,
+        next_retry_at: None,
+        error_kind: None,
+        remote_result_file_id: None,
+        state_revision: 0,
+    };
+    if let Err(error) = repository::insert_transfer(conn, &task) {
+        return Err(AppError::generic(format!(
+            "{DELETE_TRACE_ERROR_PREFIX}文件已删除，但传输记录写入失败：{error}"
+        )));
+    }
+    // 修剪历史（保留最近 100 条已结束任务），与同步执行器一致；失败仅记录不阻断。
+    if let Err(error) = repository::prune_transfer_history(conn, 100) {
+        tracing::warn!(file_id, %error, "修剪传输历史失败，不影响删除留痕");
+    }
     Ok(())
 }
 
@@ -757,4 +824,71 @@ fn ensure_not_indexing() -> AppResult<()> {
         ));
     }
     Ok(())
+}
+
+/// 删除留痕的私有 DB 合同测试。record_completed_delete 依赖私有函数与内存 DB，
+/// 无法通过公开接口覆盖，按 coding-rules 第四章「确实依赖私有实现」例外保留在 src 内。
+/// 前后端前缀一致性合同由 app/api/drive.contract.test.ts 跨语言校验。
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 用正式迁移建表的内存数据库，确保 transfer_queue schema 与生产一致。
+    fn open_test_db() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::data::migrations::run(&conn).unwrap();
+        conn
+    }
+
+    /// 无同步基线时，留痕 name 回退为传入的 fallback_name，relative_path 为空。
+    #[test]
+    fn delete_trace_uses_fallback_name_without_baseline() {
+        let conn = open_test_db();
+        record_completed_delete(&conn, "file-A", Some("report.pdf"), None).unwrap();
+        let record = &repository::list_all_transfers(&conn).unwrap()[0];
+        assert_eq!(record.name, "report.pdf");
+        assert_eq!(record.relative_path, None);
+        assert_eq!(record.direction, transfer_direction::DELETE);
+        assert_eq!(record.state, i32::from(TransferState::Completed));
+    }
+
+    /// 有同步基线时，留痕 name 与 relative_path 取自基线（优先于 fallback）。
+    #[test]
+    fn delete_trace_prefers_baseline_over_fallback() {
+        let conn = open_test_db();
+        let baseline = repository::SyncItem {
+            file_id: "file-B".to_string(),
+            local_path: "docs/b.txt".to_string(),
+            parent_folder_id: None,
+            name: "b.txt".to_string(),
+            is_folder: false,
+            size: 0,
+            local_size: Some(0),
+            sha256: None,
+            local_mtime: None,
+            cloud_edited_time: None,
+            last_sync_time: None,
+            status: repository::sync_status::SYNCED,
+            error_message: None,
+        };
+        repository::upsert(&conn, &baseline).unwrap();
+        record_completed_delete(&conn, "file-B", Some("ignored"), Some(&baseline)).unwrap();
+        let record = &repository::list_all_transfers(&conn).unwrap()[0];
+        assert_eq!(record.name, "b.txt");
+        assert_eq!(record.relative_path.as_deref(), Some("docs/b.txt"));
+    }
+
+    /// 留痕写入失败（transfer_queue 表缺失模拟 DB 异常）时，必须返回带固定前缀的错误，
+    /// 前端据此区分「文件未删」与「文件已删但记录未写入」。此测试锁定该核心合同。
+    #[test]
+    fn delete_trace_insert_failure_returns_prefixed_error() {
+        // 未建表的连接：insert_transfer 会因表不存在失败。
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let result = record_completed_delete(&conn, "file-C", Some("c.txt"), None);
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.starts_with(DELETE_TRACE_ERROR_PREFIX),
+            "留痕失败错误必须以 {DELETE_TRACE_ERROR_PREFIX} 开头，实际：{error}"
+        );
+    }
 }

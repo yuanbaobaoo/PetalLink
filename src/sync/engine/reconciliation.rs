@@ -456,8 +456,17 @@ impl SyncEngine {
             crate::core::paths::expand_tilde(&self.mount_dir.lock().clone().unwrap_or_default());
         let mut renamed_sources = std::collections::HashSet::new();
         let mut superseded_cloud_paths = std::collections::HashSet::new();
+        let mut deferred_replacement_sources = std::collections::HashSet::new();
         for action in actions.iter_mut() {
-            if action.action_type != SyncActionType::Upload || action.file_id.is_some() {
+            // 接纳两类候选：上传新文件（Upload，file_id 为空），以及孤儿占位符删除
+            // （DeleteFromLocal + file_id 为空）。Finder 改名的纯占位符（0 字节）会被
+            // planner 判为孤儿占位符 → DeleteFromLocal，但它仍带 XATTR_FILE_ID，
+            // 借此可识别为同一文件的改名。合法的云端驱动 DeleteFromLocal 带 file_id，不会误命中。
+            let is_orphan_placeholder_delete =
+                action.action_type == SyncActionType::DeleteFromLocal && action.file_id.is_none();
+            if !(action.action_type == SyncActionType::Upload || is_orphan_placeholder_delete)
+                || action.file_id.is_some()
+            {
                 continue;
             }
             let local_path = match &action.local_path {
@@ -483,18 +492,41 @@ impl SyncEngine {
             else {
                 continue;
             };
-            // 旧文件仍在本地 → 复制（非改名）：新文件应作为全新上传，
-            // 不能复用旧 fileId 走 update/rename 路径（否则云端文件被移动/覆盖）。
-            // 同时清除新文件上的旧 xattr fileId，避免下轮又被误判为改名。
+            // 只有旧路径仍携带同一 fileId 才能证明是复制；旧路径若已被其他文件占用，
+            // 仍应把携带稳定身份的新路径识别为移动，随后由下一周期处理旧路径的新文件。
             let old_abs = std::path::PathBuf::from(&mount_dir).join(&old_record.local_path);
             match std::fs::symlink_metadata(&old_abs) {
                 Ok(_) => {
-                    let _ = xattr::remove(&local_path, XATTR_FILE_ID);
+                    let old_owner = match xattr::get(&old_abs, XATTR_FILE_ID) {
+                        Ok(owner) => owner,
+                        Err(error) => {
+                            tracing::warn!(
+                                old = %old_record.local_path,
+                                new = action.relative_path.as_deref().unwrap_or("?"),
+                                %error,
+                                "无法核验旧路径身份，拒绝执行远端改名/移动"
+                            );
+                            continue;
+                        }
+                    };
+                    if old_owner.as_deref() == Some(fid.as_bytes()) {
+                        let _ = xattr::remove(&local_path, XATTR_FILE_ID);
+                        tracing::info!(
+                            old = %old_record.local_path,
+                            new = action.relative_path.as_deref().unwrap_or("?"),
+                            "复制检测（旧路径仍属于同一 fileId），已清除新文件旧 xattr"
+                        );
+                        continue;
+                    }
                     tracing::info!(
                         old = %old_record.local_path,
                         new = action.relative_path.as_deref().unwrap_or("?"),
-                        "复制检测（旧文件仍在本地），已清除新文件旧 xattr，按全新文件上传");
-                    continue;
+                        "旧路径已被其他文件占用，按稳定 fileId 继续识别为移动"
+                    );
+                    // 旧路径的新文件不能在本周期继续用原 fileId 覆盖上传；移动结算后触发的
+                    // 下一轮重扫会在旧基线清除后把它规划为全新上传。
+                    deferred_replacement_sources
+                        .insert((old_record.local_path.clone(), fid.clone()));
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => {
@@ -551,6 +583,13 @@ impl SyncEngine {
 
         // fileId 证明为同一文件后，移除旧路径及其删除祖先，避免与移动并发回收目标文件。
         actions.retain(|action| {
+            if let (Some(path), Some(file_id)) =
+                (action.relative_path.as_ref(), action.file_id.as_ref())
+            {
+                if deferred_replacement_sources.contains(&(path.clone(), file_id.clone())) {
+                    return false;
+                }
+            }
             if action.action_type == SyncActionType::CreatePlaceholder {
                 if let (Some(path), Some(file_id)) =
                     (action.relative_path.as_ref(), action.file_id.as_ref())

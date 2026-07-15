@@ -106,13 +106,18 @@ export function createFolder(name: string, parentId?: string): Promise<DriveFile
   return invoke<DriveFile>("drive_create_folder", { name, parentId: parentId || null });
 }
 
+// 留痕失败错误标识符（与后端 src/commands/drive.rs 的 DELETE_TRACE_ERROR_PREFIX 完全一致），
+// 前端据此区分「文件未删」与「文件已删但记录未写入」。改动任一侧必须同步另一侧。
+export const DELETE_TRACE_ERROR_PREFIX = "TRACE_FAILED:";
+
 /**
  * 删除文件（软删除进回收站）
  *
  * @param id - 文件 ID
+ * @param name - 文件名（无本地基线时用于传输队列留痕显示，可选）
  */
-export function deleteFile(id: string): Promise<void> {
-  return invoke<void>("drive_delete_file", { id });
+export function deleteFile(id: string, name?: string): Promise<void> {
+  return invoke<void>("drive_delete_file", { id, name });
 }
 
 /**

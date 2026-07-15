@@ -148,6 +148,48 @@ export function freeUpSpace(
   return invoke<void>("sync_free_up_space", { fileId, relPath, localPath, name, size });
 }
 
+/** 可释放空间候选项（文件名、相对路径、大小） */
+export interface FreeableItem {
+  // 文件 ID
+  fileId: string;
+  // 相对挂载目录的路径
+  relPath: string;
+  // 文件名
+  name: string;
+  // 本地已下载字节数
+  size: number;
+}
+
+/** 批量释放空间结果统计 */
+export interface FreeUpBatchResult {
+  // 成功释放的文件数
+  freedCount: number;
+  // 因不满足条件被跳过的文件数
+  skippedCount: number;
+  // 成功释放的总字节数
+  freedBytes: number;
+  // 被跳过项的错误原因
+  errors: string[];
+}
+
+/**
+ * 枚举目录（含子树）下可释放空间的文件候选项
+ *
+ * @param folderRelPath - 目录相对路径，传空串表示从根枚举
+ */
+export function listFreeableInFolder(folderRelPath: string): Promise<FreeableItem[]> {
+  return invoke<FreeableItem[]>("sync_list_freeable_in_folder", { folderRelPath });
+}
+
+/**
+ * 批量释放多个文件的本地空间，逐项独立执行
+ *
+ * @param items - 经用户确认的可释放候选项清单
+ */
+export function freeUpBatch(items: FreeableItem[]): Promise<FreeUpBatchResult> {
+  return invoke<FreeUpBatchResult>("sync_free_up_batch", { items });
+}
+
 /**
  * 按需下载单个文件到本地
  *
