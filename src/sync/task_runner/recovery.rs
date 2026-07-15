@@ -34,9 +34,10 @@ impl TaskRunner {
             return Ok(TaskRecoverySummary::default());
         }
         let tasks = self.list_states(&[TransferState::VerifyingRemote])?;
-        let now = (self.now_ms)();
         let mut summary = TaskRecoverySummary::default();
         for task in tasks {
+            // 核验可能串行执行较久，逐任务取时钟，避免本轮处理中跨过 deadline 后仍被跳过。
+            let now = (self.now_ms)();
             if task
                 .next_retry_at
                 .is_some_and(|next_retry_at| next_retry_at > now)

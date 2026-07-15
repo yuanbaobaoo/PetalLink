@@ -1,7 +1,7 @@
 //! TaskRunner 远端结果核验恢复的集成测试。
 
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -317,6 +317,113 @@ async fn future_verification_deadline_skips_remote_check() {
     assert_eq!(persisted.0, i32::from(TransferState::VerifyingRemote));
     assert_eq!(persisted.1, Some(NOW_MS + 1));
     assert_eq!(persisted.2, 0);
+}
+
+/// 首轮错过 deadline 的任务在后续恢复入口中必须无需状态通知即可完成核验。
+#[tokio::test]
+async fn overdue_verification_progresses_on_next_recovery_pass() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mount_root, local_path) = create_local_source(&temp);
+    let database = open_database(&temp.path().join("state.db"));
+    let task_id = insert_task(&database.lock(), &verifying_task(&local_path, NOW_MS + 1));
+    let active_activities = Arc::new(AtomicUsize::new(0));
+    let begin_calls = Arc::new(AtomicUsize::new(0));
+    let verification_calls = Arc::new(AtomicUsize::new(0));
+    let operations = Arc::new(CommittedOperations {
+        cloud_file: committed_cloud_file(),
+        verification_calls: verification_calls.clone(),
+        active_activities: active_activities.clone(),
+    });
+    let clock = Arc::new(AtomicI64::new(NOW_MS));
+    let runner_clock = clock.clone();
+    let runner = TaskRunner::new_with_clock(
+        database.clone(),
+        mount_root,
+        operations,
+        Arc::new(|| true),
+        Arc::new(|| Ok(())),
+        None,
+        Arc::new(move || runner_clock.load(Ordering::SeqCst)),
+    );
+    runner.set_activity_gate(Arc::new(CountingActivityGate {
+        active_activities: active_activities.clone(),
+        begin_calls: begin_calls.clone(),
+    }));
+
+    let first = runner.resume_verifying().await.unwrap();
+    clock.store(NOW_MS + 1, Ordering::SeqCst);
+    let second = runner.resume_verifying().await.unwrap();
+
+    assert_eq!(first.completed, 0);
+    assert_eq!(second.completed, 1);
+    assert_eq!(verification_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(begin_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(active_activities.load(Ordering::SeqCst), 0);
+    let state: i32 = database
+        .lock()
+        .query_row(
+            "SELECT state FROM transfer_queue WHERE id=?1",
+            [task_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(state, i32::from(TransferState::Completed));
+}
+
+/// 同一恢复周期处理中跨过后续任务 deadline 时，后续任务必须在本轮继续核验。
+#[tokio::test]
+async fn verification_rechecks_clock_for_each_task() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mount_root, local_path) = create_local_source(&temp);
+    let database = open_database(&temp.path().join("state.db"));
+    let mut first_task = verifying_task(&local_path, NOW_MS);
+    first_task.created_at = 2;
+    let first_task_id = insert_task(&database.lock(), &first_task);
+    let mut second_task = verifying_task(&local_path, NOW_MS + 1);
+    second_task.created_at = 1;
+    let second_task_id = insert_task(&database.lock(), &second_task);
+    let active_activities = Arc::new(AtomicUsize::new(0));
+    let begin_calls = Arc::new(AtomicUsize::new(0));
+    let verification_calls = Arc::new(AtomicUsize::new(0));
+    let operations = Arc::new(CommittedOperations {
+        cloud_file: committed_cloud_file(),
+        verification_calls: verification_calls.clone(),
+        active_activities: active_activities.clone(),
+    });
+    let clock = Arc::new(AtomicI64::new(NOW_MS));
+    let runner_clock = clock.clone();
+    let runner = TaskRunner::new_with_clock(
+        database.clone(),
+        mount_root,
+        operations,
+        Arc::new(|| true),
+        Arc::new(|| Ok(())),
+        None,
+        Arc::new(move || runner_clock.fetch_add(1, Ordering::SeqCst)),
+    );
+    runner.set_activity_gate(Arc::new(CountingActivityGate {
+        active_activities: active_activities.clone(),
+        begin_calls: begin_calls.clone(),
+    }));
+
+    let summary = runner.resume_verifying().await.unwrap();
+
+    assert_eq!(summary.completed, 2);
+    assert_eq!(summary.recovered_cloud_files.len(), 2);
+    assert_eq!(verification_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(begin_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(active_activities.load(Ordering::SeqCst), 0);
+    let connection = database.lock();
+    for task_id in [first_task_id, second_task_id] {
+        let state: i32 = connection
+            .query_row(
+                "SELECT state FROM transfer_queue WHERE id=?1",
+                [task_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, i32::from(TransferState::Completed));
+    }
 }
 
 /// 到期且远端已提交时，任务与同步基线必须在路径许可内原子结算并返回云端结果。

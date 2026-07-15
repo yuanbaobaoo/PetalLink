@@ -5,6 +5,33 @@ use std::sync::atomic::Ordering;
 use super::coordination::{network_listener_loop, watcher_listener_loop, TaskRunnerActivityGate};
 use super::*;
 
+/// 到期任务未推进时的兜底复查间隔，防止只等待状态通知而永久休眠。
+const BLOCKED_DEADLINE_RECHECK_INTERVAL: Duration = Duration::from_secs(1);
+
+/// 等待调度状态变化或兜底复查时间；关闭时返回 `false`，其余情况返回 `true`。
+async fn wait_for_schedule_change_or_recheck(
+    shutdown: &mut tokio::sync::watch::Receiver<bool>,
+    backoff_changed: &tokio::sync::Notify,
+    schedule_revision: &AtomicU64,
+    observed_revision: u64,
+) -> bool {
+    let fallback = tokio::time::sleep(BLOCKED_DEADLINE_RECHECK_INTERVAL);
+    tokio::pin!(fallback);
+    loop {
+        tokio::select! {
+            changed = shutdown.changed() => {
+                return changed.is_ok() && !*shutdown.borrow();
+            }
+            _ = backoff_changed.notified() => {
+                if schedule_revision.load(Ordering::Acquire) != observed_revision {
+                    return true;
+                }
+            }
+            _ = &mut fallback => return true,
+        }
+    }
+}
+
 impl SyncEngine {
     #[allow(clippy::too_many_arguments)]
     /// 创建尚未绑定挂载目录与执行器的同步引擎。
@@ -420,17 +447,17 @@ impl SyncEngine {
                                 .is_some_and(|next| next <= task_runner.current_time_ms());
                             if still_blocked {
                                 let observed = engine.schedule_revision.load(Ordering::Acquire);
-                                loop {
-                                    tokio::select! {
-                                        changed = shutdown.changed() => {
-                                            if changed.is_err() || *shutdown.borrow() { return; }
-                                        }
-                                        _ = engine.backoff_changed.notified() => {
-                                            if engine.schedule_revision.load(Ordering::Acquire) != observed {
-                                                break;
-                                            }
-                                        }
-                                    }
+                                // 周期可能在任务 deadline 前开始、在 deadline 后结束；此时任务没有
+                                // 状态变化可供通知，必须用有界定时器复查，同时避免立即热循环。
+                                if !wait_for_schedule_change_or_recheck(
+                                    &mut shutdown,
+                                    &engine.backoff_changed,
+                                    &engine.schedule_revision,
+                                    observed,
+                                )
+                                .await
+                                {
+                                    return;
                                 }
                             }
                             continue;
