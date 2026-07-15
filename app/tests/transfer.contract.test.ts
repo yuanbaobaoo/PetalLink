@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import rustTransferStateSource from "../../src/sync/transfer_state.rs?raw";
-import { TRANSFER_STATE } from "./transfer";
+import { TRANSFER_STATE } from "@/api/transfer";
 
 function rustTransferStateDiscriminants(): Record<string, number> {
   const enumBody = rustTransferStateSource.match(

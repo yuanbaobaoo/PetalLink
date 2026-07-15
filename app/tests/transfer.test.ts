@@ -7,7 +7,7 @@ import {
   type TransferState,
   type TransferTask,
 } from "@/api/transfer";
-import { useTransferStore } from "./transfer";
+import { useTransferStore } from "@/stores/transfer";
 
 function task(id: number, state: TransferState): TransferTask {
   return {

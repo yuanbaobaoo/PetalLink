@@ -15,8 +15,8 @@ import {
 import { useSyncStore } from "@/stores/sync";
 import { useTransferStore } from "@/stores/transfer";
 import { MateDialog } from "@/components/mate";
-import SyncStatusBar from "./SyncStatusBar.vue";
-import TransferPopover from "./TransferPopover.vue";
+import SyncStatusBar from "@/views/main/SyncStatusBar.vue";
+import TransferPopover from "@/views/main/TransferPopover.vue";
 
 function task(
   id: number,

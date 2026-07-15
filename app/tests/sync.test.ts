@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import type { SyncGlobalState } from "@/api/sync";
-import { useSyncStore } from "./sync";
+import { useSyncStore } from "@/stores/sync";
 
 function snapshot(overrides: Partial<SyncGlobalState> = {}): SyncGlobalState {
   return {

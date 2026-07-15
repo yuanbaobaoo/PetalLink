@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import rustDriveSource from "../../src/commands/drive.rs?raw";
-import { DELETE_TRACE_ERROR_PREFIX } from "./drive";
+import { DELETE_TRACE_ERROR_PREFIX } from "@/api/drive";
 
 /// 从 Rust 源码提取 DELETE_TRACE_ERROR_PREFIX 常量值，锁定前后端机器合同。
 function rustDeleteTracePrefix(): string {

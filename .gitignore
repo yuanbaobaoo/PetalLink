@@ -84,3 +84,4 @@ docs/superpowers/
 app/node_modules/
 app/dist/
 .zcode
+.vite
