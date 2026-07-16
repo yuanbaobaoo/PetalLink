@@ -1,0 +1,67 @@
+-- 全部建表语句（对标 docs/04 §3 + docs/11 §3）
+-- schemaVersion=6（inode 方案后）
+-- 注意：SQLDelight 会在首次连接时按 schema.sq 的文件名顺序执行所有 .sq 的 DDL
+
+CREATE TABLE IF NOT EXISTS sync_items (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_id         TEXT    NOT NULL,
+    local_path      TEXT    NOT NULL,
+    parent_file_id  TEXT,
+    is_folder       INTEGER NOT NULL DEFAULT 0,
+    size            INTEGER NOT NULL DEFAULT 0,
+    mtime           INTEGER NOT NULL DEFAULT 0,
+    etag            TEXT,
+    sync_status     INTEGER NOT NULL DEFAULT 0,
+    state_revision  INTEGER NOT NULL DEFAULT 0,
+    last_error      TEXT,
+    UNIQUE(file_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_sync_items_local_path ON sync_items(local_path);
+CREATE INDEX IF NOT EXISTS idx_sync_items_parent ON sync_items(parent_file_id);
+
+CREATE TABLE IF NOT EXISTS transfer_queue (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_id           TEXT    NOT NULL,
+    local_path        TEXT    NOT NULL,
+    direction         INTEGER NOT NULL,             -- 0=upload, 1=download
+    state             INTEGER NOT NULL DEFAULT 0,   -- TransferState 序号
+    state_revision    INTEGER NOT NULL DEFAULT 0,   -- CAS 乐观锁
+    attempt           INTEGER NOT NULL DEFAULT 0,
+    bytes_total       INTEGER NOT NULL DEFAULT 0,
+    bytes_done        INTEGER NOT NULL DEFAULT 0,
+    error_message     TEXT,
+    upload_session_url TEXT,                        -- 断点续传 session
+    created_at        INTEGER NOT NULL DEFAULT 0,
+    updated_at        INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_transfer_queue_state ON transfer_queue(state);
+CREATE INDEX IF NOT EXISTS idx_transfer_queue_file_id ON transfer_queue(file_id);
+
+CREATE TABLE IF NOT EXISTS sync_cursor (
+    key     TEXT PRIMARY KEY,
+    value   TEXT NOT NULL
+);
+
+-- inode 身份映射表（v6 新增，docs/11 §3.1）
+CREATE TABLE IF NOT EXISTS local_inode_map (
+    inode         INTEGER NOT NULL,
+    relative_path TEXT    NOT NULL,
+    file_id       TEXT    NOT NULL,
+    scanned_at    INTEGER NOT NULL,
+    PRIMARY KEY (inode)
+);
+
+CREATE INDEX IF NOT EXISTS idx_inode_map_path ON local_inode_map(relative_path);
+CREATE INDEX IF NOT EXISTS idx_inode_map_fid  ON local_inode_map(file_id);
+
+-- 释放空间暂存表（v6 新增，docs/11 §3.2）
+CREATE TABLE IF NOT EXISTS free_up_staging (
+    staging_name   TEXT    NOT NULL PRIMARY KEY,   -- 暂存文件名
+    relative_path  TEXT    NOT NULL,               -- 原始相对路径
+    file_id        TEXT    NOT NULL,               -- 云端文件 ID
+    source_mtime   INTEGER,                        -- 回滚恢复用
+    source_size    INTEGER,                        -- 回滚恢复用
+    created_at     INTEGER NOT NULL
+);

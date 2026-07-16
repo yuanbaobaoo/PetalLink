@@ -1,0 +1,48 @@
+-- sync_items 表查询（对标 docs/04 §6 CAS 乐观锁）
+-- CAS：所有状态变更带 state_revision 乐观锁，受影响行数==0 即冲突
+
+insertRow:
+INSERT INTO sync_items(file_id, local_path, parent_file_id, is_folder, size, mtime, etag, sync_status, state_revision)
+VALUES (:fileId, :localPath, :parentFileId, :isFolder, :size, :mtime, :etag, :syncStatus, :stateRevision);
+
+selectById:
+SELECT * FROM sync_items WHERE id = :id LIMIT 1;
+
+selectByFileId:
+SELECT * FROM sync_items WHERE file_id = :fileId LIMIT 1;
+
+selectByLocalPath:
+SELECT * FROM sync_items WHERE local_path = :localPath LIMIT 1;
+
+-- CAS 状态更新：WHERE state_revision = :expectedRevision，成功返回 1 行
+casUpdateStatus:
+UPDATE sync_items
+SET sync_status = :newStatus, state_revision = state_revision + 1, last_error = :errorMsg
+WHERE id = :id AND state_revision = :expectedRevision;
+
+-- CAS 更新 etag（同步基线刷新）
+casUpdateEtag:
+UPDATE sync_items
+SET etag = :etag, state_revision = state_revision + 1
+WHERE id = :id AND state_revision = :expectedRevision;
+
+deleteByFileId:
+DELETE FROM sync_items WHERE file_id = :fileId;
+
+selectAll:
+SELECT * FROM sync_items ORDER BY local_path;
+
+selectByFolderPrefix:
+SELECT * FROM sync_items WHERE local_path LIKE :prefix || '%' ESCAPE '\' ORDER BY local_path;
+
+selectByStatus:
+SELECT * FROM sync_items WHERE sync_status = :status ORDER BY local_path;
+
+countAll:
+SELECT COUNT(*) FROM sync_items;
+
+countByStatus:
+SELECT COUNT(*) FROM sync_items WHERE sync_status = :status;
+
+selectFailedItems:
+SELECT local_path, last_error FROM sync_items WHERE sync_status = :status ORDER BY local_path LIMIT :limit;

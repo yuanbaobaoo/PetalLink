@@ -1,0 +1,43 @@
+# IDE / 编辑器
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# Flux CLI 生成的安装清单(用 flux install 直连集群,不落地)
+gotk-components.yaml
+gotk-components.yml
+
+# 临时/备份
+*.bak
+*.tmp
+*.orig
+
+# 本地 kubeconfig / 凭据(防止误提交)
+kubeconfig
+*kubeconfig*
+secrets/
+*.secret
+.env
+.zcode
+
+# Gradle / Kotlin 构建产物
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+*.kotlin/
+
+# Xcode / CocoaPods 生成产物（由 XcodeGen + pod install 生成）
+macosApp/*.xcodeproj
+macosApp/*.xcworkspace
+macosApp/Podfile.lock
+macosApp/Pods/
+
+# Kotlin/Native 临时
+.kotlin/
+konan/

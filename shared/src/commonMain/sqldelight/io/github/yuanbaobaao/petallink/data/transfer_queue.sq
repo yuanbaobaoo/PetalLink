@@ -1,0 +1,40 @@
+-- transfer_queue 表查询（对标 docs/04 §6 + docs/06 九态状态机）
+-- CAS 状态迁移 + 进度更新（刻意不递增 revision）
+
+insertRow:
+INSERT INTO transfer_queue(file_id, local_path, direction, state, state_revision, attempt, bytes_total, bytes_done, error_message, upload_session_url, created_at, updated_at)
+VALUES (:fileId, :localPath, :direction, :state, :stateRevision, :attempt, :bytesTotal, :bytesDone, :errorMessage, :uploadSessionUrl, :createdAt, :updatedAt);
+
+selectById:
+SELECT * FROM transfer_queue WHERE id = :id LIMIT 1;
+
+selectByFileId:
+SELECT * FROM transfer_queue WHERE file_id = :fileId ORDER BY id DESC LIMIT 1;
+
+-- CAS 状态迁移：WHERE state_revision = :expectedRevision
+casTransitionState:
+UPDATE transfer_queue
+SET state = :newState, state_revision = state_revision + 1, attempt = :attempt, error_message = :errorMsg, updated_at = :updatedAt
+WHERE id = :id AND state_revision = :expectedRevision;
+
+-- 进度更新：刻意不递增 state_revision（进度是高频非状态变更）
+updateRunningProgress:
+UPDATE transfer_queue
+SET bytes_done = :bytesDone, updated_at = :updatedAt
+WHERE id = :id;
+
+selectByState:
+SELECT * FROM transfer_queue WHERE state = :state;
+
+-- 历史清理：保留最近 keepCount 条（对标 prune_transfer_history，保留 100 条）
+pruneHistory:
+DELETE FROM transfer_queue
+WHERE id NOT IN (
+  SELECT id FROM transfer_queue ORDER BY updated_at DESC LIMIT :keepCount
+);
+
+countByStateAndDirection:
+SELECT COUNT(*) FROM transfer_queue WHERE state = :state AND direction = :direction;
+
+countByState:
+SELECT COUNT(*) FROM transfer_queue WHERE state = :state;
