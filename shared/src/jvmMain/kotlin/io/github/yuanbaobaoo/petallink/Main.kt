@@ -109,16 +109,14 @@ fun main(args: Array<String>) {
             val tray = remember {
                 io.github.yuanbaobaoo.petallink.platform.DesktopTray(
                     onShow = { SwingUtilities.invokeLater(::show) },
-                    onRefresh = { scope.launch { root.viewModel.refresh() } },
                     onQuit = { SwingUtilities.invokeLater(::quit) },
                 ).also { it.install() }
             }
             DisposableEffect(Unit) {
                 onDispose { tray.remove() }
             }
-            // 同步状态到托盘（tooltip / 登录态 / 传输段）
+            // 同步状态到托盘（tooltip / 传输段）
             LaunchedEffect(state.syncStatus) { tray.tooltip = "PetalLink · ${state.syncStatus}" }
-            LaunchedEffect(state.loggedIn) { tray.loggedIn = state.loggedIn }
             LaunchedEffect(state.transfers) {
                 // 仅展示进行中（Pending/Running）任务，对标原版 load_active_transfers 的 state IN (PENDING, RUNNING)
                 tray.activeTransfers = state.transfers.filter {

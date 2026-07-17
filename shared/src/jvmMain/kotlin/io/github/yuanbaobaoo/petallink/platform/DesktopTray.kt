@@ -23,23 +23,13 @@ import javax.imageio.ImageIO
  * 版本标识 → 分隔 → 显示主窗口 → [分隔 → 进行中传输项…] → 分隔 → 退出 PetalLink。
  *
  * @param onShow 「显示主窗口」回调
- * @param onRefresh 「立即刷新」回调
  * @param onQuit 「退出」回调
  */
 class DesktopTray(
     private val onShow: () -> Unit,
-    private val onRefresh: () -> Unit,
     private val onQuit: () -> Unit,
 ) {
     private var trayIcon: TrayIcon? = null
-
-    /** 当前版本号（tooltip 附加用，不影响菜单版本标识文案）。 */
-    var versionLabel: String = "PetalLink"
-        set(value) { field = value; rebuildMenu() }
-
-    /** 是否已登录（控制「立即刷新」是否启用）。 */
-    var loggedIn: Boolean = false
-        set(value) { field = value; rebuildMenu() }
 
     /**
      * 进行中的传输任务（菜单动态段）。
@@ -133,11 +123,8 @@ class DesktopTray(
         addSeparator()
         // 显示主窗口（对标原版 show_window）
         add(MenuItem("显示主窗口").apply { addActionListener(ActionListener { onShow() }) })
-        // 立即刷新（登录后启用）
-        add(MenuItem("立即刷新").apply {
-            isEnabled = loggedIn
-            addActionListener(ActionListener { onRefresh() })
-        })
+        // 注：原版不提供「立即刷新」项（tray.rs 注释：按需求直接不提供，菜单与
+        // Flutter 默认态 canSync=false 一致），故此处也不加。
         // 进行中传输段（每个任务两行：文件名 + 正在X…N%，disabled）
         if (activeTransfers.isNotEmpty()) {
             addSeparator()
