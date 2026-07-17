@@ -38,6 +38,7 @@ import io.github.yuanbaobaoo.petallink.ui.pages.main.MainScreen
 import io.github.yuanbaobaoo.petallink.ui.pages.main.SettingsScreen
 import io.github.yuanbaobaoo.petallink.ui.pages.main.FileListScreen
 import io.github.yuanbaobaoo.petallink.ui.pages.main.UpdateDialogScreen
+import io.github.yuanbaobaoo.petallink.ui.viewmodel.UpdaterPhase
 import io.github.yuanbaobaoo.petallink.ui.theme.PetalLinkTheme
 import java.awt.Desktop
 import java.awt.event.WindowAdapter
@@ -217,6 +218,10 @@ fun main(args: Array<String>) {
                                 transfers = state.transfers,
                                 errorMessage = state.errorMessage,
                                 availableUpdate = state.availableUpdate,
+                                updateDownloading = state.updatePhase == UpdaterPhase.DOWNLOADING,
+                                updateDownloadProgress = state.updateDownloadProgress,
+                                updateAvailableVersion = if (state.updatePhase == UpdaterPhase.AVAILABLE) state.availableUpdate?.version else null,
+                                onDismissUpdate = root.viewModel::dismissUpdateDialog,
                                 fileListView = {
                                     FileListScreen(
                                         browser = state.browser,

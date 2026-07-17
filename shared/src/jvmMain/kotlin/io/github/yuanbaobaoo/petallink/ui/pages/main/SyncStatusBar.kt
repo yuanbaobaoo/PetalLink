@@ -28,6 +28,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.yuanbaobaoo.petallink.ui.components.MateIcon
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateDialogOptions
+import io.github.yuanbaobaoo.petallink.ui.components.mate.MateHDivider
 import io.github.yuanbaobaoo.petallink.ui.components.mate.confirmDialog
 import io.github.yuanbaobaoo.petallink.ui.theme.BrandColor
 import io.github.yuanbaobaoo.petallink.ui.theme.ErrorBg
@@ -82,6 +83,7 @@ fun SyncStatusBar(
         ) { showFailed = false }
     }
 
+    Column {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -123,6 +125,9 @@ fun SyncStatusBar(
                 )
             }
         }
+    }
+    // 底分隔线（对标 .sync-bar border-bottom: 0.5px）
+    MateHDivider()
     }
 }
 

@@ -11,6 +11,7 @@ import androidx.compose.ui.unit.dp
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateBannerVariant
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateButton
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateButtonVariant
+import io.github.yuanbaobaoo.petallink.ui.components.mate.MateHDivider
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateInfoBanner
 import io.github.yuanbaobaoo.petallink.ui.theme.LocalSemanticColors
 import io.github.yuanbaobaoo.petallink.ui.viewmodel.SetupPhase
@@ -74,10 +75,16 @@ fun SyncSetupBanner(
     }
 }
 
-/** 引导条容器：padding 4/16，白底（与原 .setup-banner 一致）。 */
+/** 引导条容器：padding 4/16，白底，底 0.5px 分隔线（与原 .setup-banner 一致）。 */
 @Composable
 private fun BannerWrapper(bg: androidx.compose.ui.graphics.Color, content: @Composable () -> Unit) {
     androidx.compose.foundation.layout.Column(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp).background(bg),
-    ) { content() }
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        androidx.compose.foundation.layout.Column(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp).background(bg),
+        ) { content() }
+        // 底分隔线（对标 .setup-banner border-bottom: 0.5px）
+        MateHDivider()
+    }
 }

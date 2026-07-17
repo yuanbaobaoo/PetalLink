@@ -22,6 +22,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -135,6 +136,7 @@ fun TransferPopoverScreen(
                 .width(420.dp)
                 .height(560.dp)
                 .padding(top = 56.dp, end = 16.dp)
+                .shadow(elevation = 16.dp, shape = RoundedCornerShape(6.dp))
                 .clip(RoundedCornerShape(6.dp))
                 .background(semantic.bgContainer)
                 .border(0.5.dp, semantic.border, RoundedCornerShape(6.dp)),
@@ -200,81 +202,86 @@ fun TransferPopoverScreen(
     }
 }
 
-/** 单个传输任务行（60px）。 */
+/** 单个传输任务行（60px，含底分隔线）。 */
 @Composable
 private fun TransferItemRow(task: TransferTaskUi, onRetry: (Long) -> Unit) {
     val semantic = LocalSemanticColors.current
     val meta = stateMeta(task.state)
-    Row(
-        modifier = Modifier.fillMaxWidth().height(60.dp).padding(horizontal = 16.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        // 方向图标
-        MateIcon(name = dirIcon(task.direction), size = 16.dp, tint = semantic.textSecondary)
-        // 信息区（flex:1）
-        Column(modifier = Modifier.weight(1f)) {
-            // 名称行（13px medium + tag 标签）
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    dirLabel(task.direction),
-                    fontSize = 12.sp,
-                    color = semantic.textSecondary,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(3.dp))
-                        .background(semantic.bgHover)
-                        .padding(horizontal = 4.dp, vertical = 0.dp)
-                        .padding(end = 4.dp),
-                )
-                Text(
-                    " " + task.fileName,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = semantic.textPrimary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-            Spacer(Modifier.height(4.dp))
-            // 第二行：错误 or 进度条 or 删除操作
-            if ((task.state == TransferState.Failed || task.state == TransferState.RestartRequired) && task.errorMessage != null) {
-                Text(
-                    task.errorMessage,
-                    fontSize = 12.sp,
-                    color = ErrorColor,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            } else if (task.direction != "delete") {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    MateLinearProgress(
-                        value = task.progress,
-                        color = progressColor(task.state),
-                        modifier = Modifier.weight(1f),
-                    )
-                    val pct = if (task.bytesTotal > 0) "${(task.progress * 100).toInt()}%" else ""
-                    if (pct.isNotEmpty()) Text(pct, fontSize = 12.sp, color = semantic.textSecondary)
-                }
-            } else {
-                Text("删除操作", fontSize = 12.sp, color = semantic.textSecondary)
-            }
-        }
-        // 状态区（80px 右对齐）
+    Column {
         Row(
-            modifier = Modifier.width(80.dp),
+            modifier = Modifier.fillMaxWidth().height(60.dp).padding(horizontal = 16.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(3.dp, Alignment.End),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            MateIcon(name = meta.icon, size = 12.dp, tint = meta.color, spin = meta.spin)
-            Text(meta.label, fontSize = 12.sp, fontWeight = FontWeight.Medium, color = meta.color)
+            // 方向图标
+            MateIcon(name = dirIcon(task.direction), size = 16.dp, tint = semantic.textSecondary)
+            // 信息区（flex:1）
+            Column(modifier = Modifier.weight(1f)) {
+                // 名称行（13px medium + tag 标签）
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    // tag：padding 0/4，bg-hover，radius 3
+                    Text(
+                        dirLabel(task.direction),
+                        fontSize = 12.sp,
+                        color = semantic.textSecondary,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(3.dp))
+                            .background(semantic.bgHover)
+                            .padding(horizontal = 4.dp, vertical = 0.dp),
+                    )
+                    Text(
+                        task.fileName,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = semantic.textPrimary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Spacer(Modifier.height(4.dp))
+                // 第二行：错误 or 进度条（带字节） or 删除操作
+                if ((task.state == TransferState.Failed || task.state == TransferState.RestartRequired) && task.errorMessage != null) {
+                    Text(
+                        task.errorMessage,
+                        fontSize = 12.sp,
+                        color = ErrorColor,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                } else if (task.direction != "delete" && task.bytesTotal > 0) {
+                    // 进度条 + 百分比 + 已传/总字节（对标原 Vue tp-item__pct）
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        MateLinearProgress(
+                            value = task.progress,
+                            color = progressColor(task.state),
+                            modifier = Modifier.weight(1f),
+                        )
+                        val pctText = "${(task.progress * 100).toInt()}% · ${formatFileSize(task.bytesDone)}/${formatFileSize(task.bytesTotal)}"
+                        Text(pctText, fontSize = 12.sp, color = semantic.textSecondary)
+                    }
+                } else if (task.direction == "delete") {
+                    Text("删除操作", fontSize = 12.sp, color = semantic.textSecondary)
+                }
+            }
+            // 状态区（80px 右对齐）
+            Row(
+                modifier = Modifier.width(80.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(3.dp, Alignment.End),
+            ) {
+                MateIcon(name = meta.icon, size = 12.dp, tint = meta.color, spin = meta.spin)
+                Text(meta.label, fontSize = 12.sp, fontWeight = FontWeight.Medium, color = meta.color)
+            }
+            // 重试按钮（条件）
+            if (canRetry(task)) {
+                MateButton(
+                    variant = MateButtonVariant.ICON,
+                    icon = "refresh",
+                    onClick = { onRetry(task.id) },
+                )
+            }
         }
-        // 重试按钮（条件）
-        if (canRetry(task)) {
-            MateButton(
-                variant = MateButtonVariant.ICON,
-                icon = "refresh",
-                onClick = { onRetry(task.id) },
-            )
-        }
+        // item 底分隔线（对标 .tp-item border-bottom: 0.5px）
+        io.github.yuanbaobaoo.petallink.ui.components.mate.MateHDivider()
     }
 }
