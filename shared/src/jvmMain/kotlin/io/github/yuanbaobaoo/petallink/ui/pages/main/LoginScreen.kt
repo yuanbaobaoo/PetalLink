@@ -80,29 +80,29 @@ fun LoginScreen(
             ),
         contentAlignment = Alignment.Center,
     ) {
-        // 装饰圆（品牌色低透明度，pointer-events: none 用不接收点击实现）
-        // lg: 400×400, top -100, right -80, opacity 0.06
+        // 装饰圆（品牌色低透明度，用 align 模拟 CSS top/right/bottom/left 定位）
+        // lg: 400×400, top -100, right -80, opacity 0.06（贴右上角溢出）
         Box(
-            Modifier.offset(x = 320.dp, y = (-260).dp)
+            Modifier.align(Alignment.TopEnd).offset(x = 80.dp, y = (-100).dp)
                 .width(400.dp).height(400.dp).alpha(0.06f)
                 .clip(CircleShape).background(Color(0xFF0052D9)),
         )
-        // md: 300×300, bottom -60, left -80, opacity 0.06
+        // md: 300×300, bottom -60, left -80, opacity 0.06（贴左下角溢出）
         Box(
-            Modifier.offset(x = (-300).dp, y = 300.dp)
+            Modifier.align(Alignment.BottomStart).offset(x = (-80).dp, y = 60.dp)
                 .width(300.dp).height(300.dp).alpha(0.06f)
                 .clip(CircleShape).background(Color(0xFF0052D9)),
         )
-        // sm: 200×200, top 45%, left 30%, opacity 0.04
+        // sm: 200×200, top 45%, left 30%, opacity 0.04（居中偏左）
         Box(
-            Modifier.offset(x = (-200).dp, y = 0.dp)
+            Modifier.align(Alignment.Center).offset(x = (-160).dp, y = (-40).dp)
                 .width(200.dp).height(200.dp).alpha(0.04f)
                 .clip(CircleShape).background(Color(0xFF0052D9)),
         )
 
-        // 居中卡片（max-width 480，padding 32/24）
+        // 居中卡片（max-width 480dp，padding 32/24）
         Column(
-            modifier = Modifier.fillMaxWidth(0.42f).padding(horizontal = 24.dp, vertical = 32.dp),
+            modifier = Modifier.width(480.dp).padding(horizontal = 24.dp, vertical = 32.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             // 品牌容器图标（64×64）

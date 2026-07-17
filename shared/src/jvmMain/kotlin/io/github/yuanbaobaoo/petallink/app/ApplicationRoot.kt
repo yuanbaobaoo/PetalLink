@@ -524,6 +524,18 @@ class DesktopAppViewModel(
         refresh()
     }
 
+    /** 仅清除已完成（Completed）任务（对标原 Vue transfer_clear_completed）。 */
+    fun clearCompletedTransfers() = scope.launch {
+        commands.transferClearCompleted()
+        refresh()
+    }
+
+    /** 仅清除失败历史（Failed）任务（对标原 Vue transfer_clear_failed）。 */
+    fun clearFailedTransfers() = scope.launch {
+        commands.transferClearFailed()
+        refresh()
+    }
+
     fun exportLogs() {
         val target = Path.of(System.getProperty("user.home"), "Desktop", "PetalLink-logs.txt")
         when (val result = commands.platformLogsExport(target.toString())) {

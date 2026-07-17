@@ -9,24 +9,31 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.yuanbaobaoo.petallink.core.logging.LogLevel
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateButton
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateButtonVariant
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateCircularProgress
+import io.github.yuanbaobaoo.petallink.ui.components.mate.MateHDivider
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateEmpty
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateTag
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateTagSize
@@ -95,14 +102,18 @@ fun LogViewerScreen(
         modifier = Modifier.fillMaxSize().background(if (inline) semantic.bgContainer else semantic.bgPage),
     ) {
         if (!inline) {
-            // 独立 AppBar
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                MateButton(variant = MateButtonVariant.ICON, icon = "arrow", onClick = onBack)
-                Text("同步日志", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            // 独立 AppBar（56px + 底分隔线 + 返回箭头 rotate 180）
+            Column {
+                Row(
+                    modifier = Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    MateButton(variant = MateButtonVariant.ICON, icon = "arrow", onClick = onBack,
+                        modifier = Modifier.rotate(180f))
+                    Text("同步日志", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                }
+                MateHDivider()
             }
         }
         // 工具栏
@@ -137,6 +148,7 @@ fun LogViewerScreen(
         } else {
             LazyColumn(modifier = Modifier.fillMaxSize().padding(horizontal = if (inline) 0.dp else 12.dp)) {
                 itemsIndexed(filtered) { _, record ->
+                    Column {
                     Row(
                         modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
                         verticalAlignment = Alignment.Top,
@@ -145,13 +157,20 @@ fun LogViewerScreen(
                         MateTag(label = record.level.name, theme = levelTheme(record.level), size = MateTagSize.SMALL)
                         Column {
                             Text(record.message, fontSize = 14.sp, color = semantic.textPrimary)
+                            // meta：时间 · logger（对标原 Vue fmtTime(time_ms) · logger_name）
+                            val timeStr = remember(record.timestampMs) {
+                                SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date(record.timestampMs))
+                            }
                             Text(
-                                "[${record.target}]",
+                                "$timeStr · ${record.target}",
                                 fontSize = 12.sp,
                                 color = semantic.textSecondary,
                                 modifier = Modifier.padding(top = 2.dp),
                             )
                         }
+                    }
+                    // log-item 底分隔线 0.5px
+                    MateHDivider()
                     }
                 }
             }
