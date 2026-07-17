@@ -33,7 +33,7 @@ class DesktopTray(
 ) {
     private var trayIcon: TrayIcon? = null
 
-    /** 当前版本号（版本标识菜单项展示用）。 */
+    /** 当前版本号（tooltip 附加用，不影响菜单版本标识文案）。 */
     var versionLabel: String = "PetalLink"
         set(value) { field = value; rebuildMenu() }
 
@@ -41,9 +41,17 @@ class DesktopTray(
     var loggedIn: Boolean = false
         set(value) { field = value; rebuildMenu() }
 
-    /** 进行中的传输任务（菜单动态段）。 */
+    /**
+     * 进行中的传输任务（菜单动态段）。
+     *
+     * 对标原版 `load_active_transfers`：仅 state IN (PENDING, RUNNING)。
+     * 设值时按 5 秒节流重建菜单（`MENU_REBUILD_INTERVAL_MS`），避免进度高频变化导致已展开菜单闪烁。
+     */
     var activeTransfers: List<TransferTaskUi> = emptyList()
-        set(value) { field = value; rebuildMenu() }
+        set(value) {
+            field = value
+            scheduleRebuild()
+        }
 
     /** 当前 tooltip。 */
     var tooltip: String = "PetalLink"
@@ -80,6 +88,30 @@ class DesktopTray(
         trayIcon?.setPopupMenu(buildMenu())
     }
 
+    /** 菜单重建最小间隔（毫秒，对标原版 MENU_REBUILD_INTERVAL_MS = 5000）。 */
+    private var lastMenuRebuildMs: Long = 0L
+
+    /**
+     * 节流重建菜单（对标原版 refresh_menu 节流逻辑）。
+     *
+     * 有进行中传输时按 5 秒节流，避免进度高频回调导致已展开菜单闪烁消失；
+     * 无传输时立即重建（清场，不残留已完成项）。
+     */
+    private fun scheduleRebuild() {
+        val now = System.currentTimeMillis()
+        if (activeTransfers.isNotEmpty()) {
+            val last = lastMenuRebuildMs
+            if (last != 0L && now - last < MENU_REBUILD_INTERVAL_MS) return // 节流窗口内跳过
+        }
+        lastMenuRebuildMs = now
+        rebuildMenu()
+    }
+
+    /** 菜单重建最小间隔（毫秒）。传输进度高频变化，过频重建会让已展开菜单闪烁消失。 */
+    private companion object {
+        const val MENU_REBUILD_INTERVAL_MS: Long = 5000L
+    }
+
     /** 从系统托盘移除图标。 */
     fun remove() {
         val icon = trayIcon ?: return
@@ -96,32 +128,51 @@ class DesktopTray(
 
     /** 构建托盘菜单（对齐原版 build_menu）。 */
     private fun buildMenu(): PopupMenu = PopupMenu().apply {
-        // 版本标识（disabled 纯展示）
-        add(MenuItem(versionLabel).apply { isEnabled = false })
+        // 版本标识（disabled 纯展示，对标原版「PetalLink - 华为云盘 Mac 客户端开源版」）
+        add(MenuItem("PetalLink - 华为云盘 Mac 客户端开源版").apply { isEnabled = false })
         addSeparator()
-        // 显示主窗口
-        add(MenuItem("显示 PetalLink").apply { addActionListener(ActionListener { onShow() }) })
+        // 显示主窗口（对标原版 show_window）
+        add(MenuItem("显示主窗口").apply { addActionListener(ActionListener { onShow() }) })
         // 立即刷新（登录后启用）
         add(MenuItem("立即刷新").apply {
             isEnabled = loggedIn
             addActionListener(ActionListener { onRefresh() })
         })
-        // 进行中传输段（每个任务两行：文件名 + 状态，disabled）
+        // 进行中传输段（每个任务两行：文件名 + 正在X…N%，disabled）
         if (activeTransfers.isNotEmpty()) {
             addSeparator()
             activeTransfers.forEach { task ->
                 add(MenuItem(task.fileName.take(20)).apply { isEnabled = false })
-                val dir = if (task.direction == "upload") "上传" else "下载"
-                val pct = if (task.bytesTotal > 0) "${(task.progress * 100).toInt()}%" else "0%"
-                val stateLabel = when (task.state) {
-                    TransferState.Pending -> "等待中"
-                    else -> "正在$dir…$pct"
-                }
-                add(MenuItem(stateLabel).apply { isEnabled = false })
+                add(MenuItem(formatTransferStatus(task)).apply { isEnabled = false })
             }
         }
         addSeparator()
-        // 退出
+        // 退出 PetalLink（对标原版 quit）
         add(MenuItem("退出 PetalLink").apply { addActionListener(ActionListener { onQuit() }) })
+    }
+
+    /**
+     * 传输状态文案（对标原版 format_transfer_status）。
+     *
+     * - upload → 「正在上传…N%」
+     * - download → 「正在下载…N%」
+     * - download_update → 「正在更新…N%」
+     * - delete → 「正在删除…N%」
+     * - pending → 「等待中」
+     *
+     * total 缺失（0）时百分比按 0 显示。
+     */
+    private fun formatTransferStatus(task: TransferTaskUi): String {
+        if (task.state == TransferState.Pending) return "等待中"
+        val label = when (task.direction) {
+            "upload" -> "正在上传"
+            "download" -> "正在下载"
+            "delete" -> "正在删除"
+            else -> "正在传输"
+        }
+        val pct = if (task.bytesTotal > 0) {
+            minOf(100, (task.progress * 100).toInt())
+        } else 0
+        return "$label…$pct%"
     }
 }

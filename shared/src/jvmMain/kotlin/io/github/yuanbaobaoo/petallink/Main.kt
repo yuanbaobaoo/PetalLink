@@ -116,17 +116,15 @@ fun main(args: Array<String>) {
             DisposableEffect(Unit) {
                 onDispose { tray.remove() }
             }
-            // 同步状态到托盘（tooltip / 登录态 / 传输段 / 版本号）
+            // 同步状态到托盘（tooltip / 登录态 / 传输段）
             LaunchedEffect(state.syncStatus) { tray.tooltip = "PetalLink · ${state.syncStatus}" }
             LaunchedEffect(state.loggedIn) { tray.loggedIn = state.loggedIn }
-            LaunchedEffect(state.appVersion) { tray.versionLabel = "PetalLink ${state.appVersion}" }
             LaunchedEffect(state.transfers) {
-                // 仅展示进行中（Pending/Running/VerifyingRemote）任务
+                // 仅展示进行中（Pending/Running）任务，对标原版 load_active_transfers 的 state IN (PENDING, RUNNING)
                 tray.activeTransfers = state.transfers.filter {
                     it.state in setOf(
                         io.github.yuanbaobaoo.petallink.sync.TransferState.Pending,
                         io.github.yuanbaobaoo.petallink.sync.TransferState.Running,
-                        io.github.yuanbaobaoo.petallink.sync.TransferState.VerifyingRemote,
                     )
                 }
             }
