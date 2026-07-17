@@ -36,7 +36,7 @@ import io.github.yuanbaobaoo.petallink.ui.theme.LocalSemanticColors
 /**
  * 组件预览页（开发期工具，对标原 Vue 的组件 storybook）。
  *
- * 用 `./gradlew :shared:run` 可查看全部 Mate 组件的渲染效果。
+ * 用 `./gradlew run` 可查看全部 Mate 组件的渲染效果。
  * 不参与正式路由，仅作开发期校验。
  */
 @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)

@@ -58,12 +58,12 @@ jobs:
           HWCLOUD_CLIENT_ID: ${{ secrets.HWCLOUD_CLIENT_ID }}
           HWCLOUD_CLIENT_SECRET: ${{ secrets.HWCLOUD_CLIENT_SECRET }}
         run: |
-          ./gradlew :shared:jvmTest :shared:createReleaseDistributable :shared:notarizeReleaseDmg --stacktrace
+          ./gradlew jvmTest createReleaseDistributable notarizeReleaseDmg --stacktrace
       - name: Verify, staple and prepare updater artifact
         shell: bash
         run: |
-          APP="shared/build/compose/binaries/main-release/app/PetalLink.app"
-          DMG=$(find shared/build/compose/binaries/main-release/dmg -name '*.dmg' -print -quit)
+          APP="build/compose/binaries/main-release/app/PetalLink.app"
+          DMG=$(find build/compose/binaries/main-release/dmg -name '*.dmg' -print -quit)
           test -d "$APP"
           test -f "$DMG"
           xcrun stapler staple "$APP"

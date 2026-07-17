@@ -19,4 +19,3 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "petal-link-cmp"
-include(":shared")

@@ -35,7 +35,7 @@ object EnvLoader {
      * 3. 可执行文件 / classpath 目录的 `.env`
      *
      * 对标原 Rust `env_loader.rs`：当前目录 → exe 目录 → exe 父目录。
-     * CMP `./gradlew :shared:run` 时工作目录是 `shared/`，需向上到项目根才能找到 `.env`。
+     * CMP `./gradlew run` 时工作目录是项目根，直接读取 `.env`。
      */
     fun loadEnvFile() {
         val candidates = mutableListOf<java.nio.file.Path>()

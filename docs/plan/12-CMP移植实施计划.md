@@ -62,7 +62,7 @@ P0 装配与数据底座
 - 新库直建 v6，旧库按 v2/v3/v4/v5 fixture 逐级迁移；`PRAGMA user_version=6`
 - 传输队列已对齐终态 26 列与 5 个索引，CAS/迟到 progress 测试覆盖
 - 配置、DB、token、日志统一从可注入 `AppPaths` 派生；支持 `PETALLINK_DATA_DIR` 与 `PETALLINK_ENV=dev`
-- `./gradlew :shared:jvmTest`：185 tests，0 failures，0 errors
+- `./gradlew jvmTest`：185 tests，0 failures，0 errors
 
 ### 验收门
 
@@ -122,7 +122,7 @@ P0 装配与数据底座
 - create/rename/move/delete 都实现写后严格核验和响应丢失后的远端 GET/list 收敛，不盲目重放写请求
 - OAuth 已接入 PKCE + state + loopback + 取消/超时；用户资料按 OIDC < info < phone 并发聚合
 - multipart/related、Location resume URL、308 rangeList、配额 String、Changes 三种删除、两类 cursor 和 OIDC 404 均有自动化合同测试
-- `./gradlew :shared:jvmTest`：220 tests，0 failures，0 errors
+- `./gradlew jvmTest`：220 tests，0 failures，0 errors
 - P3 已将 `ChangesCursorInvalid(400/410)` 接到“保留旧 checkpoint → startCursor → BFS → replay → 原子提交”，旧 checkpoint 不会被部分结果推进
 
 ### 验收门
@@ -174,7 +174,7 @@ P0 装配与数据底座
 - `JvmPlaceholderManager` 仅以 state xattr 判定占位符，保护用户 0 字节文件，支持 modified placeholder 备份、downloaded 标记和 FinderInfo 读改写
 - 挂载路径同时接受 macOS `/var` 与 `/private/var` 系统别名，但仍拒绝越界和挂载目录内符号链接
 - `JvmFileHasher` 使用 64KiB 流式 SHA-256、per-path mutex、mtime/size cache 和哈希前后稳定性复核
-- `./gradlew :shared:jvmTest` 完整回归通过：243 tests，0 failures
+- `./gradlew jvmTest` 完整回归通过：243 tests，0 failures
 
 ## 5. 阶段 P3：云树、Planner 和同步周期闭环
 
@@ -224,7 +224,7 @@ P0 装配与数据底座
 - `CycleRequestDispatcher` 统一接收 startup/watcher/manual/timer/recovery 请求；`ActivityTracker`、完整状态快照和事件流已有并发测试覆盖。
 - `JvmSyncRuntime` 已装配真实本地扫描、Mock Drive 云树/上传/占位、数据库 baseline 和同一可信 checkpoint；临时目录纵向测试验证本地新增上传与云端新增落地。
 - P3 收口时，覆盖上传、完整下载、破坏性删除、移动和冲突动作曾保持显式延后；该安全门已在 P4 合同与回归完成后解除。
-- `./gradlew :shared:jvmTest --rerun-tasks` 完整回归通过：271 tests，0 failures。
+- `./gradlew jvmTest --rerun-tasks` 完整回归通过：271 tests，0 failures。
 
 ## 6. 阶段 P4：TaskRunner、安全传输和释放空间
 
@@ -283,7 +283,7 @@ P0 装配与数据底座
 - `JvmTransferFileStore` 实现 `.tmp`/sidecar、Range/206、416 单次回退、1MiB 流式 SHA-256、二次远端版本核验、文件/目录 fsync 和原子安装；三个下载/上传命令不再绕过持久协议。
 - `JvmFreeUpService` 用 write-ahead `free_up_staging`、双重本地/DB 快照、可信 checkpoint、远端复核、原子 staging、占位符、baseline CAS 和 inode 更新完成释放空间；启动恢复绝不覆盖新用户文件。
 - 同步运行时已解除 P3 的破坏性动作安全门，云端删除、本地安全删除、移动/重命名和冲突副本会同步收敛 checkpoint 与 baseline。
-- `./gradlew :shared:jvmTest --rerun-tasks` 完整回归通过：291 tests，0 failures。
+- `./gradlew jvmTest --rerun-tasks` 完整回归通过：291 tests，0 failures。
 
 ## 7. 阶段 P5：Compose UI 与 macOS 生命周期
 
@@ -327,7 +327,7 @@ P0 装配与数据底座
 - `SyncViewModel` 拒绝 `revision <= lastRevision`；`TransferViewModel` 同时拒绝旧 requestId 和低于现有 task revision 的列表/进度回写，并已接入桌面状态流。
 - Compose SystemTray（macOS 落为 NSStatusItem）显示动态同步/传输菜单并按 5 秒节流；文件锁+loopback 保证单实例，Close/Cmd+Q/Dock Quit 隐藏并切 accessory，托盘/第二实例切 regular 并聚焦。
 - JNA 检测 `NSAppleEventManager.currentAppleEvent` 的 `aevt/quit` 以放行系统关机；LaunchAgent 原子写入、bootstrap/bootout 和 `--hidden` 已实现；退出以 ActivityTracker 封门、3.2 秒等待和 `incomplete-shutdown` 哨兵保护可信 checkpoint。
-- 系统深色主题、Reduced Motion CompositionLocal 与完整 Mate 组件目录已接入；全量 `./gradlew :shared:jvmTest --rerun-tasks` 通过：296 tests，0 failures，`git diff --check` 通过。
+- 系统深色主题、Reduced Motion CompositionLocal 与完整 Mate 组件目录已接入；全量 `./gradlew jvmTest --rerun-tasks` 通过：296 tests，0 failures，`git diff --check` 通过。
 
 ## 8. 阶段 P6：更新、打包和兼容验收
 
@@ -349,7 +349,7 @@ P0 装配与数据底座
 - 等价更新器实现启动 3 秒静默检查、每小时检查、聚焦 10 分钟节流、手动检查和主界面提示；安装链路包含 HTTPS manifest、语义版本、最多 5 分钟传输空闲等待、流式下载、SHA-256、codesign/Gatekeeper/固定 Team ID 校验、helper 替换及失败回滚，无 Team ID 时 fail closed。
 - CI 执行完整测试、DMG 构建、静态制品门禁以及打包应用隐藏启动/单实例冒烟；Release workflow 执行 Developer ID 签名、notary、staple、Gatekeeper、更新 zip/manifest 与 GitHub Release。
 - 旧数据目录直接沿用；原 Tauri `token.bin` 明文布局、camelCase 配置枚举和数据库 v2–v6 均有兼容测试。49 命令源码审计补齐了挂载切换清基线、账号隔离、直接 rename/move/delete 结算、后台目录 BFS、完整状态快照、传输顺序和批量释放统计。
-- `./gradlew :shared:jvmTest`：317 tests，0 failures；`packageDmg` 实际生成 arm64 `PetalLink-1.0.12.dmg`；最新 `.app` 的制品门禁、隐藏启动/第二实例冒烟通过。DMG 挂载后复制到隔离安装目录的流程已在前一构建通过，最新哈希尚待重复该步。
+- `./gradlew jvmTest`：317 tests，0 failures；`packageDmg` 实际生成 arm64 `PetalLink-1.0.12.dmg`；最新 `.app` 的制品门禁、隐藏启动/第二实例冒烟通过。DMG 挂载后复制到隔离安装目录的流程已在前一构建通过，最新哈希尚待重复该步。
 - 代码、无签名构建和自动化门禁已经完成；正式 Developer ID/notarization、真实华为账号与完整系统 UI 对照仍需在 Release Candidate 上按 `13-发布与兼容验收.md` 人工签字，因此 P6 尚未整体关闭。
 
 ### P6 追加执行记录（2026-07-17）：bundle id dev/release 分离
@@ -359,7 +359,7 @@ P0 装配与数据底座
 - **LaunchAgent**：`CommandService.launchAgentManager()` 改用 `AppPaths.currentBundleId()`，dev 包注册 `...-dev.plist`，release 包注册 prod plist，互不覆盖。
 - **优先级**：`PETALLINK_DATA_DIR` > `PETALLINK_ENV=dev` > `BuildInfo.BUNDLE_ID`（默认 dev，因 `-Prelease` 默认 false） > prod 兜底（仅 BuildInfo 缺失时）；前两者保留为测试/本地覆盖。
 - **顺手清理**：全局修正包名拼写 `yuanbaobaao`→`yuanbaobaoo`（178 文件 + 5 目录）；删除零引用死代码 `core/Paths.kt`（其 `cacheBaseDir` 用了游离的 `Application Support/PetalLink` 路径，与 bundle id 体系冲突，运行时实际走 `AppPaths.cloudTreeCheckpoint`）。
-- **测试**：新增 `AppPathsTest`（优先级链、dev/prod 目录、大小写、空白覆盖，纯函数 `resolveFromEnvironment` 不污染全局）；`DesktopLifecycleTest` 补 dev/prod LaunchAgent 隔离测试；修复一个既有 flaky 时序测试（`JvmSyncRuntimeIntegrationTest` 文件落地后未等 `folderSyncProgress` 发布）。`./gradlew :shared:jvmTest --rerun-tasks`：330 tests，0 failures，连续两次稳定。
+- **测试**：新增 `AppPathsTest`（优先级链、dev/prod 目录、大小写、空白覆盖，纯函数 `resolveFromEnvironment` 不污染全局）；`DesktopLifecycleTest` 补 dev/prod LaunchAgent 隔离测试；修复一个既有 flaky 时序测试（`JvmSyncRuntimeIntegrationTest` 文件落地后未等 `folderSyncProgress` 发布）。`./gradlew jvmTest --rerun-tasks`：330 tests，0 failures，连续两次稳定。
 - **双包验收**：release 包 `CFBundleIdentifier=io.github.yuanbaobaoo.PetalLink`、dev 包 `=...PetalLink-dev`，`BuildInfo` 一致；两包 verify+smoke 通过；release DMG ditto 隔离 verify+冒烟通过；release DMG SHA-256 `3187f02d5e04612dcdd3d6cf16a8e051499b9622f4a61d10522bdc089dfa2249`。
 - **已修复 jpackage DMG entitlements 丢失**：jpackage `--type dmg` 在 adhoc 签名下会丢主可执行 entitlements。新增 `repackDmgForEntitlements` 任务，`packageDmg` 后用 `ditto`+`hdiutil` 从 app-image 重封 DMG，dev/release 双包 entitlements 均完整保留。ditto 复制品的 verify 门禁（含 entitlements）现全通过。
 

@@ -2,7 +2,7 @@
 
 > 所有回复使用**中文**，代码注释使用**简短、准确的中文**，代码标识符和专有技术名词保留标准英文写法。
 > 
-> **UI 开发必须遵循 `docs/plan/09-设计系统.md` 与 `shared/src/jvmMain/.../ui/theme/DesignTokens.kt` 中定义的设计令牌**（颜色、间距、圆角、字号统一取自 `DesignTokens`，禁止在 Composable 内硬编码带单位的数值）。
+> **UI 开发必须遵循 `docs/plan/09-设计系统.md` 与 `src/jvmMain/.../ui/theme/DesignTokens.kt` 中定义的设计令牌**（颜色、间距、圆角、字号统一取自 `DesignTokens`，禁止在 Composable 内硬编码带单位的数值）。
 
 ---
 
@@ -237,7 +237,7 @@ private suspend fun <T> drive(block: suspend () -> T): AppResult<T> = try {
 
 ### 4.1 `.sq` 文件组织
 
-- `.sq` 文件放 `shared/src/commonMain/sqldelight/io/github/yuanbaobaoo/petallink/data/`，一张表一个文件，文件名为 `表名.sq`；建表 DDL 集中在 `schema.sq`。
+- `.sq` 文件放 `src/commonMain/sqldelight/io/github/yuanbaobaoo/petallink/data/`，一张表一个文件，文件名为 `表名.sq`；建表 DDL 集中在 `schema.sq`。
 - 每个文件顶部用 `--` 注释说明该表的职责与对标文档（如 `-- inode 身份映射，docs/11 §3.1`）。
 - 查询命名以 `:` 结尾分节，采用动词开头：`upsert:` / `insertRow:` / `lookupByInode:` / `selectAll:` / `deleteByInode:`。
 
@@ -352,7 +352,7 @@ fun 跨日期写不同文件并清理30天以前日志() { ... }
 
 ### 8.5 自查清单（提交前必检）
 
-任何对 `shared/build.gradle.kts`、`build.gradle.kts`、`settings.gradle.kts`、`scripts/`、自定义 Gradle 任务的修改，提交前必须逐条对照：
+任何对 `build.gradle.kts`、`settings.gradle.kts`、`scripts/`、自定义 Gradle 任务的修改，提交前必须逐条对照：
 
 - [ ] 是否引入了指向项目目录之外（尤其系统目录）的符号链接？如有 → 禁止。
 - [ ] 是否存在对含符号链接目录的递归删除？如有 → 禁止。
