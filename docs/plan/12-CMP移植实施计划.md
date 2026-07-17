@@ -360,8 +360,8 @@ P0 装配与数据底座
 - **优先级**：`PETALLINK_DATA_DIR` > `PETALLINK_ENV=dev` > `BuildInfo.BUNDLE_ID` > prod 兜底；前两者保留为测试/本地覆盖。
 - **顺手清理**：全局修正包名拼写 `yuanbaobaao`→`yuanbaobaoo`（178 文件 + 5 目录）；删除零引用死代码 `core/Paths.kt`（其 `cacheBaseDir` 用了游离的 `Application Support/PetalLink` 路径，与 bundle id 体系冲突，运行时实际走 `AppPaths.cloudTreeCheckpoint`）。
 - **测试**：新增 `AppPathsTest`（优先级链、dev/prod 目录、大小写、空白覆盖，纯函数 `resolveFromEnvironment` 不污染全局）；`DesktopLifecycleTest` 补 dev/prod LaunchAgent 隔离测试；修复一个既有 flaky 时序测试（`JvmSyncRuntimeIntegrationTest` 文件落地后未等 `folderSyncProgress` 发布）。`./gradlew :shared:jvmTest --rerun-tasks`：330 tests，0 failures，连续两次稳定。
-- **双包验收**：release 包 `CFBundleIdentifier=io.github.yuanbaobaoo.PetalLink`、dev 包 `=...PetalLink-dev`，`BuildInfo` 一致；两包 verify+smoke 通过；release DMG ditto 隔离冒烟通过；release DMG SHA-256 `a3a900f681b41d33d278c47c650a7c10d2570fb8a234b973d369ca2d1cbc7712`。
-- **已知独立阻断（非本次引入）**：jpackage 把 `.app` 打进 DMG 后复制品 entitlements 丢失（构建目录 `.app` 正确），`verify` 的 entitlements 门禁在 ditto 复制品上失败，留待单独修复。
+- **双包验收**：release 包 `CFBundleIdentifier=io.github.yuanbaobaoo.PetalLink`、dev 包 `=...PetalLink-dev`，`BuildInfo` 一致；两包 verify+smoke 通过；release DMG ditto 隔离 verify+冒烟通过；release DMG SHA-256 `3187f02d5e04612dcdd3d6cf16a8e051499b9622f4a61d10522bdc089dfa2249`。
+- **已修复 jpackage DMG entitlements 丢失**：jpackage `--type dmg` 在 adhoc 签名下会丢主可执行 entitlements。新增 `repackDmgForEntitlements` 任务，`packageDmg` 后用 `ditto`+`hdiutil` 从 app-image 重封 DMG，dev/release 双包 entitlements 均完整保留。ditto 复制品的 verify 门禁（含 entitlements）现全通过。
 
 ### 最终验收矩阵
 
