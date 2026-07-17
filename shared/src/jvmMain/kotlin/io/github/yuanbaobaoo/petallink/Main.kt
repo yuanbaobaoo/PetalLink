@@ -27,10 +27,12 @@ import io.github.yuanbaobaoo.petallink.core.net_guard.NetState
 import io.github.yuanbaobaoo.petallink.core.AppPaths
 import io.github.yuanbaobaoo.petallink.platform.MacActivationPolicy
 import io.github.yuanbaobaoo.petallink.platform.SingleInstanceCoordinator
-import io.github.yuanbaobaoo.petallink.ui.pages.LoginScreen
-import io.github.yuanbaobaoo.petallink.ui.pages.LogViewerScreen
-import io.github.yuanbaobaoo.petallink.ui.pages.MainScreen
-import io.github.yuanbaobaoo.petallink.ui.pages.SettingsScreen
+import io.github.yuanbaobaoo.petallink.ui.pages.main.LoginScreen
+import io.github.yuanbaobaoo.petallink.ui.pages.main.LogViewerScreen
+import io.github.yuanbaobaoo.petallink.ui.pages.main.MainScreen
+import io.github.yuanbaobaoo.petallink.ui.pages.main.SettingsScreen
+import io.github.yuanbaobaoo.petallink.ui.pages.main.FileListScreen
+import io.github.yuanbaobaoo.petallink.ui.pages.main.UpdateDialogScreen
 import io.github.yuanbaobaoo.petallink.ui.theme.PetalLinkTheme
 import java.awt.Desktop
 import java.awt.event.WindowAdapter
@@ -59,7 +61,7 @@ fun main(args: Array<String>) {
             val trayIcon = rememberVectorPainter(Icons.Default.Menu)
             var trayTransfers by remember { mutableStateOf(state.transfers) }
             var lastTrayRebuild by remember { mutableStateOf(0L) }
-            val transferSignature = state.transfers.joinToString("|") { "${it.fileName}:${it.stateText}:${it.progress}" }
+            val transferSignature = state.transfers.joinToString("|") { "${it.fileName}:${it.state}:${it.progress}" }
 
             fun show() {
                 visible = true
@@ -131,7 +133,7 @@ fun main(args: Array<String>) {
                         trayTransfers.forEach { transfer ->
                             Item(transfer.fileName.take(20), onClick = {}, enabled = false)
                             Item(
-                                "${if (transfer.direction == "upload") "上传" else "下载"} ${(transfer.progress * 100).toInt()}% · ${transfer.stateText}",
+                                "${if (transfer.direction == "upload") "上传" else "下载"} ${(transfer.progress * 100).toInt()}% · ${transfer.state}",
                                 onClick = {}, enabled = false,
                             )
                         }
@@ -164,7 +166,8 @@ fun main(args: Array<String>) {
                 }
                 PetalLinkTheme {
                     Surface(modifier = Modifier.fillMaxSize()) {
-                        when {
+                        Box(modifier = Modifier.fillMaxSize()) {
+                            when {
                             !state.initialized -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                                 CircularProgressIndicator()
                             }
@@ -196,43 +199,69 @@ fun main(args: Array<String>) {
                             state.page == AppPage.LOGS -> LogViewerScreen(
                                 records = state.logs,
                                 onBack = root.viewModel::openFiles,
-                                onReload = root.viewModel::reloadLogs,
                                 onExport = root.viewModel::exportLogs,
                                 onClear = root.viewModel::clearLogs,
                             )
                             else -> MainScreen(
-                                syncStatus = state.errorMessage ?: state.syncStatus,
-                                isOnline = state.netState == NetState.ONLINE,
                                 browser = state.browser,
-                                thumbnails = state.thumbnails,
-                                fileStatuses = state.fileStatuses,
+                                sync = state.sync,
+                                setupPhase = state.setupPhase,
+                                mountDir = state.config.mountDir,
+                                userName = state.userName,
                                 quotaText = state.quotaText,
-                                transferItems = state.transfers,
+                                transfers = state.transfers,
+                                errorMessage = state.errorMessage,
                                 availableUpdate = state.availableUpdate,
+                                fileListView = {
+                                    FileListScreen(
+                                        browser = state.browser,
+                                        fileStatuses = state.fileStatuses,
+                                        thumbnails = state.thumbnails,
+                                        onSort = root.viewModel::sort,
+                                        onEnterFolder = root.viewModel::enterFolder,
+                                        onOpenItem = root.viewModel::openItem,
+                                        onThumbnailNeeded = root.viewModel::loadThumbnail,
+                                        onDelete = root.viewModel::deleteItems,
+                                        onFreeUp = root.viewModel::freeUpItems,
+                                        onDownload = { files -> files.forEach(root.viewModel::openItem) },
+                                        onSyncFolder = root.viewModel::syncFolder,
+                                        onRename = { file -> root.viewModel.renameItem(file, file.name ?: file.fileName ?: "") },
+                                        onShowProps = {},
+                                    )
+                                },
                                 onSearch = root.viewModel::search,
-                                onSort = root.viewModel::sort,
-                                onNavigate = root.viewModel::navigateTo,
+                                onNavigate = root.viewModel::enterFolder,
+                                onNavigateCrumb = root.viewModel::navigateTo,
                                 onEnterFolder = root.viewModel::enterFolder,
                                 onOpenItem = root.viewModel::openItem,
-                                onThumbnailNeeded = root.viewModel::loadThumbnail,
-                                onCanFreeUp = root.viewModel::canFreeUp,
-                                onDelete = root.viewModel::deleteItems,
-                                onFreeUp = root.viewModel::freeUpItems,
-                                onCreateFolder = root.viewModel::createFolder,
-                                onRename = root.viewModel::renameItem,
-                                onMove = root.viewModel::moveItem,
-                                onSyncFolder = root.viewModel::syncFolder,
-                                onUpload = root.viewModel::chooseAndUpload,
-                                onOpenFinder = root.viewModel::openMountInFinder,
-                                onLoadQuota = root.viewModel::loadQuota,
-                                onLoadMore = root.viewModel::loadMore,
-                                onRetryTransfer = root.viewModel::retryTransfer,
-                                onClearTransfers = root.viewModel::clearFinishedTransfers,
-                                onInstallUpdate = root.viewModel::installUpdate,
                                 onRefresh = root.viewModel::refresh,
+                                onOpenFinder = root.viewModel::openMountInFinder,
                                 onOpenSettings = root.viewModel::openSettings,
-                                onOpenLogs = root.viewModel::openLogs,
+                                onRetryTransfer = root.viewModel::retryTransfer,
+                                onClearFinishedTransfers = root.viewModel::clearFinishedTransfers,
+                                onClearCompletedTransfers = root.viewModel::clearFinishedTransfers,
+                                onClearFailedTransfers = root.viewModel::clearFinishedTransfers,
+                                onSelectDir = {},
+                                onFirstSync = root.viewModel::refresh,
+                                onRetrySetup = root.viewModel::refresh,
+                                onInstallUpdate = root.viewModel::installUpdate,
                             )
+                        }
+                        // 全局更新对话框（覆盖所有页面，对标原 Vue App.vue 顶层 <UpdateDialog />）
+                        UpdateDialogScreen(
+                            phase = state.updatePhase,
+                            manifest = state.availableUpdate,
+                            downloadProgress = state.updateDownloadProgress,
+                            errorMessage = state.errorMessage,
+                            hasActiveTransfers = state.sync.hasActiveTransfer,
+                            onStartUpdate = root.viewModel::installUpdate,
+                            onRelaunch = root.viewModel::installUpdate,
+                            onRetry = root.viewModel::installUpdate,
+                            onDismiss = root.viewModel::dismissUpdateDialog,
+                        )
+                        // 全局对话框 / Toast 宿主
+                        io.github.yuanbaobaoo.petallink.ui.components.mate.MateDialogHost()
+                        io.github.yuanbaobaoo.petallink.ui.components.mate.MateToastHost()
                         }
                     }
                 }

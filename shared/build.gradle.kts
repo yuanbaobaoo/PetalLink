@@ -11,15 +11,14 @@ plugins {
 
 val petalLinkVersion = providers.gradleProperty("petalLinkVersion").get()
 // 构建档案（dev/release）是 bundle id、运行时数据目录与 LaunchAgent label 的唯一真相源。
-// 默认 release：沿用原 Tauri 的 prod bundle id，保证老用户数据目录与单实例锁不变。
-// dev：附加 -dev 后缀，与 release 包在系统层（LaunchServices）、数据目录、开机自启上完全隔离。
-val buildProfile = providers.gradleProperty("petalLinkBuildProfile").orElse("release").get().lowercase()
-require(buildProfile == "dev" || buildProfile == "release") {
-    "petalLinkBuildProfile 仅支持 dev/release，当前值：$buildProfile"
-}
+// 用 -Prelease=true 切换：true → release（prod bundle id，沿用原 Tauri 老用户数据目录）；
+// 不带 / false / 任意非 true 值 → dev（附加 -dev 后缀，数据目录/单实例锁/开机自启与 release 完全隔离）。
+// 因此 run/jvmTest/本地 packageDmg 默认都落到 dev 数据目录，不污染正式数据；正式发布才 -Prelease=true。
+val isRelease = providers.gradleProperty("release").map { it.equals("true", ignoreCase = true) }.orElse(false).get()
+val buildProfile = if (isRelease) "release" else "dev"
 val prodBundleId = "io.github.yuanbaobaoo.PetalLink"
 val devBundleId = "$prodBundleId-dev"
-val bundleId = if (buildProfile == "dev") devBundleId else prodBundleId
+val bundleId = if (isRelease) prodBundleId else devBundleId
 val updateEndpoint = providers.environmentVariable("PETALLINK_UPDATE_ENDPOINT")
     .orElse("https://github.com/yuanbaobaoo/PetalLink/releases/latest/download/PetalLink-update.json")
 val updateTeamId = providers.environmentVariable("PETALLINK_UPDATE_TEAM_ID").orElse("")

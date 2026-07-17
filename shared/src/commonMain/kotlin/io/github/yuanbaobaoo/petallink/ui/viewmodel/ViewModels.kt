@@ -41,14 +41,65 @@ data class UserInfo(
 )
 
 /**
+ * 同步快照 UI 模型（对标原 Vue sync store 全部字段 + docs/08 §sync store）。
+ *
+ * 字段对齐原 Rust `SyncGlobalState`（src/sync/state.rs）与 `RuntimeStatus`。
+ * SyncStatusBar 按 [syncPhase] 9 种值映射精确文案，failedItems 驱动失败弹窗。
+ */
+data class SyncSnapshotUi(
+    val revision: Long = 0L,
+    val global: SyncGlobalState = SyncGlobalState.IDLE,
+    // 计数器（对标 StatusCounts）
+    val total: Long = 0L,
+    val completed: Long = 0L,
+    val uploading: Long = 0L,
+    val downloading: Long = 0L,
+    val waitingNetwork: Long = 0L,
+    val failed: Long = 0L,
+    val transferFailed: Long = 0L,
+    val conflict: Long = 0L,
+    val editing: Long = 0L,
+    // 运行态（对标 RuntimeStatus）
+    val isRunning: Boolean = false,
+    val isIndexing: Boolean = false,
+    val indexingScannedFolders: Long = 0L,
+    val indexingDiscoveredItems: Long = 0L,
+    val syncPhase: String? = null,
+    val lastSyncTime: Long? = null,
+    val contentChanged: Boolean = false,
+    // 失败项详情（最多 20 条）
+    val failedItems: List<FailedItemUi> = emptyList(),
+) {
+    /** 进度 0..1（completed/total，total=0 视为 1.0）。 */
+    val progress: Float get() = if (total == 0L) 1f else (completed.toFloat() / total).coerceIn(0f, 1f)
+    /** 是否有活跃传输（上传/下载/等待网络任一 >0）。 */
+    val hasActiveTransfer: Boolean get() = uploading > 0 || downloading > 0 || waitingNetwork > 0
+    /** 是否空闲（无活跃传输、非索引、非运行）。 */
+    val isIdle: Boolean get() = !hasActiveTransfer && !isIndexing && !isRunning
+}
+
+/** 失败项 UI 模型（对标原 Vue FailedItem）。 */
+data class FailedItemUi(
+    val relativePath: String,
+    val errorMessage: String?,
+)
+
+/** 同步目录配置阶段（对标原 Vue sync.setupPhase）。 */
+enum class SetupPhase { LOADING, NEEDS_SETUP, NEEDS_FIRST_SYNC, ACTIVE }
+
+/**
  * 同步状态 ViewModel（对标原项目前端 sync store）。
  *
  * 详见 docs/08 §sync store。
- * applyState 同 revision 重复投递只幂等赋值，不触发 sidebarRefresh++。
+ * applyState/applySnapshot 同 revision 重复投递只幂等赋值，不触发 sidebarRefresh++。
+ * sidebarRefresh 是 contentChanged 同新 revision 时 +1 的计数器，供目录树订阅刷新。
  */
 class SyncViewModel {
     private val _state = MutableStateFlow(SyncGlobalState.IDLE)
     val state: StateFlow<SyncGlobalState> = _state.asStateFlow()
+
+    private val _snapshot = MutableStateFlow(SyncSnapshotUi())
+    val snapshot: StateFlow<SyncSnapshotUi> = _snapshot.asStateFlow()
 
     private val _netState = MutableStateFlow(NetState.OFFLINE)
     val netState: StateFlow<NetState> = _netState.asStateFlow()
@@ -56,15 +107,39 @@ class SyncViewModel {
     private val _lastSyncTime = MutableStateFlow(0L)
     val lastSyncTime: StateFlow<Long> = _lastSyncTime.asStateFlow()
 
+    /** 目录树刷新计数器（contentChanged 同新 revision 时 +1，对标原 Vue sidebarRefresh）。 */
+    private val _sidebarRefresh = MutableStateFlow(0)
+    val sidebarRefresh: StateFlow<Int> = _sidebarRefresh.asStateFlow()
+
     private var lastRevision: Long = -1
 
     /**
      * 应用同步状态（isNewRevision 逻辑：同 revision 重复投递只幂等赋值）。
+     * 兼容旧调用方；完整快照用 [applySnapshot]。
      */
     fun applyState(newState: SyncGlobalState, revision: Long) {
         if (revision <= lastRevision) return
         lastRevision = revision
         _state.value = newState
+        _snapshot.value = _snapshot.value.copy(revision = revision, global = newState)
+    }
+
+    /**
+     * 应用完整快照（乱序保护：revision <= lastRevision 拒绝）。
+     *
+     * contentChanged 且为新 revision 时 sidebarRefresh++（目录树据此刷新），
+     * 同 revision 重复投递只幂等赋值，不重复触发刷新。
+     */
+    fun applySnapshot(snap: SyncSnapshotUi) {
+        if (snap.revision <= lastRevision) return
+        val isNewRevision = snap.revision > lastRevision
+        lastRevision = snap.revision
+        _state.value = snap.global
+        _snapshot.value = snap
+        _lastSyncTime.value = snap.lastSyncTime ?: 0L
+        if (snap.contentChanged && isNewRevision) {
+            _sidebarRefresh.value = _sidebarRefresh.value + 1
+        }
     }
 
     fun updateNetState(state: NetState) {

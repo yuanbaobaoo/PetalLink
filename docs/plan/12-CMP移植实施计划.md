@@ -355,9 +355,9 @@ P0 装配与数据底座
 ### P6 追加执行记录（2026-07-17）：bundle id dev/release 分离
 
 - **问题**：原实现打包的 `CFBundleIdentifier` 硬编码为 prod，与运行时 `PETALLINK_ENV` 数据目录开关完全解耦——dev 包会误读 prod 数据目录，dev/release 开机自启 LaunchAgent 互相覆盖。
-- **方案（单一真相源）**：新增 gradle 属性 `petalLinkBuildProfile`（默认 release）。打包期同时写入 `.app` 的 `CFBundleIdentifier` 和编译进 `BuildInfo.BUNDLE_ID`/`BUILD_PROFILE`；运行时 `AppPaths.resolveFromEnvironment` 默认读 `BuildInfo.BUNDLE_ID` 派生数据目录。两个开关合一。
+- **方案（单一真相源）**：新增 gradle 布尔属性 `-Prelease`（不带 / false / 非 true → dev，使 `run`/`jvmTest`/`packageDmg` 默认落到 dev 数据目录，不污染正式数据；`-Prelease=true` 切到 release）。打包期同时写入 `.app` 的 `CFBundleIdentifier` 和编译进 `BuildInfo.BUNDLE_ID`/`BUILD_PROFILE`；运行时 `AppPaths.resolveFromEnvironment` 默认读 `BuildInfo.BUNDLE_ID` 派生数据目录。两个开关合一。
 - **LaunchAgent**：`CommandService.launchAgentManager()` 改用 `AppPaths.currentBundleId()`，dev 包注册 `...-dev.plist`，release 包注册 prod plist，互不覆盖。
-- **优先级**：`PETALLINK_DATA_DIR` > `PETALLINK_ENV=dev` > `BuildInfo.BUNDLE_ID` > prod 兜底；前两者保留为测试/本地覆盖。
+- **优先级**：`PETALLINK_DATA_DIR` > `PETALLINK_ENV=dev` > `BuildInfo.BUNDLE_ID`（默认 dev，因 `-Prelease` 默认 false） > prod 兜底（仅 BuildInfo 缺失时）；前两者保留为测试/本地覆盖。
 - **顺手清理**：全局修正包名拼写 `yuanbaobaao`→`yuanbaobaoo`（178 文件 + 5 目录）；删除零引用死代码 `core/Paths.kt`（其 `cacheBaseDir` 用了游离的 `Application Support/PetalLink` 路径，与 bundle id 体系冲突，运行时实际走 `AppPaths.cloudTreeCheckpoint`）。
 - **测试**：新增 `AppPathsTest`（优先级链、dev/prod 目录、大小写、空白覆盖，纯函数 `resolveFromEnvironment` 不污染全局）；`DesktopLifecycleTest` 补 dev/prod LaunchAgent 隔离测试；修复一个既有 flaky 时序测试（`JvmSyncRuntimeIntegrationTest` 文件落地后未等 `folderSyncProgress` 发布）。`./gradlew :shared:jvmTest --rerun-tasks`：330 tests，0 failures，连续两次稳定。
 - **双包验收**：release 包 `CFBundleIdentifier=io.github.yuanbaobaoo.PetalLink`、dev 包 `=...PetalLink-dev`，`BuildInfo` 一致；两包 verify+smoke 通过；release DMG ditto 隔离 verify+冒烟通过；release DMG SHA-256 `3187f02d5e04612dcdd3d6cf16a8e051499b9622f4a61d10522bdc089dfa2249`。

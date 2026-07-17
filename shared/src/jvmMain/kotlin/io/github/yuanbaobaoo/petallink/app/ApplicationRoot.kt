@@ -13,16 +13,18 @@ import io.github.yuanbaobaoo.petallink.drive.DriveFile
 import io.github.yuanbaobaoo.petallink.drive.totalBytes
 import io.github.yuanbaobaoo.petallink.drive.usedBytes
 import io.github.yuanbaobaoo.petallink.sync.isFolder
-import io.github.yuanbaobaoo.petallink.ui.pages.LogRecordDisplay
-import io.github.yuanbaobaoo.petallink.ui.components.MateFileItemData
-import io.github.yuanbaobaoo.petallink.ui.components.MateTransferItemData
+import io.github.yuanbaobaoo.petallink.ui.pages.main.LogRecordDisplay
 import io.github.yuanbaobaoo.petallink.ui.viewmodel.BrowserBreadcrumb
 import io.github.yuanbaobaoo.petallink.ui.viewmodel.BrowserSortField
 import io.github.yuanbaobaoo.petallink.ui.viewmodel.FileBrowserState
 import io.github.yuanbaobaoo.petallink.ui.viewmodel.FileBrowserViewModel
 import io.github.yuanbaobaoo.petallink.ui.viewmodel.SyncGlobalState
+import io.github.yuanbaobaoo.petallink.ui.viewmodel.SyncSnapshotUi
 import io.github.yuanbaobaoo.petallink.ui.viewmodel.SyncViewModel
+import io.github.yuanbaobaoo.petallink.ui.viewmodel.SetupPhase
 import io.github.yuanbaobaoo.petallink.ui.viewmodel.TransferTaskUi
+import io.github.yuanbaobaoo.petallink.ui.viewmodel.UpdaterPhase
+import io.github.yuanbaobaoo.petallink.auth.UserInfo
 import io.github.yuanbaobaoo.petallink.ui.viewmodel.TransferViewModel
 import io.github.yuanbaobaoo.petallink.update.UpdateManifest
 import java.nio.file.Path
@@ -43,6 +45,12 @@ import kotlinx.coroutines.sync.withLock
 
 enum class AppPage { LOGIN, FILES, SETTINGS, LOGS }
 
+/**
+ * 桌面 UI 全量状态。
+ *
+ * sync 为完整同步快照（对标原 Vue sync store 全部字段）；
+ * setupPhase 由 mountConfigured 派生，驱动 SyncSetupBanner 三态。
+ */
 data class DesktopUiState(
     val initialized: Boolean = false,
     val page: AppPage = AppPage.LOGIN,
@@ -51,21 +59,26 @@ data class DesktopUiState(
     val secretConfigured: Boolean = true,
     val netState: NetState = NetState.OFFLINE,
     val syncStatus: String = "初始化中",
+    val sync: SyncSnapshotUi = SyncSnapshotUi(),
+    val setupPhase: SetupPhase = SetupPhase.LOADING,
     val config: UserConfig = UserConfig(),
-    val files: List<MateFileItemData> = emptyList(),
-    val transfers: List<MateTransferItemData> = emptyList(),
+    val transfers: List<TransferTaskUi> = emptyList(),
     val browser: FileBrowserState = FileBrowserState(),
     val thumbnails: Map<String, ByteArray> = emptyMap(),
     val fileStatuses: Map<String, String> = emptyMap(),
     val quotaText: String? = null,
     val logs: List<LogRecordDisplay> = emptyList(),
+    val userInfo: UserInfo? = null,
     val userName: String? = null,
     val appVersion: String = "",
     val availableUpdate: UpdateManifest? = null,
     val updateStatus: String = "",
+    val updatePhase: UpdaterPhase = UpdaterPhase.IDLE,
+    val updateDownloadProgress: Float = 0f,
     val updateReadyToQuit: Boolean = false,
     val launchAtLogin: Boolean = false,
     val errorMessage: String? = null,
+    val sidebarRefresh: Int = 0,
 )
 
 /** 桌面 UI 的真实状态适配层；所有 IO 都通过 Composition Root 中的服务执行。 */
@@ -92,16 +105,7 @@ class DesktopAppViewModel(
         }
         scope.launch {
             transferViewModel.tasks.collect { tasks ->
-                mutableState.value = mutableState.value.copy(transfers = tasks.map { task ->
-                    MateTransferItemData(
-                        fileName = task.fileName,
-                        direction = task.direction,
-                        progress = task.progress.coerceIn(0f, 1f),
-                        stateText = task.state.name,
-                        id = task.id,
-                        errorMessage = task.errorMessage,
-                    )
-                })
+                mutableState.value = mutableState.value.copy(transfers = tasks)
             }
         }
         scope.launch {
@@ -116,18 +120,47 @@ class DesktopAppViewModel(
             }
         }
         scope.launch {
+            syncViewModel.snapshot.collect { snap ->
+                mutableState.value = mutableState.value.copy(
+                    sync = snap,
+                    sidebarRefresh = syncViewModel.sidebarRefresh.value,
+                )
+            }
+        }
+        scope.launch {
             var lastContentRevision = 0L
             commands.syncStates.collect { snapshot ->
-                syncViewModel.applyState(
-                    when (snapshot.global) {
+                // 透出完整快照（counts + runtime + failedItems + syncPhase），不再压缩成字符串。
+                val ui = SyncSnapshotUi(
+                    revision = snapshot.revision,
+                    global = when (snapshot.global) {
                         io.github.yuanbaobaoo.petallink.sync.engine.SyncGlobalStatus.IDLE -> SyncGlobalState.IDLE
                         io.github.yuanbaobaoo.petallink.sync.engine.SyncGlobalStatus.INDEXING -> SyncGlobalState.INDEXING
                         io.github.yuanbaobaoo.petallink.sync.engine.SyncGlobalStatus.SYNCING -> SyncGlobalState.SYNCING
                         io.github.yuanbaobaoo.petallink.sync.engine.SyncGlobalStatus.PAUSED -> SyncGlobalState.PAUSED
                         io.github.yuanbaobaoo.petallink.sync.engine.SyncGlobalStatus.ERROR -> SyncGlobalState.ERROR
                     },
-                    snapshot.revision,
+                    total = snapshot.counts.total,
+                    completed = snapshot.counts.completed,
+                    uploading = snapshot.counts.uploading,
+                    downloading = snapshot.counts.downloading,
+                    waitingNetwork = snapshot.counts.waitingNetwork,
+                    failed = snapshot.counts.failed,
+                    transferFailed = snapshot.counts.transferFailed,
+                    conflict = snapshot.counts.conflict,
+                    editing = snapshot.runtime.editing,
+                    isRunning = snapshot.runtime.isRunning,
+                    isIndexing = snapshot.runtime.isIndexing,
+                    indexingScannedFolders = snapshot.runtime.indexingScannedFolders.toLong(),
+                    indexingDiscoveredItems = snapshot.runtime.indexingDiscoveredItems.toLong(),
+                    syncPhase = snapshot.runtime.syncPhase,
+                    lastSyncTime = snapshot.runtime.lastSyncTime,
+                    contentChanged = snapshot.runtime.contentChanged,
+                    failedItems = snapshot.failedItems.map {
+                        io.github.yuanbaobaoo.petallink.ui.viewmodel.FailedItemUi(it.relativePath, it.errorMessage)
+                    },
                 )
+                syncViewModel.applySnapshot(ui)
                 if (snapshot.runtime.contentChanged && snapshot.revision > lastContentRevision && mutableState.value.loggedIn) {
                     lastContentRevision = snapshot.revision
                     refreshInternal(triggerSync = false)
@@ -198,6 +231,7 @@ class DesktopAppViewModel(
             page = if (loggedIn) AppPage.FILES else AppPage.LOGIN,
             syncStatus = if (loggedIn) "空闲" else "等待登录",
             config = config,
+            setupPhase = deriveSetupPhase(config.mountConfigured),
             secretConfigured = authState?.secretConfigured ?: commands.authCheckSecret(),
             launchAtLogin = commands.platformLaunchAtLoginIsEnabled(),
             appVersion = commands.platformAppGetVersion(),
@@ -224,6 +258,7 @@ class DesktopAppViewModel(
                         page = if (resetConfig.mountConfigured) AppPage.FILES else AppPage.SETTINGS,
                         syncStatus = if (resetConfig.mountConfigured) "空闲" else "请选择同步目录",
                         config = resetConfig,
+                        setupPhase = deriveSetupPhase(resetConfig.mountConfigured),
                     )
                     loadUserInfo()
                     if (resetConfig.mountConfigured) refresh()
@@ -254,16 +289,8 @@ class DesktopAppViewModel(
                 val statuses = (commands.syncBatchFileStatus(ids) as? AppResult.Ok)?.value.orEmpty()
                 mutableState.value = mutableState.value.copy(fileStatuses = statuses)
             }
-            val files = (fileResult as? AppResult.Ok)?.value?.files.orEmpty().map { file ->
-                MateFileItemData(
-                    name = file.name ?: file.fileName ?: "未命名",
-                    size = if (file.isFolder()) "--" else formatBytes(file.size?.toLongOrNull() ?: 0L),
-                    modified = file.modifiedTime.orEmpty(),
-                    isFolder = file.isFolder(),
-                    statusIcon = "☁️",
-                )
-            }
-            (transferResult as? AppResult.Ok)?.value?.let { tasks ->
+            val transferTasks = (transferResult as? AppResult.Ok)?.value
+            transferTasks?.let { tasks ->
                 transferViewModel.loadAll(tasks.map { task ->
                     TransferTaskUi(
                         id = task.id ?: return@map null,
@@ -296,7 +323,6 @@ class DesktopAppViewModel(
             val error = (fileResult as? AppResult.Err)?.error?.message
                 ?: (transferResult as? AppResult.Err)?.error?.message
             mutableState.value = mutableState.value.copy(
-                files = files,
                 syncStatus = if (error == null) "已刷新" else "刷新失败",
                 errorMessage = error,
             )
@@ -554,17 +580,24 @@ class DesktopAppViewModel(
             if (automatic && last != null && now - last < minimumIntervalMs) return@withLock
             if (automatic) lastAutomaticUpdateCheckMs = now
             if (!automatic) {
-                mutableState.value = mutableState.value.copy(updateStatus = "正在检查更新…", errorMessage = null)
+                mutableState.value = mutableState.value.copy(
+                    updateStatus = "正在检查更新…",
+                    updatePhase = UpdaterPhase.CHECKING,
+                    errorMessage = null,
+                )
             }
             when (val result = commands.updaterCheck()) {
                 is AppResult.Ok -> mutableState.value = mutableState.value.copy(
                     availableUpdate = result.value,
                     updateStatus = result.value?.let { "发现新版本 ${it.version}" }
                         ?: if (automatic) "" else "已是最新版本",
+                    updatePhase = if (result.value != null) UpdaterPhase.AVAILABLE else UpdaterPhase.IDLE,
                 )
                 is AppResult.Err -> if (!automatic) {
                     mutableState.value = mutableState.value.copy(
-                        updateStatus = "检查更新失败", errorMessage = result.error.message,
+                        updateStatus = "检查更新失败",
+                        updatePhase = UpdaterPhase.FAILED,
+                        errorMessage = result.error.message,
                     )
                 }
             }
@@ -574,16 +607,30 @@ class DesktopAppViewModel(
     fun installUpdate() {
         val manifest = mutableState.value.availableUpdate ?: return
         scope.launch {
-            mutableState.value = mutableState.value.copy(updateStatus = "等待传输并下载更新…", errorMessage = null)
+            mutableState.value = mutableState.value.copy(
+                updateStatus = "等待传输并下载更新…",
+                updatePhase = UpdaterPhase.DOWNLOADING,
+                updateDownloadProgress = 0f,
+                errorMessage = null,
+            )
             when (val result = commands.updaterDownloadAndInstall(manifest)) {
                 is AppResult.Ok -> mutableState.value = mutableState.value.copy(
-                    updateStatus = "更新已校验，正在重启安装", updateReadyToQuit = result.value,
+                    updateStatus = "更新已校验，正在重启安装",
+                    updatePhase = UpdaterPhase.READY,
+                    updateReadyToQuit = result.value,
                 )
                 is AppResult.Err -> mutableState.value = mutableState.value.copy(
-                    updateStatus = "更新失败", errorMessage = result.error.message,
+                    updateStatus = "更新失败",
+                    updatePhase = UpdaterPhase.FAILED,
+                    errorMessage = result.error.message,
                 )
             }
         }
+    }
+
+    /** 关闭更新弹窗（回到 IDLE，但保留 availableUpdate 以便侧边栏提示）。 */
+    fun dismissUpdateDialog() {
+        mutableState.value = mutableState.value.copy(updatePhase = UpdaterPhase.IDLE)
     }
 
     fun logout() = scope.launch {
@@ -595,7 +642,22 @@ class DesktopAppViewModel(
 
     private fun loadUserInfo() = scope.launch {
         val user = (commands.authGetUserInfo() as? AppResult.Ok)?.value
-        mutableState.value = mutableState.value.copy(userName = user?.displayName ?: user?.nickname)
+        mutableState.value = mutableState.value.copy(
+            userInfo = user,
+            userName = user?.displayName ?: user?.nickname,
+        )
+    }
+
+    /**
+     * 派生同步目录配置阶段（对标原 Vue sync.setupPhase）。
+     *
+     * mountConfigured=false → NEEDS_SETUP；=true 但从未成功同步 → NEEDS_FIRST_SYNC；否则 ACTIVE。
+     */
+    private fun deriveSetupPhase(mountConfigured: Boolean): SetupPhase {
+        if (!mountConfigured) return SetupPhase.NEEDS_SETUP
+        val snap = mutableState.value.sync
+        // 已有过同步内容（基线非空）或上次同步时间存在 → ACTIVE，否则等待首次同步
+        return if (snap.total > 0 || snap.lastSyncTime != null) SetupPhase.ACTIVE else SetupPhase.NEEDS_FIRST_SYNC
     }
 
     private fun relativePathFor(file: DriveFile): String =

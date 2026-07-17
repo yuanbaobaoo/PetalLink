@@ -21,13 +21,29 @@ object EnvLoader {
 
     /**
      * 从 .env 文件加载凭据。
-     * 搜索顺序：当前目录 → 可执行文件目录 → 父目录
+     *
+     * 搜索顺序（首个命中即用）：
+     * 1. 当前工作目录的 `.env`
+     * 2. 当前工作目录逐级向上的 `.env`（最多 4 级，覆盖 Gradle 子模块工作目录场景）
+     * 3. 可执行文件 / classpath 目录的 `.env`
+     *
+     * 对标原 Rust `env_loader.rs`：当前目录 → exe 目录 → exe 父目录。
+     * CMP `./gradlew :shared:run` 时工作目录是 `shared/`，需向上到项目根才能找到 `.env`。
      */
     fun loadEnvFile() {
-        val candidates = listOf(
-            java.nio.file.Paths.get(".env"),
-            java.nio.file.Paths.get(System.getProperty("java.class.path", "")).parent?.resolve(".env"),
-        )
+        val candidates = mutableListOf<java.nio.file.Path>()
+        // 当前工作目录及其逐级父目录（最多向上 4 级）
+        var current: java.nio.file.Path? = java.nio.file.Paths.get(".").toAbsolutePath().normalize().parent
+        var levels = 0
+        while (current != null && levels <= 4) {
+            candidates.add(current.resolve(".env"))
+            current = current.parent
+            levels++
+        }
+        // classpath 目录（打包后从可执行文件目录查找）
+        java.nio.file.Paths.get(System.getProperty("java.class.path", ""))
+            .parent?.resolve(".env")?.let { candidates.add(it.normalize()) }
+
         for (path in candidates) {
             if (!java.nio.file.Files.exists(path)) continue
             try {
@@ -47,7 +63,7 @@ object EnvLoader {
                 }
                 break  // 找到第一个 .env 就返回
             } catch (e: Throwable) {
-                // 读取失败忽略
+                // 读取失败忽略，继续下一个候选
             }
         }
     }
