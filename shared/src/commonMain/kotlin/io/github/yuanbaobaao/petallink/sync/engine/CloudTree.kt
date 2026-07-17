@@ -1,7 +1,10 @@
 package io.github.yuanbaobaao.petallink.sync.engine
 
 import io.github.yuanbaobaao.petallink.AppError
+import io.github.yuanbaobaao.petallink.drive.ChangeKind
+import io.github.yuanbaobaao.petallink.drive.DriveChange
 import io.github.yuanbaobaao.petallink.drive.DriveFile
+import kotlinx.serialization.Serializable
 
 /**
  * 云端树缓存（对标 src/sync/cloud_tree.rs）。
@@ -9,6 +12,7 @@ import io.github.yuanbaobaao.petallink.drive.DriveFile
  * 详见 docs/06 §cloud_tree、docs/10 阶段 4 item 18。
  * BFS 遍历 + validate_trusted + 原子 checkpoint + 增量 replay。
  */
+@Serializable
 data class CloudTreeCache(
     val tree: Map<String, DriveFile>,           // relative_path → DriveFile
     val pathToId: Map<String, String>,          // relative_path → fileId
@@ -16,6 +20,20 @@ data class CloudTreeCache(
     val cursor: String?,                        // 增量游标
     val complete: Boolean,                      // 是否完整提交
 ) {
+    companion object {
+        fun trusted(
+            tree: Map<String, DriveFile>,
+            pathToId: Map<String, String>,
+            rootFolderId: String?,
+            cursor: String,
+        ): CloudTreeCache {
+            val indexed = pathToId.toMutableMap()
+            rootFolderId?.takeIf(String::isNotBlank)?.let { indexed[""] = it }
+            return CloudTreeCache(tree.toMap(), indexed, rootFolderId, cursor, complete = true)
+                .also(CloudTreeCache::validateTrusted)
+        }
+    }
+
     /**
      * 校验可信度（对标 validate_trusted）。
      *
@@ -47,6 +65,9 @@ data class CloudTreeCache(
             }
             if (tree[path]?.id != fileId) throw AppError.Data("孤立路径索引: $path")
         }
+        if (rootFolderId != null && pathToId[""] != rootFolderId) {
+            throw AppError.Data("根目录索引缺失")
+        }
     }
 
     /** 是否可信（validateTrusted 不抛异常） */
@@ -54,6 +75,122 @@ data class CloudTreeCache(
         validateTrusted(); true
     } catch (e: Throwable) {
         false
+    }
+}
+
+/** 单文件云树 checkpoint 提交门；实现必须保证失败不替换旧版本。 */
+interface CloudTreeCheckpointStore {
+    suspend fun loadTrusted(): CloudTreeCache?
+    suspend fun persist(checkpoint: CloudTreeCache)
+    suspend fun discardUncommitted()
+}
+
+/** Changes 只在候选 clone 上执行；任一项不可解释时整批失败。 */
+object CloudTreeChanges {
+    fun apply(cache: CloudTreeCache, changes: List<DriveChange>, finalCursor: String): CloudTreeCache {
+        val tree = cache.tree.toMutableMap()
+        val pathToId = cache.pathToId.toMutableMap()
+        applyToCandidate(tree, pathToId, cache.rootFolderId, changes)
+        return CloudTreeCache.trusted(tree, pathToId, cache.rootFolderId, finalCursor)
+    }
+
+    fun applyToCandidate(
+        tree: MutableMap<String, DriveFile>,
+        pathToId: MutableMap<String, String>,
+        rootFolderId: String?,
+        changes: List<DriveChange>,
+    ) {
+        val idToPath = pathToId.entries.associateTo(mutableMapOf()) { (path, id) -> id to path }
+        rootFolderId?.takeIf(String::isNotBlank)?.let { idToPath[it] = "" }
+
+        for (change in changes) {
+            when (change.kind) {
+                ChangeKind.REMOVED -> removeSubtree(change.fileId, tree, pathToId, idToPath)
+                ChangeKind.MODIFIED -> applyModified(change, tree, pathToId, idToPath)
+            }
+        }
+    }
+
+    private fun removeSubtree(
+        fileId: String,
+        tree: MutableMap<String, DriveFile>,
+        pathToId: MutableMap<String, String>,
+        idToPath: MutableMap<String, String>,
+    ) {
+        val root = idToPath[fileId] ?: return
+        if (root.isEmpty()) throw AppError.Data("Changes 试图删除云盘根目录")
+        val prefix = "$root/"
+        val removed = tree.keys.filter { it == root || it.startsWith(prefix) }
+        for (path in removed) {
+            tree.remove(path)
+            pathToId.remove(path)?.let(idToPath::remove)
+        }
+    }
+
+    private fun applyModified(
+        change: DriveChange,
+        tree: MutableMap<String, DriveFile>,
+        pathToId: MutableMap<String, String>,
+        idToPath: MutableMap<String, String>,
+    ) {
+        val file = change.file ?: throw AppError.Data("非删除 Change 缺少完整文件: ${change.fileId}")
+        if (file.id != change.fileId) throw AppError.Data("Change fileId 与文件 id 不一致")
+        val name = file.name ?: throw AppError.Data("Change ${change.fileId} 缺少文件名")
+        CloudTreeRefresh.validatePathSegment(name)
+        val parentId = file.parentFolder?.singleOrNull() ?: file.parent
+            ?: throw AppError.Data("Change ${change.fileId} 缺少唯一 parentFolder")
+        if (parentId.isBlank() || parentId == change.fileId) {
+            throw AppError.Data("Change ${change.fileId} 的 parentFolder 非法")
+        }
+        val parentPath = idToPath[parentId]
+            ?: throw AppError.Data("Change ${change.fileId} 的 parentFolder $parentId 无法映射")
+        val desiredPath = if (parentPath.isEmpty()) name else "$parentPath/$name"
+        val existingPath = idToPath[change.fileId]
+        if (existingPath != null && existingPath.isEmpty()) {
+            throw AppError.Data("Changes 不支持修改云盘根目录")
+        }
+        if (existingPath != null && existingPath != desiredPath) {
+            if (desiredPath.startsWith("$existingPath/")) {
+                throw AppError.Data("Change 试图把目录移到自身子树")
+            }
+            rekeySubtree(tree, pathToId, idToPath, existingPath, desiredPath)
+        } else {
+            val occupied = pathToId[desiredPath]
+            if (occupied != null && occupied != change.fileId) {
+                throw AppError.Data("Change 目标路径冲突: $desiredPath")
+            }
+        }
+        tree[desiredPath] = file
+        pathToId[desiredPath] = change.fileId
+        idToPath[change.fileId] = desiredPath
+    }
+
+    private fun rekeySubtree(
+        tree: MutableMap<String, DriveFile>,
+        pathToId: MutableMap<String, String>,
+        idToPath: MutableMap<String, String>,
+        oldRoot: String,
+        newRoot: String,
+    ) {
+        val oldPrefix = "$oldRoot/"
+        val paths = tree.keys.filter { it == oldRoot || it.startsWith(oldPrefix) }
+        if (paths.isEmpty()) throw AppError.Data("Change 引用的旧路径不在候选树: $oldRoot")
+        val movedSet = paths.toSet()
+        val targets = paths.associateWith { old -> newRoot + old.removePrefix(oldRoot) }
+        targets.values.forEach { target ->
+            if (target in tree && target !in movedSet) throw AppError.Data("Change 移动目标已存在: $target")
+        }
+        val moved = paths.map { old ->
+            val file = tree.remove(old) ?: throw AppError.Data("移动时路径消失: $old")
+            val id = pathToId.remove(old) ?: throw AppError.Data("移动时索引消失: $old")
+            idToPath.remove(id)
+            Triple(targets.getValue(old), id, file)
+        }
+        moved.forEach { (path, id, file) ->
+            tree[path] = file
+            pathToId[path] = id
+            idToPath[id] = path
+        }
     }
 }
 

@@ -16,6 +16,19 @@ data class PkcePair(
  * 授权相关纯逻辑（无 IO，可单测）。
  */
 object Pkce {
+    /** 64 随机字节 verifier + SHA-256 challenge。 */
+    fun generate(): PkcePair {
+        val verifierBytes = ByteArray(64).also(java.security.SecureRandom()::nextBytes)
+        val verifier = base64Url(verifierBytes)
+        val challenge = base64Url(java.security.MessageDigest.getInstance("SHA-256").digest(verifier.encodeToByteArray()))
+        return PkcePair(verifier, challenge)
+    }
+
+    /** OAuth CSRF state：32 字节密码学随机数。 */
+    fun generateState(): String = base64Url(ByteArray(32).also(java.security.SecureRandom()::nextBytes))
+
+    private fun base64Url(bytes: ByteArray): String =
+        java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
 
     /**
      * 构建授权 URL（参数顺序固定，docs/03 踩坑 2）。

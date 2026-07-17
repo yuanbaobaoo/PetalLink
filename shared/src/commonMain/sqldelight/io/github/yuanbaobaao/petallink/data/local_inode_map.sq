@@ -17,3 +17,6 @@ SELECT * FROM local_inode_map;
 
 deleteByInode:
 DELETE FROM local_inode_map WHERE inode = :inode;
+
+deleteAll:
+DELETE FROM local_inode_map;

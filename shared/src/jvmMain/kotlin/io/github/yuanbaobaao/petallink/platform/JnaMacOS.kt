@@ -1,5 +1,8 @@
 package io.github.yuanbaobaao.petallink.platform
 
+import io.github.yuanbaobaao.petallink.mount.MacXattrAccess
+import io.github.yuanbaobaao.petallink.mount.MacFSEventSourceFactory
+
 /**
  * JNA macOS 平台接口（对标 macosMain cinterop 功能）。
  * 用 JNA 调用 AppKit/CoreServices 原生 API。
@@ -32,16 +35,14 @@ object JnaMacOS {
      * 完整实现需：FSEventStreamCreate(allocator, callback, ctx, paths, sinceWhen, latency, flags)
      */
     fun createFSEventStream(paths: List<String>, callback: (String, Long) -> Unit): AutoCloseable {
-        // JNA: val stream = CoreFoundation.INSTANCE.FSEventStreamCreate(...)
-        // 当前降级：java.nio.file.WatchService
-        return AutoCloseable {}
+        return MacFSEventSourceFactory.start(paths) { callback(it.path, it.eventId.toLong()) }
     }
 
     /**
      * 用 JNA 读写 xattr。
      * 完整实现需：setxattr(path, name, value, size, position, options)
      */
-    fun getXattr(path: String, name: String): ByteArray? = null
-    fun setXattr(path: String, name: String, value: ByteArray) {}
-    fun removeXattr(path: String, name: String) {}
+    fun getXattr(path: String, name: String): ByteArray? = MacXattrAccess.get(path, name)
+    fun setXattr(path: String, name: String, value: ByteArray) = MacXattrAccess.set(path, name, value)
+    fun removeXattr(path: String, name: String) = MacXattrAccess.remove(path, name)
 }

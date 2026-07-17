@@ -9,10 +9,39 @@ plugins {
     alias(libs.plugins.composeCompiler)
 }
 
+val petalLinkVersion = providers.gradleProperty("petalLinkVersion").get()
+val updateEndpoint = providers.environmentVariable("PETALLINK_UPDATE_ENDPOINT")
+    .orElse("https://github.com/yuanbaobaoo/PetalLink/releases/latest/download/PetalLink-update.json")
+val updateTeamId = providers.environmentVariable("PETALLINK_UPDATE_TEAM_ID").orElse("")
+val generatedBuildInfo = layout.buildDirectory.dir("generated/petallink-build-info/kotlin")
+val generatePetalLinkBuildInfo by tasks.registering {
+    inputs.property("version", petalLinkVersion)
+    inputs.property("updateEndpoint", updateEndpoint)
+    inputs.property("updateTeamId", updateTeamId)
+    outputs.dir(generatedBuildInfo)
+    doLast {
+        val output = generatedBuildInfo.get().file(
+            "io/github/yuanbaobaao/petallink/core/BuildInfo.kt",
+        ).asFile
+        output.parentFile.mkdirs()
+        output.writeText(
+            """package io.github.yuanbaobaao.petallink.core
+
+object BuildInfo {
+    const val VERSION: String = "$petalLinkVersion"
+    const val UPDATE_ENDPOINT: String = "${updateEndpoint.get()}"
+    const val UPDATE_TEAM_ID: String = "${updateTeamId.get()}"
+}
+""",
+        )
+    }
+}
+
 kotlin {
     jvm()
 
     sourceSets {
+        jvmMain { kotlin.srcDir(generatedBuildInfo) }
         commonMain {
             dependencies {
                 implementation(libs.kotlin.coroutines)
@@ -37,10 +66,14 @@ kotlin {
             dependencies {
                 implementation(kotlin("test"))
                 implementation(libs.kotlin.coroutines)
+                implementation(libs.kotlin.coroutines.test)
+                implementation(libs.ktor.mock)
             }
         }
     }
 }
+
+tasks.named("compileKotlinJvm").configure { dependsOn(generatePetalLinkBuildInfo) }
 
 // SQLDelight 数据库配置
 sqldelight {
@@ -56,10 +89,34 @@ compose.desktop {
     application {
         mainClass = "io.github.yuanbaobaao.petallink.MainKt"
         nativeDistributions {
-            targetFormats(org.jetbrains.compose.desktop.application.dsl.TargetFormat.Dmg, org.jetbrains.compose.desktop.application.dsl.TargetFormat.Msi)
+            // SQLite JDBC 通过反射使用 JDBC；jlink 的静态分析无法自动发现该模块。
+            modules("java.sql")
+            targetFormats(org.jetbrains.compose.desktop.application.dsl.TargetFormat.Dmg)
             packageName = "PetalLink"
-            packageVersion = "1.0.0"
-            macOS { bundleID = "io.github.yuanbaobaao.petallink.macos" }
+            packageVersion = petalLinkVersion
+            description = "华为云盘 macOS 客户端开源版"
+            vendor = "PetalLink"
+            macOS {
+                bundleID = "io.github.yuanbaobaoo.PetalLink"
+                minimumSystemVersion = "12.0"
+                packageVersion = petalLinkVersion
+                packageBuildVersion = petalLinkVersion
+                dmgPackageVersion = petalLinkVersion
+                dmgPackageBuildVersion = petalLinkVersion
+                iconFile.set(project.file("src/jvmMain/resources/icon.icns"))
+                entitlementsFile.set(project.file("src/jvmMain/resources/Entitlements.plist"))
+                runtimeEntitlementsFile.set(project.file("src/jvmMain/resources/RuntimeEntitlements.plist"))
+                signing {
+                    sign.set(providers.environmentVariable("PETALLINK_MAC_SIGN").map { it.toBoolean() }.orElse(false))
+                    identity.set(providers.environmentVariable("PETALLINK_MAC_SIGN_IDENTITY"))
+                    keychain.set(providers.environmentVariable("PETALLINK_MAC_SIGN_KEYCHAIN"))
+                }
+                notarization {
+                    appleID.set(providers.environmentVariable("PETALLINK_NOTARY_APPLE_ID"))
+                    password.set(providers.environmentVariable("PETALLINK_NOTARY_PASSWORD"))
+                    teamID.set(providers.environmentVariable("PETALLINK_NOTARY_TEAM_ID"))
+                }
+            }
         }
     }
 }

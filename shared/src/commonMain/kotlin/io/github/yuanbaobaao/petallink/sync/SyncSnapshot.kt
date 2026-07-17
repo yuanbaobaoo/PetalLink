@@ -24,10 +24,14 @@ data class DbBaselineEntry(
 /** sync_status 枚举值（对标 docs/04 §sync_status） */
 object SyncStatus {
     const val SYNCED = 0
-    const val PENDING = 1
-    const val UPLOADING = 2
+    const val CLOUD_ONLY = 1
+    const val LOCAL_ONLY = 2
+    const val SYNCING = 3
+    const val PENDING = SYNCING
+    const val UPLOADING = SYNCING
+    const val FAILED = 4
+    const val CONFLICT = 5
     const val DELETED = 7   // 墓碑
-    const val FAILED = 8
 }
 
 /**

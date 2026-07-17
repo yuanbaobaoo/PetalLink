@@ -10,12 +10,22 @@ import kotlin.test.assertTrue
  * Planner 单测（对标 src/sync/planner.rs decide() 决策表）。
  */
 class PlannerTest {
+    @Test
+    fun 同步状态持久化数值与原Tauri完全一致() {
+        assertEquals(0, SyncStatus.SYNCED)
+        assertEquals(1, SyncStatus.CLOUD_ONLY)
+        assertEquals(2, SyncStatus.LOCAL_ONLY)
+        assertEquals(3, SyncStatus.SYNCING)
+        assertEquals(4, SyncStatus.FAILED)
+        assertEquals(5, SyncStatus.CONFLICT)
+        assertEquals(7, SyncStatus.DELETED)
+    }
 
     private val path = "doc.txt"
     private fun localFile(mtime: Long = 100, size: Long = 50) =
         LocalEntry(path, mtime, size, isPlaceholder = false, isFolder = false)
-    private fun cloudFile(id: String = "cid", folder: Boolean = false) =
-        DriveFile(id = id, name = path, mimeType = if (folder) "vnd.huawei-apps.folder" else "text/plain")
+    private fun cloudFile(id: String = "cid", folder: Boolean = false, editedTime: String? = null) =
+        DriveFile(id = id, name = path, mimeType = if (folder) "vnd.huawei-apps.folder" else "text/plain", editedTime = editedTime)
     private fun dbEntry(
         fileId: String = "cid", localMtime: Long? = 100, localSize: Long? = 50,
         cloudTime: Long? = 1000, status: Int = SyncStatus.SYNCED, folder: Boolean = false,
@@ -42,14 +52,10 @@ class PlannerTest {
     @Test
     fun 三方都存在_本地和云端都改_冲突() {
         val local = localFile(mtime = 200)
-        val cloud = cloudFile()
+        val cloud = cloudFile(editedTime = "1970-01-01T00:00:02Z")
         val db = dbEntry(localMtime = 100, cloudTime = 1000)
-        // isLocalChanged: mtime 变了 → true
-        // isCloudChanged: cloudEditedTimeMs 返回 null → false（TODO 未实现 RFC3339 解析）
-        // 所以当前是 仅本地改 → UPLOAD，不是冲突
-        // 待 RFC3339 解析实现后此处应为 CREATE_CONFLICT_COPY
         val result = Planner.decide(path, local, cloud, db, true, false)
-        assertEquals(SyncActionType.UPLOAD, result?.type)
+        assertEquals(SyncActionType.CREATE_CONFLICT_COPY, result?.type)
     }
 
     @Test
@@ -164,7 +170,19 @@ class PlannerTest {
 
     @Test
     fun isCloudChanged_cloudTime缺失为false() {
-        // cloudEditedTimeMs 暂返回 null → false
         assertEquals(false, Planner.isCloudChanged(null, dbEntry(cloudTime = 1000)))
+    }
+
+    @Test
+    fun editedTime_RFC3339真实参与云端变更判定() {
+        val result = Planner.decide(
+            path,
+            localFile(),
+            cloudFile(editedTime = "1970-01-01T00:00:02Z"),
+            dbEntry(cloudTime = 1000),
+            true,
+            false,
+        )
+        assertEquals(SyncActionType.DOWNLOAD, result?.type)
     }
 }

@@ -19,6 +19,12 @@ expect class PetalLinkDb(dbPath: String) {
     val inodeMap: InodeMapRepository
     val freeUpStaging: FreeUpStagingRepository
 
+    /** 登出/清空应用时原子清理全部账号相关运行数据。 */
+    fun clearAll()
+
+    /** 切换同步根目录时原子清理所有挂载目录绑定状态。 */
+    fun clearMountState()
+
     /** 关闭数据库连接（应用退出时调用） */
     fun close()
 }

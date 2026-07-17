@@ -34,6 +34,14 @@ sealed class AppError(
     class Remote(val status: Int, message: String, cause: Throwable? = null) :
         AppError(ErrorKind.REMOTE, message, cause)
 
+    /** 写响应丢失或成功响应无法核验；上层只能进入 VerifyingRemote。 */
+    class RemoteAmbiguous(message: String, cause: Throwable? = null) :
+        AppError(ErrorKind.REMOTE, message, cause)
+
+    /** Changes cursor 已失效；上层只能保留旧 checkpoint 并执行可信全量重建。 */
+    class ChangesCursorInvalid(val status: Int, message: String) :
+        AppError(ErrorKind.REMOTE, message)
+
     /** 同步冲突：本地与云端均发生修改 */
     class Conflict(message: String, cause: Throwable? = null) : AppError(ErrorKind.CONFLICT, message, cause)
 

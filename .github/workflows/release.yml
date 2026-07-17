@@ -1,0 +1,102 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release-macos:
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+      - name: Validate tag and single version source
+        shell: bash
+        run: |
+          VERSION=$(sed -n 's/^petalLinkVersion=//p' gradle.properties)
+          TAG="${GITHUB_REF_NAME#v}"
+          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${VERSION}" != "${TAG}" ]]; then
+            echo "::error::tag v${TAG} 与 petalLinkVersion=${VERSION} 不一致"
+            exit 1
+          fi
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+      - name: Import Developer ID certificate
+        shell: bash
+        env:
+          CERTIFICATE_P12: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD }}
+        run: |
+          test -n "$CERTIFICATE_P12"
+          KEYCHAIN="$RUNNER_TEMP/petallink-signing.keychain-db"
+          CERTIFICATE="$RUNNER_TEMP/petallink-signing.p12"
+          echo "$CERTIFICATE_P12" | base64 --decode > "$CERTIFICATE"
+          security create-keychain -p actions "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p actions "$KEYCHAIN"
+          security import "$CERTIFICATE" -P "$CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          security set-key-partition-list -S apple-tool:,apple: -s -k actions "$KEYCHAIN"
+          echo "PETALLINK_SIGNING_KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
+      - name: Test and build signed app/DMG
+        env:
+          PETALLINK_MAC_SIGN: 'true'
+          PETALLINK_MAC_SIGN_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          PETALLINK_MAC_SIGN_KEYCHAIN: ${{ env.PETALLINK_SIGNING_KEYCHAIN }}
+          PETALLINK_UPDATE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          PETALLINK_NOTARY_APPLE_ID: ${{ secrets.APPLE_NOTARY_ID }}
+          PETALLINK_NOTARY_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
+          PETALLINK_NOTARY_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          HWCLOUD_CLIENT_ID: ${{ secrets.HWCLOUD_CLIENT_ID }}
+          HWCLOUD_CLIENT_SECRET: ${{ secrets.HWCLOUD_CLIENT_SECRET }}
+        run: |
+          ./gradlew :shared:jvmTest :shared:createReleaseDistributable :shared:notarizeReleaseDmg --stacktrace
+      - name: Verify, staple and prepare updater artifact
+        shell: bash
+        run: |
+          APP="shared/build/compose/binaries/main-release/app/PetalLink.app"
+          DMG=$(find shared/build/compose/binaries/main-release/dmg -name '*.dmg' -print -quit)
+          test -d "$APP"
+          test -f "$DMG"
+          xcrun stapler staple "$APP"
+          xcrun stapler staple "$DMG"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          spctl --assess --type execute --verbose=2 "$APP"
+          spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG"
+          scripts/verify-macos-artifacts.sh "$APP" "$DMG" strict
+          scripts/smoke-test-macos-app.sh "$APP"
+          mkdir -p dist
+          ditto -c -k --keepParent "$APP" "dist/PetalLink_${VERSION}_aarch64.app.zip"
+          cp "$DMG" "dist/PetalLink_${VERSION}_aarch64.dmg"
+          shasum -a 256 "dist/PetalLink_${VERSION}_aarch64.app.zip" | awk '{print $1}' > dist/app.sha256
+      - name: Generate secure update manifest
+        shell: bash
+        run: |
+          ZIP="PetalLink_${VERSION}_aarch64.app.zip"
+          SHA=$(cat dist/app.sha256)
+          TAG="v${VERSION}"
+          URL="https://github.com/yuanbaobaoo/PetalLink/releases/download/${TAG}/${ZIP}"
+          jq -n \
+            --arg version "$VERSION" \
+            --arg url "$URL" \
+            --arg sha256 "$SHA" \
+            --arg notes "详见 GitHub Release ${TAG}" \
+            '{version:$version,url:$url,sha256:$sha256,notes:$notes,minimumSystemVersion:"12.0"}' \
+            > dist/PetalLink-update.json
+          jq empty dist/PetalLink-update.json
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/*.dmg
+            dist/*.app.zip
+            dist/PetalLink-update.json

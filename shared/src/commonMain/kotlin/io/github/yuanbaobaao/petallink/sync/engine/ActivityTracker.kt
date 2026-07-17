@@ -1,6 +1,9 @@
 package io.github.yuanbaobaao.petallink.sync.engine
 
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
 
 /** 不可变活动状态 */
 private data class ActivityState(
@@ -18,6 +21,7 @@ private data class ActivityState(
  */
 class ActivityTracker {
     private val state = AtomicReference(ActivityState())
+    private val active = MutableStateFlow(0)
 
     /** 判定两个路径是否重叠（相等或祖先/后代） */
     fun syncPathsOverlap(left: String, right: String): Boolean {
@@ -37,7 +41,10 @@ class ActivityTracker {
                 cur.activePaths + (relativePath to (cur.activePaths[relativePath] ?: 0) + 1)
             } else cur.activePaths
             val next = cur.copy(count = cur.count + 1, activePaths = newActive)
-            if (state.compareAndSet(cur, next)) return ActivityGuard(Shared(relativePath), this)
+            if (state.compareAndSet(cur, next)) {
+                active.value = next.count
+                return ActivityGuard(Shared(relativePath), this)
+            }
         }
     }
 
@@ -52,7 +59,10 @@ class ActivityTracker {
                 count = cur.count + 1,
                 exclusivePaths = cur.exclusivePaths + relativePath,
             )
-            if (state.compareAndSet(cur, next)) return ActivityGuard(Exclusive(relativePath), this)
+            if (state.compareAndSet(cur, next)) {
+                active.value = next.count
+                return ActivityGuard(Exclusive(relativePath), this)
+            }
         }
     }
 
@@ -62,6 +72,16 @@ class ActivityTracker {
             val cur = state.get()
             if (state.compareAndSet(cur, cur.copy(accepting = false))) return
         }
+    }
+
+    /** 先封门，再等待封门前已登记的所有动作结算。 */
+    suspend fun closeAndWait() {
+        close()
+        active.first { it == 0 }
+    }
+
+    suspend fun waitUntilIdle() {
+        active.first { it == 0 }
     }
 
     /** 释放租约 */
@@ -82,7 +102,10 @@ class ActivityTracker {
                     exclusivePaths = cur.exclusivePaths - kind.path,
                 )
             }
-            if (state.compareAndSet(cur, next)) return
+            if (state.compareAndSet(cur, next)) {
+                active.value = next.count
+                return
+            }
         }
     }
 
@@ -93,6 +116,9 @@ sealed class ActivityKind
 data class Shared(val path: String?) : ActivityKind()
 data class Exclusive(val path: String) : ActivityKind()
 
-class ActivityGuard(private val kind: ActivityKind, private val tracker: ActivityTracker) {
-    fun close() = tracker.release(kind)
+class ActivityGuard(private val kind: ActivityKind, private val tracker: ActivityTracker) : AutoCloseable {
+    private val closed = AtomicBoolean(false)
+    override fun close() {
+        if (closed.compareAndSet(false, true)) tracker.release(kind)
+    }
 }

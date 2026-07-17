@@ -59,6 +59,11 @@ class ChangeParserTest {
     }
 
     @Test
+    fun isCursorAdvanced_无变更终页允许保持原游标() {
+        assertTrue(ChangeParser.isCursorAdvanced(setOf("c1"), "c1", "c1", pageChangeCount = 0))
+    }
+
+    @Test
     fun isCursorAdvanced_循环返回false() {
         assertFalse(ChangeParser.isCursorAdvanced(setOf("c1", "c2"), "c1", "c2"))
     }

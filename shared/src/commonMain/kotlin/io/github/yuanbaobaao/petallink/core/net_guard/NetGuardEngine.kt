@@ -28,8 +28,9 @@ class NetGuardEngine {
      * @return 处理后的网络状态
      */
     fun onProbeResult(success: Boolean, gen: Int): NetState {
-        // 代际切换：新代际重置连续成功计数
-        if (gen != currentGen) {
+        // 只接受单调递增的新代际；旧任务迟到回调不得把代际切回去。
+        if (gen < currentGen) return current
+        if (gen > currentGen) {
             currentGen = gen
             consecutiveSuccess = 0
         }
@@ -50,4 +51,12 @@ class NetGuardEngine {
 
     /** 当前网络状态 */
     fun state(): NetState = current
+
+    /** 请求层失败与主动探测共用同一状态机，只发布一次离线边沿。 */
+    fun onRequestNetworkFailure(): Boolean {
+        val changed = current == NetState.ONLINE
+        consecutiveSuccess = 0
+        current = NetState.OFFLINE
+        return changed
+    }
 }

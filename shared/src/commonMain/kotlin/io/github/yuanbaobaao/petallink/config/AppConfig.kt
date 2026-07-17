@@ -98,6 +98,7 @@ object AppConfig {
 
     /** 占位符状态：唯一权威判据（placeholder / downloaded） */
     const val XATTR_STATE = "com.hwcloud.state"
+    const val XATTR_FILE_ID = "com.hwcloud.fileId"
 
     /** Finder 灰标：纯视觉反馈，buf[9] = 0x02（label index 7） */
     const val XATTR_FINDER_INFO = "com.apple.FinderInfo"

@@ -9,7 +9,7 @@ import kotlin.test.assertTrue
  */
 class ConfigValidatorTest {
 
-    private val valid = UserConfig(mountDir = "/Users/test/PetalLink")
+    private val valid = UserConfig(mountDir = "/Users/test/PetalLink", mountConfigured = true)
 
     @Test
     fun 合法配置无错误() {
@@ -57,9 +57,14 @@ class ConfigValidatorTest {
     }
 
     @Test
-    fun mountDir为空失败() {
+    fun mountDir为空且已配置时失败() {
         val errors = ConfigValidator.validate(valid.copy(mountDir = ""))
         assertTrue(errors.any { it.contains("mountDir") })
+    }
+
+    @Test
+    fun 首次启动未配置目录时通过() {
+        assertTrue(ConfigValidator.isValid(UserConfig()))
     }
 
     @Test
@@ -72,5 +77,10 @@ class ConfigValidatorTest {
     fun mountDir含双点失败() {
         val errors = ConfigValidator.validate(valid.copy(mountDir = "/Users/../etc"))
         assertTrue(errors.any { it.contains("mountDir") })
+    }
+
+    @Test
+    fun mountDir支持以主目录为基准的缩写() {
+        assertTrue(ConfigValidator.isValid(valid.copy(mountDir = "~/PetalLink")))
     }
 }

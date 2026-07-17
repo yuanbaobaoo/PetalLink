@@ -69,8 +69,12 @@ object ErrorClassifier {
         val trimmed = value.trim()
         // 纯数字 → 秒
         trimmed.toLongOrNull()?.let { return RetryAfter.DelaySeconds(it) }
-        // TODO(stage2): RFC2822 日期解析 → AtUnixMs（需 kotlinx-datetime 或手写）
-        // 当前仅支持秒数形式
-        return null
+        return runCatching {
+            val instant = java.time.ZonedDateTime.parse(
+                trimmed,
+                java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME,
+            ).toInstant()
+            RetryAfter.AtUnixMs(instant.toEpochMilli())
+        }.getOrNull()
     }
 }

@@ -3,41 +3,59 @@
 -- 注意：SQLDelight 会在首次连接时按 schema.sq 的文件名顺序执行所有 .sq 的 DDL
 
 CREATE TABLE IF NOT EXISTS sync_items (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    file_id         TEXT    NOT NULL,
-    local_path      TEXT    NOT NULL,
-    parent_file_id  TEXT,
-    is_folder       INTEGER NOT NULL DEFAULT 0,
-    size            INTEGER NOT NULL DEFAULT 0,
-    mtime           INTEGER NOT NULL DEFAULT 0,
-    etag            TEXT,
-    sync_status     INTEGER NOT NULL DEFAULT 0,
-    state_revision  INTEGER NOT NULL DEFAULT 0,
-    last_error      TEXT,
-    UNIQUE(file_id)
+    file_id           TEXT    NOT NULL,
+    local_path        TEXT    NOT NULL,
+    parent_folder_id  TEXT,
+    name              TEXT    NOT NULL,
+    is_folder         INTEGER NOT NULL DEFAULT 0,
+    size              INTEGER NOT NULL DEFAULT 0,
+    local_size        INTEGER,
+    sha256            TEXT,
+    local_mtime       INTEGER,
+    cloud_edited_time INTEGER,
+    last_sync_time    INTEGER,
+    status            INTEGER NOT NULL DEFAULT 0,
+    error_message     TEXT,
+    PRIMARY KEY (file_id, local_path)
 );
 
 CREATE INDEX IF NOT EXISTS idx_sync_items_local_path ON sync_items(local_path);
-CREATE INDEX IF NOT EXISTS idx_sync_items_parent ON sync_items(parent_file_id);
+CREATE INDEX IF NOT EXISTS idx_sync_items_parent ON sync_items(parent_folder_id);
 
 CREATE TABLE IF NOT EXISTS transfer_queue (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
-    file_id           TEXT    NOT NULL,
-    local_path        TEXT    NOT NULL,
-    direction         INTEGER NOT NULL,             -- 0=upload, 1=download
-    state             INTEGER NOT NULL DEFAULT 0,   -- TransferState 序号
-    state_revision    INTEGER NOT NULL DEFAULT 0,   -- CAS 乐观锁
-    attempt           INTEGER NOT NULL DEFAULT 0,
-    bytes_total       INTEGER NOT NULL DEFAULT 0,
-    bytes_done        INTEGER NOT NULL DEFAULT 0,
-    error_message     TEXT,
-    upload_session_url TEXT,                        -- 断点续传 session
-    created_at        INTEGER NOT NULL DEFAULT 0,
-    updated_at        INTEGER NOT NULL DEFAULT 0
+    direction                   INTEGER NOT NULL,
+    file_id                     TEXT,
+    local_path                  TEXT,
+    name                        TEXT    NOT NULL,
+    total_size                  INTEGER NOT NULL DEFAULT 0,
+    transferred                 INTEGER NOT NULL DEFAULT 0,
+    state                       INTEGER NOT NULL DEFAULT 0,
+    error_message               TEXT,
+    created_at                  INTEGER NOT NULL,
+    finished_at                 INTEGER,
+    server_id                   TEXT,
+    upload_id                   TEXT,
+    resume_offset               INTEGER NOT NULL DEFAULT 0,
+    session_url                 TEXT,
+    relative_path               TEXT,
+    parent_file_id              TEXT,
+    operation                   INTEGER,
+    source_mtime                INTEGER,
+    source_size                 INTEGER,
+    expected_cloud_edited_time  INTEGER,
+    attempt_count               INTEGER NOT NULL DEFAULT 0,
+    next_retry_at               INTEGER,
+    error_kind                  INTEGER,
+    remote_result_file_id       TEXT,
+    state_revision              INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_transfer_queue_state ON transfer_queue(state);
 CREATE INDEX IF NOT EXISTS idx_transfer_queue_file_id ON transfer_queue(file_id);
+CREATE INDEX IF NOT EXISTS idx_transfer_queue_direction ON transfer_queue(direction);
+CREATE INDEX IF NOT EXISTS idx_transfer_queue_relative ON transfer_queue(relative_path);
+CREATE INDEX IF NOT EXISTS idx_transfer_queue_next_retry ON transfer_queue(next_retry_at);
 
 CREATE TABLE IF NOT EXISTS sync_cursor (
     key     TEXT PRIMARY KEY,

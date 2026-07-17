@@ -215,7 +215,7 @@ object Planner {
      * 应用不可信删除抑制 + Skip 过滤。
      */
     fun plan(snapshot: SyncSnapshot): List<SyncAction> {
-        val allPaths = (snapshot.local.keys + snapshot.cloud.keys + snapshot.db.keys)
+        val allPaths = (snapshot.local.keys + snapshot.cloud.keys + snapshot.db.keys).toSortedSet()
         val actions = mutableListOf<SyncAction>()
         for (path in allPaths) {
             val action = decide(
@@ -247,11 +247,5 @@ object Planner {
 
 /** DriveFile 是否为文件夹（4 种 mimeType 变体，踩坑 1） */
 fun DriveFile.isFolder(): Boolean {
-    val mime = mimeType?.lowercase() ?: return false
-    return mime in setOf(
-        "vnd.huawei-apps.folder",
-        "vnd.huawei-app.folder",
-        "vnd.google-apps.folder",
-        "x-folder",
-    )
+    return io.github.yuanbaobaao.petallink.drive.DriveParsers.isFolderMime(mimeType)
 }

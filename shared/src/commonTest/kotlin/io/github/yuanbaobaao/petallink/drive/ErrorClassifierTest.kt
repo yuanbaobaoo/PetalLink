@@ -102,6 +102,14 @@ class ErrorClassifierTest {
     }
 
     @Test
+    fun parseRetryAfter_RFC1123日期() {
+        assertEquals(
+            RetryAfter.AtUnixMs(784111777000L),
+            ErrorClassifier.parseRetryAfter("Sun, 06 Nov 1994 08:49:37 GMT"),
+        )
+    }
+
+    @Test
     fun RetryAfter_DelaySeconds计算下次重试时间() {
         val ra = RetryAfter.DelaySeconds(10L)
         // 10 秒 = 10000 毫秒

@@ -37,11 +37,13 @@ class SyncEngine(
         val isStartup = request.contains(CycleRequest.STARTUP)
         if (request.contains(CycleRequest.CLOUD_FULL)) {
             cloudCache = cloudRefresher.refreshFull()
-        } else if (request.contains(CycleRequest.CLOUD_INCREMENTAL) && isStartup) {
-            cloudCache = cloudRefresher.refreshIncremental(cloudCache.cursor ?: "")
+        } else if (request.contains(CycleRequest.CLOUD_INCREMENTAL)) {
+            cloudCache = cloudCache.cursor?.takeIf { it.isNotBlank() }
+                ?.let { cloudRefresher.refreshIncremental(it) }
+                ?: cloudRefresher.refreshFull()
         }
         if (!cloudCache.isTrusted()) {
-            cycle.restore(0)
+            cycle.restore(request)
             return Result.failure(AppError.Data("云端树不可信"))
         }
         taskRunner.performStartupRecovery {}
@@ -55,11 +57,11 @@ class SyncEngine(
         localScan: Map<String, LocalEntry>, isStartup: Boolean,
     ): Result<Unit> {
         val snapshot = SyncSnapshot(localScan, cloudCache.tree, dbBaselines, cloudCache.isTrusted(), isStartup)
-        val actions = Planner.plan(snapshot)
+        val actions = ActionPlannerGuards.prepare(snapshot, Planner.plan(snapshot))
         val filtered = antiOsc.filter(actions)
-        val results = executor.executeActionsOrdered(filtered)
+        val results = executor.executeActionsOrdered(filtered, cloudCache.pathToId)
 
-        applyResults(snapshot, actions, results)
+        applyResults(snapshot, filtered, results)
 
         antiOsc.purgeExpired(nowMs())
         statusAggregator.snapshot(db)
@@ -115,10 +117,7 @@ class SyncEngine(
                 action.fileId?.let { fid ->
                     val existing = db.syncItems.findByFileId(fid)
                     if (existing != null) {
-                        db.syncItems.casUpdateStatus(
-                            existing.id ?: return, existing.stateRevision,
-                            8, res.errorMessage,
-                        )
+                        db.syncItems.updateStatus(existing.fileId, existing.localPath, 4, res.errorMessage)
                     }
                 }
             }
@@ -132,20 +131,21 @@ class SyncEngine(
         if (fileId == null) return
         val local = snapshot.local[path]
         val cloud = snapshot.cloud[path]
-        val existing = db.syncItems.findByFileId(fileId)
-        if (existing != null) {
-            db.syncItems.casUpdateEtag(existing.id ?: return, existing.stateRevision, cloud?.etag ?: "")
-        } else {
-            db.syncItems.insert(SyncItem(
-                id = null, fileId = fileId, localPath = path,
-                parentFileId = cloud?.parent,
-                isFolder = isFolder,
-                size = local?.size ?: cloud?.let { it.size?.toLongOrNull() } ?: 0L,
-                mtime = local?.mtime ?: 0L,
-                etag = cloud?.etag,
-                syncStatus = 0, stateRevision = 0, lastError = null,
-            ))
-        }
+        db.syncItems.upsert(SyncItem(
+            fileId = fileId,
+            localPath = path,
+            parentFolderId = cloud?.parent,
+            name = path.substringAfterLast('/'),
+            isFolder = isFolder,
+            size = cloud?.size?.toLongOrNull() ?: local?.size ?: 0L,
+            localSize = local?.size,
+            sha256 = null,
+            localMtime = local?.mtime,
+            cloudEditedTime = cloud?.modifiedTime?.toLongOrNull(),
+            lastSyncTime = nowMs(),
+            status = 0,
+            errorMessage = null,
+        ))
     }
 
     private fun nowMs(): Long = System.currentTimeMillis()

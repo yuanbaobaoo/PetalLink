@@ -70,4 +70,17 @@ class PkceTest {
     fun buildRedirectUri_格式正确() {
         assertEquals("http://127.0.0.1:9999/oauth/callback", Pkce.buildRedirectUri(9999))
     }
+
+    @Test
+    fun generate使用64字节verifier和32字节state() {
+        val pair = Pkce.generate()
+        val decoder = java.util.Base64.getUrlDecoder()
+        assertEquals(64, decoder.decode(pair.codeVerifier).size)
+        assertEquals(32, decoder.decode(Pkce.generateState()).size)
+        assertEquals(43, pair.codeChallenge.length)
+        val expected = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(
+            java.security.MessageDigest.getInstance("SHA-256").digest(pair.codeVerifier.encodeToByteArray()),
+        )
+        assertEquals(expected, pair.codeChallenge)
+    }
 }

@@ -6,6 +6,7 @@ import io.ktor.client.request.header
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.*
 import io.ktor.http.*
+import io.ktor.http.content.ByteArrayContent
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -57,13 +58,61 @@ class UploadApi(
         ) {
             // 手工拼 multipart/related body（Ktor 无原生 multipart/related，用 ByteArrayContent）
             val bodyBytes = buildMultipartRelatedBody(boundary, meta, content)
-            header(HttpHeaders.ContentType, "multipart/related; boundary=$boundary")
-            setBody(bodyBytes)
+            setBody(
+                ByteArrayContent(
+                    bodyBytes,
+                    ContentType.parse("multipart/related; boundary=$boundary"),
+                ),
+            )
         }
+        if (resp.status.value != 200) throw AppError.Remote(resp.status.value, "小文件上传未返回 200")
         val file = parseDriveFile(Json.parseToJsonElement(resp.bodyAsText()).jsonObject)
         // 完成校验：id 非空 + size 匹配 + name 匹配
-        return UploadProtocol.completeUploadFile(file, content.size.toLong(), fileName)
+        val verified = UploadProtocol.completeUploadFile(file, content.size.toLong(), fileName)
             ?: throw AppError.Remote(resp.status.value, "上传完成校验失败")
+        if (!parentFolder.isNullOrBlank()) {
+            require(DriveParsers.singleParent(verified, "upload") == parentFolder) {
+                "上传响应父目录不一致"
+            }
+        }
+        return verified
+    }
+
+    /** 小文件覆盖更新；Update 绝不退化为 Create。 */
+    suspend fun uploadSmallUpdate(
+        fileId: String,
+        fileName: String,
+        parentFolder: String?,
+        content: ByteArray,
+    ): DriveFile {
+        require(fileId.isNotBlank()) { "Update 必须携带 fileId" }
+        val boundary = "hwcloud_${PlatformTime.micros()}"
+        val meta = buildJsonObject {
+            put("fileName", fileName)
+            if (!parentFolder.isNullOrBlank()) {
+                putJsonArray("parentFolder") { add(JsonPrimitive(parentFolder)) }
+            }
+        }.toString()
+        val resp = client.executeWithRetry(
+            HttpMethod.Patch,
+            "$base/files/${Pkce.enc(fileId)}?uploadType=multipart",
+            HttpSemantics.WRITE,
+        ) {
+            setBody(
+                ByteArrayContent(
+                    buildMultipartRelatedBody(boundary, meta, content),
+                    ContentType.parse("multipart/related; boundary=$boundary"),
+                ),
+            )
+        }
+        if (resp.status.value !in 200..299) {
+            throw AppError.Remote(resp.status.value, "小文件 Update 失败，保留云端旧文件")
+        }
+        val file = parseDriveFile(Json.parseToJsonElement(resp.bodyAsText()).jsonObject)
+        val verified = UploadProtocol.completeUploadFile(file, content.size.toLong(), fileName)
+            ?: throw AppError.Remote(resp.status.value, "Update 完成校验失败")
+        if (verified.id != fileId) throw AppError.Remote(resp.status.value, "Update 返回了不同 fileId")
+        return verified
     }
 
     /**
@@ -88,6 +137,7 @@ class UploadApi(
             header(HttpHeaders.ContentType, ContentType.Application.Json.toString())
             setBody(meta.toString())
         }
+        if (resp.status.value != 200) throw AppError.Remote(resp.status.value, "断点续传初始化未返回 200")
         // 踩坑 12：session URL 从 Location 响应头取
         val sessionUrl = resp.headers[HttpHeaders.Location]
             ?: throw AppError.Remote(resp.status.value, "断点续传初始化缺少 Location 头")
@@ -99,14 +149,12 @@ class UploadApi(
         val uploadId = body["uploadId"]?.jsonPrimitive?.contentOrNull ?: ""
         val sliceSize = body["sliceSize"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L
 
-        if (sessionUrl.isBlank() && serverId.isBlank()) {
-            throw AppError.Remote(resp.status.value, "断点续传初始化缺少 session_url 和 serverId")
-        }
+        if (sessionUrl.isBlank()) throw AppError.Remote(resp.status.value, "断点续传初始化返回空 Location")
         return ResumeSession(
             serverId = serverId,
             uploadId = uploadId,
             sessionUrl = sessionUrl,
-            chunkSize = sliceSize,
+            chunkSize = UploadProtocol.validatedChunkSize(sliceSize),
         )
     }
 
@@ -129,14 +177,91 @@ class UploadApi(
             val rangeList = body["rangeList"]?.jsonArray?.map { it.jsonPrimitive.content }
                 ?: throw AppError.Remote(308, "308 响应缺少 rangeList")
             val offset = UploadProtocol.parseConfirmedOffset(rangeList, totalSize)
-            return SessionStatus(uploaded = offset, finalFile = null)
+            return SessionStatus(uploaded = offset, finalFile = null, sessionUrl = resp.headers[HttpHeaders.Location])
         }
         if (status in 200..299) {
             val file = parseDriveFile(Json.parseToJsonElement(resp.bodyAsText()).jsonObject)
             val verified = UploadProtocol.completeUploadFile(file, totalSize, null)
-            return SessionStatus(uploaded = if (verified != null) totalSize else 0L, finalFile = verified)
+            return SessionStatus(
+                uploaded = if (verified != null) totalSize else 0L,
+                finalFile = verified,
+                sessionUrl = resp.headers[HttpHeaders.Location],
+            )
         }
         throw AppError.Remote(status, "会话状态查询失败")
+    }
+
+    /**
+     * 提交一个 resume 分片。返回的 offset 只来自服务端 rangeList/完整 File；
+     * 请求结果不确定时查询同一 session，绝不使用 offset + chunk.size 推算。
+     */
+    suspend fun putChunk(
+        session: ResumeSession,
+        offset: Long,
+        totalSize: Long,
+        content: ByteArray,
+    ): ChunkResult {
+        require(content.isNotEmpty()) { "上传分片不能为空" }
+        val endExclusive = offset + content.size.toLong()
+        require(offset >= 0 && endExclusive > offset && endExclusive <= totalSize) { "非法上传分片边界" }
+        val end = endExclusive - 1L
+        val response = try {
+            client.executeWithRetry(
+                HttpMethod.Put, session.requestUrl(), HttpSemantics.WRITE,
+            ) {
+                header(HttpHeaders.ContentRange, "bytes $offset-$end/$totalSize")
+                header(HttpHeaders.ContentLength, content.size.toString())
+                setBody(ByteArrayContent(content, ContentType.Application.OctetStream))
+            }
+        } catch (error: Throwable) {
+            return reconcileUncertainChunk(session, offset, totalSize, error)
+        }
+        val rotatedUrl = response.headers[HttpHeaders.Location]
+        val status = response.status.value
+        if (status == 308) {
+            val body = Json.parseToJsonElement(response.bodyAsText()).jsonObject
+            val ranges = body["rangeList"]?.jsonArray?.map { it.jsonPrimitive.content }
+                ?: throw AppError.Remote(308, "308 响应缺少 rangeList")
+            return ChunkResult(
+                uploaded = UploadProtocol.parseConfirmedOffset(ranges, totalSize),
+                finalFile = null,
+                sessionUrl = rotatedUrl,
+            )
+        }
+        if (status in 200..299) {
+            val body = Json.parseToJsonElement(response.bodyAsText()).jsonObject
+            val file = runCatching { parseDriveFile(body) }.getOrNull()
+            val verified = UploadProtocol.completeUploadFile(file, totalSize, null)
+            if (verified != null) {
+                return ChunkResult(totalSize, verified, rotatedUrl)
+            }
+            throw AppError.RemoteAmbiguous("分片返回 2xx，但没有可核验的完整 File")
+        }
+        if (status == 408 || status in 500..599) {
+            return reconcileUncertainChunk(
+                session, offset, totalSize,
+                AppError.Remote(status, "分片写入结果不确定"),
+            )
+        }
+        throw AppError.Remote(status, "上传分片失败")
+    }
+
+    private suspend fun reconcileUncertainChunk(
+        session: ResumeSession,
+        offset: Long,
+        totalSize: Long,
+        original: Throwable,
+    ): ChunkResult {
+        return try {
+            val status = querySessionStatus(session, totalSize)
+            ChunkResult(status.uploaded, status.finalFile, status.sessionUrl)
+        } catch (queryError: Throwable) {
+            throw AppError.RemoteAmbiguous("上传分片结果不确定且会话状态查询失败", queryError)
+        }.also {
+            if (it.finalFile == null && it.uploaded < offset) {
+                throw AppError.Remote(0, "服务端确认偏移倒退")
+            }
+        }
     }
 
     /**
@@ -189,7 +314,7 @@ class UploadApi(
     }
 
     private fun parseDriveFile(obj: JsonObject): DriveFile =
-        Json.decodeFromJsonElement(DriveFile.serializer(), obj)
+        DriveParsers.parseDriveFileStrict(obj, "upload")
 
     private val Json = Json { ignoreUnknownKeys = true }
 }
@@ -216,4 +341,11 @@ data class ResumeSession(
 data class SessionStatus(
     val uploaded: Long,
     val finalFile: DriveFile?,
+    val sessionUrl: String? = null,
+)
+
+data class ChunkResult(
+    val uploaded: Long,
+    val finalFile: DriveFile?,
+    val sessionUrl: String? = null,
 )

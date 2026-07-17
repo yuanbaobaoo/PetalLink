@@ -15,16 +15,25 @@ import kotlinx.serialization.json.JsonElement
 data class DriveFile(
     val id: String? = null,
     val name: String? = null,
-    val type: String? = null,           // "file" / "folder"
-    val size: String? = null,           // 华为返回 String（容忍非数字）
-    val parent: String? = null,
-    @SerialName("file_name") val fileName: String? = null,
-    @SerialName("created_time") val createdTime: String? = null,
-    @SerialName("modified_time") val modifiedTime: String? = null,
-    @SerialName("mime_type") val mimeType: String? = null,
-    val digest: String? = null,         // 哈希摘要
+    val category: String? = null,
+    val size: String? = null,
+    @kotlinx.serialization.Transient val parent: String? = null,
+    @SerialName("parentFolder") val parentFolder: List<String>? = parent?.let(::listOf),
+    @SerialName("fileName") val fileName: String? = null,
+    val description: String? = null,
+    @SerialName("createdTime") val createdTime: String? = null,
+    @SerialName("editedTime") val editedTime: String? = null,
+    @SerialName("mimeType") val mimeType: String? = null,
+    val contentHash: String? = null,
+    val thumbnailLink: String? = null,
+    val recycled: Boolean? = null,
+    val digest: String? = contentHash,
     val etag: String? = null,
-)
+) {
+    val modifiedTime: String? get() = editedTime
+    val sizeBytes: Long get() = size?.toDoubleOrNull()?.takeIf { it.isFinite() && it >= 0 }?.toLong() ?: 0L
+    val singleParentOrNull: String? get() = parentFolder?.singleOrNull() ?: parent
+}
 
 /** 配额信息（size 字段华为可能返回 String，需容忍） */
 @Serializable
@@ -38,14 +47,14 @@ data class DriveQuota(
  * 配额数值解析：容忍 String / Int 形式（docs/03 踩坑 18）。
  * 返回 Long 字节数；解析失败返回 0。
  */
-fun DriveQuota.totalBytes(): Long = jsonElementToLong(total)
-fun DriveQuota.usedBytes(): Long = jsonElementToLong(used)
+fun DriveQuota.totalBytes(): Long = tolerantLong(total)
+fun DriveQuota.usedBytes(): Long = tolerantLong(used)
 
 /** 将 JsonElement（可能为 String 或数字）安全转为 Long */
-private fun jsonElementToLong(el: JsonElement?): Long {
+fun tolerantLong(el: JsonElement?): Long {
     if (el == null) return 0
     val s = el.toString().trim('"', ' ')
-    return s.toLongOrNull() ?: 0L
+    return s.toLongOrNull() ?: s.toDoubleOrNull()?.takeIf { it.isFinite() }?.toLong() ?: 0L
 }
 
 /** changes 增量事件中的一个条目 */

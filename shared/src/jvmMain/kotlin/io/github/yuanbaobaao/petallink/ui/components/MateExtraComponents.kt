@@ -178,7 +178,7 @@ fun MateStatChip(count: Int, label: String) {
 // ========== 加载动画 ==========
 @Composable
 fun MateSpinner(size: Dp = 24.dp) {
-    CircularProgressIndicator(modifier = Modifier.size(size), strokeWidth = 2.dp)
+    MateCircularProgress(size)
 }
 
 // ========== 徽章 ==========

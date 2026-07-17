@@ -6,13 +6,27 @@ package io.github.yuanbaobaao.petallink.mount
  * 含 inode 字段（docs/11 §4.2 inode 身份识别）。
  */
 data class LocalFileEntry(
+    val absolutePath: String,   // 经过 normalize 的绝对路径
     val relativePath: String,   // 相对挂载目录的路径
     val inode: ULong,           // 文件系统 inode（meta.ino()）
     val size: Long,             // 字节数
-    val mtime: Long,            // 修改时间（秒）
+    val mtime: Long,            // 修改时间（epoch ms）
     val isDirectory: Boolean,
     val isPlaceholder: Boolean, // 占位符判定：size==0 AND xattr state=="placeholder"
+    val placeholderState: PlaceholderState? = null,
 )
+
+/** 同步扫描器抽象；实现必须递归且不跟随符号链接。 */
+interface LocalFileScanner {
+    suspend fun scan(): List<LocalFileEntry>
+}
+
+/** xattr 最小平台抽象；缺失属性返回 null，其他失败抛 LocalIo。 */
+interface XattrAccess {
+    fun get(path: String, name: String): ByteArray?
+    fun set(path: String, name: String, value: ByteArray)
+    fun remove(path: String, name: String)
+}
 
 /**
  * 占位符状态 xattr 值（对标 com.hwcloud.state）。
@@ -57,6 +71,9 @@ interface PlaceholderManager {
      * .gitkeep 等用户 0 字节文件受保护（无 state xattr → false）。
      */
     suspend fun isPlaceholder(absolutePath: String): Boolean
+
+    /** 真实内容完整落盘后标记 downloaded 并清除灰标。 */
+    suspend fun markDownloaded(absolutePath: String)
 
     /**
      * 设置/清除 Finder 灰标（buf[9]=0x02，纯视觉）。

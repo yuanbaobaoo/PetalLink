@@ -1,63 +1,70 @@
 package io.github.yuanbaobaao.petallink.core.net_guard
 
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
-/**
- * JVM 网络守卫实现（actual）。
- * TCP 连接探测 driveapis.cloud.huawei.com.cn:443，3s 超时，连续 2 次成功才 ONLINE。
- */
-actual class NetGuard actual constructor() {
+/** 使用应用级 CoroutineScope 的单实例网络守卫。 */
+actual class NetGuard actual constructor(private val scope: CoroutineScope) {
     private val engine = NetGuardEngine()
     private val generation = AtomicInteger(0)
-    private val scopeRef = AtomicReference<CoroutineScope?>(null)
+    private val mutableState = MutableStateFlow(NetState.OFFLINE)
+    private val lock = Any()
+    private var probeJob: Job? = null
 
-    actual val state: NetState get() = engine.state()
+    actual val state: StateFlow<NetState> = mutableState.asStateFlow()
 
-    actual fun startProbe() {
-        if (scopeRef.get() != null) return
-        val s = CoroutineScope(Dispatchers.IO)
-        scopeRef.set(s)
-        s.launch {
-            while (true) {
-                val gen = generation.get()
-                val success = probeOnce()
-                engine.onProbeResult(success, gen)
+    actual fun startProbe() = synchronized(lock) {
+        if (probeJob?.isActive == true) return@synchronized
+        val gen = newGeneration()
+        probeJob = scope.launch {
+            while (isActive && generation.get() == gen) {
+                publishProbeResult(probeOnce(), gen)
                 delay(PROBE_INTERVAL_MS)
             }
         }
     }
 
-    actual fun stopProbe() {
-        scopeRef.get()?.cancel()
-        scopeRef.set(null)
+    actual fun stopProbe() = synchronized(lock) {
+        generation.incrementAndGet() // 先失效当前代际，再取消任务。
+        probeJob?.cancel()
+        probeJob = null
     }
 
-    actual fun newGeneration(): Int {
-        generation.incrementAndGet()
-        return generation.get()
+    actual fun newGeneration(): Int = generation.updateAndGet { current ->
+        if (current == Int.MAX_VALUE) 1 else current + 1
     }
 
-    private suspend fun probeOnce(): Boolean {
-        return withTimeoutOrNull(PROBE_TIMEOUT_MS) {
-            try {
-                Socket().use { socket ->
-                    socket.connect(InetSocketAddress(PROBE_HOST, PROBE_PORT), PROBE_TIMEOUT_MS.toInt())
-                    socket.isConnected
-                }
-            } catch (e: Throwable) {
-                false
+    actual fun reportRequestNetworkFailure(): Boolean = synchronized(engine) {
+        val changed = engine.onRequestNetworkFailure()
+        mutableState.value = engine.state()
+        changed
+    }
+
+    private fun publishProbeResult(success: Boolean, gen: Int) = synchronized(engine) {
+        if (gen != generation.get()) return@synchronized
+        mutableState.value = engine.onProbeResult(success, gen)
+    }
+
+    private suspend fun probeOnce(): Boolean = withTimeoutOrNull(PROBE_TIMEOUT_MS) {
+        try {
+            Socket().use { socket ->
+                socket.connect(InetSocketAddress(PROBE_HOST, PROBE_PORT), PROBE_TIMEOUT_MS.toInt())
+                socket.isConnected
             }
-        } ?: false
-    }
+        } catch (_: Throwable) {
+            false
+        }
+    } ?: false
 
     private companion object {
         const val PROBE_HOST = "driveapis.cloud.huawei.com.cn"

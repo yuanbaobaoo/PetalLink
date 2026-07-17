@@ -6,7 +6,7 @@ import io.ktor.client.request.header
 import io.ktor.client.request.url
 import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.bodyAsChannel
-import io.ktor.client.statement.readBytes
+import io.ktor.client.statement.readRawBytes
 import io.ktor.http.HttpHeaders
 
 /**
@@ -23,7 +23,7 @@ class ThumbnailApi(
     /**
      * 获取缩略图二进制流。
      *
-     * 端点：GET /files/{id}/thumbnail?size=M
+     * 端点：GET /thumbnails/{id}?form=content
      * 手工注入 Authorization Bearer 头（DriveClient.executeWithRetry 已处理 401 重放）。
      *
      * @param fileId 云端文件 ID
@@ -31,7 +31,7 @@ class ThumbnailApi(
      * @return 缩略图二进制字节；失败抛 [AppError]
      */
     suspend fun getThumbnail(fileId: String, size: String = "M"): ByteArray {
-        val url = "$base/files/${Pkce.enc(fileId)}/thumbnail?size=$size"
+        val url = "$base/thumbnails/${Pkce.enc(fileId)}?form=content"
         val resp: HttpResponse = client.executeWithRetry(
             method = io.ktor.http.HttpMethod.Get,
             url = url,
@@ -45,6 +45,6 @@ class ThumbnailApi(
             )
         }
         // 读取二进制响应体
-        return resp.readBytes()
+        return resp.readRawBytes()
     }
 }

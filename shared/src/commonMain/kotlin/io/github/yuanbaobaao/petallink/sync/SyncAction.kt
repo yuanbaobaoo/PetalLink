@@ -36,4 +36,5 @@ data class SyncAction(
     val fileId: String? = null,
     val cloudFile: DriveFile? = null,
     val reason: String,
+    val parentFileId: String? = null,
 )

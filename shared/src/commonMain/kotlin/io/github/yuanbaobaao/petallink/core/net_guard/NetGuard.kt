@@ -1,5 +1,8 @@
 package io.github.yuanbaobaao.petallink.core.net_guard
 
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.StateFlow
+
 /**
  * 网络守卫接口（expect，macosMain 提供 actual）。
  *
@@ -12,9 +15,9 @@ package io.github.yuanbaobaao.petallink.core.net_guard
  * - 间隔：30s
  * - 连续 2 次成功才转 ONLINE
  */
-expect class NetGuard() {
+expect class NetGuard(scope: CoroutineScope) {
     /** 当前网络状态 */
-    val state: NetState
+    val state: StateFlow<NetState>
 
     /** 启动周期性探测 */
     fun startProbe()
@@ -27,4 +30,7 @@ expect class NetGuard() {
      * @return 新的代际号
      */
     fun newGeneration(): Int
+
+    /** 真实请求层报告网络失败；仅首次 Online→Offline 返回 true。 */
+    fun reportRequestNetworkFailure(): Boolean
 }

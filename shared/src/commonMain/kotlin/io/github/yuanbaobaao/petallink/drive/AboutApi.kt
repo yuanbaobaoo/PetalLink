@@ -1,5 +1,6 @@
 package io.github.yuanbaobaao.petallink.drive
 
+import io.github.yuanbaobaao.petallink.AppError
 import io.ktor.client.statement.*
 import io.ktor.http.*
 import kotlinx.serialization.json.Json
@@ -19,6 +20,7 @@ class AboutApi(
         val resp = client.executeWithRetry(
             HttpMethod.Get, "$base/about?fields=*", HttpSemantics.READ,
         )
+        if (resp.status.value != 200) throw AppError.Remote(resp.status.value, "about 未返回 200")
         val body = Json.parseToJsonElement(resp.bodyAsText()).jsonObject
         // storageQuota.userCapacity / usedSpace 可能是 String
         val sq = body["storageQuota"]?.jsonObject

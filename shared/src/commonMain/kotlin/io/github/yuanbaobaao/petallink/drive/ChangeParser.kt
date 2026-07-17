@@ -64,10 +64,15 @@ object ChangeParser {
      * @param lastCursor 最后一页的 nextCursor（用于比较推进）
      * @return true 表示游标正常推进；false 表示未推进或循环
      */
-    fun isCursorAdvanced(seen: Set<String>, finalCursor: String, lastCursor: String): Boolean {
+    fun isCursorAdvanced(
+        seen: Set<String>,
+        finalCursor: String,
+        lastCursor: String,
+        pageChangeCount: Int = 1,
+    ): Boolean {
         if (finalCursor.isBlank()) return false
-        // 游标等于上一页且本轮有内容 → 未推进
-        if (finalCursor == lastCursor) return false
+        // 无变更终页允许服务端返回原 cursor；有变更时必须推进。
+        if (finalCursor == lastCursor) return pageChangeCount == 0
         // 游标在本轮已见过 → 循环
         if (seen.contains(finalCursor)) return false
         return true

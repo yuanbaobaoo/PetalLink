@@ -5,6 +5,8 @@ import androidx.compose.material.MaterialTheme
 import androidx.compose.material.darkColors
 import androidx.compose.material.lightColors
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.graphics.Color
 
 // 品牌色（对标 DesignTokens）
@@ -32,8 +34,20 @@ private val DarkColors = darkColors(
     error = ErrorColor,
 )
 
+val LocalReducedMotion = compositionLocalOf { false }
+
+private val systemReducedMotion: Boolean by lazy {
+    System.getProperty("petallink.reduceMotion")?.toBooleanStrictOrNull()
+        ?: runCatching {
+            java.awt.Toolkit.getDefaultToolkit().getDesktopProperty("apple.awt.reduceMotion") as? Boolean
+        }.getOrNull()
+        ?: false
+}
+
 @Composable
 fun PetalLinkTheme(content: @Composable () -> Unit) {
     val colors = if (isSystemInDarkTheme()) DarkColors else LightColors
-    MaterialTheme(colors = colors, content = content)
+    CompositionLocalProvider(LocalReducedMotion provides systemReducedMotion) {
+        MaterialTheme(colors = colors, content = content)
+    }
 }

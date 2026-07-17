@@ -2,14 +2,19 @@ package io.github.yuanbaobaao.petallink.ui.viewmodel
 
 import io.github.yuanbaobaao.petallink.core.net_guard.NetState
 import io.github.yuanbaobaao.petallink.sync.TransferState
+import io.github.yuanbaobaao.petallink.drive.DriveFile
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
  * ViewModel 单测（对标 docs/08 §stores）。
  */
 class ViewModelsTest {
+    private fun task(revision: Long, done: Long) = TransferTaskUi(
+        1, "a.txt", TransferState.Running, revision, 100, done, "upload", null,
+    )
 
     @Test
     fun SyncViewModel_同revision重复投递被忽略() {
@@ -22,6 +27,14 @@ class ViewModelsTest {
         // 新 revision 才生效
         vm.applyState(SyncGlobalState.IDLE, revision = 2)
         assertEquals(SyncGlobalState.IDLE, vm.state.value)
+    }
+
+    @Test
+    fun SyncViewModel_旧revision不能回滚状态() {
+        val vm = SyncViewModel()
+        vm.applyState(SyncGlobalState.SYNCING, 9)
+        vm.applyState(SyncGlobalState.IDLE, 8)
+        assertEquals(SyncGlobalState.SYNCING, vm.state.value)
     }
 
     @Test
@@ -46,6 +59,29 @@ class ViewModelsTest {
         // 旧 revision 被忽略（乱序保护）
         vm.updateProgress(1, bytesDone = 10, revision = 1)
         assertEquals(80, vm.tasks.value[0].bytesDone)
+    }
+
+    @Test
+    fun TransferViewModel_新列表请求也不能回滚单任务revision() {
+        val vm = TransferViewModel()
+        vm.loadAll(listOf(task(revision = 8, done = 80)), 1)
+        vm.loadAll(listOf(task(revision = 7, done = 70)), 2)
+        assertEquals(8, vm.tasks.value.single().stateRevision)
+        assertEquals(80, vm.tasks.value.single().bytesDone)
+    }
+
+    @Test
+    fun FileBrowserViewModel_拒绝旧页且文件夹优先排序() {
+        val vm = FileBrowserViewModel()
+        val current = vm.beginLoad()
+        val later = vm.beginLoad()
+        assertTrue(vm.applyPage(later, null, listOf(
+            DriveFile(id = "f", name = "z-folder", mimeType = "application/vnd.huawei-apps.folder"),
+            DriveFile(id = "b", name = "b.txt", category = "file", size = "2"),
+            DriveFile(id = "a", name = "a.txt", category = "file", size = "1"),
+        ), null, false))
+        assertFalse(vm.applyPage(current, null, emptyList(), null, false))
+        assertEquals(listOf("z-folder", "a.txt", "b.txt"), vm.state.value.visibleFiles.map { it.name })
     }
 
     @Test

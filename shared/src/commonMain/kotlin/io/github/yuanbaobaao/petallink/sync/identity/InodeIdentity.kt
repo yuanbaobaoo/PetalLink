@@ -45,3 +45,31 @@ interface InodeIdentityStore {
      */
     suspend fun purgeMissing(seenInodes: Set<ULong>)
 }
+
+/** 扫描快照中基于稳定 inode 配对出的本地移动。 */
+data class DetectedMove(
+    val inode: ULong,
+    val fileId: String,
+    val oldRelativePath: String,
+    val newRelativePath: String,
+)
+
+object InodeMoveDetector {
+    /**
+     * 同 inode 且路径改变时才输出 move；copy 产生新 inode，因而不会被误判为 move。
+     * 成功识别后立即更新路径映射，但不自动 purge，由完整扫描提交者统一执行。
+     */
+    suspend fun detectMoves(
+        entries: Collection<io.github.yuanbaobaao.petallink.mount.LocalFileEntry>,
+        identity: InodeIdentityStore,
+    ): List<DetectedMove> {
+        val result = mutableListOf<DetectedMove>()
+        for (entry in entries.sortedBy { it.relativePath }) {
+            val old = identity.lookup(entry.inode) ?: continue
+            if (old.relativePath == entry.relativePath) continue
+            result += DetectedMove(entry.inode, old.fileId, old.relativePath, entry.relativePath)
+            identity.upsert(entry.inode, entry.relativePath, old.fileId)
+        }
+        return result
+    }
+}

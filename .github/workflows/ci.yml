@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-package:
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@v4
+      - name: Unit, contract and integration tests
+        run: ./gradlew :shared:jvmTest --stacktrace
+      - name: Build unsigned DMG
+        run: ./gradlew :shared:packageDmg --stacktrace
+      - name: Verify unsigned app metadata
+        run: scripts/verify-macos-artifacts.sh shared/build/compose/binaries/main/app/PetalLink.app
+      - name: Smoke test packaged app
+        run: scripts/smoke-test-macos-app.sh shared/build/compose/binaries/main/app/PetalLink.app
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: shared/build/reports/tests
+      - name: Upload unsigned DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: PetalLink-unsigned-dmg
+          path: shared/build/compose/binaries/main/dmg/*.dmg

@@ -100,6 +100,8 @@ data class MateTransferItemData(
     val direction: String,
     val progress: Float,
     val stateText: String,
+    val id: Long? = null,
+    val errorMessage: String? = null,
 )
 
 @Composable

@@ -2,11 +2,20 @@ package io.github.yuanbaobaao.petallink.sync.engine
 
 import io.github.yuanbaobaao.petallink.AppError
 import io.github.yuanbaobaao.petallink.config.AppConfig
+import io.github.yuanbaobaao.petallink.data.ColumnPatch
+import io.github.yuanbaobaao.petallink.data.TransferPatch
 import io.github.yuanbaobaao.petallink.data.TransferDirection
+import io.github.yuanbaobaao.petallink.data.TransferTask
+import io.github.yuanbaobaao.petallink.data.RunningTransferPatch
+import io.github.yuanbaobaao.petallink.drive.ResumeSession
 import io.github.yuanbaobaao.petallink.data.repository.TransferRepository
+import io.github.yuanbaobaao.petallink.data.repository.StaleRevisionException
 import io.github.yuanbaobaao.petallink.sync.RetryPolicy
 import io.github.yuanbaobaao.petallink.sync.TransferState
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import kotlin.math.min
+import kotlin.random.Random
 
 /**
  * 任务执行后端操作接口（对标 TransferOperations trait）。
@@ -42,6 +51,17 @@ data class TaskContext(
     val attempt: Int,
     val bytesTotal: Long,
     val bytesDone: Long,
+    val nextRetryAt: Long? = null,
+    val remoteResultFileId: String? = null,
+    val sessionUrl: String? = null,
+    val serverId: String? = null,
+    val uploadId: String? = null,
+    val parentFileId: String? = null,
+    val operation: Int? = null,
+    val sourceMtime: Long? = null,
+    val sourceSize: Long? = null,
+    val expectedCloudEditedTime: Long? = null,
+    val createdAt: Long = 0L,
 )
 
 /** 任务执行输出 */
@@ -86,8 +106,22 @@ class TaskProgressReporter(
     suspend fun report(bytesDone: Long, nowMs: Long) {
         if (nowMs - lastReportMs < throttleMs) return  // 节流
         lastReportMs = nowMs
-        repository.updateRunningProgress(taskId, bytesDone)
+        repository.updateRunningProgress(taskId, stateRevision, bytesDone)
     }
+
+    /** 会话轮换与服务端确认 offset 必须立即持久化，不受 UI 进度节流影响。 */
+    suspend fun reportResume(session: ResumeSession, confirmedOffset: Long): Boolean =
+        repository.updateRunningTransfer(
+            taskId,
+            stateRevision,
+            RunningTransferPatch(
+                transferred = confirmedOffset,
+                resumeOffset = confirmedOffset,
+                serverId = ColumnPatch.Set(session.serverId),
+                uploadId = ColumnPatch.Set(session.uploadId),
+                sessionUrl = ColumnPatch.Set(session.sessionUrl),
+            ),
+        )
 
     companion object {
         /** 进度节流间隔：500ms */
@@ -111,6 +145,7 @@ class TaskRunner(
     private val operations: TransferOperations,
     private val isOnline: () -> Boolean,
     private val nowMs: () -> Long,
+    private val jitterMs: () -> Long = { Random.nextLong(0L, 1_000L) },
 ) {
     // CAS 并发控制：同一路径同时只允许一个任务 Running
     private val runningSemaphore = Semaphore(AppConfig.MAX_CONCURRENT_TRANSFERS)
@@ -140,22 +175,25 @@ class TaskRunner(
         if (!isOnline()) {
             if (task.state == TransferState.Pending) {
                 // Pending 离线 → WaitingForNetwork
-                casTransition(task, TransferState.WaitingForNetwork, task.attempt, null)
+                transitionFailure(task, TransferState.WaitingForNetwork, task.attempt, null, null)
                 return TaskDisposition.WAITING_FOR_NETWORK
             }
             return TaskDisposition.WAITING_FOR_NETWORK
         }
 
         // 3. BackingOff 退避检查
-        if (task.state == TransferState.BackingOff) {
-            val backoffDeadline = RetryPolicy.backoff(task.attempt).inWholeMilliseconds
-            // 简化：退避未到则停留（实际用 next_retry_at 列比较）
+        if (task.state == TransferState.BackingOff && (task.nextRetryAt ?: Long.MAX_VALUE) > nowMs()) {
+            return TaskDisposition.BACKING_OFF
         }
 
+        return runningSemaphore.withPermit { runAdmitted(task) }
+    }
+
+    private suspend fun runAdmitted(task: TaskContext): TaskDisposition {
         // 4. 预检
         when (val preflight = operations.preflight(task)) {
             is PreflightResult.Reject -> {
-                casTransition(task, preflight.targetState, task.attempt, preflight.reason)
+                transitionFailure(task, preflight.targetState, task.attempt, preflight.reason, null)
                 return when (preflight.targetState) {
                     TransferState.RestartRequired -> TaskDisposition.RESTART_REQUIRED
                     TransferState.Failed -> TaskDisposition.FAILED
@@ -166,25 +204,27 @@ class TaskRunner(
         }
 
         // 5. CAS 转 Running
-        val runningRevision = task.stateRevision
-        val casOk = repository.casTransitionState(
-            task.id, runningRevision, TransferState.Running, task.attempt, null,
-        )
-        if (!casOk) {
-            // CAS 冲突：revision 已变（其他实例已处理）
+        val running = try {
+            transition(
+                task, TransferState.Running,
+                TransferPatch(
+                    errorKind = ColumnPatch.Clear,
+                    errorMessage = ColumnPatch.Clear,
+                    nextRetryAt = ColumnPatch.Clear,
+                    finishedAt = ColumnPatch.Clear,
+                ),
+            )
+        } catch (_: StaleRevisionException) {
             return TaskDisposition.BLOCKED
         }
 
         // 6. 执行传输
-        val progress = TaskProgressReporter(repository, task.id, runningRevision + 1)
+        val progress = TaskProgressReporter(repository, running.id, running.stateRevision)
         return try {
-            val output = operations.execute(
-                task.copy(state = TransferState.Running, stateRevision = runningRevision + 1),
-                progress,
-            )
-            settle(task.copy(stateRevision = runningRevision + 1), output)
+            val output = operations.execute(running, progress)
+            settle(running, output)
         } catch (e: AppError) {
-            settleError(task.copy(stateRevision = runningRevision + 1), e)
+            settleError(running, e)
         }
     }
 
@@ -195,39 +235,62 @@ class TaskRunner(
     private suspend fun settle(task: TaskContext, output: TaskOutput): TaskDisposition {
         return when (output.disposition) {
             TaskDisposition.COMPLETED -> {
-                // CAS → Completed
-                casTransition(task, TransferState.Completed, task.attempt, null)
+                transition(
+                    task, TransferState.Completed,
+                    TransferPatch(
+                        errorKind = ColumnPatch.Clear,
+                        errorMessage = ColumnPatch.Clear,
+                        nextRetryAt = ColumnPatch.Clear,
+                        finishedAt = ColumnPatch.Set(nowMs()),
+                        remoteResultFileId = output.cloudFileId?.let(ColumnPatch<String>::Set)
+                            ?: ColumnPatch.Keep,
+                        transferred = output.bytesTransferred,
+                        resumeOffset = output.bytesTransferred,
+                    ),
+                )
                 TaskDisposition.COMPLETED
             }
             TaskDisposition.VERIFYING_REMOTE -> {
-                casTransition(task, TransferState.VerifyingRemote, task.attempt, output.errorMessage)
+                transition(
+                    task, TransferState.VerifyingRemote,
+                    TransferPatch(
+                        errorMessage = output.errorMessage.patchOrClear(),
+                        nextRetryAt = ColumnPatch.Set(nowMs() + 3_000L),
+                        remoteResultFileId = output.cloudFileId?.let(ColumnPatch<String>::Set)
+                            ?: ColumnPatch.Keep,
+                        transferred = output.bytesTransferred,
+                        resumeOffset = output.bytesTransferred,
+                    ),
+                )
                 TaskDisposition.VERIFYING_REMOTE
             }
             TaskDisposition.BACKING_OFF -> {
                 val newAttempt = task.attempt + 1
                 if (newAttempt >= AppConfig.MAX_AUTOMATIC_ATTEMPTS) {
-                    casTransition(task, TransferState.Failed, newAttempt, output.errorMessage)
+                    transitionFailure(task, TransferState.Failed, newAttempt, output.errorMessage, null)
                     TaskDisposition.FAILED
                 } else {
-                    casTransition(task, TransferState.BackingOff, newAttempt, output.errorMessage)
+                    val baseAttempt = (newAttempt - 1).coerceAtLeast(0)
+                    val deadline = nowMs() + RetryPolicy.backoff(baseAttempt, jitterMs()).inWholeMilliseconds
+                    transitionFailure(task, TransferState.BackingOff, newAttempt, output.errorMessage, deadline)
                     TaskDisposition.BACKING_OFF
                 }
             }
             TaskDisposition.WAITING_FOR_NETWORK -> {
-                casTransition(task, TransferState.WaitingForNetwork, task.attempt, output.errorMessage)
+                transitionFailure(task, TransferState.WaitingForNetwork, task.attempt, output.errorMessage, null)
                 TaskDisposition.WAITING_FOR_NETWORK
             }
             TaskDisposition.RESTART_REQUIRED -> {
-                casTransition(task, TransferState.RestartRequired, task.attempt, output.errorMessage)
+                transitionFailure(task, TransferState.RestartRequired, task.attempt, output.errorMessage, null)
                 TaskDisposition.RESTART_REQUIRED
             }
             TaskDisposition.FAILED -> {
-                casTransition(task, TransferState.Failed, task.attempt, output.errorMessage)
+                transitionFailure(task, TransferState.Failed, task.attempt, output.errorMessage, null)
                 TaskDisposition.FAILED
             }
             else -> {
                 // 缺少可持久化恢复条件 → 失败
-                casTransition(task, TransferState.Failed, task.attempt, "后端返回缺少可持久化恢复条件的状态")
+                transitionFailure(task, TransferState.Failed, task.attempt, "后端返回缺少可持久化恢复条件的状态", null)
                 TaskDisposition.FAILED
             }
         }
@@ -262,18 +325,54 @@ class TaskRunner(
         return settle(task, output)
     }
 
-    /** CAS 状态迁移（封装 repository 调用） */
-    private suspend fun casTransition(
+    private suspend fun transitionFailure(
         task: TaskContext,
         newState: TransferState,
         attempt: Int,
         errorMsg: String?,
-    ) {
-        if (!TransferState.canTransition(task.state, newState)) {
-            // 非法迁移视为 bug，但仍尝试（防御性）
+        nextRetryAt: Long?,
+    ): TaskContext = transition(
+        task, newState,
+        TransferPatch(
+            errorMessage = errorMsg.patchOrClear(),
+            nextRetryAt = nextRetryAt?.let(ColumnPatch<Long>::Set) ?: ColumnPatch.Clear,
+            finishedAt = if (TransferState.isTerminal(newState)) ColumnPatch.Set(nowMs()) else ColumnPatch.Clear,
+            attemptCount = attempt,
+        ),
+    )
+
+    private suspend fun transition(task: TaskContext, newState: TransferState, patch: TransferPatch): TaskContext {
+        check(TransferState.canTransition(task.state, newState)) {
+            "非法状态迁移：${task.state} → $newState"
         }
-        repository.casTransitionState(task.id, task.stateRevision, newState, attempt, errorMsg)
+        return repository.transition(task.id, task.stateRevision, newState, patch).toContext()
     }
+
+    private fun String?.patchOrClear(): ColumnPatch<String> =
+        this?.let(ColumnPatch<String>::Set) ?: ColumnPatch.Clear
+
+    private fun TransferTask.toContext() = TaskContext(
+        id = id ?: error("传输任务缺少 id"),
+        fileId = fileId.orEmpty(),
+        localPath = localPath.orEmpty(),
+        direction = direction,
+        state = state,
+        stateRevision = stateRevision,
+        attempt = attempt,
+        bytesTotal = bytesTotal,
+        bytesDone = bytesDone,
+        nextRetryAt = nextRetryAt,
+        remoteResultFileId = remoteResultFileId,
+        sessionUrl = sessionUrl,
+        serverId = serverId,
+        uploadId = uploadId,
+        parentFileId = parentFileId,
+        operation = operation,
+        sourceMtime = sourceMtime,
+        sourceSize = sourceSize,
+        expectedCloudEditedTime = expectedCloudEditedTime,
+        createdAt = createdAt,
+    )
 
     // ------------------------------------------------------------------
     // 8 步启动恢复（对标 cycle.rs run_coordinated_cycle）
@@ -288,10 +387,10 @@ class TaskRunner(
     suspend fun performStartupRecovery(
         recoverInterrupted: suspend () -> Unit,
     ) {
-        // 步骤 1: reset_stale_statuses（SYNCING → failed，清孤儿）
-        resetStaleStatuses()
+        // 步骤 1: Running 写操作先进入远端核验；下载只从持久断点重建请求。
+        recoverInterruptedRunning()
 
-        // 步骤 2: load_or_refresh_cloud_tree（在 engine 层做，此处占位）
+        // 步骤 2: load_or_refresh_cloud_tree（由调用方在进入本方法前完成）
 
         // 步骤 3: refresh_cloud_full / incremental（在 engine 层做）
 
@@ -301,7 +400,7 @@ class TaskRunner(
         promoteAmbiguousRestarts()
 
         // 步骤 6: recover_verified_remote_path_changes + purge_deleted_tombstones
-        purgeDeletedTombstones()
+        // 依赖可信 cloud tree，由运行时在进入本方法前完成。
 
         // 步骤 7: recover_interrupted_transfers + commit_recovery_checkpoint
         recoverInterrupted()
@@ -309,12 +408,35 @@ class TaskRunner(
         // 步骤 8: run_sync_cycle_inner（在 engine 层做：rescan + plan + execute）
     }
 
-    /** 步骤 1：重置陈旧状态（SYNCING → failed） */
-    private suspend fun resetStaleStatuses() {
-        val syncing = repository.selectByState(TransferState.Running)
-        for (task in syncing) {
-            task.id?.let {
-                repository.casTransitionState(it, task.stateRevision, TransferState.Failed, task.attempt, "启动恢复：重置陈旧 Running 状态")
+    private suspend fun recoverInterruptedRunning() {
+        for (task in repository.selectByState(TransferState.Running)) {
+            val ctx = task.toContext()
+            if (task.direction == TransferDirection.UPLOAD || task.direction == TransferDirection.DELETE) {
+                transition(
+                    ctx, TransferState.VerifyingRemote,
+                    TransferPatch(
+                        errorMessage = ColumnPatch.Set("进程中断时远端写入结果不确定，等待核验"),
+                        nextRetryAt = ColumnPatch.Set(nowMs()),
+                    ),
+                )
+            } else if (task.direction == TransferDirection.DOWNLOAD || task.direction == TransferDirection.DOWNLOAD_UPDATE) {
+                val restart = transitionFailure(
+                    ctx, TransferState.RestartRequired, ctx.attempt,
+                    "进程中断，保留已验证下载断点并重新建立 Range 请求", null,
+                )
+                transition(
+                    restart, TransferState.Pending,
+                    TransferPatch(
+                        errorKind = ColumnPatch.Clear,
+                        errorMessage = ColumnPatch.Clear,
+                        nextRetryAt = ColumnPatch.Clear,
+                        finishedAt = ColumnPatch.Clear,
+                        transferred = min(task.transferred, task.totalSize),
+                        resumeOffset = min(task.resumeOffset, task.totalSize),
+                    ),
+                )
+            } else {
+                transitionFailure(ctx, TransferState.Failed, ctx.attempt, "中断任务不支持自动恢复", null)
             }
         }
     }
@@ -322,16 +444,12 @@ class TaskRunner(
     /** 步骤 5：提升歧义重启（RestartRequired → VerifyingRemote） */
     private suspend fun promoteAmbiguousRestarts() {
         val restarts = repository.selectByState(TransferState.RestartRequired)
-        for (task in restarts) {
-            task.id?.let {
-                repository.casTransitionState(it, task.stateRevision, TransferState.VerifyingRemote, task.attempt, null)
-            }
+        for (task in restarts.filter { !it.remoteResultFileId.isNullOrBlank() }) {
+            transition(
+                task.toContext(), TransferState.VerifyingRemote,
+                TransferPatch(nextRetryAt = ColumnPatch.Set(nowMs()), finishedAt = ColumnPatch.Clear),
+            )
         }
-    }
-
-    /** 步骤 6b：清理已删除墓碑（cloud_tree 可信时） */
-    private suspend fun purgeDeletedTombstones() {
-        // TODO(stage4): 查询 sync_items status=DELETED 且云端无对应 → 删 DB 行
     }
 
     // ------------------------------------------------------------------
@@ -355,23 +473,29 @@ class TaskRunner(
     private suspend fun resumeVerifying() {
         val verifying = repository.selectByState(TransferState.VerifyingRemote)
         for (task in verifying) {
-            val ctx = TaskContext(
-                task.id ?: continue, task.fileId, task.localPath, task.direction,
-                task.state, task.stateRevision, task.attempt, task.bytesTotal, task.bytesDone,
-            )
+            if ((task.nextRetryAt ?: Long.MIN_VALUE) > nowMs()) continue
+            val ctx = task.toContext()
             when (val result = operations.verifyRemote(ctx)) {
                 is RemoteVerification.Committed -> {
                     settle(ctx, TaskOutput(TaskDisposition.COMPLETED, cloudFileId = result.fileId))
                 }
                 RemoteVerification.NotCommitted -> {
-                    // → RestartRequired → Pending → run_expected
-                    casTransition(ctx, TransferState.RestartRequired, ctx.attempt, "远端未提交")
+                    transitionFailure(ctx, TransferState.RestartRequired, ctx.attempt, "远端未提交；等待显式重规划", null)
                 }
                 RemoteVerification.Ambiguous -> {
-                    // 停留 VerifyingRemote，next_retry_at = now+60s
+                    transition(
+                        ctx, TransferState.VerifyingRemote,
+                        TransferPatch(nextRetryAt = ColumnPatch.Set(nowMs() + 60_000L)),
+                    )
                 }
                 is RemoteVerification.Err -> {
-                    // 停留 VerifyingRemote，next_retry_at = now+15s
+                    transition(
+                        ctx, TransferState.VerifyingRemote,
+                        TransferPatch(
+                            errorMessage = ColumnPatch.Set(result.message),
+                            nextRetryAt = ColumnPatch.Set(nowMs() + 15_000L),
+                        ),
+                    )
                 }
             }
         }
@@ -382,23 +506,43 @@ class TaskRunner(
         if (!isOnline()) return
         val waiting = repository.selectByState(TransferState.WaitingForNetwork)
         for (task in waiting) {
-            val ctx = TaskContext(
-                task.id ?: continue, task.fileId, task.localPath, task.direction,
-                task.state, task.stateRevision, task.attempt, task.bytesTotal, task.bytesDone,
-            )
-            runExpected(ctx)
+            runExpected(task.toContext())
         }
     }
 
     /** resume_due_backoff：退避到期恢复 BackingOff 任务 */
     private suspend fun resumeDueBackoff() {
         val backing = repository.selectByState(TransferState.BackingOff)
-        for (task in backing) {
-            val ctx = TaskContext(
-                task.id ?: continue, task.fileId, task.localPath, task.direction,
-                task.state, task.stateRevision, task.attempt, task.bytesTotal, task.bytesDone,
-            )
-            runExpected(ctx)
+        for (task in backing.filter { (it.nextRetryAt ?: Long.MAX_VALUE) <= nowMs() }) {
+            runExpected(task.toContext())
         }
+    }
+
+    /** Failed/RestartRequired 只有显式重试才会重新规划；歧义远端结果仍优先核验。 */
+    suspend fun retryExplicit(taskId: Long): TaskDisposition {
+        val task = repository.findById(taskId) ?: return TaskDisposition.FAILED
+        if (task.state != TransferState.Failed && task.state != TransferState.RestartRequired) {
+            return TaskDisposition.BLOCKED
+        }
+        // 只有 Create/Update/Download/DownloadUpdate 能安全重放现有任务。
+        if (task.operation !in 0..3) return TaskDisposition.BLOCKED
+        if (task.state == TransferState.RestartRequired && !task.remoteResultFileId.isNullOrBlank()) {
+            transition(
+                task.toContext(), TransferState.VerifyingRemote,
+                TransferPatch(nextRetryAt = ColumnPatch.Set(nowMs()), finishedAt = ColumnPatch.Clear),
+            )
+            return TaskDisposition.VERIFYING_REMOTE
+        }
+        val pending = transition(
+            task.toContext(), TransferState.Pending,
+            TransferPatch(
+                errorKind = ColumnPatch.Clear,
+                errorMessage = ColumnPatch.Clear,
+                nextRetryAt = ColumnPatch.Clear,
+                finishedAt = ColumnPatch.Clear,
+                attemptCount = 0,
+            ),
+        )
+        return runExpected(pending)
     }
 }

@@ -8,6 +8,8 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -31,7 +33,13 @@ class ChangesApi(
         val resp = client.executeWithRetry(
             HttpMethod.Get, "$base/changes/getStartCursor?fields=*", HttpSemantics.READ,
         )
+        if (resp.status.value != 200) throw AppError.Remote(resp.status.value, "getStartCursor 请求失败")
         val body = Json.parseToJsonElement(resp.bodyAsText()).jsonObject
+        body["category"]?.let {
+            if (it.jsonPrimitive.contentOrNull != "drive#startCursor") {
+                throw AppError.Remote(0, "getStartCursor category 不是 drive#startCursor")
+            }
+        }
         val cursor = body["startCursor"]?.jsonPrimitive?.contentOrNull
             ?: throw AppError.Remote(0, "getStartCursor 缺少 startCursor")
         require(cursor.isNotBlank()) { "startCursor 为空" }
@@ -52,10 +60,24 @@ class ChangesApi(
             "$base/changes?fields=*&pageSize=$pageSize&includeDeleted=true&cursor=${Pkce.enc(cursor)}",
             HttpSemantics.READ,
         )
+        if (resp.status.value == 400 || resp.status.value == 410) {
+            throw AppError.ChangesCursorInvalid(
+                resp.status.value,
+                "Changes cursor 已失效，必须保留旧 checkpoint 并全量重建",
+            )
+        }
+        if (resp.status.value != 200) throw AppError.Remote(resp.status.value, "Changes:list 请求失败")
         val body = Json.parseToJsonElement(resp.bodyAsText()).jsonObject
-        val changes = body["changes"]?.jsonArray?.map { parseChange(it.jsonObject) } ?: emptyList()
-        val nextCursor = body["nextCursor"]?.jsonPrimitive?.contentOrNull
-        val newStartCursor = body["newStartCursor"]?.jsonPrimitive?.contentOrNull
+        body["category"]?.let {
+            if (it.jsonPrimitive.contentOrNull != "drive#changeList") {
+                throw AppError.Remote(0, "Changes:list category 不是 drive#changeList")
+            }
+        }
+        val rawChanges = body["changes"]?.runCatching { jsonArray }?.getOrNull()
+            ?: throw AppError.Remote(0, "Changes:list 缺少 changes 数组")
+        val changes = rawChanges.map { parseChange(it.jsonObject) }
+        val nextCursor = parseCursor(body["nextCursor"], "nextCursor")
+        val newStartCursor = parseCursor(body["newStartCursor"], "newStartCursor")
         return Triple(changes, nextCursor, newStartCursor)
     }
 
@@ -88,7 +110,7 @@ class ChangesApi(
             // 终页：必须有非空 newStartCursor
             val finalCursor = newStartCursor
                 ?: throw AppError.Remote(0, "终页缺少非空 newStartCursor")
-            if (!ChangeParser.isCursorAdvanced(seen, finalCursor, cursor)) {
+            if (!ChangeParser.isCursorAdvanced(seen, finalCursor, cursor, changes.size)) {
                 throw AppError.Remote(0, "newStartCursor 未推进或形成循环: $finalCursor")
             }
             return all to finalCursor
@@ -98,22 +120,44 @@ class ChangesApi(
 
     /** 解析单个 change（三种删除信号） */
     private fun parseChange(obj: JsonObject): DriveChange {
+        obj["category"]?.let {
+            if (it.jsonPrimitive.contentOrNull != "drive#change") {
+                throw AppError.Remote(0, "change.category 不是 drive#change")
+            }
+        }
+        obj["type"]?.let {
+            if (it.jsonPrimitive.contentOrNull != "File") {
+                throw AppError.Remote(0, "change.type 不是 File")
+            }
+        }
         val fileId = obj["fileId"]?.jsonPrimitive?.contentOrNull
             ?: throw AppError.Remote(0, "change 缺少 fileId")
         val deleted = obj["deleted"]?.jsonPrimitive?.booleanOrNull
             ?: throw AppError.Remote(0, "change 缺少 deleted 布尔字段")
         val changeType = obj["changeType"]?.jsonPrimitive?.contentOrNull
-        val fileObj = obj["file"]?.takeIf { it !is kotlinx.serialization.json.JsonNull }?.jsonObject
+        val fileObj = obj["file"]?.takeIf { it !is JsonNull }?.jsonObject
         val recycled = fileObj?.get("recycled")?.jsonPrimitive?.booleanOrNull
-        val file = fileObj?.let { parseDriveFile(it) }
+        val removed = ChangeParser.isRemoved(deleted, changeType, recycled)
+        if (fileObj != null) {
+            val nestedId = fileObj["id"]?.jsonPrimitive?.contentOrNull
+                ?: throw AppError.Remote(0, "change.file 缺少 id")
+            if (nestedId != fileId) throw AppError.Remote(0, "change.file.id 与 fileId 不一致")
+        }
+        val file = if (removed) null else fileObj?.let {
+            DriveParsers.parseDriveFileStrict(it, "change.file").also { parsed ->
+                DriveParsers.singleParent(parsed, "change.file")
+            }
+        } ?: throw AppError.Remote(0, "非删除 change 缺少完整 file")
 
         return ChangeParser.parse(deleted, changeType, fileId, file, recycled)
     }
 
     private val Json = Json { ignoreUnknownKeys = true; isLenient = true }
 
-    private fun parseDriveFile(obj: JsonObject): DriveFile =
-        Json.decodeFromJsonElement(DriveFile.serializer(), obj)
+    private fun parseCursor(value: kotlinx.serialization.json.JsonElement?, field: String): String? = when (value) {
+        null, JsonNull -> null
+        is JsonPrimitive -> if (value.isString) value.content.takeIf { it.isNotEmpty() }
+            else throw AppError.Remote(0, "$field 必须是字符串或 null")
+        else -> throw AppError.Remote(0, "$field 必须是字符串或 null")
+    }
 }
-
-

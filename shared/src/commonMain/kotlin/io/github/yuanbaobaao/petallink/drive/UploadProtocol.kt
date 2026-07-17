@@ -90,9 +90,7 @@ object UploadProtocol {
     ): DriveFile? {
         if (file == null) return null
         val idOk = !file.id.isNullOrBlank()
-        val sizeStr = file.size
-        val size = sizeStr?.toLongOrNull()
-        val sizeOk = size != null && size == expectedSize
+        val sizeOk = file.size != null && file.sizeBytes == expectedSize
         val nameOk = !file.name.isNullOrBlank() &&
             (expectedName == null || file.name == expectedName)
         return if (idOk && sizeOk && nameOk) file else null

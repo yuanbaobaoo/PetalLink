@@ -22,11 +22,10 @@ object RetryPolicy {
      * 计算第 [attempt] 次重试前的退避时长（attempt 从 0 开始计）。
      * 公式：base = 2^attempt 秒，封顶 300s，再加 0~1s 的 jitter。
      */
-    fun backoff(attempt: Int): Duration {
+    fun backoff(attempt: Int, jitterMs: Long = Random.nextLong(0, 1000)): Duration {
         val exp = 1L shl min(attempt, 30)              // 2^attempt，防溢出封到 2^30
         val baseSeconds = min(exp, AppConfig.BACKOFF_CAP.inWholeSeconds)
-        val jitterMs = Random.nextLong(0, 1000)        // 0~999ms 抖动
-        return baseSeconds.seconds + jitterMs.milliseconds
+        return baseSeconds.seconds + jitterMs.coerceIn(0L, 999L).milliseconds
     }
 
     /**

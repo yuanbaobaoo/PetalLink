@@ -1,6 +1,10 @@
 package io.github.yuanbaobaao.petallink.sync.engine
 
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
 
 /**
  * 同步周期请求位集（对标 src/sync/engine/coordination.rs CycleRequest）。
@@ -51,8 +55,10 @@ private data class CoordinatorState(
     val pending: Int = 0,
     val requestedSeq: Long = 0,
     val completedSeq: Long = 0,
-    val failures: List<Triple<Long, Long, String>> = emptyList(),
+    val failures: List<CycleFailure> = emptyList(),
 )
+
+private data class CycleFailure(val start: Long, val end: Long, val message: String)
 
 /**
  * 同步周期协调器（对标 CycleCoordinator）。
@@ -60,6 +66,7 @@ private data class CoordinatorState(
  */
 class CycleCoordinator {
     private val state = AtomicReference(CoordinatorState())
+    private val owner = Mutex()
 
     /** 合并请求到位集，返回请求序号 */
     fun request(req: CycleRequest): Long {
@@ -81,10 +88,10 @@ class CycleCoordinator {
     }
 
     /** 恢复请求（sticky） */
-    fun restore(seq: Long) {
+    fun restore(request: CycleRequest) {
         while (true) {
             val cur = state.get()
-            val next = cur.copy(pending = cur.pending or CycleRequest.LOCAL_RESCAN.bits)
+            val next = cur.copy(pending = cur.pending or request.bits)
             if (state.compareAndSet(cur, next)) return
         }
     }
@@ -94,7 +101,7 @@ class CycleCoordinator {
         while (true) {
             val cur = state.get()
             val newFailures = if (error != null) {
-                val list = cur.failures + Triple(through, maxOf(cur.completedSeq, through), error)
+                val list = cur.failures + CycleFailure(cur.completedSeq + 1, through, error)
                 if (list.size > 128) list.takeLast(128) else list
             } else cur.failures
             val next = cur.copy(
@@ -109,12 +116,59 @@ class CycleCoordinator {
     fun resultIfCompleted(seq: Long): Result<Unit>? {
         val cur = state.get()
         if (seq > cur.completedSeq) return null
-        for ((reqSeq, _, msg) in cur.failures) {
-            if (reqSeq == seq) return Result.failure(RuntimeException(msg))
+        for (failure in cur.failures) {
+            if (seq in failure.start..failure.end) return Result.failure(RuntimeException(failure.message))
         }
         return Result.success(Unit)
     }
 
     /** 是否有未完成的请求 */
     fun hasUncompletedRequest(): Boolean = state.get().requestedSeq > state.get().completedSeq
+
+    fun hasPending(): Boolean = state.get().pending != 0
+
+    /** 同一时刻仅一个 owner 可以取走并执行合并后的周期请求。 */
+    suspend fun drainOwned(execute: suspend (CycleRequest) -> Result<Unit>): Boolean {
+        if (!owner.tryLock()) return false
+        try {
+            while (true) {
+                val (request, sequence) = takePending()
+                if (request.isEmpty()) break
+                val result = runCatching { execute(request) }.getOrElse { Result.failure(it) }
+                complete(sequence, result.exceptionOrNull()?.message)
+            }
+            return true
+        } finally {
+            owner.unlock()
+        }
+    }
+}
+
+/** watcher/manual/timer/startup/recovery 统一只向这个入口提交请求。 */
+class CycleRequestDispatcher(
+    private val scope: CoroutineScope,
+    private val coordinator: CycleCoordinator,
+    private val execute: suspend (CycleRequest) -> Result<Unit>,
+) {
+    private val workerScheduled = AtomicBoolean(false)
+
+    fun submit(request: CycleRequest): Long {
+        val sequence = coordinator.request(request)
+        schedule()
+        return sequence
+    }
+
+    fun submit(trigger: String): Long = submit(CycleTrigger.requestFor(trigger))
+
+    private fun schedule() {
+        if (!workerScheduled.compareAndSet(false, true)) return
+        scope.launch {
+            try {
+                coordinator.drainOwned(execute)
+            } finally {
+                workerScheduled.set(false)
+                if (coordinator.hasPending()) schedule()
+            }
+        }
+    }
 }

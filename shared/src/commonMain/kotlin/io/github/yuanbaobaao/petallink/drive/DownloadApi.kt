@@ -33,6 +33,9 @@ class DownloadApi(
         val resp = client.executeWithRetry(
             HttpMethod.Get, "$base/files/${Pkce.enc(fileId)}?fields=*", HttpSemantics.READ,
         )
+        if (resp.status.value != 200) {
+            throw AppError.Remote(resp.status.value, "fetchRemoteMetadata 未返回 200")
+        }
         val headerEtag = resp.headers[HttpHeaders.ETag]
         val body = Json.parseToJsonElement(resp.bodyAsText()).jsonObject
         val id = body["id"]?.jsonPrimitive?.contentOrNull
@@ -45,11 +48,14 @@ class DownloadApi(
         val etag = headerEtag ?: body["etag"]?.jsonPrimitive?.contentOrNull
         val sha256 = body["sha256"]?.jsonPrimitive?.contentOrNull
             ?: body["fileSha256"]?.jsonPrimitive?.contentOrNull
+        val editedTime = body["editedTime"]?.jsonPrimitive?.contentOrNull
+            ?: body["edited_time"]?.jsonPrimitive?.contentOrNull
         return RemoteMetadata(
             fileId = id,
             size = size,
             etag = etag,
             sha256 = sha256,
+            editedTime = editedTime,
         )
     }
 
@@ -79,9 +85,18 @@ data class RemoteMetadata(
     val size: Long,
     val etag: String?,
     val sha256: String?,
+    val editedTime: String? = null,
 ) {
     /** 是否有稳定身份（防版本混淆） */
-    fun hasStableIdentity(): Boolean = etag != null || sha256 != null
+    fun hasStableIdentity(): Boolean = etag != null || sha256 != null || editedTime != null
+
+    fun resumeMetadata() = io.github.yuanbaobaao.petallink.sync.engine.DownloadResumeMetadata(
+        fileId = fileId,
+        size = size,
+        editedTime = editedTime,
+        etag = etag,
+        sha256 = sha256,
+    )
 }
 
 /**

@@ -40,12 +40,17 @@ object ConfigValidator {
             errors.add("oauthCallbackPort 必须 > 0，当前 ${config.oauthCallbackPort}")
         }
 
-        // 挂载目录规则
-        val dir = config.mountDir.trim()
-        when {
-            dir.isEmpty() -> errors.add("mountDir 不能为空")
-            dir == "/" -> errors.add("mountDir 不能是根目录 /")
-            dir.contains("..") -> errors.add("mountDir 不能包含 .. （防目录穿越）")
+        // 未完成首次目录选择时允许 mountDir 为空，且绝不能启动同步。
+        if (config.mountConfigured) {
+            val dir = config.mountDir.trim()
+            when {
+                dir.isEmpty() -> errors.add("mountDir 不能为空")
+                !dir.startsWith("/") && !dir.startsWith("~/") -> errors.add("mountDir 必须是绝对路径或 ~/ 路径")
+                dir == "/" -> errors.add("mountDir 不能是根目录 /")
+                dir.contains("..") -> errors.add("mountDir 不能包含 .. （防目录穿越）")
+                dir.contains("/Library/Application Support") ->
+                    errors.add("mountDir 不能位于 Application Support")
+            }
         }
 
         return errors

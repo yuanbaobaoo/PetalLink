@@ -2,6 +2,8 @@ package io.github.yuanbaobaao.petallink.ui.viewmodel
 
 import io.github.yuanbaobaao.petallink.auth.TokenPair
 import io.github.yuanbaobaao.petallink.core.net_guard.NetState
+import io.github.yuanbaobaao.petallink.drive.DriveFile
+import io.github.yuanbaobaao.petallink.sync.isFolder
 import io.github.yuanbaobaao.petallink.sync.TransferState
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -60,7 +62,7 @@ class SyncViewModel {
      * 应用同步状态（isNewRevision 逻辑：同 revision 重复投递只幂等赋值）。
      */
     fun applyState(newState: SyncGlobalState, revision: Long) {
-        if (revision == lastRevision) return  // 幂等
+        if (revision <= lastRevision) return
         lastRevision = revision
         _state.value = newState
     }
@@ -92,7 +94,10 @@ class TransferViewModel {
     fun loadAll(newTasks: List<TransferTaskUi>, requestId: Int) {
         if (requestId < loadRequestId) return  // 过期请求丢弃
         loadRequestId = requestId
-        _tasks.value = newTasks
+        val revisions = _tasks.value.associateBy { it.id }
+        _tasks.value = newTasks.map { incoming ->
+            revisions[incoming.id]?.takeIf { it.stateRevision > incoming.stateRevision } ?: incoming
+        }
     }
 
     /** 更新单个任务进度（乱序保护：revision 比对） */
@@ -106,6 +111,110 @@ class TransferViewModel {
         _tasks.value = updated
     }
 }
+
+enum class BrowserSortField { NAME, SIZE, MODIFIED_TIME }
+
+data class BrowserBreadcrumb(val id: String?, val name: String)
+
+data class FileBrowserState(
+    val folderId: String? = null,
+    val breadcrumbs: List<BrowserBreadcrumb> = listOf(BrowserBreadcrumb(null, "全部文件")),
+    val files: List<DriveFile> = emptyList(),
+    val nextCursor: String? = null,
+    val query: String = "",
+    val sortField: BrowserSortField = BrowserSortField.NAME,
+    val ascending: Boolean = true,
+    val loading: Boolean = false,
+    val directoryChildren: Map<String, List<DriveFile>> = emptyMap(),
+) {
+    val visibleFiles: List<DriveFile> get() {
+        val filtered = if (query.isBlank()) files else files.filter {
+            (it.name ?: it.fileName.orEmpty()).contains(query, ignoreCase = true)
+        }
+        val itemComparator = Comparator<DriveFile> { left, right ->
+            val result = when (sortField) {
+                BrowserSortField.NAME -> displayName(left).compareTo(displayName(right), ignoreCase = true)
+                BrowserSortField.SIZE -> left.sizeBytes.compareTo(right.sizeBytes)
+                BrowserSortField.MODIFIED_TIME -> left.modifiedTime.orEmpty().compareTo(right.modifiedTime.orEmpty())
+            }
+            if (ascending) result else -result
+        }
+        return filtered.sortedWith(compareByDescending<DriveFile> { it.isFolder() }.then(itemComparator))
+    }
+}
+
+/** 分页、路径和目录树写入都由 requestId 保护的纯状态模型。 */
+class FileBrowserViewModel {
+    private val _state = MutableStateFlow(FileBrowserState())
+    val state: StateFlow<FileBrowserState> = _state.asStateFlow()
+    private var requestSequence = 0L
+    private var acceptedRequest = 0L
+    private val childrenByFolder = mutableMapOf<String?, List<DriveFile>>()
+
+    fun beginLoad(): Long {
+        val request = ++requestSequence
+        _state.value = _state.value.copy(loading = true)
+        return request
+    }
+
+    fun applyPage(
+        requestId: Long,
+        folderId: String?,
+        files: List<DriveFile>,
+        nextCursor: String?,
+        append: Boolean,
+    ): Boolean {
+        if (requestId < acceptedRequest || folderId != _state.value.folderId) return false
+        acceptedRequest = requestId
+        val merged = if (append) (_state.value.files + files).distinctBy { it.id } else files
+        childrenByFolder[folderId] = merged.filter { it.isFolder() }
+        val key = folderId ?: ROOT_KEY
+        _state.value = _state.value.copy(
+            files = merged,
+            nextCursor = nextCursor,
+            loading = false,
+            directoryChildren = _state.value.directoryChildren + (key to merged.filter { it.isFolder() }),
+        )
+        return true
+    }
+
+    fun enter(folder: DriveFile) {
+        require(folder.isFolder()) { "只能进入文件夹" }
+        val id = requireNotNull(folder.id) { "文件夹缺少 id" }
+        acceptedRequest = ++requestSequence
+        _state.value = _state.value.copy(
+            folderId = id,
+            breadcrumbs = _state.value.breadcrumbs + BrowserBreadcrumb(id, displayName(folder)),
+            files = emptyList(), nextCursor = null, query = "", loading = true,
+        )
+    }
+
+    fun navigateTo(breadcrumb: BrowserBreadcrumb) {
+        acceptedRequest = ++requestSequence
+        val index = _state.value.breadcrumbs.indexOfFirst { it.id == breadcrumb.id }
+        val path = if (index >= 0) _state.value.breadcrumbs.take(index + 1) else listOf(breadcrumb)
+        _state.value = _state.value.copy(
+            folderId = breadcrumb.id, breadcrumbs = path, files = emptyList(),
+            nextCursor = null, query = "", loading = true,
+        )
+    }
+
+    fun search(query: String) { _state.value = _state.value.copy(query = query) }
+
+    fun sort(field: BrowserSortField) {
+        val current = _state.value
+        _state.value = current.copy(
+            sortField = field,
+            ascending = if (field == current.sortField) !current.ascending else true,
+        )
+    }
+
+    fun treeChildren(folderId: String?): List<DriveFile> = childrenByFolder[folderId].orEmpty()
+
+    companion object { const val ROOT_KEY = "__root__" }
+}
+
+private fun displayName(file: DriveFile): String = file.name ?: file.fileName ?: "未命名"
 
 /** 传输任务 UI 模型 */
 data class TransferTaskUi(

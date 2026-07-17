@@ -238,7 +238,7 @@ class CloudTreeTest {
     fun validateTrusted_完整且一致_通过() {
         val tree = mapOf("a.txt" to file("fid1"), "dir" to file("fid2"))
         val pathToId = mapOf("a.txt" to "fid1", "dir" to "fid2")
-        val cache = CloudTreeCache(tree, pathToId, "root", "cursor123", complete = true)
+        val cache = CloudTreeCache.trusted(tree, pathToId, "root", "cursor123")
         cache.validateTrusted()  // 不抛异常
         assertTrue(cache.isTrusted())
     }

@@ -34,21 +34,24 @@ enum class TransferState {
         // key = 源状态，value = 可达目标状态集合
         // ------------------------------------------------------------------
         private val TRANSITIONS: Map<TransferState, Set<TransferState>> = mapOf(
-            Pending to setOf(Running, WaitingForNetwork, Canceled),
+            Pending to setOf(Running, WaitingForNetwork, RestartRequired, Failed, Canceled),
             Running to setOf(
                 VerifyingRemote,        // 正常完成 → 核验远端
                 WaitingForNetwork,      // 网络中断
                 BackingOff,             // 可重试错误
+                RestartRequired,
+                Completed,
                 Failed,                 // 不可重试错误
                 Canceled,               // 用户取消
             ),
-            WaitingForNetwork to setOf(Running, Canceled),
-            BackingOff to setOf(Running, WaitingForNetwork, Failed, Canceled),
-            VerifyingRemote to setOf(Completed, RestartRequired, Failed, Canceled),
-            RestartRequired to setOf(Running, Canceled),
-            // 三个终态不可再迁移
+            WaitingForNetwork to setOf(Running, RestartRequired, Failed, Canceled),
+            BackingOff to setOf(Running, RestartRequired, Failed, Canceled),
+            VerifyingRemote to setOf(
+                Running, WaitingForNetwork, BackingOff, RestartRequired, Completed, Failed, Canceled,
+            ),
+            RestartRequired to setOf(Pending, VerifyingRemote, Failed, Canceled),
             Completed to emptySet(),
-            Failed to emptySet(),
+            Failed to setOf(Pending, RestartRequired, Canceled),
             Canceled to emptySet(),
         )
 

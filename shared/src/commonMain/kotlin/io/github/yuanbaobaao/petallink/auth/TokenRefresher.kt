@@ -36,30 +36,25 @@ class TokenRefresher(
      * @return 新的 TokenPair
      */
     suspend fun refresh(): TokenPair {
-        // Singleflight：已有刷新在进行则 await
-        singleflightMutex.withLock {
-            activeFlight?.let { return@withLock it }
-            val flight = CompletableDeferred<TokenPair>()
-            activeFlight = flight
+        val (flight, isLeader) = singleflightMutex.withLock {
+            val existing = activeFlight
+            if (existing != null) existing to false
+            else CompletableDeferred<TokenPair>().also { activeFlight = it } to true
         }
-        val flight = activeFlight!!
+        if (!isLeader) return flight.await()
 
         return try {
-            if (flight.isCompleted) {
-                // follower 直接取结果
-                flight.await()
-            } else {
-                // leader 执行刷新
-                val result = doRefresh()
-                flight.complete(result)
-                onTokenSaved(result)
-                singleflightMutex.withLock { activeFlight = null }
-                result
-            }
+            val result = doRefresh()
+            onTokenSaved(result)
+            flight.complete(result)
+            result
         } catch (e: Throwable) {
             flight.completeExceptionally(e)
-            singleflightMutex.withLock { activeFlight = null }
             throw e
+        } finally {
+            singleflightMutex.withLock {
+                if (activeFlight === flight) activeFlight = null
+            }
         }
     }
 

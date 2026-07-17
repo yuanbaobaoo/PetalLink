@@ -16,4 +16,10 @@ interface InodeMapRepository {
 
     /** 删除某 inode 记录 */
     suspend fun delete(inode: ULong)
+
+    /** 返回当前全部映射，供扫描对账和诊断使用。 */
+    suspend fun selectAll(): List<InodeRecord>
+
+    /** 扫描结束后删除本轮未见到的 inode 映射。 */
+    suspend fun purgeMissing(seenInodes: Set<ULong>)
 }

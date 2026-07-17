@@ -3,6 +3,7 @@ package io.github.yuanbaobaao.petallink.sync.executor
 import io.github.yuanbaobaao.petallink.config.AppConfig
 import io.github.yuanbaobaao.petallink.sync.SyncAction
 import io.github.yuanbaobaao.petallink.sync.SyncActionType
+import io.github.yuanbaobaao.petallink.drive.DriveFile
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -16,6 +17,7 @@ data class ActionResult(
     val success: Boolean,
     val deferred: Boolean = false,   // 延迟（被 shutdown/活动门拒绝）
     val cloudFileId: String? = null,
+    val cloudFile: DriveFile? = null,
     val errorMessage: String? = null,
 )
 
@@ -67,10 +69,13 @@ class SyncExecutor(
      */
     suspend fun executeActionsOrdered(
         actions: List<SyncAction>,
+        initialPathToId: Map<String, String> = emptyMap(),
         onFolderCreated: (suspend (SyncAction, ActionResult) -> Unit)? = null,
     ): List<ActionResult> {
         val n = actions.size
         val results = arrayOfNulls<ActionResult>(n)
+        val resolved = actions.toMutableList()
+        val pathToId = initialPathToId.toMutableMap()
 
         // 阶段 1：本地新建目录（顺序，父先于子）
         val folderIdx = actions.mapIndexedNotNull { idx, a ->
@@ -78,23 +83,50 @@ class SyncExecutor(
         }.sortedBy { idx -> actions[idx].relativePath.count { it == '/' } }
 
         for (i in folderIdx) {
-            val res = executeAll(listOf(actions[i])).first()
+            resolved[i] = fillParentFileId(resolved[i], pathToId)
+            val res = if (requiresMissingParent(resolved[i])) {
+                ActionResult(success = false, errorMessage = "嵌套目录缺少已提交的云端父目录")
+            } else {
+                executeAll(listOf(resolved[i])).first()
+            }
             results[i] = res
+            val createdId = res.cloudFile?.id ?: res.cloudFileId
+            if (res.success && !createdId.isNullOrBlank()) pathToId[resolved[i].relativePath] = createdId
             if (res.success && onFolderCreated != null) {
-                onFolderCreated(actions[i], res)
+                onFolderCreated(resolved[i], res)
             }
         }
 
         // 阶段 2：剩余动作并发
         val otherIdx = (0 until n).filter { results[it] == null }
-        val otherActions = otherIdx.map { actions[it] }
+        val executableIdx = mutableListOf<Int>()
+        val otherActions = otherIdx.mapNotNull { idx ->
+            resolved[idx] = fillParentFileId(resolved[idx], pathToId)
+            if (requiresMissingParent(resolved[idx])) {
+                results[idx] = ActionResult(success = false, errorMessage = "嵌套动作缺少已提交的云端父目录")
+                null
+            } else {
+                executableIdx += idx
+                resolved[idx]
+            }
+        }
         if (otherActions.isNotEmpty()) {
             val otherResults = executeAll(otherActions)
-            for ((k, idx) in otherIdx.withIndex()) {
+            for ((k, idx) in executableIdx.withIndex()) {
                 results[idx] = otherResults[k]
             }
         }
 
         return results.map { it ?: ActionResult(success = false, errorMessage = "未执行") }
     }
+
+    private fun fillParentFileId(action: SyncAction, pathToId: Map<String, String>): SyncAction {
+        if (action.parentFileId != null) return action
+        val parentPath = action.relativePath.substringBeforeLast('/', missingDelimiterValue = "")
+        return action.copy(parentFileId = pathToId[parentPath])
+    }
+
+    private fun requiresMissingParent(action: SyncAction): Boolean =
+        '/' in action.relativePath && action.parentFileId.isNullOrBlank() &&
+            action.type in setOf(SyncActionType.CREATE_FOLDER, SyncActionType.UPLOAD, SyncActionType.MOVE_IN_CLOUD)
 }

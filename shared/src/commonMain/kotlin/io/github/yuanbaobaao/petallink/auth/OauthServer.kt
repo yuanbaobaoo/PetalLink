@@ -5,7 +5,10 @@ import kotlinx.coroutines.TimeoutCancellationException
 
 
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.yield
 import java.net.ServerSocket
+import java.net.Socket
+import java.net.SocketTimeoutException
 import java.net.URLDecoder
 import kotlin.text.Charsets
 
@@ -15,8 +18,19 @@ import kotlin.text.Charsets
  * 绑定 127.0.0.1:{port}，单次接受，解析 query 参数后自动停止。
  * 详见 docs/07 §OAuth。
  */
-class OauthServer(private val port: Int) {
-    private var listener: java.net.ServerSocket? = null
+class OauthServer(
+    private val port: Int,
+    private val timeoutMs: Long = AuthConstants.OAUTH_TIMEOUT_SECS * 1000L,
+) {
+    @Volatile private var listener: java.net.ServerSocket? = null
+
+    /** 先绑定端口，再由调用方打开浏览器，避免快速回调竞态。 */
+    fun bind() {
+        if (listener != null) return
+        listener = java.net.ServerSocket(port, 1, java.net.InetAddress.getByName(AuthConstants.LOOPBACK_HOST)).also {
+            it.soTimeout = 100
+        }
+    }
 
     data class CallbackResult(
         val code: String?,
@@ -30,22 +44,23 @@ class OauthServer(private val port: Int) {
      * @return 回调结果（code/state/error）
      */
     suspend fun waitForCallback(): CallbackResult {
-        listener = java.net.ServerSocket(port, 1, java.net.InetAddress.getByName(AuthConstants.LOOPBACK_HOST))
+        bind()
         val server = listener ?: throw AppError.Network("无法绑定 OAuth 回调端口 $port")
 
         return try {
-            withTimeout(AuthConstants.OAUTH_TIMEOUT_SECS * 1000L) {
-                val socket = server.accept()
+            withTimeout(timeoutMs) {
+                val socket = acceptCancellable(server)
                 val input = socket.getInputStream().bufferedReader()
                 val requestLine = input.readLine() ?: throw AppError.Remote(0, "空请求")
 
                 // 解析 GET /oauth/callback?code=...&state=... HTTP/1.1
                 val parts = requestLine.split(" ")
-                if (parts.size < 2 || !parts[1].startsWith(AuthConstants.CALLBACK_PATH)) {
+                val requestTarget = parts.getOrNull(1).orEmpty()
+                if (parts.size < 2 || requestTarget.substringBefore('?') != AuthConstants.CALLBACK_PATH) {
                     throw AppError.Remote(0, "非法回调请求: $requestLine")
                 }
-                val queryIdx = parts[1].indexOf('?')
-                val queryStr = if (queryIdx >= 0) parts[1].substring(queryIdx + 1) else ""
+                val queryIdx = requestTarget.indexOf('?')
+                val queryStr = if (queryIdx >= 0) requestTarget.substring(queryIdx + 1) else ""
 
                 val params = parseQuery(queryStr)
 
@@ -71,7 +86,18 @@ class OauthServer(private val port: Int) {
             throw AppError.Auth("OAuth 回调超时（${AuthConstants.OAUTH_TIMEOUT_SECS}秒）")
         } catch (e: Throwable) {
             server.close()
+            if (listener == null) throw AppError.Canceled("OAuth 登录已取消")
             throw e
+        }
+    }
+
+    private suspend fun acceptCancellable(server: ServerSocket): Socket {
+        while (true) {
+            try {
+                return server.accept()
+            } catch (_: SocketTimeoutException) {
+                yield()
+            }
         }
     }
 
@@ -80,6 +106,7 @@ class OauthServer(private val port: Int) {
      */
     fun stop() {
         try { listener?.close() } catch (e: Throwable) {}
+        listener = null
     }
 
     /** 解析 query string */
@@ -109,5 +136,13 @@ class OauthServer(private val port: Int) {
         val title = if (result["code"] != null) "登录成功" else "登录失败"
         val msg = result["error_description"] ?: result["error"] ?: "请返回应用"
         return "<!DOCTYPE html><html><head><meta charset='UTF-8'><title>PetalLink</title><style>$css</style></head><body><div><h2>$title</h2><p>$msg</p></div></body></html>"
+    }
+}
+
+object OauthCallbackValidator {
+    fun requireCode(result: OauthServer.CallbackResult, expectedState: String): String {
+        if (result.state != expectedState) throw AppError.Auth("OAuth state 校验失败")
+        return result.code
+            ?: throw AppError.Auth("授权失败: ${result.errorDescription ?: result.error ?: "未知"}")
     }
 }
