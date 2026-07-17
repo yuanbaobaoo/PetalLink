@@ -2,6 +2,7 @@
 
 package io.github.yuanbaobaoo.petallink.ui.components.mate
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -24,6 +25,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toComposeImageBitmap
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -95,24 +98,46 @@ fun MateLogoWithText(height: Dp = 32.dp) {
     }
 }
 
-/** 从 resources/icon.png 加载 Logo 图标；文件缺失时回退品牌色圆角方块占位。 */
+/**
+ * 从 resources/assets/logo.png 加载真实 Logo（对标原 Vue `@assets/logo.png`）。
+ *
+ * 进程级 ImageBitmap 缓存，避免每次重组重新解码；PNG 缺失才回退品牌色圆角方块占位。
+ */
 @Composable
 private fun LogoImage(size: Dp) {
-    // resources 下暂无独立 icon.png；用品牌色圆角方块 + 云朵图标占位（U4 会接入真实 PNG）。
-    Box(
-        modifier = Modifier
-            .size(size)
-            .clip(RoundedCornerShape(size * 0.2f))
-            .background(BrandColor),
-        contentAlignment = Alignment.Center,
-    ) {
-        io.github.yuanbaobaoo.petallink.ui.components.MateIcon(
-            name = "cloud",
-            size = size * 0.6f,
-            tint = Color.White,
+    // 进程级缓存：logo.png 只解码一次（1024×1024 RGBA，解码开销不宜重复）。
+    val bitmap = remember { loadLogoBitmap() }
+    if (bitmap != null) {
+        Image(
+            bitmap = bitmap,
+            contentDescription = "PetalLink",
+            modifier = Modifier.size(size).clip(RoundedCornerShape(size * 0.2f)),
         )
+    } else {
+        // 回退：品牌色圆角方块 + 云朵图标（仅在 logo.png 加载失败时出现）
+        Box(
+            modifier = Modifier
+                .size(size)
+                .clip(RoundedCornerShape(size * 0.2f))
+                .background(BrandColor),
+            contentAlignment = Alignment.Center,
+        ) {
+            io.github.yuanbaobaoo.petallink.ui.components.MateIcon(
+                name = "cloud",
+                size = size * 0.6f,
+                tint = Color.White,
+            )
+        }
     }
 }
+
+/** 加载 resources/assets/logo.png 为 ImageBitmap；失败返回 null。 */
+private fun loadLogoBitmap(): ImageBitmap? = runCatching {
+    val loader = Thread.currentThread().contextClassLoader ?: ClassLoader.getSystemClassLoader()
+    val stream = loader.getResourceAsStream("assets/logo.png") ?: return null
+    val bytes = stream.use { it.readAllBytes() }
+    org.jetbrains.skia.Image.makeFromEncoded(bytes).toComposeImageBitmap()
+}.getOrNull()
 
 /**
  * 页面脚手架（对标原 Vue `<MateScaffold flush>`）。

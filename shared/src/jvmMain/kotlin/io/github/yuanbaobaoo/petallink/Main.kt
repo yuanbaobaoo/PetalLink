@@ -5,6 +5,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material.CircularProgressIndicator
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.graphics.painter.BitmapPainter
+import androidx.compose.ui.graphics.painter.Painter
+import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.material.Surface
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -58,7 +63,7 @@ fun main(args: Array<String>) {
             var exiting by remember { mutableStateOf(false) }
             val windowState = rememberWindowState()
             val scope = rememberCoroutineScope()
-            val trayIcon = rememberVectorPainter(Icons.Default.Menu)
+            val trayIcon = rememberTrayIcon()
             var trayTransfers by remember { mutableStateOf(state.transfers) }
             var lastTrayRebuild by remember { mutableStateOf(0L) }
             val transferSignature = state.transfers.joinToString("|") { "${it.fileName}:${it.state}:${it.progress}" }
@@ -269,5 +274,28 @@ fun main(args: Array<String>) {
         }
     } finally {
         instance.close()
+    }
+}
+
+/**
+ * 加载托盘图标 Painter（对标原 Tauri menubar-icon.png）。
+ *
+ * 从 resources/assets/menubar-icon.png 加载真实图标；加载失败回退 Material Menu 图标，
+ * 保证托盘始终可用。
+ */
+@Composable
+private fun rememberTrayIcon(): Painter {
+    val pngIcon = remember {
+        runCatching {
+            val loader = Thread.currentThread().contextClassLoader ?: ClassLoader.getSystemClassLoader()
+            loader.getResourceAsStream("assets/menubar-icon.png")?.use { it.readAllBytes() }
+        }.getOrNull()
+    }
+    return if (pngIcon != null) {
+        remember(pngIcon) {
+            BitmapPainter(org.jetbrains.skia.Image.makeFromEncoded(pngIcon).toComposeImageBitmap())
+        }
+    } else {
+        rememberVectorPainter(Icons.Default.Menu)
     }
 }
