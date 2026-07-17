@@ -68,6 +68,9 @@ import io.github.yuanbaobaoo.petallink.update.UpdateManifest
 import java.awt.Desktop
 import java.net.URI
 
+/**
+ * 设置页标签页：每个值带显示名称与图标名，涵盖同步目录、传输设置等分区。
+ */
 private enum class SettingsTab(val label: String, val icon: String) {
     SYNC_DIR("同步目录", "folder"),
     TRANSFER("传输设置", "transfer"),
@@ -77,10 +80,14 @@ private enum class SettingsTab(val label: String, val icon: String) {
     ABOUT("关于", "cloud"),
 }
 
-/** 「通用」分组（同步目录/传输设置/高级设置），v2 settings-nav 分组结构。 */
+/**
+ * 「通用」分组（同步目录/传输设置/高级设置），v2 settings-nav 分组结构。
+ */
 private val GeneralTabs = listOf(SettingsTab.SYNC_DIR, SettingsTab.TRANSFER, SettingsTab.ADVANCED)
 
-/** 「其他」分组（账号管理/日志查看/关于）。 */
+/**
+ * 「其他」分组（账号管理/日志查看/关于）。
+ */
 private val OtherTabs = listOf(SettingsTab.ACCOUNT, SettingsTab.LOGS, SettingsTab.ABOUT)
 
 /**
@@ -288,7 +295,9 @@ private fun SettingsPanel(
     )
 }
 
-/** 分组标题（v2 .group-header：12px semibold secondary uppercase，无分割线；面板内首个上 12，其余上 20）。 */
+/**
+ * 分组标题（v2 .group-header：12px semibold secondary uppercase，无分割线；面板内首个上 12，其余上 20）。
+ */
 @Composable
 private fun GroupHeader(label: String, first: Boolean = false) {
     val semantic = LocalSemanticColors.current
@@ -301,7 +310,9 @@ private fun GroupHeader(label: String, first: Boolean = false) {
     )
 }
 
-/** 设置行（v2 .setting-row：左侧 label+desc 占满剩余宽度，右侧 control，行间距 24；非末行底 0.5px 细边）。 */
+/**
+ * 设置行（v2 .setting-row：左侧 label+desc 占满剩余宽度，右侧 control，行间距 24；非末行底 0.5px 细边）。
+ */
 @Composable
 private fun SettingRow(label: String, desc: String, showDivider: Boolean = true, control: @Composable () -> Unit) {
     val semantic = LocalSemanticColors.current
@@ -321,7 +332,9 @@ private fun SettingRow(label: String, desc: String, showDivider: Boolean = true,
     }
 }
 
-/** 同步目录 Section（v2：radius 10 卡片；已配置 1px SuccessColor 描边 + 成功徽章，未配置 MateEmpty 风格徽章引导）。 */
+/**
+ * 同步目录 Section（v2：radius 10 卡片；已配置 1px SuccessColor 描边 + 成功徽章，未配置 MateEmpty 风格徽章引导）。
+ */
 @Composable
 private fun SyncDirSection(mountDir: String, mountConfigured: Boolean, onSelectDir: () -> Unit) {
     val semantic = LocalSemanticColors.current
@@ -366,7 +379,9 @@ private fun SyncDirSection(mountDir: String, mountConfigured: Boolean, onSelectD
     MateInfoBanner(message = "更换同步目录将清除所有本地缓存与登录状态并重启，云盘文件不受影响。", variant = MateBannerVariant.INFO)
 }
 
-/** 账号管理 Section（v2：头像卡片 radius 10 + 信息面板；账号信息表 + 配额 + 退出登录）。 */
+/**
+ * 账号管理 Section（v2：头像卡片 radius 10 + 信息面板；账号信息表 + 配额 + 退出登录）。
+ */
 @Composable
 private fun AccountSection(userInfo: UserInfo?, userLabel: String, quotaUsed: Long?, quotaTotal: Long?, onLogout: () -> Unit) {
     val semantic = LocalSemanticColors.current
@@ -405,7 +420,9 @@ private fun AccountSection(userInfo: UserInfo?, userLabel: String, quotaUsed: Lo
     }
 }
 
-/** 信息行（label 96px + value flex，底 0.5px border）。 */
+/**
+ * 信息行（label 96px + value flex，底 0.5px border）。
+ */
 @Composable
 private fun InfoRow(label: String, value: String, mono: Boolean = false) {
     val semantic = LocalSemanticColors.current
@@ -419,7 +436,9 @@ private fun InfoRow(label: String, value: String, mono: Boolean = false) {
     }
 }
 
-/** 关于 Section（v2 白卡：LogoWithText + 版本 + 检查更新 + GitHub/GitCode 外链）。 */
+/**
+ * 关于 Section（v2 白卡：LogoWithText + 版本 + 检查更新 + GitHub/GitCode 外链）。
+ */
 @Composable
 private fun AboutSection(
     appVersion: String,
@@ -451,7 +470,9 @@ private fun AboutSection(
     }
 }
 
-/** 外链项（brand 色，点击打开浏览器）。 */
+/**
+ * 外链项（brand 色，点击打开浏览器）。
+ */
 @Composable
 private fun LinkItem(label: String, icon: String, url: String) {
     Row(

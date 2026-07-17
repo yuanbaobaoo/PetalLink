@@ -30,6 +30,9 @@ class UserInfoApi(
     private val restPhpUrl: String = AuthConstants.REST_PHP_URL,
     private val oidcUrl: String = AuthConstants.USER_INFO_URL,
 ) {
+    /**
+     * 并发拉取 OIDC、展示信息、手机号三个端点并合并为账号资料。单端点失败只丢弃该端点结果。
+     */
     suspend fun get(): UserInfo = coroutineScope {
         val token = tokenProvider()
         val info = async { runCatching { getDisplayInfo(token) }.getOrNull() }
@@ -43,6 +46,9 @@ class UserInfoApi(
         UserInfo.fromJson(JsonObject(merged)).resolveAnonymousAsMobile()
     }
 
+    /**
+     * 请求昵称等展示信息端点（GOpen.User.getInfo）
+     */
     private suspend fun getDisplayInfo(token: String): JsonObject {
         val body = "access_token=${Pkce.enc(token)}&getNickName=1"
         return requestObject(
@@ -52,6 +58,9 @@ class UserInfoApi(
         )
     }
 
+    /**
+     * 请求手机号端点（GOpen.User.getPhone）；非对象响应时原样作为 mobile 字段包装
+     */
     private suspend fun getPhone(token: String): JsonObject {
         val response = httpClient.request("$restPhpUrl?nsp_svc=GOpen.User.getPhone") {
             method = HttpMethod.Post
@@ -68,6 +77,9 @@ class UserInfoApi(
         return JsonObject(mapOf("mobile" to JsonPrimitive(text)))
     }
 
+    /**
+     * 以 Bearer Token 请求 OIDC 用户信息端点
+     */
     private suspend fun getOidc(token: String): JsonObject = requestObject(
         HttpMethod.Get,
         oidcUrl,
@@ -75,6 +87,9 @@ class UserInfoApi(
         bearerToken = token,
     )
 
+    /**
+     * 发起请求并校验状态码，将响应体解析为 JSON 对象；非对象或非 2xx 抛错
+     */
     private suspend fun requestObject(
         method: HttpMethod,
         url: String,
@@ -100,7 +115,9 @@ class UserInfoApi(
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 }
 
-/** 多端点合并后的完整账号资料。 */
+/**
+ * 多端点合并后的完整账号资料。
+ */
 data class UserInfo(
     val sub: String? = null,
     val openId: String? = null,
@@ -127,11 +144,20 @@ data class UserInfo(
 
     val initial: String? get() = primaryLabel?.firstOrNull()?.toString()
 
+    /**
+     * 匿名账号且已有真实手机号时，清空占位 displayName 以优先展示手机号
+     */
     fun resolveAnonymousAsMobile(): UserInfo =
         if (isAnonymized && nonBlank(mobile) != null) copy(displayName = null) else this
 
     companion object {
+        /**
+         * 从多端点合并后的 JSON 提取账号资料，兼容各端点不同字段名
+         */
         fun fromJson(json: JsonObject): UserInfo {
+            /**
+             * 依次尝试候选键，返回首个非空白字符串值，均无则返回 null
+             */
             fun pick(vararg keys: String): String? = keys.firstNotNullOfOrNull { key ->
                 json[key]?.let { value ->
                     (value as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf(String::isNotEmpty)
@@ -154,6 +180,9 @@ data class UserInfo(
             )
         }
 
+        /**
+         * 去除首尾空白，空串返回 null
+         */
         private fun nonBlank(value: String?): String? = value?.trim()?.takeIf(String::isNotEmpty)
     }
 }

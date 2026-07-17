@@ -124,7 +124,9 @@ private fun LogoImage(size: Dp) {
     }
 }
 
-/** 加载 resources/assets/logo.png 为 ImageBitmap；失败返回 null。 */
+/**
+ * 加载 resources/assets/logo.png 为 ImageBitmap；失败返回 null。
+ */
 private fun loadLogoBitmap(): ImageBitmap? = runCatching {
     val loader = Thread.currentThread().contextClassLoader ?: ClassLoader.getSystemClassLoader()
     val stream = loader.getResourceAsStream("assets/logo.png") ?: return null
@@ -165,7 +167,9 @@ fun MateHover(
     Box(modifier = Modifier.hoverable(interaction)) { content(hovered) }
 }
 
-/** 竖分隔线（对标原 Vue `<MateVerticalSeparator height>`）。w 1px，bg border。 */
+/**
+ * 竖分隔线（对标原 Vue `<MateVerticalSeparator height>`）。w 1px，bg border。
+ */
 @Composable
 fun MateVerticalSeparator(height: Dp = 20.dp) {
     val semantic = LocalSemanticColors.current
@@ -177,7 +181,9 @@ fun MateVerticalSeparator(height: Dp = 20.dp) {
     )
 }
 
-/** 底部分隔线容器（对标原 Vue `<MateBottomDivider>`）。border-bottom 0.5px。 */
+/**
+ * 底部分隔线容器（对标原 Vue `<MateBottomDivider>`）。border-bottom 0.5px。
+ */
 @Composable
 fun MateBottomDivider(
     content: @Composable () -> Unit,

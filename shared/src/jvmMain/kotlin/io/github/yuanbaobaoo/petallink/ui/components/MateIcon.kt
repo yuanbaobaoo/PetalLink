@@ -34,7 +34,9 @@ import org.jetbrains.skia.svg.SVGDOM
  * 与 resources/icons/ 下的 .svg 文件一一对应。
  */
 public object MateIcons {
-    /** 已注册的全部图标 name。 */
+    /**
+     * 已注册的全部图标 name。
+     */
     public val NAMES: List<String> = listOf(
         "cloud", "local", "folder", "folder-open", "file", "file-text", "image", "chart",
         "search", "refresh", "transfer", "settings", "check", "sync", "alert", "clock",
@@ -42,7 +44,9 @@ public object MateIcons {
         "video", "edit", "archive", "download", "share", "trash", "github", "gitcode",
     )
 
-    /** SVG viewBox 内在尺寸（所有图标统一 24×24）。 */
+    /**
+     * SVG viewBox 内在尺寸（所有图标统一 24×24）。
+     */
     public const val VIEWBOX_SIZE: Float = 24f
 }
 
@@ -143,7 +147,9 @@ public fun MateIcon(
     }
 }
 
-/** 重放 Picture 并叠加 tint（SrcIn：把图标非透明像素染成 tint）。 */
+/**
+ * 重放 Picture 并叠加 tint（SrcIn：把图标非透明像素染成 tint）。
+ */
 private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawSvgPicture(
     picture: Picture,
     tint: Color,

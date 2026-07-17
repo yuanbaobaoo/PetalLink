@@ -49,6 +49,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import io.github.yuanbaobaoo.petallink.drive.DriveFile
+import io.github.yuanbaobaoo.petallink.drive.displayName
 import io.github.yuanbaobaoo.petallink.sync.isFolder
 import io.github.yuanbaobaoo.petallink.ui.components.MateIcon
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateButton
@@ -73,13 +74,17 @@ import io.github.yuanbaobaoo.petallink.ui.theme.TileSheet
 import io.github.yuanbaobaoo.petallink.ui.theme.TileSheetBg
 import io.github.yuanbaobaoo.petallink.ui.theme.TileVideo
 import io.github.yuanbaobaoo.petallink.ui.theme.TileVideoBg
-import io.github.yuanbaobaoo.petallink.ui.viewmodel.BrowserSortField
+import io.github.yuanbaobaoo.petallink.config.SortField
 import io.github.yuanbaobaoo.petallink.ui.viewmodel.FileBrowserState
 
-/** v2：文档类扩展名 → file-text tile（对标原型 .docx/.md/.pdf）。 */
+/**
+ * v2：文档类扩展名 → file-text tile（对标原型 .docx/.md/.pdf）。
+ */
 private val DOC_TILE_EXTS = setOf("doc", "docx", "txt", "md", "pdf", "rtf", "odt", "pages")
 
-/** v2：表格/图表类扩展名 → chart tile（对标原型 .xlsx）。 */
+/**
+ * v2：表格/图表类扩展名 → chart tile（对标原型 .xlsx）。
+ */
 private val SHEET_TILE_EXTS = setOf("xls", "xlsx", "csv", "ods", "numbers", "et")
 
 /**
@@ -103,7 +108,9 @@ private fun fileTypeIcon(file: DriveFile): String {
     }
 }
 
-/** 文件大小格式化（对标原 Vue formatFileSize）。 */
+/**
+ * 文件大小格式化（对标原 Vue formatFileSize）。
+ */
 fun formatFileSize(bytes: Long): String = when {
     bytes < 1024 -> "$bytes B"
     bytes < 1_048_576 -> "%.1f KB".format(bytes / 1024.0)
@@ -124,7 +131,7 @@ fun FileListScreen(
     thumbnails: Map<String, ByteArray>,
     mountConfigured: Boolean,
     isIndexing: Boolean,
-    onSort: (BrowserSortField) -> Unit,
+    onSort: (SortField) -> Unit,
     onEnterFolder: (DriveFile) -> Unit,
     onOpenItem: (DriveFile) -> Unit,
     onThumbnailNeeded: (DriveFile) -> Unit,
@@ -205,16 +212,16 @@ fun FileListScreen(
                             MateButton(variant = MateButtonVariant.ICON, icon = "check", onClick = { showCheckboxes = true })
                         }
                     }
-                    HeaderCell("名称", browser.sortField == BrowserSortField.NAME, browser.ascending, Modifier.weight(1f)) {
-                        onSort(BrowserSortField.NAME)
+                    HeaderCell("名称", browser.sortField == SortField.Name, browser.ascending, Modifier.weight(1f)) {
+                        onSort(SortField.Name)
                     }
-                    HeaderCell("大小", browser.sortField == BrowserSortField.SIZE, browser.ascending, Modifier.width(sizeWidth),
+                    HeaderCell("大小", browser.sortField == SortField.Size, browser.ascending, Modifier.width(sizeWidth),
                         resizable = true, onResize = { delta -> sizeWidth = (sizeWidth + delta).coerceIn(64.dp, 400.dp) }) {
-                        onSort(BrowserSortField.SIZE)
+                        onSort(SortField.Size)
                     }
-                    HeaderCell("修改时间", browser.sortField == BrowserSortField.MODIFIED_TIME, browser.ascending, Modifier.width(timeWidth),
+                    HeaderCell("修改时间", browser.sortField == SortField.ModifiedTime, browser.ascending, Modifier.width(timeWidth),
                         resizable = true, onResize = { delta -> timeWidth = (timeWidth + delta).coerceIn(64.dp, 400.dp) }) {
-                        onSort(BrowserSortField.MODIFIED_TIME)
+                        onSort(SortField.ModifiedTime)
                     }
                     // v2 列宽：状态 72 / 操作 44
                     Box(modifier = Modifier.width(72.dp), contentAlignment = Alignment.Center) {
@@ -324,7 +331,9 @@ private fun BulkBarButton(
     }
 }
 
-/** 批量栏关闭按钮（v2 .bulk-bar .btn-circle：32×32 正圆，白 70% 图标，hover 白 12% 底 + 纯白图标）。 */
+/**
+ * 批量栏关闭按钮（v2 .bulk-bar .btn-circle：32×32 正圆，白 70% 图标，hover 白 12% 底 + 纯白图标）。
+ */
 @Composable
 private fun BulkBarCloseButton(onClick: () -> Unit) {
     val interaction = remember { MutableInteractionSource() }
@@ -341,7 +350,9 @@ private fun BulkBarCloseButton(onClick: () -> Unit) {
     }
 }
 
-/** 表头单元格（排序指示 + 可选 resize-handle）。 */
+/**
+ * 表头单元格（排序指示 + 可选 resize-handle）。
+ */
 @Composable
 private fun HeaderCell(
     title: String,
@@ -387,7 +398,9 @@ private fun HeaderCell(
     }
 }
 
-/** 文件行（v2：56px，radius 8，hover bgHover，selected BrandLighter，双击触发，右键菜单条件渲染）。 */
+/**
+ * 文件行（v2：56px，radius 8，hover bgHover，selected BrandLighter，双击触发，右键菜单条件渲染）。
+ */
 @Composable
 private fun FileRow(
     file: DriveFile,
@@ -457,7 +470,7 @@ private fun FileRow(
             Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 LaunchedEffect(file.id, file.thumbnailLink) { onThumbnailNeeded() }
                 FileTypeTile(file = file, thumbnail = thumbnail)
-                Text(file.name ?: file.fileName ?: "未命名", fontSize = 15.sp, color = semantic.textPrimary,
+                Text(file.displayName(), fontSize = 15.sp, color = semantic.textPrimary,
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             // size 列
@@ -590,7 +603,9 @@ private fun CtxItem(label: String, icon: String, danger: Boolean = false, enable
     }
 }
 
-/** 右键菜单分隔线（v2 .menu__sep：0.5px，margin 8/4，bg border）。 */
+/**
+ * 右键菜单分隔线（v2 .menu__sep：0.5px，margin 8/4，bg border）。
+ */
 @Composable
 private fun CtxDivider() {
     Box(
@@ -601,7 +616,9 @@ private fun CtxDivider() {
     )
 }
 
-/** 重命名对话框（对标原 Vue MateDialog 重命名）。 */
+/**
+ * 重命名对话框（对标原 Vue MateDialog 重命名）。
+ */
 @Composable
 private fun RenameDialog(target: DriveFile, value: String, onValueChange: (String) -> Unit, onConfirm: () -> Unit, onDismiss: () -> Unit) {
     confirmDialog(
@@ -619,7 +636,9 @@ private fun RenameDialog(target: DriveFile, value: String, onValueChange: (Strin
     // 完整的带输入框对话框需要 MateDialog 支持 slot，后续完善。
 }
 
-/** 属性对话框（对标原 Vue MateDialog 属性，5 行键值）。 */
+/**
+ * 属性对话框（对标原 Vue MateDialog 属性，5 行键值）。
+ */
 @Composable
 private fun PropsDialog(target: DriveFile, onDismiss: () -> Unit) {
     confirmDialog(

@@ -36,6 +36,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.yuanbaobaoo.petallink.drive.DriveFile
+import io.github.yuanbaobaoo.petallink.drive.displayName
 import io.github.yuanbaobaoo.petallink.sync.isFolder
 import io.github.yuanbaobaoo.petallink.ui.components.MateIcon
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateButton
@@ -244,7 +245,9 @@ fun MainScreen(
     }
 }
 
-/** 搜索结果区（v2：对标 02-main.html 场景 3，header + 56px 结果行 + 32px 色块 tile）。 */
+/**
+ * 搜索结果区（v2：对标 02-main.html 场景 3，header + 56px 结果行 + 32px 色块 tile）。
+ */
 @Composable
 private fun SearchResults(
     keyword: String,
@@ -299,7 +302,7 @@ private fun SearchResults(
                         }
                         Column {
                             Text(
-                                file.name ?: file.fileName ?: "未命名",
+                                file.displayName(),
                                 fontSize = 15.sp,
                                 color = semantic.textPrimary,
                                 maxLines = 1,

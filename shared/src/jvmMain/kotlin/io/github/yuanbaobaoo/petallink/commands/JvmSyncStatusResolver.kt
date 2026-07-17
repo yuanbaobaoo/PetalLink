@@ -20,6 +20,9 @@ internal class JvmSyncStatusResolver(
     private val repository: SyncItemRepository,
     private val xattrs: XattrAccess = MacXattrAccess,
 ) {
+    /**
+     * 解析单个 fileId 对应的本地同步状态（folder / synced / placeholder / not_synced）。
+     */
     suspend fun resolveOne(fileId: String): String {
         val item = repository.findByFileId(fileId) ?: return NOT_SYNCED
         if (item.isFolder) return FOLDER
@@ -27,6 +30,9 @@ internal class JvmSyncStatusResolver(
         return statusWithRoot(item, root)
     }
 
+    /**
+     * 批量解析多个 fileId 的本地同步状态，返回 fileId 到状态串的映射。
+     */
     suspend fun resolveBatch(fileIds: List<String>): Map<String, String> {
         val root = configuredRootOrNull()
         return fileIds.associateWith { fileId ->
@@ -40,6 +46,9 @@ internal class JvmSyncStatusResolver(
         }
     }
 
+    /**
+     * 读取配置并返回已挂载根目录的真实路径；未配置或非法时返回 null。
+     */
     private fun configuredRootOrNull(): Path? {
         val config = runCatching(configStore::load).getOrNull() ?: return null
         if (!config.mountConfigured || config.mountDir.isBlank()) return null
@@ -48,6 +57,9 @@ internal class JvmSyncStatusResolver(
         return root.toRealPath()
     }
 
+    /**
+     * 在已知根目录下读取本地文件的 xattr 状态，判定是 placeholder 还是 synced。
+     */
     private fun statusWithRoot(item: SyncItem, root: Path): String {
         val relative = Path.of(item.localPath)
         if (relative.isAbsolute || relative.none() || relative.any { it.toString() == "." || it.toString() == ".." }) {

@@ -162,7 +162,9 @@ data class SemanticColors(
     val shadowModal: String,
 )
 
-/** 浅色主题语义别名。 */
+/**
+ * 浅色主题语义别名。
+ */
 val LightSemanticColors = SemanticColors(
     bgPage = "#F5F5F7",
     bgContainer = "#FFFFFF",
@@ -181,7 +183,9 @@ val LightSemanticColors = SemanticColors(
     shadowModal = "0 24px 64px -12px rgba(16,24,40,0.22)",
 )
 
-/** 深色主题语义别名。 */
+/**
+ * 深色主题语义别名。
+ */
 val DarkSemanticColors = SemanticColors(
     bgPage = "#181818",
     bgContainer = "#242424",
@@ -208,6 +212,9 @@ val DarkSemanticColors = SemanticColors(
  * size/time 列宽可拖拽（默认 110/160，范围 64–400）。
  */
 object FileListColumns {
+    /**
+     * 文件列表单列定义，包含列标识、标题及默认/最小/最大宽度
+     */
     data class Column(val key: String, val title: String, val defaultWidth: Int, val minWidth: Int, val maxWidth: Int)
 
     val COLUMNS: List<Column> = listOf(

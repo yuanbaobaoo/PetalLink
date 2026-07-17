@@ -25,6 +25,9 @@ class SyncEngine(
 ) {
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
+    /**
+     * 执行一次协调同步周期：启动恢复、云端刷新与同步主流程
+     */
     suspend fun runCoordinatedCycle(
         request: CycleRequest,
         localScan: Map<String, LocalEntry>,
@@ -53,6 +56,9 @@ class SyncEngine(
         return runSyncCycleInner(localScan, isStartup)
     }
 
+    /**
+     * 同步周期内核：构建快照、规划并过滤动作、执行后落库并刷新状态
+     */
     private suspend fun runSyncCycleInner(
         localScan: Map<String, LocalEntry>, isStartup: Boolean,
     ): Result<Unit> {
@@ -124,7 +130,9 @@ class SyncEngine(
         }
     }
 
-    /** 写/更新 SyncItem 基线 */
+    /**
+     * 写/更新 SyncItem 基线
+     */
     private suspend fun upsertSyncItem(
         path: String, fileId: String?, snapshot: SyncSnapshot, isFolder: Boolean,
     ) {
@@ -148,5 +156,8 @@ class SyncEngine(
         ))
     }
 
+    /**
+     * 当前时间戳（毫秒）
+     */
     private fun nowMs(): Long = System.currentTimeMillis()
 }

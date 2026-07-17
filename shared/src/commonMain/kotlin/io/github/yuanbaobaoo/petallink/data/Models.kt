@@ -8,7 +8,9 @@ import io.github.yuanbaobaoo.petallink.sync.TransferState
  * 详见 docs/04-数据模型与持久化.md。
  */
 
-/** 同步项：云端↔本地的基线记录 */
+/**
+ * 同步项：云端↔本地的基线记录
+ */
 data class SyncItem(
     val fileId: String,
     val localPath: String,
@@ -31,7 +33,9 @@ data class SyncItem(
     val lastError: String? get() = errorMessage
 }
 
-/** 传输任务（对应 transfer_queue 表） */
+/**
+ * 传输任务（对应 transfer_queue 表）
+ */
 data class TransferTask(
     val id: Long?,
     val direction: TransferDirection,
@@ -66,7 +70,9 @@ data class TransferTask(
     val uploadSessionUrl: String? get() = sessionUrl
 }
 
-/** 传输方向 */
+/**
+ * 传输方向
+ */
 enum class TransferDirection { UPLOAD, DOWNLOAD, DELETE, DOWNLOAD_UPDATE }
 
 /**
@@ -75,15 +81,25 @@ enum class TransferDirection { UPLOAD, DOWNLOAD, DELETE, DOWNLOAD_UPDATE }
  * 序列化保持只发送变更字段，减少乐观锁冲突。
  */
 sealed class ColumnPatch<out T> {
-    /** 不变更此列（SQL UPDATE 不包含此字段） */
+    /**
+     * 不变更此列（SQL UPDATE 不包含此字段）
+     */
     object Keep : ColumnPatch<Nothing>()
-    /** 设置此列的值 */
+
+    /**
+     * 设置此列的值
+     */
     data class Set<T>(val value: T) : ColumnPatch<T>()
-    /** 清空此列（设为 NULL） */
+
+    /**
+     * 清空此列（设为 NULL）
+     */
     object Clear : ColumnPatch<Nothing>()
 }
 
-/** 一次传输生命周期迁移附带的原子字段补丁。 */
+/**
+ * 一次传输生命周期迁移附带的原子字段补丁。
+ */
 data class TransferPatch(
     val errorKind: ColumnPatch<Int> = ColumnPatch.Keep,
     val errorMessage: ColumnPatch<String> = ColumnPatch.Keep,
@@ -98,7 +114,9 @@ data class TransferPatch(
     val attemptCount: Int? = null,
 )
 
-/** 仅在同一 Running revision 内更新的进度与 resume 会话。 */
+/**
+ * 仅在同一 Running revision 内更新的进度与 resume 会话。
+ */
 data class RunningTransferPatch(
     val transferred: Long? = null,
     val resumeOffset: Long? = null,

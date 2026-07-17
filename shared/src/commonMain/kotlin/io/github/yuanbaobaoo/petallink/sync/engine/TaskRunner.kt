@@ -24,23 +24,40 @@ import kotlin.random.Random
  * 详见 docs/06 §TaskRunner contracts。
  */
 interface TransferOperations {
-    /** 预检（静态检查：路径合法/空间/冲突） */
+    /**
+     * 预检（静态检查：路径合法/空间/冲突）
+     */
     suspend fun preflight(task: TaskContext): PreflightResult
 
-    /** 执行传输 */
+    /**
+     * 执行传输
+     */
     suspend fun execute(task: TaskContext, progress: TaskProgressReporter): TaskOutput
 
-    /** 远端核验（VerifyingRemote 状态用） */
+    /**
+     * 远端核验（VerifyingRemote 状态用）
+     */
     suspend fun verifyRemote(task: TaskContext): RemoteVerification
 }
 
-/** 预检结果 */
+/**
+ * 预检结果
+ */
 sealed class PreflightResult {
+    /**
+     * 预检通过：允许进入执行
+     */
     object Ok : PreflightResult()
+
+    /**
+     * 预检拒绝：携带原因与目标态（如 Failed / RestartRequired）
+     */
     data class Reject(val reason: String, val targetState: TransferState) : PreflightResult()
 }
 
-/** 任务上下文（对标 RunningTask 快照） */
+/**
+ * 任务上下文（对标 RunningTask 快照）
+ */
 data class TaskContext(
     val id: Long,
     val fileId: String,
@@ -64,7 +81,37 @@ data class TaskContext(
     val createdAt: Long = 0L,
 )
 
-/** 任务执行输出 */
+/**
+ * 将 [TransferTask] 转为执行上下文 [TaskContext]（字段一一映射）。
+ *
+ * id 缺失视为数据错误，直接抛异常；其余可空字段原样透传。
+ */
+fun TransferTask.toTaskContext(): TaskContext = TaskContext(
+    id = id ?: error("传输任务缺少 id"),
+    fileId = fileId.orEmpty(),
+    localPath = localPath.orEmpty(),
+    direction = direction,
+    state = state,
+    stateRevision = stateRevision,
+    attempt = attempt,
+    bytesTotal = bytesTotal,
+    bytesDone = bytesDone,
+    nextRetryAt = nextRetryAt,
+    remoteResultFileId = remoteResultFileId,
+    sessionUrl = sessionUrl,
+    serverId = serverId,
+    uploadId = uploadId,
+    parentFileId = parentFileId,
+    operation = operation,
+    sourceMtime = sourceMtime,
+    sourceSize = sourceSize,
+    expectedCloudEditedTime = expectedCloudEditedTime,
+    createdAt = createdAt,
+)
+
+/**
+ * 任务执行输出
+ */
 data class TaskOutput(
     val disposition: TaskDisposition,
     val cloudFileId: String? = null,
@@ -72,28 +119,84 @@ data class TaskOutput(
     val errorMessage: String? = null,
 )
 
-/** 任务结局（9 种，对标 TaskDisposition） */
+/**
+ * 任务结局（9 种，对标 TaskDisposition）
+ */
 enum class TaskDisposition {
-    COMPLETED,          // 完成
-    BACKING_OFF,        // 退避重试
-    WAITING_FOR_NETWORK,// 等待网络
-    VERIFYING_REMOTE,   // 核验远端
-    RESTART_REQUIRED,   // 需重启（可恢复中断）
-    BLOCKED,            // 被同路径任务阻塞
-    FAILED,             // 失败（终态）
-    CANCELED,           // 取消
-    PENDING,            // 重新入队
+    /**
+     * 完成
+     */
+    COMPLETED,
+
+    /**
+     * 退避重试
+     */
+    BACKING_OFF,
+
+    /**
+     * 等待网络
+     */
+    WAITING_FOR_NETWORK,
+
+    /**
+     * 核验远端
+     */
+    VERIFYING_REMOTE,
+
+    /**
+     * 需重启（可恢复中断）
+     */
+    RESTART_REQUIRED,
+
+    /**
+     * 被同路径任务阻塞
+     */
+    BLOCKED,
+
+    /**
+     * 失败（终态）
+     */
+    FAILED,
+
+    /**
+     * 取消
+     */
+    CANCELED,
+
+    /**
+     * 重新入队
+     */
+    PENDING,
 }
 
-/** 远端核验结果 */
+/**
+ * 远端核验结果
+ */
 sealed class RemoteVerification {
+    /**
+     * 远端已确认提交：携带最终 fileId
+     */
     data class Committed(val fileId: String) : RemoteVerification()
+
+    /**
+     * 远端未提交：任务需重新规划
+     */
     object NotCommitted : RemoteVerification()
+
+    /**
+     * 远端结果不明：需稍后重试核验
+     */
     object Ambiguous : RemoteVerification()
+
+    /**
+     * 校验过程出错：携带错误信息
+     */
     data class Err(val message: String) : RemoteVerification()
 }
 
-/** 进度上报器（对标 TaskProgressReporter） */
+/**
+ * 进度上报器（对标 TaskProgressReporter）
+ */
 class TaskProgressReporter(
     private val repository: TransferRepository,
     private val taskId: Long,
@@ -102,14 +205,18 @@ class TaskProgressReporter(
 ) {
     private var lastReportMs: Long = 0L
 
-    /** 上报进度（刻意不递增 revision） */
+    /**
+     * 上报进度（刻意不递增 revision）
+     */
     suspend fun report(bytesDone: Long, nowMs: Long) {
         if (nowMs - lastReportMs < throttleMs) return  // 节流
         lastReportMs = nowMs
         repository.updateRunningProgress(taskId, stateRevision, bytesDone)
     }
 
-    /** 会话轮换与服务端确认 offset 必须立即持久化，不受 UI 进度节流影响。 */
+    /**
+     * 会话轮换与服务端确认 offset 必须立即持久化，不受 UI 进度节流影响。
+     */
     suspend fun reportResume(session: ResumeSession, confirmedOffset: Long): Boolean =
         repository.updateRunningTransfer(
             taskId,
@@ -124,7 +231,9 @@ class TaskProgressReporter(
         )
 
     companion object {
-        /** 进度节流间隔：500ms */
+        /**
+         * 进度节流间隔：500ms
+         */
         const val PROGRESS_THROTTLE_MS = 500L
     }
 }
@@ -189,6 +298,9 @@ class TaskRunner(
         return runningSemaphore.withPermit { runAdmitted(task) }
     }
 
+    /**
+     * 取得并发许可后的执行主链：预检 → CAS 转 Running → 执行传输 → settle。
+     */
     private suspend fun runAdmitted(task: TaskContext): TaskDisposition {
         // 4. 预检
         when (val preflight = operations.preflight(task)) {
@@ -325,6 +437,9 @@ class TaskRunner(
         return settle(task, output)
     }
 
+    /**
+     * 构造失败态迁移 patch 并委托 [transition]：清/写错误信息、设退避时间，终态补 finishedAt。
+     */
     private suspend fun transitionFailure(
         task: TaskContext,
         newState: TransferState,
@@ -341,6 +456,9 @@ class TaskRunner(
         ),
     )
 
+    /**
+     * 校验状态迁移合法后，通过仓库 CAS 乐观锁落库并返回更新后的任务上下文。
+     */
     private suspend fun transition(task: TaskContext, newState: TransferState, patch: TransferPatch): TaskContext {
         check(TransferState.canTransition(task.state, newState)) {
             "非法状态迁移：${task.state} → $newState"
@@ -348,31 +466,16 @@ class TaskRunner(
         return repository.transition(task.id, task.stateRevision, newState, patch).toContext()
     }
 
+    /**
+     * 把可空错误信息映射为 Set（非空）或 Clear（空）。
+     */
     private fun String?.patchOrClear(): ColumnPatch<String> =
         this?.let(ColumnPatch<String>::Set) ?: ColumnPatch.Clear
 
-    private fun TransferTask.toContext() = TaskContext(
-        id = id ?: error("传输任务缺少 id"),
-        fileId = fileId.orEmpty(),
-        localPath = localPath.orEmpty(),
-        direction = direction,
-        state = state,
-        stateRevision = stateRevision,
-        attempt = attempt,
-        bytesTotal = bytesTotal,
-        bytesDone = bytesDone,
-        nextRetryAt = nextRetryAt,
-        remoteResultFileId = remoteResultFileId,
-        sessionUrl = sessionUrl,
-        serverId = serverId,
-        uploadId = uploadId,
-        parentFileId = parentFileId,
-        operation = operation,
-        sourceMtime = sourceMtime,
-        sourceSize = sourceSize,
-        expectedCloudEditedTime = expectedCloudEditedTime,
-        createdAt = createdAt,
-    )
+    /**
+     * 把持久层 TransferTask 转换为执行上下文 TaskContext。
+     */
+    private fun TransferTask.toContext(): TaskContext = toTaskContext()
 
     // ------------------------------------------------------------------
     // 8 步启动恢复（对标 cycle.rs run_coordinated_cycle）
@@ -408,6 +511,9 @@ class TaskRunner(
         // 步骤 8: run_sync_cycle_inner（在 engine 层做：rescan + plan + execute）
     }
 
+    /**
+     * 步骤 1：恢复进程中断时仍处于 Running 的任务——写操作转 VerifyingRemote，下载保留断点转 Pending。
+     */
     private suspend fun recoverInterruptedRunning() {
         for (task in repository.selectByState(TransferState.Running)) {
             val ctx = task.toContext()
@@ -441,7 +547,9 @@ class TaskRunner(
         }
     }
 
-    /** 步骤 5：提升歧义重启（RestartRequired → VerifyingRemote） */
+    /**
+     * 步骤 5：提升歧义重启（RestartRequired → VerifyingRemote）
+     */
     private suspend fun promoteAmbiguousRestarts() {
         val restarts = repository.selectByState(TransferState.RestartRequired)
         for (task in restarts.filter { !it.remoteResultFileId.isNullOrBlank() }) {
@@ -469,7 +577,9 @@ class TaskRunner(
         resumeDueBackoff()
     }
 
-    /** resume_verifying：核验 VerifyingRemote 任务 */
+    /**
+     * resume_verifying：核验 VerifyingRemote 任务
+     */
     private suspend fun resumeVerifying() {
         val verifying = repository.selectByState(TransferState.VerifyingRemote)
         for (task in verifying) {
@@ -501,7 +611,9 @@ class TaskRunner(
         }
     }
 
-    /** resume_waiting：在线时恢复 WaitingForNetwork 任务 */
+    /**
+     * resume_waiting：在线时恢复 WaitingForNetwork 任务
+     */
     private suspend fun resumeWaiting() {
         if (!isOnline()) return
         val waiting = repository.selectByState(TransferState.WaitingForNetwork)
@@ -510,7 +622,9 @@ class TaskRunner(
         }
     }
 
-    /** resume_due_backoff：退避到期恢复 BackingOff 任务 */
+    /**
+     * resume_due_backoff：退避到期恢复 BackingOff 任务
+     */
     private suspend fun resumeDueBackoff() {
         val backing = repository.selectByState(TransferState.BackingOff)
         for (task in backing.filter { (it.nextRetryAt ?: Long.MAX_VALUE) <= nowMs() }) {
@@ -518,7 +632,9 @@ class TaskRunner(
         }
     }
 
-    /** Failed/RestartRequired 只有显式重试才会重新规划；歧义远端结果仍优先核验。 */
+    /**
+     * Failed/RestartRequired 只有显式重试才会重新规划；歧义远端结果仍优先核验。
+     */
     suspend fun retryExplicit(taskId: Long): TaskDisposition {
         val task = repository.findById(taskId) ?: return TaskDisposition.FAILED
         if (task.state != TransferState.Failed && task.state != TransferState.RestartRequired) {

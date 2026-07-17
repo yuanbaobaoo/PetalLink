@@ -12,7 +12,14 @@ import kotlinx.coroutines.sync.withLock
  * 云端树刷新器接口（对标 cloud_tree.rs + engine/cache.rs）。
  */
 interface CloudTreeRefresher {
+    /**
+     * 全量刷新云端目录树，返回全新构造的可信缓存。
+     */
     suspend fun refreshFull(): CloudTreeCache
+
+    /**
+     * 基于 [cursor] 增量刷新；游标失效或阈值超限时自动回退到全量。
+     */
     suspend fun refreshIncremental(cursor: String): CloudTreeCache
 }
 
@@ -29,12 +36,21 @@ class BfsCloudTreeRefresher(
 
     companion object { const val INDEXING_CONCURRENCY = 8 }
 
+    /**
+     * BFS 遍历队列节点：记录待列举的文件夹 id、相对路径以及已重试次数。
+     */
     private data class BfsNode(val folderId: String?, val path: String, val retries: Int = 0)
     private val refreshMutex = Mutex()
     private var incrementalSinceFull = 0
 
+    /**
+     * 全量刷新：互斥锁下执行 buildFull。
+     */
     override suspend fun refreshFull(): CloudTreeCache = refreshMutex.withLock { buildFull() }
 
+    /**
+     * 增量刷新实现：游标失效、阈值超限或增量失败时回退到全量刷新。
+     */
     override suspend fun refreshIncremental(cursor: String): CloudTreeCache = refreshMutex.withLock {
         require(cursor.isNotBlank()) { "增量 cursor 不能为空" }
         if (incrementalSinceFull >= forcedFullThreshold) return@withLock buildFull()
@@ -53,6 +69,9 @@ class BfsCloudTreeRefresher(
         }
     }
 
+    /**
+     * 全量构造：先取 startCursor，BFS 建候选，再 replay startCursor 起的增量变更并落盘。
+     */
     private suspend fun buildFull(): CloudTreeCache {
         val startCursor = changesApi.getStartCursor()
         val candidate = buildBfsCandidate()
@@ -63,6 +82,9 @@ class BfsCloudTreeRefresher(
         return replayed
     }
 
+    /**
+     * BFS 遍历构建候选云树：每层并发 8 个目录列举，检测根 fileId，遇重复路径/耗尽重试即失败。
+     */
     private suspend fun buildBfsCandidate(): CloudTreeCache = coroutineScope {
         val tree = mutableMapOf<String, DriveFile>()
         val pathToId = mutableMapOf<String, String>()
@@ -109,14 +131,27 @@ class BfsCloudTreeRefresher(
         CloudTreeCache(tree = tree, pathToId = pathToId, rootFolderId = rootFolderId, cursor = null, complete = false)
     }
 
+    /**
+     * 列举单个文件夹文件，成功返回 Ok，其他异常（除取消）转为可重试的 Retry。
+     */
     private suspend fun listFolder(node: BfsNode): FolderResult = try {
         FolderResult.Ok(filesApi.listAllFiles(node.folderId))
     } catch (cancelled: CancellationException) {
         throw cancelled
     } catch (e: Throwable) { FolderResult.Retry }
 
+    /**
+     * 单个文件夹列举的结果密封类：成功携带文件列表，失败为可重试分支。
+     */
     private sealed class FolderResult {
+        /**
+         * 文件夹列举成功，携带该文件夹下的文件列表
+         */
         data class Ok(val files: List<DriveFile>) : FolderResult()
+
+        /**
+         * 列举失败（非取消），可重新入队重试。
+         */
         data object Retry : FolderResult()
     }
 }

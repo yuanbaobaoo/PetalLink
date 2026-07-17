@@ -7,11 +7,16 @@ import io.github.yuanbaobaoo.petallink.drive.FilesApi
 import io.github.yuanbaobaoo.petallink.data.TransferDirection
 import java.time.Instant
 
-/** 对不确定远端写执行只读收敛；Create 永不因“查不到”而直接重放。 */
+/**
+ * 对不确定远端写执行只读收敛；Create 永不因“查不到”而直接重放。
+ */
 class JvmRemoteTransferVerifier(
     private val filesApi: FilesApi,
     private val fileStore: TransferFileStore,
 ) {
+    /**
+     * 对不确定的远端写执行只读收敛核验，判定任务应提交、重放还是保持歧义。
+     */
     suspend fun verify(task: TaskContext): RemoteVerification {
         return try {
         if (task.direction == TransferDirection.DELETE) {
@@ -63,6 +68,9 @@ class JvmRemoteTransferVerifier(
         }
     }
 
+    /**
+     * 比对远端文件与任务的标识（id、名称、大小、父目录）是否一致。
+     */
     private fun matchesIdentity(file: DriveFile, task: TaskContext): Boolean {
         if (file.id.isNullOrBlank() || file.name != task.localPath.substringAfterLast('/') || file.sizeBytes != task.bytesTotal) {
             return false

@@ -76,7 +76,9 @@ fun SyncSetupBanner(
     }
 }
 
-/** 引导条容器：padding 8/20（v2），底部分隔线保留。 */
+/**
+ * 引导条容器：padding 8/20（v2），底部分隔线保留。
+ */
 @Composable
 private fun BannerWrapper(bg: androidx.compose.ui.graphics.Color, content: @Composable () -> Unit) {
     androidx.compose.foundation.layout.Column(

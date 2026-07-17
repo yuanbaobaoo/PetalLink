@@ -56,7 +56,9 @@ data class LogRecordDisplay(
     val message: String,
 )
 
-/** 级别 → tag 主题映射（对标原 Vue tagTheme）。 */
+/**
+ * 级别 → tag 主题映射（对标原 Vue tagTheme）。
+ */
 private fun levelTheme(level: LogLevel): MateTagTheme = when (level) {
     LogLevel.ERROR -> MateTagTheme.ERROR
     LogLevel.WARN -> MateTagTheme.WARNING
@@ -64,7 +66,9 @@ private fun levelTheme(level: LogLevel): MateTagTheme = when (level) {
     else -> MateTagTheme.DEFAULT
 }
 
-/** 级别过滤选项。 */
+/**
+ * 级别过滤选项。
+ */
 private enum class LevelFilter { ALL, INFO, WARN, ERROR }
 
 /**

@@ -46,7 +46,9 @@ interface InodeIdentityStore {
     suspend fun purgeMissing(seenInodes: Set<ULong>)
 }
 
-/** 扫描快照中基于稳定 inode 配对出的本地移动。 */
+/**
+ * 扫描快照中基于稳定 inode 配对出的本地移动。
+ */
 data class DetectedMove(
     val inode: ULong,
     val fileId: String,
@@ -54,6 +56,9 @@ data class DetectedMove(
     val newRelativePath: String,
 )
 
+/**
+ * 基于稳定 inode 的文件移动检测器，比对扫描快照识别本地文件的移动
+ */
 object InodeMoveDetector {
     /**
      * 同 inode 且路径改变时才输出 move；copy 产生新 inode，因而不会被误判为 move。

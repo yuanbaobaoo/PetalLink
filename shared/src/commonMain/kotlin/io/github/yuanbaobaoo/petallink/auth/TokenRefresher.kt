@@ -58,7 +58,9 @@ class TokenRefresher(
         }
     }
 
-    /** 实际刷新请求（对标 refresh，用 .form()，refresh_token 无特殊字符） */
+    /**
+     * 实际刷新请求（对标 refresh，用 .form()，refresh_token 无特殊字符）
+     */
     private suspend fun doRefresh(): TokenPair {
         val current = currentTokenProvider()
             ?: throw AppError.Auth("无 token 可刷新，需重新登录")

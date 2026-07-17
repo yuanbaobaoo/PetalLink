@@ -1,6 +1,8 @@
 package io.github.yuanbaobaoo.petallink.drive
 
-/** JVM 平台时间实现 */
+/**
+ * JVM 平台时间实现
+ */
 actual object PlatformTime {
     actual fun micros(): Long = System.currentTimeMillis() * 1000L
 

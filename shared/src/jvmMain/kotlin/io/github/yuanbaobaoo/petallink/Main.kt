@@ -48,6 +48,9 @@ import javax.swing.SwingUtilities
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 
+/**
+ * JVM 应用入口：协调单实例锁、窗口/托盘生命周期，并根据应用状态分发到各页面。
+ */
 fun main(args: Array<String>) {
     val paths = AppPaths.fromEnvironment()
     val showWindow = AtomicReference<() -> Unit>({})
@@ -65,16 +68,25 @@ fun main(args: Array<String>) {
             val windowState = rememberWindowState()
             val scope = rememberCoroutineScope()
 
+            /**
+             * 显示主窗口并将其切回常规应用模式（含 macOS ActivationPolicy 激活）。
+             */
             fun show() {
                 visible = true
                 MacActivationPolicy.regularAndActivate()
             }
 
+            /**
+             * 隐藏主窗口并切换为 accessory（仅托盘驻留）模式。
+             */
             fun hide() {
                 visible = false
                 MacActivationPolicy.accessory()
             }
 
+            /**
+             * 退出应用：清理根组件与单实例锁后调用 exitApplication；重入时直接返回。
+             */
             fun quit() {
                 if (exiting) return
                 exiting = true
@@ -146,6 +158,9 @@ fun main(args: Array<String>) {
             ) {
                 DisposableEffect(window) {
                     val listener = object : WindowAdapter() {
+                        /**
+                         * 窗口获得焦点时通知 viewModel，用于同步聚焦状态。
+                         */
                         override fun windowGainedFocus(event: WindowEvent?) {
                             root.viewModel.onWindowFocused()
                         }

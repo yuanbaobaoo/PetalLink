@@ -43,14 +43,18 @@ class DesktopTray(
             scheduleRebuild()
         }
 
-    /** 当前 tooltip。 */
+    /**
+     * 当前 tooltip。
+     */
     var tooltip: String = "PetalLink"
         set(value) {
             field = value
             trayIcon?.toolTip = value
         }
 
-    /** 创建并添加托盘图标到系统托盘。失败（不支持/无桌面）返回 false。 */
+    /**
+     * 创建并添加托盘图标到系统托盘。失败（不支持/无桌面）返回 false。
+     */
     fun install(): Boolean {
         if (!SystemTray.isSupported()) return false
         val iconImage = loadTrayImage() ?: return false
@@ -73,12 +77,16 @@ class DesktopTray(
         }
     }
 
-    /** 重建菜单（传输任务变化时调用）。 */
+    /**
+     * 重建菜单（传输任务变化时调用）。
+     */
     fun rebuildMenu() {
         trayIcon?.setPopupMenu(buildMenu())
     }
 
-    /** 菜单重建最小间隔（毫秒，对标原版 MENU_REBUILD_INTERVAL_MS = 5000）。 */
+    /**
+     * 菜单重建最小间隔（毫秒，对标原版 MENU_REBUILD_INTERVAL_MS = 5000）。
+     */
     private var lastMenuRebuildMs: Long = 0L
 
     /**
@@ -97,26 +105,34 @@ class DesktopTray(
         rebuildMenu()
     }
 
-    /** 菜单重建最小间隔（毫秒）。传输进度高频变化，过频重建会让已展开菜单闪烁消失。 */
+    /**
+     * 菜单重建最小间隔（毫秒）。传输进度高频变化，过频重建会让已展开菜单闪烁消失。
+     */
     private companion object {
         const val MENU_REBUILD_INTERVAL_MS: Long = 5000L
     }
 
-    /** 从系统托盘移除图标。 */
+    /**
+     * 从系统托盘移除图标。
+     */
     fun remove() {
         val icon = trayIcon ?: return
         runCatching { SystemTray.getSystemTray().remove(icon) }
         trayIcon = null
     }
 
-    /** 加载 menubar-icon.png；失败回退系统默认图标。 */
+    /**
+     * 加载 menubar-icon.png；失败回退系统默认图标。
+     */
     private fun loadTrayImage(): Image? = runCatching {
         val loader = Thread.currentThread().contextClassLoader ?: ClassLoader.getSystemClassLoader()
         val stream = loader.getResourceAsStream("assets/menubar-icon.png") ?: return null
         ImageIO.read(stream)
     }.getOrNull()
 
-    /** 构建托盘菜单（对齐原版 build_menu）。 */
+    /**
+     * 构建托盘菜单（对齐原版 build_menu）。
+     */
     private fun buildMenu(): PopupMenu = PopupMenu().apply {
         // 版本标识（disabled 纯展示，对标原版「PetalLink - 华为云盘 Mac 客户端开源版」）
         add(MenuItem("PetalLink - 华为云盘 Mac 客户端开源版").apply { isEnabled = false })

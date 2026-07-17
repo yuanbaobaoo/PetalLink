@@ -24,6 +24,9 @@ data class AppPaths(val dataDir: Path) {
     val tokenFile: Path get() = dataDir.resolve("token.bin")
     val logsDir: Path get() = dataDir.resolve("logs")
 
+    /**
+     * 根据挂载根路径计算对应的可信云树检查点文件路径（路径被转义为安全文件名片段）。
+     */
     fun cloudTreeCheckpoint(mountRoot: Path): Path {
         val absolute = mountRoot.toAbsolutePath().normalize().toString()
         val escaped = buildString(absolute.length) {
@@ -38,10 +41,18 @@ data class AppPaths(val dataDir: Path) {
         const val PROD_BUNDLE_ID = "io.github.yuanbaobaoo.PetalLink"
         const val DEV_BUNDLE_ID = "$PROD_BUNDLE_ID-dev"
 
+        /**
+         * 返回生产 bundle id 对应的应用路径。
+         */
         fun production(): AppPaths = fromBundleId(PROD_BUNDLE_ID)
+        /**
+         * 返回开发 bundle id 对应的应用路径。
+         */
         fun development(): AppPaths = fromBundleId(DEV_BUNDLE_ID)
 
-        /** 当前运行时生效的 bundle id（与 LaunchAgent label、数据目录一致）。 */
+        /**
+         * 当前运行时生效的 bundle id（与 LaunchAgent label、数据目录一致）。
+         */
         fun currentBundleId(): String {
             // BuildInfo.BUNDLE_ID 为空串仅在异常构建场景出现，兜底 prod。
             val built = runCatching { BuildInfo.BUNDLE_ID }.getOrDefault("")
@@ -78,6 +89,9 @@ data class AppPaths(val dataDir: Path) {
             return production()
         }
 
+        /**
+         * 按 bundle id 拼接出 `~/Library/Application Support/<bundleId>` 数据目录。
+         */
         internal fun fromBundleId(bundleId: String): AppPaths = AppPaths(
             Paths.get(System.getProperty("user.home"), "Library", "Application Support", bundleId),
         )

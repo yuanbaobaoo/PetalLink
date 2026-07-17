@@ -100,7 +100,18 @@ class AuthService(
  * actual 由 macosMain 提供（加密文件持久化）。
  */
 interface TokenStore {
+    /**
+     * 读取已持久化的 token，未登录返回 null
+     */
     suspend fun load(): TokenPair?
+
+    /**
+     * 持久化保存 token
+     */
     suspend fun save(token: TokenPair)
+
+    /**
+     * 清除已保存的 token（登出）
+     */
     suspend fun clear()
 }

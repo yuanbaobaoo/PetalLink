@@ -24,7 +24,9 @@ class OauthServer(
 ) {
     @Volatile private var listener: java.net.ServerSocket? = null
 
-    /** 先绑定端口，再由调用方打开浏览器，避免快速回调竞态。 */
+    /**
+     * 先绑定端口，再由调用方打开浏览器，避免快速回调竞态。
+     */
     fun bind() {
         if (listener != null) return
         listener = java.net.ServerSocket(port, 1, java.net.InetAddress.getByName(AuthConstants.LOOPBACK_HOST)).also {
@@ -32,6 +34,9 @@ class OauthServer(
         }
     }
 
+    /**
+     * OAuth 回调结果，包含授权码、state 及错误信息
+     */
     data class CallbackResult(
         val code: String?,
         val state: String?,
@@ -91,6 +96,9 @@ class OauthServer(
         }
     }
 
+    /**
+     * 可取消地等待连接：SO_TIMEOUT 触发时 yield 让出协程，支持外部 stop
+     */
     private suspend fun acceptCancellable(server: ServerSocket): Socket {
         while (true) {
             try {
@@ -109,7 +117,9 @@ class OauthServer(
         listener = null
     }
 
-    /** 解析 query string */
+    /**
+     * 解析 query string
+     */
     private fun parseQuery(query: String): Map<String, String> {
         if (query.isEmpty()) return emptyMap()
         val map = mutableMapOf<String, String>()
@@ -123,14 +133,18 @@ class OauthServer(
         return map
     }
 
-    /** URL 解码（form-urlencoded：+ → 空格，%XX → 字节） */
+    /**
+     * URL 解码（form-urlencoded：+ → 空格，%XX → 字节）
+     */
     private fun urlDecode(s: String): String {
         return s.replace('+', ' ').let {
             URLDecoder.decode(it, "UTF-8")
         }
     }
 
-    /** 生成回调响应页面 */
+    /**
+     * 生成回调响应页面
+     */
     private fun buildResponsePage(result: Map<String, String>): String {
         val css = "body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f5f5f5}div{text-align:center;padding:40px;border-radius:12px;background:#fff;box-shadow:0 2px 8px rgba(0,0,0,0.1)}h2{color:#333}p{color:#666}"
         val title = if (result["code"] != null) "登录成功" else "登录失败"
@@ -139,7 +153,13 @@ class OauthServer(
     }
 }
 
+/**
+ * OAuth 回调校验器，校验 state 并提取授权码或抛出鉴权异常
+ */
 object OauthCallbackValidator {
+    /**
+     * 校验 state 匹配并提取授权码，否则抛出鉴权异常
+     */
     fun requireCode(result: OauthServer.CallbackResult, expectedState: String): String {
         if (result.state != expectedState) throw AppError.Auth("OAuth state 校验失败")
         return result.code

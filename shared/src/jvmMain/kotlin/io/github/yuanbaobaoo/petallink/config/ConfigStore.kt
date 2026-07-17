@@ -16,6 +16,9 @@ class JsonConfigStore(private val configPath: Path) : ConfigStore {
         prettyPrint = true; ignoreUnknownKeys = true
     }
 
+    /**
+     * 从磁盘读取配置；存在旧值时迁移并按需落盘，缺失或空文件返回 null。
+     */
     override fun load(): UserConfig? {
         if (!Files.exists(configPath)) return null
         val text = Files.readString(configPath)
@@ -26,6 +29,9 @@ class JsonConfigStore(private val configPath: Path) : ConfigStore {
         return config
     }
 
+    /**
+     * 校验后通过同目录临时文件原子替换写入配置。
+     */
     override fun save(config: UserConfig) {
         validate(config)
         validateMountAccess(config)
@@ -44,9 +50,14 @@ class JsonConfigStore(private val configPath: Path) : ConfigStore {
         }
     }
 
-    /** 导入使用与 load 相同的旧值迁移与校验，但由命令层统一决定何时落盘。 */
+    /**
+     * 导入使用与 load 相同的旧值迁移与校验，但由命令层统一决定何时落盘。
+     */
     fun parseImport(text: String): UserConfig = decodeAndMigrate(text).first.also(::validate)
 
+    /**
+     * 解析 JSON 文本并应用历史字段迁移，返回配置与是否发生迁移的标记。
+     */
     private fun decodeAndMigrate(text: String): Pair<UserConfig, Boolean> {
         val parsed = json.parseToJsonElement(text).jsonObject
         var dirty = false
@@ -68,11 +79,17 @@ class JsonConfigStore(private val configPath: Path) : ConfigStore {
         return json.decodeFromJsonElement(UserConfig.serializer(), normalized) to dirty
     }
 
+    /**
+     * 调用 ConfigValidator 校验配置，发现错误时抛 IllegalArgumentException。
+     */
     private fun validate(config: UserConfig) {
         val errors = ConfigValidator.validate(config)
         require(errors.isEmpty()) { errors.joinToString("；") }
     }
 
+    /**
+     * 校验挂载目录可写且非用户主目录，必要时创建目录并用临时探针文件验证写入权限。
+     */
     private fun validateMountAccess(config: UserConfig) {
         if (!config.mountConfigured) return
         val expanded = JvmMountPaths.resolve(config.mountDir)

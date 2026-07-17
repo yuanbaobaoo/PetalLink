@@ -17,7 +17,9 @@ import io.github.yuanbaobaoo.petallink.drive.DriveFile
  */
 object Planner {
 
-    /** pending fileId 前缀（对标 PENDING_FILE_ID_PREFIX） */
+    /**
+     * pending fileId 前缀（对标 PENDING_FILE_ID_PREFIX）
+     */
     private const val PENDING_PREFIX = "pending:"
 
     /**
@@ -245,7 +247,9 @@ object Planner {
     }
 }
 
-/** DriveFile 是否为文件夹（4 种 mimeType 变体，踩坑 1） */
+/**
+ * DriveFile 是否为文件夹（4 种 mimeType 变体，踩坑 1）
+ */
 fun DriveFile.isFolder(): Boolean {
     return io.github.yuanbaobaoo.petallink.drive.DriveParsers.isFolderMime(mimeType)
 }

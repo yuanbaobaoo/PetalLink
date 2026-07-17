@@ -16,15 +16,33 @@ data class LocalFileEntry(
     val placeholderState: PlaceholderState? = null,
 )
 
-/** 同步扫描器抽象；实现必须递归且不跟随符号链接。 */
+/**
+ * 同步扫描器抽象；实现必须递归且不跟随符号链接。
+ */
 interface LocalFileScanner {
+    /**
+     * 递归扫描挂载目录（不跟随符号链接）返回全部本地条目
+     */
     suspend fun scan(): List<LocalFileEntry>
 }
 
-/** xattr 最小平台抽象；缺失属性返回 null，其他失败抛 LocalIo。 */
+/**
+ * xattr 最小平台抽象；缺失属性返回 null，其他失败抛 LocalIo。
+ */
 interface XattrAccess {
+    /**
+     * 读取指定名称的扩展属性，缺失返回 null，其他失败抛异常
+     */
     fun get(path: String, name: String): ByteArray?
+
+    /**
+     * 设置指定名称的扩展属性值
+     */
     fun set(path: String, name: String, value: ByteArray)
+
+    /**
+     * 删除指定名称的扩展属性
+     */
     fun remove(path: String, name: String)
 }
 
@@ -33,12 +51,20 @@ interface XattrAccess {
  * 详见 docs/11 §2.1（inode 方案后仅 2 个 xattr 键）。
  */
 enum class PlaceholderState(val xattrValue: String) {
-    /** 占位符（0 字节，云端文件未下载） */
+    /**
+     * 占位符（0 字节，云端文件未下载）
+     */
     PLACEHOLDER("placeholder"),
-    /** 已下载（真实内容） */
+
+    /**
+     * 已下载（真实内容）
+     */
     DOWNLOADED("downloaded");
 
     companion object {
+        /**
+         * 从 xattr 字符串值解析占位符状态，无法识别返回 null
+         */
         fun fromXattr(value: String?): PlaceholderState? = when (value) {
             "placeholder" -> PLACEHOLDER
             "downloaded" -> DOWNLOADED
@@ -72,7 +98,9 @@ interface PlaceholderManager {
      */
     suspend fun isPlaceholder(absolutePath: String): Boolean
 
-    /** 真实内容完整落盘后标记 downloaded 并清除灰标。 */
+    /**
+     * 真实内容完整落盘后标记 downloaded 并清除灰标。
+     */
     suspend fun markDownloaded(absolutePath: String)
 
     /**

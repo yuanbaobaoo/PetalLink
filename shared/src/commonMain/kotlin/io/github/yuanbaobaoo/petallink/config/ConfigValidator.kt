@@ -8,10 +8,15 @@ package io.github.yuanbaobaoo.petallink.config
  */
 object ConfigValidator {
 
-    /** 并发数合法范围 */
+    /**
+     * 并发数合法范围
+     */
     const val MIN_CONCURRENCY = 1
     const val MAX_CONCURRENCY = 20
-    /** 轮询间隔下限（0 表示禁用，合法） */
+
+    /**
+     * 轮询间隔下限（0 表示禁用，合法）
+     */
     const val MIN_POLL_INTERVAL_SEC = 60L
 
     /**
@@ -56,6 +61,8 @@ object ConfigValidator {
         return errors
     }
 
-    /** 便捷方法：配置是否合法 */
+    /**
+     * 便捷方法：配置是否合法
+     */
     fun isValid(config: UserConfig): Boolean = validate(config).isEmpty()
 }

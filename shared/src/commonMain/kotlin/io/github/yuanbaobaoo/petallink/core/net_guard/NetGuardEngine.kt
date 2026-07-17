@@ -49,10 +49,14 @@ class NetGuardEngine {
         return current
     }
 
-    /** 当前网络状态 */
+    /**
+     * 当前网络状态
+     */
     fun state(): NetState = current
 
-    /** 请求层失败与主动探测共用同一状态机，只发布一次离线边沿。 */
+    /**
+     * 请求层失败与主动探测共用同一状态机，只发布一次离线边沿。
+     */
     fun onRequestNetworkFailure(): Boolean {
         val changed = current == NetState.ONLINE
         consecutiveSuccess = 0

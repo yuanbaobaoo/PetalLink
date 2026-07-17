@@ -51,7 +51,9 @@ import io.github.yuanbaobaoo.petallink.ui.theme.ErrorColor
 import io.github.yuanbaobaoo.petallink.ui.theme.LocalSemanticColors
 import io.github.yuanbaobaoo.petallink.ui.theme.LocalReducedMotion
 
-/** 按钮形态（v2：主按钮 / 文字 / 图标 / 图标文字 / 软色）。 */
+/**
+ * 按钮形态（v2：主按钮 / 文字 / 图标 / 图标文字 / 软色）。
+ */
 enum class MateButtonVariant { PRIMARY, TEXT, ICON, ICON_TEXT, SOFT }
 
 /**
@@ -215,7 +217,9 @@ fun MateButton(
     }
 }
 
-/** primary 加载态的小 spinner（16×16，0.8s 线性旋转）。 */
+/**
+ * primary 加载态的小 spinner（16×16，0.8s 线性旋转）。
+ */
 @Composable
 private fun MateButtonSpinner(size: Dp, color: Color, reducedMotion: Boolean) {
     if (reducedMotion) {

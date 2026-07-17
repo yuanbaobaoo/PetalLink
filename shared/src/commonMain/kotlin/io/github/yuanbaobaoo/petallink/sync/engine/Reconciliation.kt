@@ -133,7 +133,9 @@ object Reconciliation {
         }
     }
 
-    /** 校验路径段（含错误信息前缀） */
+    /**
+     * 校验路径段（含错误信息前缀）
+     */
     private fun validatePathSegmentFull(segment: String) {
         require(segment.isNotEmpty()) { "文件名为空" }
         require('.' !in segment || (segment != "." && segment != "..")) { "文件名为目录引用: $segment" }

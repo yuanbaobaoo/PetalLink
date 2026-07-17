@@ -28,8 +28,14 @@ actual class PetalLinkDb actual constructor(dbPath: String) {
     actual val inodeMap: InodeMapRepository = InodeMapRepositoryImpl(database.local_inode_mapQueries)
     actual val freeUpStaging: FreeUpStagingRepository = FreeUpStagingRepositoryImpl(database.free_up_stagingQueries)
 
+    /**
+     * 清空挂载相关数据（等价于 clearMountState）。
+     */
     actual fun clearAll() = clearMountState()
 
+    /**
+     * 清空所有同步、传输、游标、inode 映射与释放暂存数据，回到未挂载状态。
+     */
     actual fun clearMountState() {
         database.transaction {
             listOf(
@@ -42,15 +48,23 @@ actual class PetalLinkDb actual constructor(dbPath: String) {
         }
     }
 
+    /**
+     * 关闭底层 SQL 驱动并释放数据库连接。
+     */
     actual fun close() {
         driver.close()
     }
 }
 
-/** SQLite 首次建库与 v1→v6 原子迁移。 */
+/**
+ * SQLite 首次建库与 v1→v6 原子迁移。
+ */
 internal object DatabaseBootstrap {
     const val SCHEMA_VERSION = 6
 
+    /**
+     * 打开 SQLite 数据库：必要时创建父目录，按当前版本迁移或建表，并开启外键约束。
+     */
     fun open(dbPath: String): SqlDriver {
         val path = Path.of(dbPath).toAbsolutePath().normalize()
         path.parent?.let(Files::createDirectories)
@@ -77,6 +91,9 @@ internal object DatabaseBootstrap {
         return driver
     }
 
+    /**
+     * 在单个事务中按版本阶梯式执行 v1→v6 增量迁移，失败时回滚并抛出非法状态异常。
+     */
     private fun migrate(url: String, fromVersion: Int) {
         if (fromVersion == SCHEMA_VERSION) return
         DriverManager.getConnection(url).use { connection ->
@@ -139,17 +156,26 @@ internal object DatabaseBootstrap {
         }
     }
 
+    /**
+     * 若指定列不存在则以 ALTER TABLE 增量添加。
+     */
     private fun addColumn(connection: Connection, table: String, column: String, definition: String) {
         if (columnExists(connection, table, column)) return
         connection.createStatement().use { it.execute("ALTER TABLE $table ADD COLUMN $column $definition") }
     }
 
+    /**
+     * 通过 sqlite_master 判断指定表是否存在。
+     */
     private fun tableExists(connection: Connection, table: String): Boolean =
         connection.prepareStatement("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").use { query ->
             query.setString(1, table)
             query.executeQuery().use { it.next() }
         }
 
+    /**
+     * 通过 PRAGMA table_info 判断指定列是否存在。
+     */
     private fun columnExists(connection: Connection, table: String, column: String): Boolean =
         connection.createStatement().use { statement ->
             statement.executeQuery("PRAGMA table_info($table)").use { rows ->
@@ -158,6 +184,9 @@ internal object DatabaseBootstrap {
             }
         }
 
+    /**
+     * 创建 v6 引入的 local_inode_map 与 free_up_staging 两张表。
+     */
     private fun createV6Tables(connection: Connection) {
         connection.createStatement().use { statement ->
             statement.execute(
@@ -181,6 +210,9 @@ internal object DatabaseBootstrap {
         }
     }
 
+    /**
+     * 创建用于加速查询的终态相关索引（如 local_path、state、direction、next_retry 等）。
+     */
     private fun createTerminalIndexes(connection: Connection) {
         val statements = listOf(
             "CREATE INDEX IF NOT EXISTS idx_sync_items_local_path ON sync_items(local_path)",

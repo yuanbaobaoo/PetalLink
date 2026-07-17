@@ -16,13 +16,19 @@ import kotlinx.coroutines.flow.StateFlow
  * - 连续 2 次成功才转 ONLINE
  */
 expect class NetGuard(scope: CoroutineScope) {
-    /** 当前网络状态 */
+    /**
+     * 当前网络状态
+     */
     val state: StateFlow<NetState>
 
-    /** 启动周期性探测 */
+    /**
+     * 启动周期性探测
+     */
     fun startProbe()
 
-    /** 停止探测 */
+    /**
+     * 停止探测
+     */
     fun stopProbe()
 
     /**
@@ -31,6 +37,8 @@ expect class NetGuard(scope: CoroutineScope) {
      */
     fun newGeneration(): Int
 
-    /** 真实请求层报告网络失败；仅首次 Online→Offline 返回 true。 */
+    /**
+     * 真实请求层报告网络失败；仅首次 Online→Offline 返回 true。
+     */
     fun reportRequestNetworkFailure(): Boolean
 }

@@ -6,7 +6,9 @@ package io.github.yuanbaobaoo.petallink.auth
  * 详见 docs/03 §2、docs/07 §PKCE。
  */
 
-/** PKCE 密钥对 */
+/**
+ * PKCE 密钥对
+ */
 data class PkcePair(
     val codeVerifier: String,    // ~86 字符（64 字节 base64url 无填充）
     val codeChallenge: String,   // 43 字符（SHA256 后 base64url 无填充）
@@ -16,7 +18,9 @@ data class PkcePair(
  * 授权相关纯逻辑（无 IO，可单测）。
  */
 object Pkce {
-    /** 64 随机字节 verifier + SHA-256 challenge。 */
+    /**
+     * 64 随机字节 verifier + SHA-256 challenge。
+     */
     fun generate(): PkcePair {
         val verifierBytes = ByteArray(64).also(java.security.SecureRandom()::nextBytes)
         val verifier = base64Url(verifierBytes)
@@ -24,9 +28,14 @@ object Pkce {
         return PkcePair(verifier, challenge)
     }
 
-    /** OAuth CSRF state：32 字节密码学随机数。 */
+    /**
+     * OAuth CSRF state：32 字节密码学随机数。
+     */
     fun generateState(): String = base64Url(ByteArray(32).also(java.security.SecureRandom()::nextBytes))
 
+    /**
+     * Base64url 无填充编码（PKCE 要求的编码方式）
+     */
     private fun base64Url(bytes: ByteArray): String =
         java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
 
@@ -57,7 +66,9 @@ object Pkce {
         }
     }
 
-    /** 构建回调 URI：http://127.0.0.1:{port}/oauth/callback */
+    /**
+     * 构建回调 URI：http://127.0.0.1:{port}/oauth/callback
+     */
     fun buildRedirectUri(port: Int): String =
         "http://${AuthConstants.LOOPBACK_HOST}:$port${AuthConstants.CALLBACK_PATH}"
 

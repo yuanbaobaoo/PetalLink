@@ -1,8 +1,12 @@
 package io.github.yuanbaobaoo.petallink.drive
 
-/** 华为 Files JSON 写接口要求的 ASCII-only 编码。 */
+/**
+ * 华为 Files JSON 写接口要求的 ASCII-only 编码。
+ */
 object AsciiJson {
-    /** 转义任意原始字符串，保留旧调用面。 */
+    /**
+     * 转义任意原始字符串，保留旧调用面。
+     */
     fun escape(input: String): String = buildString(input.length) {
         for (char in input) {
             if (char.code in 0x20..0x7e) append(char)

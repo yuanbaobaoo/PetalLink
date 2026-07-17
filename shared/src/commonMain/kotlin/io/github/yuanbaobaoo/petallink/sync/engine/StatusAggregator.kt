@@ -11,8 +11,14 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 
+/**
+ * 同步失败项：记录失败条目的相对路径与错误信息
+ */
 data class FailedSyncItem(val relativePath: String, val errorMessage: String?)
 
+/**
+ * 同步状态聚合快照：单次聚合产生的不可变全局视图（含计数、运行时状态与失败项）
+ */
 data class SyncStatusSnapshot(
     val revision: Long,
     val global: SyncGlobalStatus,
@@ -21,7 +27,9 @@ data class SyncStatusSnapshot(
     val failedItems: List<FailedSyncItem>,
 )
 
-/** 一个版本号对应一份完整、不可变的 DB + runtime 快照。 */
+/**
+ * 一个版本号对应一份完整、不可变的 DB + runtime 快照。
+ */
 class StatusAggregator {
     private val nextRevision = AtomicLong(0L)
     private val initialCounts = StatusCounts(0, 0, 0, 0, 0, 0, 0)
@@ -31,6 +39,9 @@ class StatusAggregator {
     private val mutableState = MutableStateFlow(SyncGlobalStatus.IDLE)
     val currentState: StateFlow<SyncGlobalStatus> = mutableState.asStateFlow()
 
+    /**
+     * 聚合 DB 与运行时状态为新的不可变快照，并发布到 StateFlow
+     */
     suspend fun snapshot(db: PetalLinkDb, runtime: RuntimeStatus = RuntimeStatus()): SyncStatusSnapshot {
         val total = db.syncItems.countAll()
         val failed = db.syncItems.countByStatus(SyncStatus.FAILED)
@@ -56,6 +67,9 @@ class StatusAggregator {
         return result
     }
 
+    /**
+     * 根据计数与运行时状态计算对外展示的全局同步状态
+     */
     fun computeGlobalState(counts: StatusCounts, runtime: RuntimeStatus): SyncGlobalStatus {
         if (runtime.isIndexing) return SyncGlobalStatus.INDEXING
         if (counts.uploading > 0 || counts.downloading > 0 || runtime.isRunning) return SyncGlobalStatus.SYNCING
@@ -65,12 +79,18 @@ class StatusAggregator {
     }
 }
 
+/**
+ * 各类同步/传输任务的计数统计
+ */
 data class StatusCounts(
     val total: Long, val failed: Long, val conflict: Long,
     val uploading: Long, val downloading: Long,
     val waitingNetwork: Long, val transferFailed: Long,
 ) { val completed: Long get() = (total - failed - conflict).coerceAtLeast(0) }
 
+/**
+ * 运行时状态：在线、索引中、运行中等引擎当前执行态
+ */
 data class RuntimeStatus(
     val isRunning: Boolean = false, val isIndexing: Boolean = false,
     val isOnline: Boolean = true, val lastSyncTime: Long? = null,
@@ -79,13 +99,29 @@ data class RuntimeStatus(
     val contentChanged: Boolean = false, val syncPhase: String? = null,
 )
 
+/**
+ * 同步全局状态：由计数与运行时状态聚合得到的对外展示态
+ */
 enum class SyncGlobalStatus { IDLE, INDEXING, SYNCING, PAUSED, ERROR }
 
+/**
+ * 目录变更事件：通知受影响路径，fullRescan 标记是否需要全量重扫
+ */
 data class FolderChangeEvent(val paths: List<String>, val fullRescan: Boolean)
+
+/**
+ * 传输进度更新事件：携带任务 id 与当前 revision
+ */
 data class TransferUpdateEvent(val taskId: Long?, val revision: Long)
+
+/**
+ * 上传失败事件：记录失败文件相对路径与错误信息
+ */
 data class UploadFailedEvent(val relativePath: String, val message: String)
 
-/** 内部事件总线：状态用 StateFlow，边沿通知用 SharedFlow。 */
+/**
+ * 内部事件总线：状态用 StateFlow，边沿通知用 SharedFlow。
+ */
 class SyncEventHub(val status: StatusAggregator = StatusAggregator()) {
     val syncState: StateFlow<SyncStatusSnapshot> = status.snapshots
     private val mutableFolderChanges = MutableSharedFlow<FolderChangeEvent>(extraBufferCapacity = 64)
@@ -95,7 +131,18 @@ class SyncEventHub(val status: StatusAggregator = StatusAggregator()) {
     val transferUpdates: SharedFlow<TransferUpdateEvent> = mutableTransferUpdates.asSharedFlow()
     val uploadFailures: SharedFlow<UploadFailedEvent> = mutableUploadFailures.asSharedFlow()
 
+    /**
+     * 发布目录变更事件到事件总线
+     */
     suspend fun publishFolderChange(event: FolderChangeEvent) = mutableFolderChanges.emit(event)
+
+    /**
+     * 发布传输进度更新事件到事件总线
+     */
     suspend fun publishTransferUpdate(event: TransferUpdateEvent) = mutableTransferUpdates.emit(event)
+
+    /**
+     * 发布上传失败事件到事件总线
+     */
     suspend fun publishUploadFailed(event: UploadFailedEvent) = mutableUploadFailures.emit(event)
 }

@@ -79,21 +79,27 @@ object ChaCha20Poly1305 {
         return paddedCt + lenBlock
     }
 
-    /** 填充到 16 字节边界 */
+    /**
+     * 填充到 16 字节边界
+     */
     private fun padTo16(data: ByteArray): ByteArray {
         val rem = data.size % 16
         if (rem == 0) return data
         return data + ByteArray(16 - rem)
     }
 
-    /** 小端写入 u64 */
+    /**
+     * 小端写入 u64
+     */
     private fun writeU64LE(buf: ByteArray, offset: Int, value: Long) {
         for (i in 0 until 8) {
             buf[offset + i] = ((value ushr (i * 8)) and 0xFF).toByte()
         }
     }
 
-    /** 常数时间比较（防时序攻击） */
+    /**
+     * 常数时间比较（防时序攻击）
+     */
     private fun constantTimeEquals(a: ByteArray, b: ByteArray): Boolean {
         if (a.size != b.size) return false
         var result = 0
@@ -180,7 +186,9 @@ object ChaCha20Poly1305 {
         return output
     }
 
-    /** ChaCha20 quarter round */
+    /**
+     * ChaCha20 quarter round
+     */
     private fun quarterRound(s: IntArray, a: Int, b: Int, c: Int, d: Int) {
         s[a] += s[b]; s[d] = rotl32(s[d] xor s[a], 16)
         s[c] += s[d]; s[b] = rotl32(s[b] xor s[c], 12)
@@ -188,16 +196,23 @@ object ChaCha20Poly1305 {
         s[c] += s[d]; s[b] = rotl32(s[b] xor s[c], 7)
     }
 
+    /**
+     * 32 位循环左移
+     */
     private fun rotl32(x: Int, n: Int): Int = (x shl n) or (x ushr (32 - n))
 
-    /** 小端读取 4 字节为 UInt */
+    /**
+     * 小端读取 4 字节为 UInt
+     */
     private fun leU32(buf: ByteArray, offset: Int): Int =
         (buf[offset].toInt() and 0xFF) or
         ((buf[offset + 1].toInt() and 0xFF) shl 8) or
         ((buf[offset + 2].toInt() and 0xFF) shl 16) or
         ((buf[offset + 3].toInt() and 0xFF) shl 24)
 
-    /** 小端写入 4 字节 */
+    /**
+     * 小端写入 4 字节
+     */
     private fun writeU32LE(buf: ByteArray, offset: Int, value: Int) {
         buf[offset] = (value and 0xFF).toByte()
         buf[offset + 1] = ((value ushr 8) and 0xFF).toByte()

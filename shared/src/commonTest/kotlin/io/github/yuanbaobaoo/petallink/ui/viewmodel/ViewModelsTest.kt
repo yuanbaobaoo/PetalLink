@@ -1,6 +1,7 @@
 package io.github.yuanbaobaoo.petallink.ui.viewmodel
 
 import io.github.yuanbaobaoo.petallink.core.net_guard.NetState
+import io.github.yuanbaobaoo.petallink.sync.engine.SyncGlobalStatus
 import io.github.yuanbaobaoo.petallink.sync.TransferState
 import io.github.yuanbaobaoo.petallink.drive.DriveFile
 import kotlin.test.Test
@@ -19,22 +20,22 @@ class ViewModelsTest {
     @Test
     fun SyncViewModel_同revision重复投递被忽略() {
         val vm = SyncViewModel()
-        vm.applyState(SyncGlobalState.SYNCING, revision = 1)
-        assertEquals(SyncGlobalState.SYNCING, vm.state.value)
+        vm.applyState(SyncGlobalStatus.SYNCING, revision = 1)
+        assertEquals(SyncGlobalStatus.SYNCING, vm.state.value)
         // 同 revision 重复投递 → 幂等，不改
-        vm.applyState(SyncGlobalState.IDLE, revision = 1)
-        assertEquals(SyncGlobalState.SYNCING, vm.state.value)
+        vm.applyState(SyncGlobalStatus.IDLE, revision = 1)
+        assertEquals(SyncGlobalStatus.SYNCING, vm.state.value)
         // 新 revision 才生效
-        vm.applyState(SyncGlobalState.IDLE, revision = 2)
-        assertEquals(SyncGlobalState.IDLE, vm.state.value)
+        vm.applyState(SyncGlobalStatus.IDLE, revision = 2)
+        assertEquals(SyncGlobalStatus.IDLE, vm.state.value)
     }
 
     @Test
     fun SyncViewModel_旧revision不能回滚状态() {
         val vm = SyncViewModel()
-        vm.applyState(SyncGlobalState.SYNCING, 9)
-        vm.applyState(SyncGlobalState.IDLE, 8)
-        assertEquals(SyncGlobalState.SYNCING, vm.state.value)
+        vm.applyState(SyncGlobalStatus.SYNCING, 9)
+        vm.applyState(SyncGlobalStatus.IDLE, 8)
+        assertEquals(SyncGlobalStatus.SYNCING, vm.state.value)
     }
 
     @Test
@@ -103,19 +104,5 @@ class ViewModelsTest {
         assertEquals(UpdaterPhase.AVAILABLE, vm.phase.value)
         vm.setNewVersion("1.2.0")
         assertEquals("1.2.0", vm.newVersion.value)
-    }
-
-    @Test
-    fun AuthViewModel_登录登出() {
-        val vm = AuthViewModel()
-        assertEquals(false, vm.isLoggedIn.value)
-        vm.onLoginSuccess(
-            io.github.yuanbaobaoo.petallink.auth.TokenPair("at", "rt", 0L),
-            UserInfo("张三", "三哥", "138****8888", null),
-        )
-        assertTrue(vm.isLoggedIn.value)
-        assertEquals("张三", vm.userInfo.value?.displayName)
-        vm.onLogout()
-        assertEquals(false, vm.isLoggedIn.value)
     }
 }

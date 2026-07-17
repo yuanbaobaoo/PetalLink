@@ -23,7 +23,9 @@ class FilesApi(
     private val client: DriveClient,
     private val base: String = DriveConstants.DRIVE_API_BASE,
 ) {
-    /** 列出文件（分页） */
+    /**
+     * 列出文件（分页）
+     */
     suspend fun listFiles(
         parentId: String?,
         pageSize: Int = 100,
@@ -49,7 +51,9 @@ class FilesApi(
         return page.files to page.nextCursor
     }
 
-    /** 获取单个文件（fields=* 全字段） */
+    /**
+     * 获取单个文件（fields=* 全字段）
+     */
     suspend fun getFile(fileId: String): DriveFile {
         val resp = client.executeWithRetry(
             HttpMethod.Get,
@@ -60,7 +64,9 @@ class FilesApi(
         return DriveParsers.parseDriveFileStrict(Json.parseToJsonElement(resp.bodyAsText()), "get")
     }
 
-    /** 创建文件/文件夹 */
+    /**
+     * 创建文件/文件夹
+     */
     suspend fun createFile(name: String, parentFolder: String?, isFolder: Boolean): DriveFile {
         require(name.isNotBlank()) { "名称不能为空" }
         val expectedParent = parentFolder ?: "root"
@@ -75,6 +81,9 @@ class FilesApi(
         }
     }
 
+    /**
+     * 单次创建文件/文件夹，并严格校验响应名称、类型与父目录
+     */
     private suspend fun createFileOnce(
         name: String,
         parentFolder: String?,
@@ -105,6 +114,9 @@ class FilesApi(
         return file
     }
 
+    /**
+     * 在指定父目录下查找同名唯一文件夹；存在多个时报歧义错误，用于创建去重
+     */
     private suspend fun findUniqueFolder(
         name: String,
         parentFolder: String?,
@@ -118,7 +130,9 @@ class FilesApi(
         return matches.singleOrNull()
     }
 
-    /** 更新文件（PATCH 覆盖） */
+    /**
+     * 更新文件（PATCH 覆盖）
+     */
     suspend fun updateFile(fileId: String, name: String?): DriveFile {
         return try {
             updateFileOnce(fileId, name)
@@ -129,6 +143,9 @@ class FilesApi(
         }
     }
 
+    /**
+     * 单次 PATCH 更新文件名，并严格校验响应 fileId 与名称
+     */
     private suspend fun updateFileOnce(fileId: String, name: String?): DriveFile {
         val meta = buildJsonObject {
             if (name != null) put("fileName", name)
@@ -150,7 +167,9 @@ class FilesApi(
         return file
     }
 
-    /** 软删除（PATCH recycled=true，踩坑：非物理删除） */
+    /**
+     * 软删除（PATCH recycled=true，踩坑：非物理删除）
+     */
     suspend fun deleteFile(fileId: String) {
         try {
             deleteFileOnce(fileId)
@@ -159,6 +178,9 @@ class FilesApi(
         }
     }
 
+    /**
+     * 单次软删除（recycled=true），并校验响应已确认删除
+     */
     private suspend fun deleteFileOnce(fileId: String) {
         val body = buildJsonObject { put("recycled", true) }
         val resp = client.executeWithRetry(
@@ -176,6 +198,9 @@ class FilesApi(
         require(file.id == fileId && file.recycled == true) { "delete 响应未确认 recycled=true" }
     }
 
+    /**
+     * 移动文件到新父目录；目标已是父目录则直接返回，否则尝试并在失败后核验
+     */
     suspend fun moveFile(fileId: String, oldParent: String, newParent: String): DriveFile {
         validateQueryLiteral(oldParent, "removeParentFolder")
         validateQueryLiteral(newParent, "addParentFolder")
@@ -191,6 +216,9 @@ class FilesApi(
         }
     }
 
+    /**
+     * 单次移动文件，通过 add/remove parentFolder 参数实现，并校验响应父目录
+     */
     private suspend fun moveFileOnce(fileId: String, oldParent: String, newParent: String): DriveFile {
         val url = "$base/files/${Pkce.enc(fileId)}?fields=*" +
             "&addParentFolder=${newParent.encodeURLParameter()}" +
@@ -206,6 +234,9 @@ class FilesApi(
         return file
     }
 
+    /**
+     * 核验文件是否已删除：404 视为已删除，200 时检查 recycled 标记
+     */
     suspend fun verifyDeleted(fileId: String): Boolean {
         val resp = client.executeWithRetry(
             HttpMethod.Get,
@@ -219,6 +250,9 @@ class FilesApi(
         return file.recycled == true
     }
 
+    /**
+     * 按文件名关键词搜索，可选限定父目录，返回首页结果与下一页游标
+     */
     suspend fun search(keyword: String, parentId: String?, pageSize: Int = 100): Pair<List<DriveFile>, String?> {
         require(pageSize in 1..100) { "pageSize 必须在 1..100" }
         validateQueryLiteral(keyword, "搜索关键词")
@@ -255,6 +289,9 @@ class FilesApi(
         )
     }
 
+    /**
+     * 校验查询字面量：禁止空串、单引号与反斜线，避免 query 注入
+     */
     private fun validateQueryLiteral(value: String, field: String) {
         require(value.isNotBlank()) { "$field 不能为空" }
         require('\'' !in value && '\\' !in value) { "$field 不允许单引号或反斜线" }

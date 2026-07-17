@@ -44,6 +44,7 @@ import io.github.yuanbaobaoo.petallink.sync.engine.TransferOperationsImpl
 import io.github.yuanbaobaoo.petallink.sync.engine.UploadFailedEvent
 import io.github.yuanbaobaoo.petallink.sync.engine.JvmTransferFileStore
 import io.github.yuanbaobaoo.petallink.sync.engine.TaskRunner
+import io.github.yuanbaobaoo.petallink.sync.engine.toTaskContext
 import io.github.yuanbaobaoo.petallink.sync.engine.TaskContext
 import io.github.yuanbaobaoo.petallink.sync.engine.TaskDisposition
 import io.github.yuanbaobaoo.petallink.sync.engine.JvmRemoteTransferVerifier
@@ -79,7 +80,9 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 
-/** JVM 双向同步周期：可信云树、持久 TaskRunner、安全传输与破坏性动作共用唯一 owner。 */
+/**
+ * JVM 双向同步周期：可信云树、持久 TaskRunner、安全传输与破坏性动作共用唯一 owner。
+ */
 class JvmSyncRuntime(
     private val paths: AppPaths,
     private val configStore: ConfigStore,
@@ -111,17 +114,32 @@ class JvmSyncRuntime(
     private val mutableFolderSyncProgress = MutableStateFlow<FolderSyncProgress?>(null)
     private val mutableUploadFailures = MutableSharedFlow<UploadFailedEvent>(extraBufferCapacity = 32)
 
+    /**
+     * 目录同步进度流。
+     */
     override fun folderSyncProgress(): StateFlow<FolderSyncProgress?> = mutableFolderSyncProgress
+    /**
+     * 上传失败事件流。
+     */
     override fun uploadFailures(): SharedFlow<UploadFailedEvent> = mutableUploadFailures
 
+    /**
+     * 提交本地重扫+全量云端刷新周期并等待结果。
+     */
     override suspend fun manualRefresh(): AppResult<Unit> = submitAndAwait(
         CycleRequest.LOCAL_RESCAN + CycleRequest.CLOUD_FULL,
     )
 
+    /**
+     * 提交本地重扫+增量云端+重试周期并等待结果。
+     */
     override suspend fun retryFailed(): AppResult<Unit> = submitAndAwait(
         CycleRequest.LOCAL_RESCAN + CycleRequest.CLOUD_INCREMENTAL + CycleRequest.RETRY,
     )
 
+    /**
+     * 记录需重试的 taskId，并提交含重试的同步周期。
+     */
     override suspend fun retryTransfer(taskId: Long): AppResult<Unit> {
         explicitRetries += taskId
         return submitAndAwait(
@@ -129,6 +147,9 @@ class JvmSyncRuntime(
         )
     }
 
+    /**
+     * 标记进入重配置中状态并停止同步源。
+     */
     override fun prepareConfigurationChange() {
         if (closed) return
         reconfigurationGeneration.incrementAndGet()
@@ -136,6 +157,9 @@ class JvmSyncRuntime(
         stopSources()
     }
 
+    /**
+     * 在重配置完成后按需清空挂载状态、切换同步源并提交全量周期。
+     */
     override fun configurationChanged(previous: UserConfig, current: UserConfig) {
         if (closed) return
         val generation = reconfigurationGeneration.get()
@@ -164,6 +188,9 @@ class JvmSyncRuntime(
         }
     }
 
+    /**
+     * 配置保存失败后的回滚：清除重配置标记并按需重配同步源。
+     */
     override fun configurationChangeFailed() {
         if (closed) return
         reconfigurationGeneration.incrementAndGet()
@@ -171,6 +198,9 @@ class JvmSyncRuntime(
         if (started.get()) reconfigureSources()
     }
 
+    /**
+     * 启动同步引擎：重配同步源并提交首个启动周期。
+     */
     override fun start() {
         if (closed || !started.compareAndSet(false, true)) return
         if (reconfiguring.get()) return
@@ -181,11 +211,17 @@ class JvmSyncRuntime(
         )
     }
 
+    /**
+     * 停止同步引擎并关闭同步源。
+     */
     override fun stop() {
         if (!started.compareAndSet(true, false)) return
         stopSources()
     }
 
+    /**
+     * 网络恢复后提交本地重扫+增量云端+在线恢复周期。
+     */
     override fun networkRecovered() {
         if (!closed && started.get() && !reconfiguring.get()) {
             dispatcher.submit(
@@ -194,6 +230,9 @@ class JvmSyncRuntime(
         }
     }
 
+    /**
+     * 在变更互斥锁内独占执行块，期间持有活动 guard 防止周期并发。
+     */
     override suspend fun <T> exclusiveMutation(block: suspend () -> T): T = mutationMutex.withLock {
         if (closed) throw AppError.Internal("同步引擎已停止")
         if (reconfiguring.get()) throw AppError.Internal("同步目录正在切换")
@@ -201,12 +240,18 @@ class JvmSyncRuntime(
         try { block() } finally { guard.close() }
     }
 
+    /**
+     * 远端写已提交后，触发本地重扫+全量云端周期以重新对账。
+     */
     override fun remoteMutationCommitted() {
         if (!closed && started.get() && !reconfiguring.get()) {
             dispatcher.submit(CycleRequest.LOCAL_RESCAN + CycleRequest.CLOUD_FULL)
         }
     }
 
+    /**
+     * 尝试入队目录递归同步；占用标志成功置位后异步执行并提交后续对账周期。
+     */
     override fun enqueueFolderSync(folderId: String, relativePath: String): Boolean {
         if (closed || !started.get() || reconfiguring.get() || mutationMutex.isLocked ||
             !folderSyncRunning.compareAndSet(false, true)
@@ -225,6 +270,9 @@ class JvmSyncRuntime(
         return true
     }
 
+    /**
+     * 按当前配置重建本地 watcher 与定时轮询任务；配置缺失或目录不安全则跳过。
+     */
     private fun reconfigureSources() = synchronized(sourceLock) {
         stopSourcesLocked()
         val config = runCatching { configStore.load() }.getOrNull() ?: return@synchronized
@@ -259,8 +307,14 @@ class JvmSyncRuntime(
         }
     }
 
+    /**
+     * 在 sourceLock 下停止 watcher 与定时任务（对外入口）。
+     */
     private fun stopSources() = synchronized(sourceLock) { stopSourcesLocked() }
 
+    /**
+     * 取消 watcher/timer 任务并关闭 watcher（调用方需持有 sourceLock）。
+     */
     private fun stopSourcesLocked() {
         watcherJob?.cancel()
         watcherJob = null
@@ -270,6 +324,9 @@ class JvmSyncRuntime(
         watcher = null
     }
 
+    /**
+     * 提交同步周期请求并轮询等待对应序列号的执行结果。
+     */
     private suspend fun submitAndAwait(request: CycleRequest): AppResult<Unit> {
         if (closed) return AppResult.Err(AppError.Internal("同步引擎已停止"))
         if (reconfiguring.get()) return AppResult.Err(AppError.Internal("同步目录正在切换"))
@@ -285,10 +342,16 @@ class JvmSyncRuntime(
         }
     }
 
+    /**
+     * 在变更互斥锁内独占执行一个同步周期。
+     */
     private suspend fun runCycle(request: CycleRequest): Result<Unit> = mutationMutex.withLock {
         runCycleOwned(request)
     }
 
+    /**
+     * 同步周期主体：刷新可信云树、恢复中断传输、扫描本地、规划并执行动作、结算基线。
+     */
     private suspend fun runCycleOwned(request: CycleRequest): Result<Unit> {
         if (reconfiguring.get()) return Result.failure(AppError.Internal("同步目录正在切换"))
         val guard = activity.begin(null)
@@ -390,6 +453,9 @@ class JvmSyncRuntime(
         }
     }
 
+    /**
+     * 执行单个同步动作（创建占位符/目录、上传/下载、本地/云端删除、云端移动、冲突副本等）。
+     */
     private suspend fun executeAction(
         root: Path,
         placeholder: JvmPlaceholderManager,
@@ -456,6 +522,9 @@ class JvmSyncRuntime(
         }
     }
 
+    /**
+     * 执行上传/下载传输动作：复用活动任务或新建传输任务并运行至完成。
+     */
     private suspend fun executeTransferAction(
         root: Path,
         placeholder: JvmPlaceholderManager,
@@ -495,7 +564,7 @@ class JvmSyncRuntime(
         val disposition = when (current.state) {
             io.github.yuanbaobaoo.petallink.sync.TransferState.Pending,
             io.github.yuanbaobaoo.petallink.sync.TransferState.WaitingForNetwork,
-            io.github.yuanbaobaoo.petallink.sync.TransferState.BackingOff -> taskRunner.runExpected(taskContext(current))
+            io.github.yuanbaobaoo.petallink.sync.TransferState.BackingOff -> taskRunner.runExpected(current.toTaskContext())
             io.github.yuanbaobaoo.petallink.sync.TransferState.Completed -> TaskDisposition.COMPLETED
             io.github.yuanbaobaoo.petallink.sync.TransferState.Failed -> TaskDisposition.FAILED
             io.github.yuanbaobaoo.petallink.sync.TransferState.RestartRequired -> TaskDisposition.RESTART_REQUIRED
@@ -528,7 +597,9 @@ class JvmSyncRuntime(
         return ActionResult(true, cloudFileId = remoteId, cloudFile = remote)
     }
 
-    /** 选定云端目录的后台 BFS 双向同步；文件下载为真实内容而非占位符。 */
+    /**
+     * 选定云端目录的后台 BFS 双向同步；文件下载为真实内容而非占位符。
+     */
     private suspend fun syncFolderSubtree(folderId: String, relativePath: String) {
         require(folderId.isNotBlank()) { "目录 fileId 不能为空" }
         val config = configStore.load() ?: throw AppError.Data("同步配置不存在")
@@ -651,18 +722,27 @@ class JvmSyncRuntime(
         if (failures.isNotEmpty()) throw AppError.Data("目录同步有 ${failures.size} 个任务失败")
     }
 
+    /**
+     * 拼接目录同步的相对路径（忽略空白片段，统一以 '/' 分隔）。
+     */
     private fun joinRelative(base: String, child: String): String = when {
         base.isBlank() -> child
         child.isBlank() -> base
         else -> "${base.trimEnd('/')}/$child"
     }
 
+    /**
+     * 恢复所有处于 Pending 状态的传输任务。
+     */
     private suspend fun resumePendingTransfers(taskRunner: TaskRunner) {
         for (task in db.transfers.selectByState(io.github.yuanbaobaoo.petallink.sync.TransferState.Pending)) {
-            taskRunner.runExpected(taskContext(task))
+            taskRunner.runExpected(task.toTaskContext())
         }
     }
 
+    /**
+     * 查找同一相对路径与方向下最近的活动传输任务，用于复用而非重复建任务。
+     */
     private suspend fun activeTransfer(relativePath: String, direction: TransferDirection): TransferTask? {
         val states = listOf(
             io.github.yuanbaobaoo.petallink.sync.TransferState.Pending,
@@ -681,31 +761,14 @@ class JvmSyncRuntime(
         return matches.maxWithOrNull(compareBy<TransferTask> { it.createdAt }.thenBy { it.id ?: 0L })
     }
 
-    private fun taskContext(task: TransferTask) = TaskContext(
-        id = task.id ?: error("传输任务缺少 id"),
-        fileId = task.fileId.orEmpty(),
-        localPath = task.localPath.orEmpty(),
-        direction = task.direction,
-        state = task.state,
-        stateRevision = task.stateRevision,
-        attempt = task.attempt,
-        bytesTotal = task.bytesTotal,
-        bytesDone = task.bytesDone,
-        nextRetryAt = task.nextRetryAt,
-        remoteResultFileId = task.remoteResultFileId,
-        sessionUrl = task.sessionUrl,
-        serverId = task.serverId,
-        uploadId = task.uploadId,
-        parentFileId = task.parentFileId,
-        operation = task.operation,
-        sourceMtime = task.sourceMtime,
-        sourceSize = task.sourceSize,
-        expectedCloudEditedTime = task.expectedCloudEditedTime,
-        createdAt = task.createdAt,
-    )
-
+    /**
+     * 将 ISO-8601 时间字符串解析为毫秒时间戳。
+     */
     private fun parseEditedTimeMillis(raw: String): Long = Instant.parse(raw).toEpochMilli()
 
+    /**
+     * 把成功的远端写（删除/移动/上传/建目录）合并进云树 checkpoint 并持久化。
+     */
     private suspend fun commitRemoteWrites(
         store: JvmCloudTreeCheckpointStore,
         cloud: CloudTreeCache,
@@ -749,6 +812,9 @@ class JvmSyncRuntime(
         return candidate
     }
 
+    /**
+     * 根据动作执行结果更新 DB 同步基线：删除项移除，成功项 upsert 为 SYNCED。
+     */
     private suspend fun settleBaselines(
         root: Path,
         cloud: CloudTreeCache,
@@ -787,6 +853,9 @@ class JvmSyncRuntime(
         }
     }
 
+    /**
+     * 在挂载根下逐段创建目录；遇符号链接或非目录类型则拒绝。
+     */
     private fun ensureLocalDirectory(root: Path, relativePath: String) {
         val target = safeLocalPath(root, relativePath)
         var current = root.toRealPath()
@@ -800,6 +869,9 @@ class JvmSyncRuntime(
         }
     }
 
+    /**
+     * 清理 DB 中已不在云树里的 DELETED 墓碑同步项。
+     */
     private suspend fun purgeDeletedTombstones(cloud: CloudTreeCache) {
         val liveIds = cloud.tree.values.mapNotNull(DriveFile::id).toHashSet()
         for (item in db.syncItems.selectByStatus(SyncStatus.DELETED)) {
@@ -807,6 +879,9 @@ class JvmSyncRuntime(
         }
     }
 
+    /**
+     * 校验相对路径并将它解析为挂载根内的绝对路径，拒绝绝对路径、越界与符号链接。
+     */
     private fun safeLocalPath(root: Path, relativePath: String): Path {
         val relative = Path.of(relativePath)
         if (relative.isAbsolute || relative.none() || relative.any { it.toString() == ".." || it.toString() == "." }) {
@@ -818,6 +893,9 @@ class JvmSyncRuntime(
         return target
     }
 
+    /**
+     * 为冲突副本分配一个不冲突的本地路径（基于时间戳与序号）。
+     */
     private fun allocateConflictBackup(source: Path): Path {
         val timestamp = DateTimeFormatter.ofPattern("yyyy-MM-dd HH-mm-ss")
             .withZone(ZoneId.systemDefault())
@@ -832,11 +910,17 @@ class JvmSyncRuntime(
         throw AppError.LocalIo("无法分配冲突副本路径")
     }
 
+    /**
+     * 返回配置对应的挂载根路径；未配置或解析失败返回 null。
+     */
     private fun mountIdentity(config: UserConfig): Path? {
         if (!config.mountConfigured || config.mountDir.isBlank()) return null
         return runCatching { JvmMountPaths.resolve(config.mountDir) }.getOrNull()
     }
 
+    /**
+     * 删除指定挂载根对应的云树 checkpoint 及其临时/备份文件。
+     */
     private fun deleteMountCheckpoint(config: UserConfig) {
         val root = mountIdentity(config) ?: return
         val checkpoint = paths.cloudTreeCheckpoint(root)
@@ -845,10 +929,16 @@ class JvmSyncRuntime(
         Files.deleteIfExists(checkpoint.resolveSibling("${checkpoint.fileName}.bak"))
     }
 
+    /**
+     * 阻塞式优雅关闭同步引擎。
+     */
     override fun close() {
         kotlinx.coroutines.runBlocking { closeGracefully() }
     }
 
+    /**
+     * 标记关闭、停止同步源、等待活动周期结束，并在完成时删除未完成关机哨兵文件。
+     */
     override suspend fun closeGracefully(timeoutMs: Long): Boolean {
         if (closed) return true
         closed = true
@@ -868,6 +958,9 @@ class JvmSyncRuntime(
     }
 
     companion object {
+        /**
+         * 默认上传稳定性探针工厂：基于 JvmUploadStabilityProbe 对路径做稳定性检查。
+         */
         private fun defaultStabilityProbe(): suspend (Path) -> UploadStability {
             val probe = JvmUploadStabilityProbe()
             return { path -> probe.check(path.toString()) }

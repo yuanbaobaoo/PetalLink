@@ -14,16 +14,24 @@ import io.github.yuanbaobaoo.petallink.config.AppConfig
  */
 object SkipFilter {
 
-    /** 内部文件前缀（硬编码，全局生效） */
+    /**
+     * 内部文件前缀（硬编码，全局生效）
+     */
     const val INTERNAL_PREFIX = ".hwcloud_"
 
-    /** 下载临时文件后缀 */
+    /**
+     * 下载临时文件后缀
+     */
     const val TMP_SUFFIX = ".tmp"
 
-    /** 旧版占位符文件名 */
+    /**
+     * 旧版占位符文件名
+     */
     const val LEGACY_PLACEHOLDER = ".hwcloud_placeholder"
 
-    /** 默认 glob 跳过模式 */
+    /**
+     * 默认 glob 跳过模式
+     */
     val DEFAULT_PATTERNS: List<String> = listOf(
         ".DS_Store",
         "*.tmp",

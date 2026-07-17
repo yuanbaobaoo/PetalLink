@@ -50,7 +50,9 @@ object Poly1305 {
         return bigIntegerTo16BytesLE(tagInt)
     }
 
-    /** Clamp r：清除 r[3]、r[7]、r[11]、r[15] 的高 4 位 */
+    /**
+     * Clamp r：清除 r[3]、r[7]、r[11]、r[15] 的高 4 位
+     */
     private fun clampR(r: ByteArray) {
         r[3] = (r[3].toInt() and 0x0F).toByte()
         r[7] = (r[7].toInt() and 0x0F).toByte()
@@ -61,7 +63,9 @@ object Poly1305 {
         r[12] = (r[12].toInt() and 0xFC).toByte()
     }
 
-    /** 小端字节数组 → BigInteger（无符号） */
+    /**
+     * 小端字节数组 → BigInteger（无符号）
+     */
     private fun leBytesToBigInteger(data: ByteArray, len: Int): BigInteger {
         val reversed = ByteArray(len)
         for (i in 0 until len) {
@@ -73,14 +77,18 @@ object Poly1305 {
         return BigInteger(positive)
     }
 
-    /** 字节数组 → BigInteger（无符号，大端） */
+    /**
+     * 字节数组 → BigInteger（无符号，大端）
+     */
     private fun bytesToBigInteger(data: ByteArray): BigInteger {
         val positive = ByteArray(data.size + 1)
         System.arraycopy(data.reversedArray(), 0, positive, 1, data.size)
         return BigInteger(positive)
     }
 
-    /** BigInteger → 16 字节小端 */
+    /**
+     * BigInteger → 16 字节小端
+     */
     private fun bigIntegerTo16BytesLE(value: BigInteger): ByteArray {
         val bytes = value.toByteArray()
         val result = ByteArray(16)

@@ -43,7 +43,9 @@ import io.github.yuanbaobaoo.petallink.ui.theme.LocalSemanticColors
 import io.github.yuanbaobaoo.petallink.ui.theme.WarningColor
 import kotlinx.coroutines.delay
 
-/** 弹出菜单项（对标原 Vue PopupItem）。 */
+/**
+ * 弹出菜单项（对标原 Vue PopupItem）。
+ */
 data class MatePopupItem(
     val value: String,
     val label: String = value,
@@ -156,7 +158,9 @@ fun MatePopupMenu(
 // Dialog（v2：radius-xl(12) + 图标徽章标题）
 // ============================================================
 
-/** 对话框配置（对标原 Vue DialogOptions / ConfirmOptions）。 */
+/**
+ * 对话框配置（对标原 Vue DialogOptions / ConfirmOptions）。
+ */
 data class MateDialogOptions(
     val title: String = "",
     val titleIcon: String? = null,
@@ -168,20 +172,28 @@ data class MateDialogOptions(
     val confirmText: String = "确定",
 )
 
-/** 全局对话框状态（模块级，供 useDialog 管理）。 */
+/**
+ * 全局对话框状态（模块级，供 useDialog 管理）。
+ */
 private val globalDialogState = mutableStateOf<Pair<MateDialogOptions, ((Boolean) -> Unit)?>?>(null)
 
-/** 显示对话框（非确认型，无 resolver）。 */
+/**
+ * 显示对话框（非确认型，无 resolver）。
+ */
 fun openDialog(options: MateDialogOptions) {
     globalDialogState.value = options to null
 }
 
-/** 确认对话框（suspend 风格的回调形式；resolver 收到 true=确认/false=取消）。 */
+/**
+ * 确认对话框（suspend 风格的回调形式；resolver 收到 true=确认/false=取消）。
+ */
 fun confirmDialog(options: MateDialogOptions, onResult: (Boolean) -> Unit) {
     globalDialogState.value = options to onResult
 }
 
-/** 关闭对话框。 */
+/**
+ * 关闭对话框。
+ */
 fun closeDialog(value: Boolean = false) {
     globalDialogState.value?.second?.invoke(value)
     globalDialogState.value = null
@@ -278,9 +290,14 @@ fun MateDialogHost() {
 // Toast（v2：深色浮条 + 状态图标）
 // ============================================================
 
-/** Toast 变体（对标原 Vue ToastVariant）。 */
+/**
+ * Toast 变体（对标原 Vue ToastVariant）。
+ */
 enum class MateToastVariant { DEFAULT, SUCCESS, WARNING, ERROR }
 
+/**
+ * Toast 通知条目：消息文本及其展示样式变体。
+ */
 private data class ToastEntry(val message: String, val variant: MateToastVariant)
 
 private val globalToastState = mutableStateOf<ToastEntry?>(null)

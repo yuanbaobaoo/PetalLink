@@ -13,15 +13,23 @@ import io.ktor.http.*
  * 详见 docs/03 §HTTP 客户端、docs/10 阶段 2 item 7。
  */
 object DriveClientConfig {
-    /** 普通 API 超时：连接 15s，请求 60s */
+    /**
+     * 普通 API 超时：连接 15s，请求 60s
+     */
     const val CONNECT_TIMEOUT_MS = 15_000L
     const val REQUEST_TIMEOUT_MS = 60_000L
-    /** 上传 API 超时：120s（大文件） */
+    /**
+     * 上传 API 超时：120s（大文件）
+     */
     const val UPLOAD_TIMEOUT_MS = 120_000L
-    /** 每 host 最大空闲连接 */
+    /**
+     * 每 host 最大空闲连接
+     */
     const val MAX_CONNECTIONS_PER_ROUTE = 15
 
-    /** 判定是否为 token 端点（跳过 Bearer 注入，防刷新死循环） */
+    /**
+     * 判定是否为 token 端点（跳过 Bearer 注入，防刷新死循环）
+     */
     fun isTokenEndpoint(url: String): Boolean = url.contains("oauth2/v3/token")
 }
 
@@ -75,7 +83,9 @@ class DriveClient(
         return resp2
     }
 
-    /** 发送单次请求（注入 Bearer） */
+    /**
+     * 发送单次请求（注入 Bearer）
+     */
     private suspend fun sendRequest(
         method: HttpMethod,
         url: String,
@@ -90,7 +100,9 @@ class DriveClient(
     }
 
     companion object {
-        /** 构建 Ktor HttpClient 配置（普通 API） */
+        /**
+         * 构建 Ktor HttpClient 配置（普通 API）
+         */
         fun defaultConfig(): HttpClientConfig<*>.() -> Unit = {
             install(HttpTimeout) {
                 connectTimeoutMillis = DriveClientConfig.CONNECT_TIMEOUT_MS
@@ -98,7 +110,9 @@ class DriveClient(
             }
         }
 
-        /** 构建上传专用 HttpClient 配置（更长超时 + 禁用自动重定向） */
+        /**
+         * 构建上传专用 HttpClient 配置（更长超时 + 禁用自动重定向）
+         */
         fun uploadConfig(): HttpClientConfig<*>.() -> Unit = {
             install(HttpTimeout) {
                 connectTimeoutMillis = DriveClientConfig.CONNECT_TIMEOUT_MS

@@ -26,8 +26,14 @@ private object Sha256 {
         0x90befffa.toInt(), 0xa4506ceb.toInt(), 0xbef9a3f7.toInt(), 0xc67178f2.toInt(),
     )
 
+    /**
+     * 32 位循环右移
+     */
     private fun rotr(x: Int, n: Int): Int = (x ushr n) or (x shl (32 - n))
 
+    /**
+     * 计算输入数据的 SHA-256 摘要（32 字节）
+     */
     fun hash(data: ByteArray): ByteArray {
         var h0 = 0x6a09e667; var h1 = 0xbb67ae85.toInt()
         var h2 = 0x3c6ef372; var h3 = 0xa54ff53a.toInt()
@@ -96,7 +102,9 @@ private object Sha256 {
     }
 }
 
-/** 计算 SHA-256 并返回小写十六进制字符串 */
+/**
+ * 计算 SHA-256 并返回小写十六进制字符串
+ */
 fun sha256Pure(data: ByteArray): String {
     val bytes = Sha256.hash(data)
     val sb = StringBuilder(bytes.size * 2)

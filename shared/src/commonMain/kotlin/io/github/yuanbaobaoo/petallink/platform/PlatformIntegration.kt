@@ -7,16 +7,24 @@ package io.github.yuanbaobaoo.petallink.platform
  * NSStatusItem + 菜单（rebuild 节流 5000ms，transfer_signature 防闪烁）。
  */
 interface TrayManager {
-    /** 显示托盘图标与菜单 */
+    /**
+     * 显示托盘图标与菜单
+     */
     fun show()
 
-    /** 隐藏托盘 */
+    /**
+     * 隐藏托盘
+     */
     fun hide()
 
-    /** 更新托盘标题/状态（同步状态摘要） */
+    /**
+     * 更新托盘标题/状态（同步状态摘要）
+     */
     fun updateStatus(text: String)
 
-    /** 托盘重建节流间隔（ms） */
+    /**
+     * 托盘重建节流间隔（ms）
+     */
     companion object {
         const val REBUILD_THROTTLE_MS = 5000L
     }
@@ -30,13 +38,19 @@ interface TrayManager {
  * swizzle NSApplication terminate: 拦截 Dock/Cmd+Q。
  */
 interface ActivationManager {
-    /** 切换到 regular（显示窗口/Dock） */
+    /**
+     * 切换到 regular（显示窗口/Dock）
+     */
     fun activateRegular()
 
-    /** 切换到 accessory（后台托盘） */
+    /**
+     * 切换到 accessory（后台托盘）
+     */
     fun deactivateToAccessory()
 
-    /** 检测 --hidden 启动参数 */
+    /**
+     * 检测 --hidden 启动参数
+     */
     fun isHiddenLaunch(): Boolean
 
     companion object {
@@ -55,13 +69,19 @@ interface ActivationManager {
  * LaunchAgent plist + --hidden 参数，launchctl bootstrap/bootout。
  */
 interface LaunchAtLoginManager {
-    /** 启用开机自启 */
+    /**
+     * 启用开机自启
+     */
     fun enable(): Boolean
 
-    /** 禁用开机自启 */
+    /**
+     * 禁用开机自启
+     */
     fun disable(): Boolean
 
-    /** 查询当前是否启用 */
+    /**
+     * 查询当前是否启用
+     */
     fun isEnabled(): Boolean
 }
 
@@ -79,7 +99,9 @@ interface ShutdownManager {
     suspend fun gracefulShutdown(): Boolean
 
     companion object {
-        /** 关闭超时：3.2 秒 */
+        /**
+         * 关闭超时：3.2 秒
+         */
         const val SHUTDOWN_TIMEOUT_MS = 3200L
     }
 }
@@ -98,9 +120,13 @@ interface SingleInstanceGuard {
      */
     fun acquire(): Boolean
 
-    /** 释放锁（正常退出时） */
+    /**
+     * 释放锁（正常退出时）
+     */
     fun release()
 
-    /** 聚焦已有实例窗口 */
+    /**
+     * 聚焦已有实例窗口
+     */
     fun focusExisting()
 }

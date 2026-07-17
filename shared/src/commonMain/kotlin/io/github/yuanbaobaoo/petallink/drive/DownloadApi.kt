@@ -79,7 +79,9 @@ class DownloadApi(
     private val Json = Json { ignoreUnknownKeys = true }
 }
 
-/** 远端文件元数据（稳定身份，对标 ResumeMetadata） */
+/**
+ * 远端文件元数据（稳定身份，对标 ResumeMetadata）
+ */
 data class RemoteMetadata(
     val fileId: String,
     val size: Long,
@@ -87,9 +89,14 @@ data class RemoteMetadata(
     val sha256: String?,
     val editedTime: String? = null,
 ) {
-    /** 是否有稳定身份（防版本混淆） */
+    /**
+     * 是否有稳定身份（防版本混淆）
+     */
     fun hasStableIdentity(): Boolean = etag != null || sha256 != null || editedTime != null
 
+    /**
+     * 转换为下载续传用的元数据快照
+     */
     fun resumeMetadata() = io.github.yuanbaobaoo.petallink.sync.engine.DownloadResumeMetadata(
         fileId = fileId,
         size = size,

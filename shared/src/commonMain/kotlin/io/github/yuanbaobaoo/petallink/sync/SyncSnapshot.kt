@@ -21,7 +21,9 @@ data class DbBaselineEntry(
     val isFolder: Boolean,
 )
 
-/** sync_status 枚举值（对标 docs/04 §sync_status） */
+/**
+ * sync_status 枚举值（对标 docs/04 §sync_status）
+ */
 object SyncStatus {
     const val SYNCED = 0
     const val CLOUD_ONLY = 1
@@ -61,6 +63,8 @@ data class LocalEntry(
     val isPlaceholder: Boolean,
     val isFolder: Boolean,
 ) {
-    /** 是否有真实内容（非占位符） */
+    /**
+     * 是否有真实内容（非占位符）
+     */
     val hasContent: Boolean get() = !isPlaceholder
 }

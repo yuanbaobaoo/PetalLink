@@ -11,7 +11,9 @@ import io.github.yuanbaobaoo.petallink.config.AppConfig
  */
 object DbSchema {
 
-    /** 当前 schema 版本（v6 = inode 身份方案） */
+    /**
+     * 当前 schema 版本（v6 = inode 身份方案）
+     */
     const val VERSION: Int = AppConfig.SCHEMA_VERSION
 
     // ------------------------------------------------------------------
@@ -100,7 +102,9 @@ object DbSchema {
         );
     """
 
-    /** 全部建表语句（按依赖顺序） */
+    /**
+     * 全部建表语句（按依赖顺序）
+     */
     val ALL_CREATE: List<String> = listOf(
         CREATE_SYNC_ITEMS,
         CREATE_TRANSFER_QUEUE,

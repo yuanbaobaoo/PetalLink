@@ -13,7 +13,9 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
-/** 使用应用级 CoroutineScope 的单实例网络守卫。 */
+/**
+ * 使用应用级 CoroutineScope 的单实例网络守卫。
+ */
 actual class NetGuard actual constructor(private val scope: CoroutineScope) {
     private val engine = NetGuardEngine()
     private val generation = AtomicInteger(0)
@@ -50,11 +52,17 @@ actual class NetGuard actual constructor(private val scope: CoroutineScope) {
         changed
     }
 
+    /**
+     * 仅当当前代际匹配时，将单次探测结果反馈给引擎并更新对外状态。
+     */
     private fun publishProbeResult(success: Boolean, gen: Int) = synchronized(engine) {
         if (gen != generation.get()) return@synchronized
         mutableState.value = engine.onProbeResult(success, gen)
     }
 
+    /**
+     * 对华为域名 443 端口执行一次带超时的 TCP 连接探测，成功返回 true。
+     */
     private suspend fun probeOnce(): Boolean = withTimeoutOrNull(PROBE_TIMEOUT_MS) {
         try {
             Socket().use { socket ->

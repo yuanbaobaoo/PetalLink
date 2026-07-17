@@ -8,7 +8,9 @@ import java.nio.file.Path
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.delay
 
-/** mtime 5s + size 3s + lsof 双重复核，并追踪 5min 持续编辑。 */
+/**
+ * mtime 5s + size 3s + lsof 双重复核，并追踪 5min 持续编辑。
+ */
 class JvmUploadStabilityProbe(
     private val busyChecker: LsofFileBusyChecker = LsofFileBusyChecker(),
     private val nowMs: () -> Long = System::currentTimeMillis,
@@ -16,6 +18,9 @@ class JvmUploadStabilityProbe(
 ) : UploadStabilityProbe {
     private val firstUnstable = ConcurrentHashMap<String, Long>()
 
+    /**
+     * 通过 mtime、size 间隔复核与 lsof 占用检查判定上传稳定性。
+     */
     override suspend fun check(path: String): UploadStability {
         val target = Path.of(path).toAbsolutePath().normalize()
         if (Files.isSymbolicLink(target) || !Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS)) {
@@ -35,6 +40,9 @@ class JvmUploadStabilityProbe(
         return UploadStability.STABLE
     }
 
+    /**
+     * 记录并返回不稳定状态；持续不稳定超过 5 分钟则升级为 EDITING。
+     */
     private fun unstable(path: String): UploadStability {
         val now = nowMs()
         val first = firstUnstable.putIfAbsent(path, now) ?: now

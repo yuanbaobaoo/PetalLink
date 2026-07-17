@@ -12,6 +12,8 @@ enum class LogLevel(val severity: Int) {
     WARN(3),
     ERROR(4);
 
-    /** 当前级别是否 >= [level]（即会被输出） */
+    /**
+     * 当前级别是否 >= [level]（即会被输出）
+     */
     fun isEnabled(level: LogLevel): Boolean = severity >= level.severity
 }

@@ -10,7 +10,9 @@ import kotlinx.serialization.json.JsonElement
  * 字段名严格对齐华为官方响应（驼峰），详见 docs/03。
  */
 
-/** 云端文件/文件夹 */
+/**
+ * 云端文件/文件夹
+ */
 @Serializable
 data class DriveFile(
     val id: String? = null,
@@ -35,7 +37,19 @@ data class DriveFile(
     val singleParentOrNull: String? get() = parentFolder?.singleOrNull() ?: parent
 }
 
-/** 配额信息（size 字段华为可能返回 String，需容忍） */
+/**
+ * 名称缺失时的兜底文案
+ */
+const val UNNAMED_FILE = "未命名"
+
+/**
+ * 文件展示名称：优先取 [DriveFile.name]，其次 [DriveFile.fileName]，最后兜底 [UNNAMED_FILE]。
+ */
+fun DriveFile.displayName(): String = name ?: fileName ?: UNNAMED_FILE
+
+/**
+ * 配额信息（size 字段华为可能返回 String，需容忍）
+ */
 @Serializable
 data class DriveQuota(
     val total: JsonElement? = null,     // 可能是 Int 也可能是 String
@@ -48,16 +62,24 @@ data class DriveQuota(
  * 返回 Long 字节数；解析失败返回 0。
  */
 fun DriveQuota.totalBytes(): Long = tolerantLong(total)
+
+/**
+ * 解析配额已用字节数，容忍 String/Int 形式，失败返回 0
+ */
 fun DriveQuota.usedBytes(): Long = tolerantLong(used)
 
-/** 将 JsonElement（可能为 String 或数字）安全转为 Long */
+/**
+ * 将 JsonElement（可能为 String 或数字）安全转为 Long
+ */
 fun tolerantLong(el: JsonElement?): Long {
     if (el == null) return 0
     val s = el.toString().trim('"', ' ')
     return s.toLongOrNull() ?: s.toDoubleOrNull()?.takeIf { it.isFinite() }?.toLong() ?: 0L
 }
 
-/** changes 增量事件中的一个条目 */
+/**
+ * changes 增量事件中的一个条目
+ */
 @Serializable
 data class ChangeEntry(
     val fileId: String? = null,
@@ -67,7 +89,9 @@ data class ChangeEntry(
     @SerialName("recycled") val recycled: Boolean = false,
 )
 
-/** changes 翻页响应 */
+/**
+ * changes 翻页响应
+ */
 @Serializable
 data class ChangesResponse(
     val changes: List<ChangeEntry> = emptyList(),

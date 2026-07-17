@@ -136,7 +136,9 @@ fun SyncStatusBar(
     }
 }
 
-/** 9 种 syncPhase 文案 + 空闲细分（对标原 Vue statusText computed）。 */
+/**
+ * 9 种 syncPhase 文案 + 空闲细分（对标原 Vue statusText computed）。
+ */
 private fun statusTextFor(snap: SyncSnapshotUi): String = when (snap.syncPhase) {
     "indexing-startup" -> "正在读取云端索引（首次）…"
     "indexing-manual" -> "正在读取云端索引…"

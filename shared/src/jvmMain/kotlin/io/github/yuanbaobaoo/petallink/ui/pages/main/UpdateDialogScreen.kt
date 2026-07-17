@@ -186,7 +186,9 @@ fun UpdateDialogScreen(
     }
 }
 
-/** available 态正文：更新日志或提示（v2：notes 块 radius 8 + 13sp，对标原 Vue .update-dialog__notes）。 */
+/**
+ * available 态正文：更新日志或提示（v2：notes 块 radius 8 + 13sp，对标原 Vue .update-dialog__notes）。
+ */
 @Composable
 private fun UpdateAvailableBody(manifest: UpdateManifest?) {
     val semantic = LocalSemanticColors.current
@@ -217,7 +219,9 @@ private fun UpdateAvailableBody(manifest: UpdateManifest?) {
     }
 }
 
-/** downloading 态正文：进度条 + 百分比（v2：fill 用 BrandGradient 品牌渐变，对标原 Vue .update-dialog__progress）。 */
+/**
+ * downloading 态正文：进度条 + 百分比（v2：fill 用 BrandGradient 品牌渐变，对标原 Vue .update-dialog__progress）。
+ */
 @Composable
 private fun UpdateDownloadingBody(progress: Float) {
     val semantic = LocalSemanticColors.current
@@ -244,7 +248,9 @@ private fun UpdateDownloadingBody(progress: Float) {
     }
 }
 
-/** downloaded/waitingTransfer/ready 态正文：spinner + 提示。 */
+/**
+ * downloaded/waitingTransfer/ready 态正文：spinner + 提示。
+ */
 @Composable
 private fun UpdateWaitingBody(hasActiveTransfers: Boolean, phase: UpdaterPhase) {
     val semantic = LocalSemanticColors.current
@@ -259,7 +265,9 @@ private fun UpdateWaitingBody(hasActiveTransfers: Boolean, phase: UpdaterPhase) 
     }
 }
 
-/** 旋转 spinner（20×20，2.5px border，border-top brand，0.8s 线性）。 */
+/**
+ * 旋转 spinner（20×20，2.5px border，border-top brand，0.8s 线性）。
+ */
 @Composable
 private fun UpdateSpinner() {
     val transition = rememberInfiniteTransition(label = "update-spinner")
@@ -300,7 +308,9 @@ private fun UpdateSpinner() {
     }
 }
 
-/** footer 按钮组合（按 phase 切换，v2：次要按钮 ICON_TEXT 幽灵灰，主按钮 PRIMARY 渐变+柔影）。 */
+/**
+ * footer 按钮组合（按 phase 切换，v2：次要按钮 ICON_TEXT 幽灵灰，主按钮 PRIMARY 渐变+柔影）。
+ */
 @Composable
 private fun UpdateFooter(
     phase: UpdaterPhase,

@@ -15,7 +15,9 @@ class AntiOscillation {
     // relative_path → 删除时间戳（ms），不可变 Map 用于 CAS
     private val state = AtomicReference<Map<String, Long>>(emptyMap())
 
-    /** 记录已删除路径 */
+    /**
+     * 记录已删除路径
+     */
     fun addDeleted(relativePath: String, nowMs: Long) {
         while (true) {
             val cur = state.get()
@@ -23,7 +25,9 @@ class AntiOscillation {
         }
     }
 
-    /** TTL 清理：移除超过 5 分钟的记录 */
+    /**
+     * TTL 清理：移除超过 5 分钟的记录
+     */
     fun purgeExpired(nowMs: Long) {
         val expireBefore = nowMs - AppConfig.ANTI_OSCILLATION_TTL.inWholeMilliseconds
         while (true) {
@@ -33,7 +37,9 @@ class AntiOscillation {
         }
     }
 
-    /** 过滤振荡动作（保留 DeleteFromCloud） */
+    /**
+     * 过滤振荡动作（保留 DeleteFromCloud）
+     */
     fun filter(actions: List<SyncAction>): List<SyncAction> {
         val rdp = state.get()
         return actions.filter { action ->
@@ -42,6 +48,13 @@ class AntiOscillation {
         }
     }
 
+    /**
+     * 判断指定路径是否在最近删除集合中
+     */
     fun contains(relativePath: String): Boolean = relativePath in state.get()
+
+    /**
+     * 当前记录的已删除路径数量
+     */
     fun size(): Int = state.get().size
 }

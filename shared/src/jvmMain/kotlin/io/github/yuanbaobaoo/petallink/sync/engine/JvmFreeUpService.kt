@@ -23,6 +23,9 @@ import java.time.Instant
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
+/**
+ * 远端释放空间核验快照，用于比对云端副本是否仍存在且大小/版本一致。
+ */
 data class RemoteFreeUpSnapshot(
     val fileId: String,
     val size: Long,
@@ -30,11 +33,23 @@ data class RemoteFreeUpSnapshot(
     val deletedOrRecycled: Boolean,
 )
 
+/**
+ * 远端释放核验接口，确认释放前云端副本仍存在且身份一致
+ */
 fun interface FreeUpRemoteVerifier {
+    /**
+     * 核验远端 fileId 仍存在且大小/版本一致，返回远端快照。
+     */
     suspend fun verify(fileId: String): RemoteFreeUpSnapshot
 }
 
+/**
+ * 基于 [FilesApi] 的远端释放核验实现：读取远端元数据并确认文件未被删除或回收。
+ */
 class FilesApiFreeUpVerifier(private val filesApi: FilesApi) : FreeUpRemoteVerifier {
+    /**
+     * 基于 FilesApi 的核验实现：读取远端文件元数据并确认未被删除或回收。
+     */
     override suspend fun verify(fileId: String): RemoteFreeUpSnapshot {
         val file = filesApi.getFile(fileId)
         return RemoteFreeUpSnapshot(
@@ -46,7 +61,9 @@ class FilesApiFreeUpVerifier(private val filesApi: FilesApi) : FreeUpRemoteVerif
     }
 }
 
-/** 释放空间的 write-ahead staging 实现；任何失败都优先恢复用户真实内容。 */
+/**
+ * 释放空间的 write-ahead staging 实现；任何失败都优先恢复用户真实内容。
+ */
 class JvmFreeUpService(
     mountRoot: Path,
     private val appPaths: AppPaths,
@@ -58,6 +75,10 @@ class JvmFreeUpService(
     private val root = mountRoot.toAbsolutePath().normalize()
     private val leases = ConcurrentHashMap<String, Mutex>()
 
+    /**
+     * 静态安全检查（不改动本地内容）：本地已同步、可信云树含同 fileId 且非占位符时返回 "safe"，
+     * 其余任意异常或条件不满足统一返回 "not_synced"。
+     */
     suspend fun checkSafe(relativePath: String, fileId: String): String = try {
         val path = safeRelative(relativePath)
         val baseline = db.syncItems.findByFileId(fileId)
@@ -73,6 +94,10 @@ class JvmFreeUpService(
         "not_synced"
     }
 
+    /**
+     * 释放单个文件空间：对该路径加租约后执行 write-ahead 流程，返回释放字节数。
+     * 失败时优先自动恢复原内容；释放完成后内容转为占位符。
+     */
     suspend fun freeOne(relativePath: String, fileId: String, expectedSize: Long): Long {
         require(expectedSize >= 0) { "释放空间 size 不能为负" }
         val lease = leases.computeIfAbsent(relativePath) { Mutex() }
@@ -83,6 +108,10 @@ class JvmFreeUpService(
         }
     }
 
+    /**
+     * 持租约的实际释放逻辑：本地/云树/远端三重核验通过后用 write-ahead 把真实内容替换为占位符。
+     * 任何阶段失败都会尽力将内容回滚到原路径，绝不覆盖原路径上的新用户文件。
+     */
     private suspend fun freeOneOwned(relativePath: String, fileId: String, expectedSize: Long): Long {
         val target = safeRelative(relativePath)
         val checkpoint = checkpointStore().loadTrusted()
@@ -169,7 +198,9 @@ class JvmFreeUpService(
         }
     }
 
-    /** 启动时收敛 write-ahead 记录；绝不覆盖原路径上的新用户文件。 */
+    /**
+     * 启动时收敛 write-ahead 记录；绝不覆盖原路径上的新用户文件。
+     */
     suspend fun recoverInterrupted(): Int {
         var recovered = 0
         for (record in db.freeUpStaging.findAll()) {
@@ -198,6 +229,9 @@ class JvmFreeUpService(
         return recovered
     }
 
+    /**
+     * 校验存在匹配的成功同步基线，且大小、修改时间与本地快照完全一致。
+     */
     private suspend fun requireBaseline(fileId: String, relativePath: String, snapshot: FileSnapshot): SyncItem {
         val baseline = db.syncItems.findByFileId(fileId)
             ?: throw AppError.Data("找不到成功同步基线")
@@ -208,6 +242,9 @@ class JvmFreeUpService(
         return baseline
     }
 
+    /**
+     * 检查同 fileId 或同路径上不存在活动传输任务，否则拒绝释放。
+     */
     private suspend fun requireNoActiveTransfer(fileId: String, relativePath: String) {
         val activeStates = listOf(
             TransferState.Pending, TransferState.Running, TransferState.WaitingForNetwork,
@@ -221,6 +258,9 @@ class JvmFreeUpService(
         if (active) throw AppError.Conflict("该文件存在活动传输任务")
     }
 
+    /**
+     * 把挂载相对路径规范化为绝对路径，拒绝绝对路径、".." 穿越与符号链接父目录。
+     */
     private fun safeRelative(relativePath: String): Path {
         val relative = Path.of(relativePath)
         if (relativePath.isBlank() || relative.isAbsolute || relative.any { it.toString() == ".." }) {
@@ -237,6 +277,9 @@ class JvmFreeUpService(
         return target
     }
 
+    /**
+     * 取本地文件的大小、修改时间和 inode 快照；非普通文件或符号链接均视为非法。
+     */
     private fun localSnapshot(path: Path): FileSnapshot {
         if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) || Files.isSymbolicLink(path)) {
             throw AppError.LocalIo("待释放目标不是普通文件")
@@ -248,6 +291,9 @@ class JvmFreeUpService(
         )
     }
 
+    /**
+     * 在目标同目录下分配一个不存在的 staging 文件路径，最多重试 16 次。
+     */
     private fun allocateStaging(target: Path): Path {
         repeat(16) {
             val candidate = target.parent.resolve(".hwcloud_freeup-${UUID.randomUUID()}")
@@ -256,19 +302,34 @@ class JvmFreeUpService(
         throw AppError.LocalIo("无法分配释放空间 staging 路径")
     }
 
+    /**
+     * 创建指向当前挂载根的 checkpoint 存储实例。
+     */
     private fun checkpointStore() = JvmCloudTreeCheckpointStore(appPaths.cloudTreeCheckpoint(root))
 
+    /**
+     * 对单个文件执行 fsync，确保数据与元数据落盘。
+     */
     private fun fsyncFile(path: Path) {
         FileChannel.open(path, StandardOpenOption.READ).use { it.force(true) }
     }
 
+    /**
+     * 对目录执行 fsync，确保目录条目变更落盘。
+     */
     private fun fsyncDirectory(path: Path?) {
         if (path == null) return
         FileChannel.open(path, StandardOpenOption.READ).use { it.force(true) }
     }
 
+    /**
+     * 读取文件的 unix inode，用于 inodeMap 重映射。
+     */
     private fun readInode(path: Path): ULong =
         (Files.getAttribute(path, "unix:ino", LinkOption.NOFOLLOW_LINKS) as Number).toLong().toULong()
 
+    /**
+     * 本地文件快照：大小、修改时间与 inode，用于释放前后比对与 inode 重映射。
+     */
     private data class FileSnapshot(val size: Long, val mtime: Long, val inode: ULong)
 }

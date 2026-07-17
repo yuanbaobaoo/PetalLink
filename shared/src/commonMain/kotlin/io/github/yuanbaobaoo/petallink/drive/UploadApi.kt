@@ -78,7 +78,9 @@ class UploadApi(
         return verified
     }
 
-    /** 小文件覆盖更新；Update 绝不退化为 Create。 */
+    /**
+     * 小文件覆盖更新；Update 绝不退化为 Create。
+     */
     suspend fun uploadSmallUpdate(
         fileId: String,
         fileName: String,
@@ -246,6 +248,9 @@ class UploadApi(
         throw AppError.Remote(status, "上传分片失败")
     }
 
+    /**
+     * 分片结果不确定时查询同一会话以确认真实偏移，避免本地推算
+     */
     private suspend fun reconcileUncertainChunk(
         session: ResumeSession,
         offset: Long,
@@ -313,20 +318,27 @@ class UploadApi(
         return parts.fold(ByteArray(0)) { acc, ba -> acc + ba }
     }
 
+    /**
+     * 严格解析上传响应为 DriveFile，字段缺失时抛错
+     */
     private fun parseDriveFile(obj: JsonObject): DriveFile =
         DriveParsers.parseDriveFileStrict(obj, "upload")
 
     private val Json = Json { ignoreUnknownKeys = true }
 }
 
-/** 断点续传会话（对标 ResumeSession） */
+/**
+ * 断点续传会话（对标 ResumeSession）
+ */
 data class ResumeSession(
     val serverId: String,
     val uploadId: String,
     val sessionUrl: String,
     val chunkSize: Long,
 ) {
-    /** 会话请求 URL（session_url 优先，踩坑 12） */
+    /**
+     * 会话请求 URL（session_url 优先，踩坑 12）
+     */
     fun requestUrl(
         uploadBase: String = "https://driveapis.cloud.huawei.com.cn/upload/drive/v1",
     ): String = when {
@@ -337,13 +349,18 @@ data class ResumeSession(
     }
 }
 
-/** 会话状态查询结果 */
+/**
+ * 会话状态查询结果
+ */
 data class SessionStatus(
     val uploaded: Long,
     val finalFile: DriveFile?,
     val sessionUrl: String? = null,
 )
 
+/**
+ * 分片上传结果：服务端确认的已上传偏移、最终文件（上传完成时）及可能轮换的会话 URL
+ */
 data class ChunkResult(
     val uploaded: Long,
     val finalFile: DriveFile?,

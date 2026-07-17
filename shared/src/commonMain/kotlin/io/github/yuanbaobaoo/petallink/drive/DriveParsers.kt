@@ -11,14 +11,23 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
+/**
+ * 文件列表分页结果：当前页文件与下一页游标（无更多数据时 nextCursor 为 null）
+ */
 data class FileListPage(val files: List<DriveFile>, val nextCursor: String?)
 
+/**
+ * Drive 响应解析器集合：将 Drive JSON 响应严格解析为领域模型（fileList、file 等）
+ */
 object DriveParsers {
     private val timestampPattern = Regex(
         "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})$",
     )
     private val hashAliases = listOf("sha256", "md5", "md5Checksum", "fileSha256", "hash", "contentHash")
 
+    /**
+     * 严格解析文件列表分页响应，校验 category 与 files 数组并提取下一页游标
+     */
     fun parseFileListPage(element: JsonElement, context: String = "list"): FileListPage {
         val obj = element as? JsonObject ?: protocol(context, "响应顶层必须是对象")
         obj["category"]?.let {
@@ -40,6 +49,9 @@ object DriveParsers {
         return FileListPage(files, cursor)
     }
 
+    /**
+     * 严格解析单个文件 JSON 为领域模型，缺失必填字段或类型不符时报协议错误
+     */
     fun parseDriveFileStrict(element: JsonElement, context: String = "file"): DriveFile {
         val obj = element as? JsonObject ?: protocol(context, "File 必须是对象")
         val id = requiredString(obj, "id", context)
@@ -92,10 +104,16 @@ object DriveParsers {
         )
     }
 
+    /**
+     * 取文件唯一非空 parentFolder；不存在或多个时报错
+     */
     fun singleParent(file: DriveFile, context: String = "file"): String =
         file.parentFolder?.singleOrNull()?.takeIf { it.isNotBlank() }
             ?: protocol(context, "当前只支持一个非空 parentFolder")
 
+    /**
+     * 判断 mimeType 是否为华为/Google 文件夹类型
+     */
     fun isFolderMime(mimeType: String?): Boolean = mimeType?.lowercase() in setOf(
         "application/vnd.huawei-apps.folder",
         "application/vnd.huawei-app.folder",
@@ -103,22 +121,34 @@ object DriveParsers {
         "application/x-folder",
     )
 
+    /**
+     * 取必填非空字符串字段，缺失或为空时报协议错误
+     */
     private fun requiredString(obj: JsonObject, field: String, context: String): String =
         stringOrNull(obj[field], "$context.$field")?.takeIf { it.isNotEmpty() }
             ?: protocol(context, "$field 缺失、类型错误或为空")
 
+    /**
+     * 取可为空的字符串 JSON 元素；非字符串类型报协议错误
+     */
     private fun stringOrNull(value: JsonElement?, context: String): String? = when (value) {
         null, JsonNull -> null
         is JsonPrimitive -> if (value.isString) value.content else protocol(context, "必须是字符串或 null")
         else -> protocol(context, "必须是字符串或 null")
     }
 
+    /**
+     * 取可选时间戳字符串，并校验是否符合 RFC3339 格式
+     */
     private fun optionalTimestamp(value: JsonElement?, context: String): String? {
         val timestamp = stringOrNull(value, context) ?: return null
         if (!timestampPattern.matches(timestamp)) protocol(context, "必须是 RFC3339 时间")
         return timestamp
     }
 
+    /**
+     * 取可选非负数字（数字或字符串形式），非法值报协议错误
+     */
     private fun parseOptionalNonnegativeNumber(value: JsonElement?, context: String): Long? {
         if (value == null || value is JsonNull) return null
         val primitive = value as? JsonPrimitive ?: protocol(context, "必须是非负数字、字符串或 null")
@@ -128,6 +158,9 @@ object DriveParsers {
         return number.toLong()
     }
 
+    /**
+     * 抛出带上下文说明的远端协议错误，统一驱动各解析校验失败路径
+     */
     private fun protocol(context: String, cause: String): Nothing =
         throw AppError.Remote(0, "$context: $cause")
 }

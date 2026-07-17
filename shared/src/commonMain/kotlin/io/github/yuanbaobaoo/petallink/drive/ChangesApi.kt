@@ -28,7 +28,9 @@ class ChangesApi(
     private val client: DriveClient,
     private val base: String = DriveConstants.DRIVE_API_BASE,
 ) {
-    /** 获取初始 cursor */
+    /**
+     * 获取初始 cursor
+     */
     suspend fun getStartCursor(): String {
         val resp = client.executeWithRetry(
             HttpMethod.Get, "$base/changes/getStartCursor?fields=*", HttpSemantics.READ,
@@ -118,7 +120,9 @@ class ChangesApi(
         throw AppError.Remote(0, "未能在分页上限内结束")
     }
 
-    /** 解析单个 change（三种删除信号） */
+    /**
+     * 解析单个 change（三种删除信号）
+     */
     private fun parseChange(obj: JsonObject): DriveChange {
         obj["category"]?.let {
             if (it.jsonPrimitive.contentOrNull != "drive#change") {
@@ -154,6 +158,9 @@ class ChangesApi(
 
     private val Json = Json { ignoreUnknownKeys = true; isLenient = true }
 
+    /**
+     * 解析 cursor 字段：仅接受字符串或 null，空串归一化为 null，非法类型抛错
+     */
     private fun parseCursor(value: kotlinx.serialization.json.JsonElement?, field: String): String? = when (value) {
         null, JsonNull -> null
         is JsonPrimitive -> if (value.isString) value.content.takeIf { it.isNotEmpty() }

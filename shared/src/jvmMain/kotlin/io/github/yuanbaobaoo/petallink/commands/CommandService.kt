@@ -55,8 +55,14 @@ class CommandService private constructor(
     val uploadFailures: kotlinx.coroutines.flow.SharedFlow<UploadFailedEvent>? get() = syncPlan?.uploadFailures()
 
     // ============ auth (7) ============
+    /**
+     * 检查 OAuth clientId / clientSecret 是否已配置。
+     */
     fun authCheckSecret(): Boolean = envLoader.clientIdConfigured() && envLoader.clientSecretConfigured()
 
+    /**
+     * 从磁盘恢复登录状态；若已登录且挂载目录已配置则启动同步引擎。
+     */
     suspend fun authRestore(): AppResult<AuthState> {
         return try {
             val stored = tokenStore.load()
@@ -77,6 +83,9 @@ class CommandService private constructor(
         }
     }
 
+    /**
+     * 启动本地 OAuth 回调服务、打开浏览器发起授权，并完成 code 换 token。
+     */
     suspend fun authLogin(port: Int): AppResult<TokenPair> {
         return try {
             val redirectUri = Pkce.buildRedirectUri(port)
@@ -106,11 +115,17 @@ class CommandService private constructor(
         catch (e: Throwable) { AppResult.Err(AppError.Auth(e.message ?: "auth error")) }
     }
 
+    /**
+     * 取消正在进行的 OAuth 登录流程，停止本地回调服务。
+     */
     suspend fun authCancelLogin(): AppResult<Unit> = safe {
         activeOauthServer?.stop()
         activeOauthServer = null
     }
 
+    /**
+     * 注销当前账号：重置运行时与挂载状态，并清空本地 token。
+     */
     suspend fun authLogout(): AppResult<Unit> {
         return try {
             resetAccountRuntimeAndMount()
@@ -121,19 +136,31 @@ class CommandService private constructor(
         }
     }
 
+    /**
+     * 获取当前登录用户的信息。
+     */
     suspend fun authGetUserInfo(): AppResult<UserInfo> = try {
         AppResult.Ok(userInfoApi.get())
     } catch (e: Throwable) {
         AppResult.Err(AppError.Auth(e.message ?: "auth error"))
     }
 
+    /**
+     * 判断当前是否已登录且 token 未过期。
+     */
     suspend fun authIsLoggedIn(): AppResult<Boolean> = safe {
         val token = tokenStore.loadSuspended()
         token != null && !token.isExpired(System.currentTimeMillis())
     }
 
     // ============ config (4) ============
+    /**
+     * 读取用户配置；若不存在则返回默认配置。
+     */
     fun configLoad(): AppResult<UserConfig> = safe { configStore.load() ?: UserConfig() }
+    /**
+     * 保存用户配置；在配置变更前后通知同步引擎，并按需启动同步。
+     */
     fun configSave(config: UserConfig): AppResult<Unit> {
         val previous = try {
             configStore.load() ?: UserConfig()
@@ -153,7 +180,13 @@ class CommandService private constructor(
             AppResult.Err(AppError.Internal(error.message ?: "保存配置失败"))
         }
     }
+    /**
+     * 将当前用户配置序列化为 JSON 字符串。
+     */
     fun configExportJson(): AppResult<String> = safe { Json.encodeToString(UserConfig.serializer(), configStore.load() ?: UserConfig()) }
+    /**
+     * 解析并校验导入的 JSON 配置，成功后保存。
+     */
     fun configImportJson(jsonStr: String): AppResult<UserConfig> {
         val config = try {
             (configStore as? JsonConfigStore)?.parseImport(jsonStr)
@@ -171,17 +204,32 @@ class CommandService private constructor(
     }
 
     // ============ drive (12) ============
+    /**
+     * 分页列出指定父目录下的云端文件。
+     */
     suspend fun driveList(parentId: String?, cursor: String?, pageSize: Int?): AppResult<FileListResult> = drive {
         val (files, next) = filesApi.listFiles(parentId, pageSize ?: 100, cursor)
         FileListResult(files, next)
     }
+    /**
+     * 列出指定父目录下的全部云端文件（不分页）。
+     */
     suspend fun driveListAll(parentId: String?): AppResult<List<DriveFile>> = drive { filesApi.listAllFiles(parentId) }
+    /**
+     * 按 fileId 获取单个云端文件元数据。
+     */
     suspend fun driveGetFile(id: String): AppResult<DriveFile> = drive { filesApi.getFile(id) }
+    /**
+     * 在云端创建文件夹，并通知同步引擎远端已发生写操作。
+     */
     suspend fun driveCreateFolder(name: String, parentId: String?): AppResult<DriveFile> = drive {
         val file = exclusiveSyncMutation { filesApi.createFile(name, parentId, true) }
         syncPlan?.remoteMutationCommitted()
         file
     }
+    /**
+     * 删除云端文件/文件夹，并在同步互斥下结算本地基线与删除留痕。
+     */
     suspend fun driveDeleteFile(id: String, name: String?): AppResult<Unit> = drive {
         var remoteCommitted = false
         try {
@@ -196,6 +244,9 @@ class CommandService private constructor(
             if (remoteCommitted) syncPlan?.remoteMutationCommitted()
         }
     }
+    /**
+     * 重命名云端文件，并结算本地路径与同步基线。
+     */
     suspend fun driveRenameFile(id: String, newName: String): AppResult<DriveFile> = drive {
         var remoteCommitted = false
         try {
@@ -211,6 +262,9 @@ class CommandService private constructor(
             if (remoteCommitted) syncPlan?.remoteMutationCommitted()
         }
     }
+    /**
+     * 将云端文件移动到新的父目录，并结算本地路径与同步基线。
+     */
     suspend fun driveMoveFile(id: String, newParentFolder: String): AppResult<DriveFile> =
         drive {
             var remoteCommitted = false
@@ -229,16 +283,31 @@ class CommandService private constructor(
                 if (remoteCommitted) syncPlan?.remoteMutationCommitted()
             }
         }
+    /**
+     * 按关键字在指定父目录下搜索云端文件。
+     */
     suspend fun driveSearch(keyword: String, parentId: String?, pageSize: Int?): AppResult<FileListResult> = drive {
         val (files, next) = filesApi.search(keyword, parentId, pageSize ?: 100)
         FileListResult(files, next)
     }
+    /**
+     * 获取云端文件的缩略图字节。
+     */
     suspend fun driveGetThumbnail(fileId: String): AppResult<ByteArray> = drive { thumbnailApi.getThumbnail(fileId) }
+    /**
+     * 获取云端存储空间的配额信息。
+     */
     suspend fun driveGetAbout(): AppResult<DriveQuota> = drive { aboutApi.getQuota() }
+    /**
+     * 下载云端文件到挂载目录内的指定路径。
+     */
     suspend fun driveDownloadFile(fileId: String, destPath: String): AppResult<Unit> = drive {
         exclusiveSyncMutation { runDownloadCommand(fileId, destPath) }
         Unit
     }
+    /**
+     * 上传挂载目录内的本地文件到云端指定父目录。
+     */
     suspend fun driveUploadFile(localPath: String, parentId: String?): AppResult<DriveFile> = drive {
         val file = exclusiveSyncMutation { runUploadCommand(localPath, parentId) }
         syncPlan?.remoteMutationCommitted()
@@ -246,30 +315,60 @@ class CommandService private constructor(
     }
 
     // ============ sync_control (2) ============
+    /**
+     * 触发一次完整的本地+云端手动刷新同步周期。
+     */
     suspend fun syncManualRefresh(): AppResult<Unit> = syncPlan?.manualRefresh() ?: AppResult.Err(AppError.Internal("engine not started"))
+    /**
+     * 触发一次同步重试周期，重新执行失败/待恢复的任务。
+     */
     suspend fun syncRetryFailed(): AppResult<Unit> = syncPlan?.retryFailed() ?: AppResult.Err(AppError.Internal("engine not started"))
+    /**
+     * 通知同步引擎网络已恢复，按需提交恢复周期。
+     */
     fun syncNetworkRecovered() { syncPlan?.networkRecovered() }
 
     // ============ sync_status (4) ============
+    /**
+     * 基于 DB 最新数据计算并返回当前同步状态快照。
+     */
     suspend fun syncState(): AppResult<SyncStatusSnapshot> = dbSafeSusp {
         statusAggregator.snapshot(db, statusAggregator.snapshots.value.runtime)
     }
+    /**
+     * 返回最近一次聚合的同步状态快照（不重新计算）。
+     */
     suspend fun syncSnapshot(): AppResult<SyncStatusSnapshot> = safe { statusAggregator.snapshots.value }
+    /**
+     * 查询指定目录前缀下的所有同步项。
+     */
     suspend fun syncItemsByFolder(folderLocalPath: String): AppResult<List<SyncItem>> = dbSafeSusp {
         val normalized = folderLocalPath.trim('/').takeIf(String::isNotBlank)
         db.syncItems.selectByFolderPrefix(normalized?.let { "$it/" }.orEmpty())
     }
+    /**
+     * 查询单个 fileId 对应的本地同步状态描述。
+     */
     suspend fun syncCheckFileLocalStatus(fileId: String): AppResult<String> = dbSafeSusp {
         JvmSyncStatusResolver(configStore, db.syncItems).resolveOne(fileId)
     }
+    /**
+     * 批量查询多个 fileId 的本地同步状态。
+     */
     suspend fun syncBatchFileStatus(fileIds: List<String>): AppResult<Map<String, String>> = dbSafeSusp {
         JvmSyncStatusResolver(configStore, db.syncItems).resolveBatch(fileIds)
     }
 
     // ============ transfer (6) ============
+    /**
+     * 列出全部传输任务记录。
+     */
     suspend fun transferListAll(): AppResult<List<TransferTask>> = dbSafeSusp {
         db.transfers.selectAll()
     }
+    /**
+     * 判断是否存在仍在活动/待恢复的传输任务（用于阻塞更新安装等）。
+     */
     fun transferHasActive(): Boolean = try {
         runBlocking {
             listOf(
@@ -278,9 +377,21 @@ class CommandService private constructor(
             ).any { db.transfers.selectByState(it).isNotEmpty() }
         }
     } catch (e: Throwable) { false }
+    /**
+     * 清除已完成（成功）的传输历史。
+     */
     suspend fun transferClearCompleted(): AppResult<Unit> = clearTransferHistory(true, false)
+    /**
+     * 清除已失败的传输历史。
+     */
     suspend fun transferClearFailed(): AppResult<Unit> = clearTransferHistory(false, true)
+    /**
+     * 清除所有已结束的传输历史（含成功和失败）。
+     */
     suspend fun transferClearFinished(): AppResult<Unit> = clearTransferHistory(true, true)
+    /**
+     * 请求同步引擎重试指定 taskId 的传输任务。
+     */
     suspend fun transferRetry(taskId: Long): AppResult<Unit> = dbSafeSusp {
         when (val result = syncPlan?.retryTransfer(taskId)) {
             is AppResult.Err -> throw result.error
@@ -289,6 +400,9 @@ class CommandService private constructor(
     }
 
     // ============ folder_sync (1) ============
+    /**
+     * 入队对指定云端目录的递归双向同步（后台 BFS 下载/上传）。
+     */
     suspend fun syncFolderRecursive(folderId: String, relPath: String): AppResult<Long> = drive {
         val accepted = syncPlan?.enqueueFolderSync(folderId, relPath)
             ?: throw AppError.Internal("同步引擎未启动")
@@ -297,9 +411,15 @@ class CommandService private constructor(
     }
 
     // ============ free_up (5) ============
+    /**
+     * 校验某个文件是否可以安全释放本地空间（占位符化）。
+     */
     suspend fun syncCheckSafeFreeUp(relPath: String, fileId: String): AppResult<String> = drive {
         freeUpService().checkSafe(relPath, fileId)
     }
+    /**
+     * 列出指定目录下所有可释放空间（已同步、有大小）的本地文件项。
+     */
     suspend fun syncListFreeableInFolder(folderRelPath: String): AppResult<List<FreeableItem>> = dbSafeSusp {
         // 查 DB sync_items 中该目录下所有已同步且有文件大小的项（可释放空间）
         val prefix = if (folderRelPath.isEmpty() || folderRelPath == "/") "" else "$folderRelPath/"
@@ -315,6 +435,9 @@ class CommandService private constructor(
             )
         }
     }
+    /**
+     * 释放单个文件占用的本地空间（校验路径一致后占位符化）。
+     */
     suspend fun syncFreeUpSpace(fileId: String, relPath: String, localPath: String, name: String, size: Long): AppResult<Unit> = drive {
         val expected = configuredMountRoot().resolve(relPath).normalize()
         if (Paths.get(localPath).toAbsolutePath().normalize() != expected) {
@@ -323,6 +446,9 @@ class CommandService private constructor(
         freeUpService().freeOne(relPath, fileId, size)
         Unit
     }
+    /**
+     * 批量释放多个文件的本地空间，返回成功/失败统计与释放字节数。
+     */
     suspend fun syncFreeUpBatch(items: List<FreeableItem>): AppResult<FreeUpBatchResult> = drive {
         var ok = 0; var fail = 0; var freedBytes = 0L; val errs = mutableListOf<String>()
         for (item in items) {
@@ -334,6 +460,9 @@ class CommandService private constructor(
         }
         FreeUpBatchResult(ok, fail, freedBytes, errs)
     }
+    /**
+     * 按需下载云端文件到挂载目录，并标记本地文件为已下载（取消占位符）。
+     */
     suspend fun syncDownloadOnDemand(fileId: String, destPath: String): AppResult<Boolean> = drive {
         val (root, relative, destination) = resolveCommandPath(destPath)
         val baseline = db.syncItems.findByFileId(fileId)
@@ -346,15 +475,27 @@ class CommandService private constructor(
     }
 
     // ============ platform (8) ============
+    /**
+     * 在 macOS Finder 中打开指定路径。
+     */
     suspend fun platformOpenInFinder(path: String): AppResult<Boolean> = safe {
         ProcessBuilder("open", path).start()
         true
     }
+    /**
+     * 查询"开机启动"LaunchAgent 当前是否启用。
+     */
     fun platformLaunchAtLoginIsEnabled(): Boolean = runCatching { launchAgentManager().isEnabled() }.getOrDefault(false)
+    /**
+     * 启用或禁用"开机启动"LaunchAgent，并返回设置是否生效。
+     */
     fun platformLaunchAtLoginSetEnabled(enabled: Boolean): Boolean = runCatching {
         launchAgentManager().setEnabled(enabled)
         launchAgentManager().isEnabled() == enabled
     }.getOrDefault(false)
+    /**
+     * 清理全部本地缓存：停止同步、清空 token、DB 与同步状态/检查点文件。
+     */
     suspend fun platformClearCache(): AppResult<Unit> = safe {
         syncPlan?.stop()
         runBlocking { tokenStore.clear() }
@@ -368,35 +509,62 @@ class CommandService private constructor(
             }.forEach(Files::deleteIfExists)
         }
     }
+    /**
+     * 读取最近 1000 条日志记录。
+     */
     fun platformLogsList(): AppResult<List<io.github.yuanbaobaoo.petallink.core.logging.LogRecord>> = safe {
         val logger = io.github.yuanbaobaoo.petallink.core.logging.Logger()
         logger.snapshot(1000)
     }
+    /**
+     * 将日志导出到指定路径的文件。
+     */
     fun platformLogsExport(path: String): AppResult<Unit> = safe {
         io.github.yuanbaobaoo.petallink.core.logging.LoggerRuntime.exportTo(Paths.get(path))
     }
+    /**
+     * 清空所有日志记录。
+     */
     fun platformLogsClear(): AppResult<Unit> = safe {
         io.github.yuanbaobaoo.petallink.core.logging.LoggerRuntime.clear()
     }
+    /**
+     * 返回当前应用版本号。
+     */
     fun platformAppGetVersion(): String = BuildInfo.VERSION
+    /**
+     * 检查是否有可用更新，返回更新清单（无则 null）。
+     */
     suspend fun updaterCheck(): AppResult<UpdateManifest?> = drive { updateService.check() }
+    /**
+     * 下载并暂存更新包，随后启动安装器；活动传输存在时由 service 内部阻塞。
+     */
     suspend fun updaterDownloadAndInstall(manifest: UpdateManifest): AppResult<Boolean> = drive {
         val staged = updateService.downloadAndStage(manifest, ::transferHasActive)
         updateService.launchInstaller(staged)
     }
 
+    /**
+     * 关闭服务：优雅停止同步引擎、关闭 HTTP 客户端与数据库。
+     */
     fun close() {
         runBlocking { syncPlan?.closeGracefully() }
         httpClient.close()
         db.close()
     }
 
+    /**
+     * 读取配置并解析出挂载根目录；未配置或为空则抛错。
+     */
     private fun configuredMountRoot(): Path {
         val config = configStore.load() ?: throw AppError.LocalIo("尚未配置挂载目录")
         if (!config.mountConfigured || config.mountDir.isBlank()) throw AppError.LocalIo("尚未配置挂载目录")
         return JvmMountPaths.resolve(config.mountDir)
     }
 
+    /**
+     * 重置账号运行时：停止同步、清空 DB、清除挂载配置并删除同步缓存文件。
+     */
     private suspend fun resetAccountRuntimeAndMount() {
         syncPlan?.stop()
         db.clearAll()
@@ -405,6 +573,9 @@ class CommandService private constructor(
         clearSyncCacheFiles()
     }
 
+    /**
+     * 删除数据目录下的同步状态、云树与 changes 游标缓存文件。
+     */
     private fun clearSyncCacheFiles() {
         if (!Files.exists(paths.dataDir)) return
         Files.list(paths.dataDir).use { files ->
@@ -416,6 +587,9 @@ class CommandService private constructor(
         }
     }
 
+    /**
+     * 构造释放空间服务，绑定当前挂载根目录、占位符管理与远端校验器。
+     */
     private fun freeUpService(): JvmFreeUpService {
         val root = configuredMountRoot()
         return JvmFreeUpService(
@@ -427,6 +601,9 @@ class CommandService private constructor(
         )
     }
 
+    /**
+     * 构造开机启动 LaunchAgent 管理器，使用当前进程命令与 bundle id。
+     */
     private fun launchAgentManager(): LaunchAgentManager {
         val command = ProcessHandle.current().info().command().orElseGet {
             Paths.get(System.getProperty("java.home"), "bin", "java").toString()
@@ -435,15 +612,24 @@ class CommandService private constructor(
         return LaunchAgentManager(AppPaths.currentBundleId(), Paths.get(command))
     }
 
+    /**
+     * 按完成/失败标志清除传输历史，并刷新同步状态快照。
+     */
     private suspend fun clearTransferHistory(completed: Boolean, failed: Boolean): AppResult<Unit> = dbSafeSusp {
         db.transfers.clearHistory(completed, failed)
         statusAggregator.snapshot(db, statusAggregator.snapshots.value.runtime)
         Unit
     }
 
+    /**
+     * 在同步引擎的互斥锁内执行破坏性变更；引擎未启动时直接执行。
+     */
     private suspend fun <T> exclusiveSyncMutation(block: suspend () -> T): T =
         syncPlan?.exclusiveMutation(block) ?: block()
 
+    /**
+     * 执行上传命令：创建传输任务、运行至完成，并返回远端文件元数据。
+     */
     private suspend fun runUploadCommand(localPath: String, parentId: String?): DriveFile {
         val store = JvmTransferFileStore()
         val (_, relative, source) = resolveCommandPath(localPath)
@@ -466,7 +652,7 @@ class CommandService private constructor(
                 sourceSize = snapshot.size,
             ),
         )
-        val disposition = commandTaskRunner(store).runExpected(commandTaskContext(db.transfers.findById(id)!!))
+        val disposition = commandTaskRunner(store).runExpected(db.transfers.findById(id)!!.toTaskContext())
         if (disposition != TaskDisposition.COMPLETED) {
             val task = db.transfers.findById(id)
             throw AppError.Internal(task?.errorMessage ?: "上传未完成: $disposition")
@@ -476,6 +662,9 @@ class CommandService private constructor(
         return filesApi.getFile(remoteId)
     }
 
+    /**
+     * 执行下载命令：创建下载（或下载更新）传输任务并运行至完成。
+     */
     private suspend fun runDownloadCommand(fileId: String, destPath: String) {
         val store = JvmTransferFileStore()
         val (_, relative, destination) = resolveCommandPath(destPath)
@@ -497,13 +686,16 @@ class CommandService private constructor(
                 expectedCloudEditedTime = metadata.editedTime?.let { java.time.Instant.parse(it).toEpochMilli() },
             ),
         )
-        val disposition = commandTaskRunner(store).runExpected(commandTaskContext(db.transfers.findById(id)!!))
+        val disposition = commandTaskRunner(store).runExpected(db.transfers.findById(id)!!.toTaskContext())
         if (disposition != TaskDisposition.COMPLETED) {
             val task = db.transfers.findById(id)
             throw AppError.Internal(task?.errorMessage ?: "下载未完成: $disposition")
         }
     }
 
+    /**
+     * 校验命令传入的路径：必须位于挂载根目录内、非符号链接，返回 (根, 相对路径, 绝对路径)。
+     */
     private fun resolveCommandPath(raw: String): Triple<Path, String, Path> {
         val root = configuredMountRoot().toRealPath()
         val requested = Paths.get(raw).toAbsolutePath().normalize()
@@ -522,6 +714,9 @@ class CommandService private constructor(
         return Triple(root, relativePath.joinToString("/"), requested)
     }
 
+    /**
+     * 构造命令传输任务执行器，绑定上传/下载 API 与本地文件读写实现。
+     */
     private fun commandTaskRunner(store: JvmTransferFileStore): TaskRunner {
         val probe = JvmUploadStabilityProbe()
         val operations = TransferOperationsImpl(
@@ -539,33 +734,22 @@ class CommandService private constructor(
         return TaskRunner(db.transfers, operations, { true }, System::currentTimeMillis)
     }
 
-    private fun commandTaskContext(task: TransferTask) = TaskContext(
-        id = task.id ?: error("传输任务缺少 id"),
-        fileId = task.fileId.orEmpty(),
-        localPath = task.localPath.orEmpty(),
-        direction = task.direction,
-        state = task.state,
-        stateRevision = task.stateRevision,
-        attempt = task.attempt,
-        bytesTotal = task.bytesTotal,
-        bytesDone = task.bytesDone,
-        nextRetryAt = task.nextRetryAt,
-        remoteResultFileId = task.remoteResultFileId,
-        sessionUrl = task.sessionUrl,
-        serverId = task.serverId,
-        uploadId = task.uploadId,
-        parentFileId = task.parentFileId,
-        operation = task.operation,
-        sourceMtime = task.sourceMtime,
-        sourceSize = task.sourceSize,
-        expectedCloudEditedTime = task.expectedCloudEditedTime,
-        createdAt = task.createdAt,
-    )
-
     // ============ helpers ============
+    /**
+     * 包装同步块：将任意异常转为 [AppResult.Err]（Internal）。
+     */
     private fun <T> safe(block: () -> T): AppResult<T> = try { AppResult.Ok(block()) } catch (e: Throwable) { AppResult.Err(AppError.Internal(e.message ?: "unknown")) }
+    /**
+     * 包装云端操作：AppError 透传，其他异常归为 Remote 错误。
+     */
     private suspend fun <T> drive(block: suspend () -> T): AppResult<T> = try { AppResult.Ok(block()) } catch (e: AppError) { AppResult.Err(e) } catch (e: Throwable) { AppResult.Err(AppError.Remote(0, e.message ?: "drive error")) }
+    /**
+     * 包装本地 DB 操作（非挂起）：异常归为 Data 错误。
+     */
     private fun <T> dbSafe(block: () -> T): AppResult<T> = try { AppResult.Ok(block()) } catch (e: Throwable) { AppResult.Err(AppError.Data(e.message ?: "db error")) }
+    /**
+     * 包装挂起的 DB 操作：异常归为 Data 错误。
+     */
     private suspend fun <T> dbSafeSusp(block: suspend () -> T): AppResult<T> = try { AppResult.Ok(block()) } catch (e: Throwable) { AppResult.Err(AppError.Data(e.message ?: "db error")) }
 
     companion object {
@@ -632,7 +816,9 @@ class FileTokenStore(tokenPath: Path = AppPaths.fromEnvironment().tokenFile) : T
     private val MAGIC = byteArrayOf('P'.code.toByte(), 'T'.code.toByte(), 'L'.code.toByte(), '1'.code.toByte())
     private val nonceLen = 12
 
-    /** 用 IOPlatformUUID 派生加密密钥（对标原项目 machine-bound） */
+    /**
+     * 用 IOPlatformUUID 派生加密密钥（对标原项目 machine-bound）
+     */
     private fun deriveKey(): ByteArray {
         val uuid = readMachineUUID()
             ?: throw AppError.Auth("无法读取 IOPlatformUUID，拒绝使用不安全的降级密钥")
@@ -640,6 +826,9 @@ class FileTokenStore(tokenPath: Path = AppPaths.fromEnvironment().tokenFile) : T
         return digest.digest(uuid.toByteArray())
     }
 
+    /**
+     * 通过 ioreg 读取本机 IOPlatformUUID，失败返回 null。
+     */
     private fun readMachineUUID(): String? {
         return try {
             // 用 ioreg 读取 IOPlatformUUID（对标原项目）
@@ -653,6 +842,9 @@ class FileTokenStore(tokenPath: Path = AppPaths.fromEnvironment().tokenFile) : T
         }
     }
 
+    /**
+     * 读取并解密本地 token 文件，返回 TokenPair；文件不存在或解密失败返回 null。
+     */
     override suspend fun load(): TokenPair? {
         if (!file.exists()) return null
         return try {
@@ -669,6 +861,9 @@ class FileTokenStore(tokenPath: Path = AppPaths.fromEnvironment().tokenFile) : T
         } catch (e: Throwable) { null }
     }
 
+    /**
+     * 加密并原子写入 token 到本地文件，权限为 rw-------。
+     */
     override suspend fun save(token: TokenPair) {
         val path = file.toPath()
         Files.createDirectories(path.parent)
@@ -703,48 +898,129 @@ class FileTokenStore(tokenPath: Path = AppPaths.fromEnvironment().tokenFile) : T
         }
     }
 
+    /**
+     * 删除本地 token 文件。
+     */
     override suspend fun clear() { file.delete() }
 
+    /**
+     * 以 runBlocking 阻塞方式加载 token，供非挂起上下文使用。
+     */
     fun loadSuspended(): TokenPair? = runBlocking { load() }
+    /**
+     * 使用 SecureRandom 生成指定长度的随机字节。
+     */
     private fun randomBytes(n: Int) = java.security.SecureRandom().run { ByteArray(n).also { nextBytes(it) } }
 
 }
 
 // ============ AppResult 类型 ============
 sealed class AppResult<out T> {
+    /**
+     * 命令执行成功，携带返回值。
+     */
     data class Ok<T>(val value: T) : AppResult<T>()
+    /**
+     * 命令执行失败，携带错误信息。
+     */
     data class Err(val error: AppError) : AppResult<Nothing>()
 }
 
+/**
+ * 鉴权状态：登录态、OAuth secret 是否就绪、回调端口。
+ */
 data class AuthState(val loggedIn: Boolean, val secretConfigured: Boolean, val callbackPort: Int)
+/**
+ * 云端文件列表查询结果，含本页文件和分页游标。
+ */
 data class FileListResult(val files: List<io.github.yuanbaobaoo.petallink.drive.DriveFile>, val nextCursor: String?)
+/**
+ * 可释放空间的本地文件项，含 fileId、相对/绝对路径、名称与大小。
+ */
 data class FreeableItem(val fileId: String, val relPath: String, val localPath: String, val name: String, val size: Long)
+/**
+ * 批量释放空间结果，含成功/跳过数量、释放字节数与错误列表。
+ */
 data class FreeUpBatchResult(
     val freedCount: Int,
     val skippedCount: Int,
     val freedBytes: Long,
     val errors: List<String>,
 )
+/**
+ * 文件夹同步进度，done 为已完成数，total 为总数。
+ */
 data class FolderSyncProgress(val done: Int, val total: Int)
 
+/**
+ * 同步命令执行计划；封装同步引擎的手动刷新、重试、配置变更与文件夹同步生命周期。
+ */
 interface SyncCommandPlan : AutoCloseable {
+    /**
+     * 触发一次本地+全量云端的同步周期。
+     */
     suspend fun manualRefresh(): AppResult<Unit>
+    /**
+     * 触发一次增量云端+本地+重试的同步周期。
+     */
     suspend fun retryFailed(): AppResult<Unit>
+    /**
+     * 请求重试指定 taskId 的传输；默认等同于全量重试。
+     */
     suspend fun retryTransfer(taskId: Long): AppResult<Unit> = retryFailed()
+    /**
+     * 预告配置即将变更：暂停同步源、标记重配置中。
+     */
     fun prepareConfigurationChange() = Unit
+    /**
+     * 配置已变更：按需切换挂载目录并重新启动同步源。
+     */
     fun configurationChanged(previous: UserConfig, current: UserConfig) = Unit
+    /**
+     * 配置保存失败后的回滚通知。
+     */
     fun configurationChangeFailed() = Unit
+    /**
+     * 启动同步引擎。
+     */
     fun start() = Unit
+    /**
+     * 停止同步引擎。
+     */
     fun stop() = Unit
+    /**
+     * 通知引擎网络已恢复，可提交恢复周期。
+     */
     fun networkRecovered() = Unit
+    /**
+     * 在同步引擎互斥保护下执行破坏性变更块。
+     */
     suspend fun <T> exclusiveMutation(block: suspend () -> T): T = block()
+    /**
+     * 通知引擎远端已发生写操作，需重新对账。
+     */
     fun remoteMutationCommitted() = Unit
+    /**
+     * 入队对指定云端目录的递归同步；返回是否被接受。
+     */
     fun enqueueFolderSync(folderId: String, relativePath: String): Boolean = false
+    /**
+     * 目录同步进度流（done/total）。
+     */
     fun folderSyncProgress(): kotlinx.coroutines.flow.StateFlow<FolderSyncProgress?>? = null
+    /**
+     * 上传失败事件流。
+     */
     fun uploadFailures(): kotlinx.coroutines.flow.SharedFlow<UploadFailedEvent>? = null
+    /**
+     * 在超时时间内优雅关闭同步引擎，返回是否在超时前完成。
+     */
     suspend fun closeGracefully(timeoutMs: Long = 3_200L): Boolean {
         close()
         return true
     }
+    /**
+     * 释放同步引擎持有的资源。
+     */
     override fun close() = Unit
 }

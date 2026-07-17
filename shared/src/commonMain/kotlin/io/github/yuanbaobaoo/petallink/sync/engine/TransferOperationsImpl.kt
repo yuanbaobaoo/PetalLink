@@ -15,8 +15,20 @@ import io.ktor.utils.io.readAvailable
 import kotlinx.coroutines.delay
 import kotlin.math.min
 
+/**
+ * 上传源文件稳定性判定结果：用于预检阶段决定是否允许上传
+ */
 enum class UploadStability { STABLE, UNSTABLE, EDITING }
-fun interface UploadStabilityProbe { suspend fun check(path: String): UploadStability }
+
+/**
+ * 上传源稳定性探测接口，用于预检阶段判断文件是否可安全上传
+ */
+fun interface UploadStabilityProbe {
+    /**
+     * 探测指定路径文件的上传稳定性
+     */
+    suspend fun check(path: String): UploadStability
+}
 
 /**
  * TransferOperations 的具体实现（对标 task_runner contracts TransferOperations）。
@@ -97,6 +109,9 @@ class TransferOperationsImpl(
         }
     }
 
+    /**
+     * 执行远端文件删除；404 视为已删除成功
+     */
     private suspend fun executeDelete(task: TaskContext): TaskOutput {
         if (task.fileId.isBlank()) return TaskOutput(TaskDisposition.FAILED, errorMessage = "远端删除缺少 fileId")
         return try {
@@ -110,7 +125,9 @@ class TransferOperationsImpl(
         }
     }
 
-    /** 执行上传 */
+    /**
+     * 执行上传
+     */
     private suspend fun executeUpload(task: TaskContext, progress: TaskProgressReporter): TaskOutput {
         fileStore?.let { return executeUploadPersistent(task, progress, it) }
         return try {
@@ -135,6 +152,9 @@ class TransferOperationsImpl(
         }
     }
 
+    /**
+     * 持久化大文件上传：分片续传，源文件变化即要求重启
+     */
     private suspend fun executeUploadPersistent(
         task: TaskContext,
         progress: TaskProgressReporter,
@@ -253,7 +273,9 @@ class TransferOperationsImpl(
         error("resume 上传循环意外结束")
     }
 
-    /** 执行下载：HTTP 流 → .tmp 临时文件 → sha256 校验 → POSIX rename 原子安装 */
+    /**
+     * 执行下载：HTTP 流 → .tmp 临时文件 → sha256 校验 → POSIX rename 原子安装
+     */
     private suspend fun executeDownload(task: TaskContext, progress: TaskProgressReporter): TaskOutput {
         fileStore?.let { return executeDownloadPersistent(task, progress, it) }
         return try {
@@ -304,6 +326,9 @@ class TransferOperationsImpl(
         }
     }
 
+    /**
+     * 持久化大文件下载：Range 断点续传、sha256 校验、版本一致性检查后原子安装
+     */
     private suspend fun executeDownloadPersistent(
         task: TaskContext,
         progress: TaskProgressReporter,
@@ -390,19 +415,25 @@ class TransferOperationsImpl(
         }
     }
 
-    /** sha256 计算为小写十六进制（流式，1MB buffer 对标原项目） */
+    /**
+     * sha256 计算为小写十六进制（流式，1MB buffer 对标原项目）
+     */
     private fun sha256Hex(data: ByteArray): String {
         // 纯 Kotlin SHA-256 实现（无外部依赖）
         return sha256Pure(data)
     }
 
-    /** POSIX rename（同文件系统原子操作） */
+    /**
+     * POSIX rename（同文件系统原子操作）
+     */
     private suspend fun renameFile(from: String, to: String) {
         // 平台注入的 rename 实现（macosMain 用 platform.posix.rename）
         renameFileImpl(from, to)
     }
 
-    /** 清理 .tmp 残留（下载失败时） */
+    /**
+     * 清理 .tmp 残留（下载失败时）
+     */
     private suspend fun cleanupTmp(localPath: String) {
         val tmpPath = "${localPath}.tmp"
         if (fileExists(tmpPath)) {
@@ -410,7 +441,9 @@ class TransferOperationsImpl(
         }
     }
 
-    /** 远端核验（VerifyingRemote 状态用） */
+    /**
+     * 远端核验（VerifyingRemote 状态用）
+     */
     override suspend fun verifyRemote(task: TaskContext): RemoteVerification {
         remoteVerification?.let { return it(task) }
         return try {
@@ -437,7 +470,9 @@ class TransferOperationsImpl(
         }
     }
 
-    /** 错误分类 → 对应 disposition */
+    /**
+     * 错误分类 → 对应 disposition
+     */
     private fun classifyAndReturn(e: AppError): TaskOutput {
         if (e is AppError.RemoteAmbiguous) {
             return TaskOutput(TaskDisposition.VERIFYING_REMOTE, errorMessage = e.message)

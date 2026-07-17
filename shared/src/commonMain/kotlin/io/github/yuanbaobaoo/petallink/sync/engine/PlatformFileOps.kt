@@ -5,8 +5,12 @@ package io.github.yuanbaobaoo.petallink.sync.engine
  * 用于 executeDownload 的 POSIX rename + delete。
  */
 
-/** POSIX rename（同文件系统原子操作） */
+/**
+ * POSIX rename（同文件系统原子操作）
+ */
 expect fun platformRenameExpect(from: String, to: String)
 
-/** 删除文件（清理 .tmp 残留） */
+/**
+ * 删除文件（清理 .tmp 残留）
+ */
 expect fun platformDeleteExpect(path: String)

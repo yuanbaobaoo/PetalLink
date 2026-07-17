@@ -12,10 +12,14 @@ data class TokenPair(
     val tokenType: String = "Bearer",
     val scope: String? = null,
 ) {
-    /** 是否已过期 */
+    /**
+     * 是否已过期
+     */
     fun isExpired(nowMs: Long): Boolean = nowMs >= expiresAt
 
-    /** 是否将在 [bufferSecs] 秒内过期（提前刷新用） */
+    /**
+     * 是否将在 [bufferSecs] 秒内过期（提前刷新用）
+     */
     fun willExpireWithin(bufferSecs: Long, nowMs: Long): Boolean =
         nowMs + bufferSecs * 1000 >= expiresAt
 

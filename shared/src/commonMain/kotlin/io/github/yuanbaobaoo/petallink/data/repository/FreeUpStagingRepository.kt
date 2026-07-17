@@ -18,15 +18,23 @@ data class FreeUpStagingRecord(
  * 释放空间暂存仓库接口。
  */
 interface FreeUpStagingRepository {
-    /** 记录一条暂存（事务内） */
+    /**
+     * 记录一条暂存（事务内）
+     */
     suspend fun insert(record: FreeUpStagingRecord)
 
-    /** 按暂存文件名查询 */
+    /**
+     * 按暂存文件名查询
+     */
     suspend fun findByName(stagingName: String): FreeUpStagingRecord?
 
-    /** 查询全部暂存记录（启动恢复用） */
+    /**
+     * 查询全部暂存记录（启动恢复用）
+     */
     suspend fun findAll(): List<FreeUpStagingRecord>
 
-    /** 删除一条暂存记录（恢复完成后清理） */
+    /**
+     * 删除一条暂存记录（恢复完成后清理）
+     */
     suspend fun deleteByName(stagingName: String)
 }

@@ -21,6 +21,9 @@ data class CloudTreeCache(
     val complete: Boolean,                      // 是否完整提交
 ) {
     companion object {
+        /**
+         * 由原始映射构造一个可信缓存：补全根 fileId 索引并立即执行 [validateTrusted]。
+         */
         fun trusted(
             tree: Map<String, DriveFile>,
             pathToId: Map<String, String>,
@@ -70,7 +73,9 @@ data class CloudTreeCache(
         }
     }
 
-    /** 是否可信（validateTrusted 不抛异常） */
+    /**
+     * 是否可信（validateTrusted 不抛异常）
+     */
     fun isTrusted(): Boolean = try {
         validateTrusted(); true
     } catch (e: Throwable) {
@@ -78,15 +83,33 @@ data class CloudTreeCache(
     }
 }
 
-/** 单文件云树 checkpoint 提交门；实现必须保证失败不替换旧版本。 */
+/**
+ * 单文件云树 checkpoint 提交门；实现必须保证失败不替换旧版本。
+ */
 interface CloudTreeCheckpointStore {
+    /**
+     * 加载并通过可信校验的 checkpoint；不存在或不可信时返回 null。
+     */
     suspend fun loadTrusted(): CloudTreeCache?
+
+    /**
+     * 原子提交 checkpoint，失败时不得替换已有版本。
+     */
     suspend fun persist(checkpoint: CloudTreeCache)
+
+    /**
+     * 清理未提交的暂存（tmp/backup），用于放弃当前写入。
+     */
     suspend fun discardUncommitted()
 }
 
-/** Changes 只在候选 clone 上执行；任一项不可解释时整批失败。 */
+/**
+ * Changes 只在候选 clone 上执行；任一项不可解释时整批失败。
+ */
 object CloudTreeChanges {
+    /**
+     * 在缓存副本上应用增量变更并以新游标构造可信缓存；任一变更不可解释都会在构造时抛异常。
+     */
     fun apply(cache: CloudTreeCache, changes: List<DriveChange>, finalCursor: String): CloudTreeCache {
         val tree = cache.tree.toMutableMap()
         val pathToId = cache.pathToId.toMutableMap()
@@ -94,6 +117,9 @@ object CloudTreeChanges {
         return CloudTreeCache.trusted(tree, pathToId, cache.rootFolderId, finalCursor)
     }
 
+    /**
+     * 直接在候选可变映射上应用变更：按 REMOVED/MODIFIED 分别删除子树或重写节点。
+     */
     fun applyToCandidate(
         tree: MutableMap<String, DriveFile>,
         pathToId: MutableMap<String, String>,
@@ -111,6 +137,9 @@ object CloudTreeChanges {
         }
     }
 
+    /**
+     * 删除 fileId 对应节点及其整棵子树（路径等于根或以 "根/" 为前缀）。
+     */
     private fun removeSubtree(
         fileId: String,
         tree: MutableMap<String, DriveFile>,
@@ -127,6 +156,9 @@ object CloudTreeChanges {
         }
     }
 
+    /**
+     * 处理 MODIFIED 变更：校验父目录、计算期望路径，按需移动子树或写入新节点；冲突即抛异常。
+     */
     private fun applyModified(
         change: DriveChange,
         tree: MutableMap<String, DriveFile>,
@@ -165,6 +197,9 @@ object CloudTreeChanges {
         idToPath[change.fileId] = desiredPath
     }
 
+    /**
+     * 把旧根子树整体改键到新根前缀下，目标路径与候选树冲突时抛异常。
+     */
     private fun rekeySubtree(
         tree: MutableMap<String, DriveFile>,
         pathToId: MutableMap<String, String>,
@@ -200,10 +235,14 @@ object CloudTreeChanges {
  * BFS 并发 8，retry ≤2，检测根目录 id（最高频 parent，平局 fail closed）。
  */
 object CloudTreeRefresh {
-    /** BFS 并发数 */
+    /**
+     * BFS 并发数
+     */
     const val INDEXING_CONCURRENCY = 8
 
-    /** 内部文件前缀（跳过） */
+    /**
+     * 内部文件前缀（跳过）
+     */
     private const val INTERNAL_PREFIX = ".hwcloud_"
 
     /**

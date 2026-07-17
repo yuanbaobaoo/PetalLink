@@ -5,8 +5,13 @@ import io.github.yuanbaobaoo.petallink.sync.SyncActionType
 import io.github.yuanbaobaoo.petallink.sync.SyncSnapshot
 import io.github.yuanbaobaoo.petallink.sync.isFolder
 
-/** Planner 之后、Executor 之前的目录安全整形。 */
+/**
+ * Planner 之后、Executor 之前的目录安全整形。
+ */
 object ActionPlannerGuards {
+    /**
+     * 对规划后的动作做目录安全整形，并按路径深度排序后返回
+     */
     fun prepare(
         snapshot: SyncSnapshot,
         planned: List<SyncAction>,
@@ -20,6 +25,9 @@ object ActionPlannerGuards {
         return actions.sortedWith(compareBy<SyncAction> { it.relativePath.count { char -> char == '/' } }.thenBy { it.relativePath })
     }
 
+    /**
+     * 为创建动作补充缺失的祖先目录创建动作，救援云端已删但仍有内容的目录
+     */
     private fun addRescueFolders(
         snapshot: SyncSnapshot,
         actions: MutableList<SyncAction>,
@@ -54,6 +62,9 @@ object ActionPlannerGuards {
         }
     }
 
+    /**
+     * 保留待备份文件所在的本地目录，避免在备份完成前删除其父目录
+     */
     private fun preserveBackupParents(snapshot: SyncSnapshot, actions: MutableList<SyncAction>) {
         val backupPaths = actions.filter { it.type == SyncActionType.BACKUP_BEFORE_CLOUD_DELETE }.map { it.relativePath }
         actions.removeAll { action ->
@@ -62,6 +73,9 @@ object ActionPlannerGuards {
         }
     }
 
+    /**
+     * 去重云端删除动作：若已删除某目录，则移除其子路径的冗余删除动作
+     */
     private fun dedupeCloudDirectoryDeletes(snapshot: SyncSnapshot, actions: MutableList<SyncAction>) {
         val roots = actions.filter { it.type == SyncActionType.DELETE_FROM_CLOUD }
             .map { it.relativePath }
@@ -71,6 +85,9 @@ object ActionPlannerGuards {
         }
     }
 
+    /**
+     * 去重本地删除动作：若已删除某目录，则移除其子路径的冗余删除动作
+     */
     private fun dedupeLocalDirectoryDeletes(snapshot: SyncSnapshot, actions: MutableList<SyncAction>) {
         val roots = actions.filter { it.type == SyncActionType.DELETE_FROM_LOCAL }
             .map { it.relativePath }

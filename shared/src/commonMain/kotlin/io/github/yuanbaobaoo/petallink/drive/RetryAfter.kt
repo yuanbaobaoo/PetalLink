@@ -9,12 +9,19 @@ import io.github.yuanbaobaoo.petallink.error.RequestSemantics
  * 详见 docs/03 §HTTP 客户端。
  */
 sealed class RetryAfter {
-    /** 延迟指定秒数 */
+    /**
+     * 延迟指定秒数
+     */
     data class DelaySeconds(val seconds: Long) : RetryAfter()
-    /** 在指定 Unix 毫秒时间戳重试 */
+
+    /**
+     * 在指定 Unix 毫秒时间戳重试
+     */
     data class AtUnixMs(val timestampMs: Long) : RetryAfter()
 
-    /** 计算下次重试的毫秒时间戳 */
+    /**
+     * 计算下次重试的毫秒时间戳
+     */
     fun nextRetryAt(nowMs: Long): Long = when (this) {
         is DelaySeconds -> nowMs + seconds * 1000
         is AtUnixMs -> maxOf(timestampMs, nowMs)

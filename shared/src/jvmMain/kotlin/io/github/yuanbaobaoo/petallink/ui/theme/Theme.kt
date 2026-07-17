@@ -42,10 +42,14 @@ val TileSheetBg = Color(0xFFE6F7EE)
 // 控件专用色
 val SwitchOffTrack = Color(0xFFE3E3E6)
 
-/** 品牌渐变（135° 浅蓝 → logo 蓝），主按钮、Logo tile、进度条、更新卡片共用。 */
+/**
+ * 品牌渐变（135° 浅蓝 → logo 蓝），主按钮、Logo tile、进度条、更新卡片共用。
+ */
 val BrandGradient: Brush = Brush.linearGradient(listOf(BrandHover, BrandColor))
 
-/** 品牌浅底渐变（空状态徽章等轻量容器）。 */
+/**
+ * 品牌浅底渐变（空状态徽章等轻量容器）。
+ */
 val BrandGradientSoft: Brush = Brush.linearGradient(listOf(BrandLighter, Brand100))
 
 // 语义别名 Color 形式（浅色默认值；随主题切换通过 LocalSemanticColors 注入）。
@@ -62,6 +66,9 @@ object LightPalette {
     val TextPlaceholder = Color(0x59000000)
 }
 
+/**
+ * 深色主题下的语义别名集合，字段含义与 [LightPalette] 一一对应。
+ */
 object DarkPalette {
     val BgPage = Color(0xFF181818)
     val BgContainer = Color(0xFF242424)
@@ -93,7 +100,9 @@ private val MaterialDarkColors = darkColors(
     error = ErrorColor,
 )
 
-/** 当前明暗主题下的语义别名集合。 */
+/**
+ * 当前明暗主题下的语义别名集合。
+ */
 class ThemeSemanticColors(
     val bgPage: Color,
     val bgContainer: Color,
@@ -133,7 +142,9 @@ private val darkSemantic = ThemeSemanticColors(
     textPlaceholder = DarkPalette.TextPlaceholder,
 )
 
-/** 当前主题语义别名；由 [PetalLinkTheme] 按 `isSystemInDarkTheme` 注入。 */
+/**
+ * 当前主题语义别名；由 [PetalLinkTheme] 按 `isSystemInDarkTheme` 注入。
+ */
 val LocalSemanticColors = staticCompositionLocalOf { lightSemantic }
 
 val LocalReducedMotion = compositionLocalOf { false }
@@ -146,6 +157,9 @@ private val systemReducedMotion: Boolean by lazy {
         ?: false
 }
 
+/**
+ * 应用主题入口：按系统明暗模式注入 Material 配色、语义别名与减弱动效偏好。
+ */
 @Composable
 fun PetalLinkTheme(content: @Composable () -> Unit) {
     val dark = isSystemInDarkTheme()

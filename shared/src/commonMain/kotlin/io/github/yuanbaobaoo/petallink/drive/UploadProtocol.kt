@@ -9,17 +9,34 @@ import io.github.yuanbaobaoo.petallink.AppError
  */
 object UploadProtocol {
 
-    /** 小/大文件分界：20 MiB */
+    /**
+     * 小/大文件分界：20 MiB
+     */
     const val SMALL_LARGE_THRESHOLD = 20L * 1024 * 1024
-    /** 最小分块：256 KiB */
+
+    /**
+     * 最小分块：256 KiB
+     */
     const val MIN_CHUNK_SIZE = 256L * 1024
-    /** 默认分块：2 MiB */
+
+    /**
+     * 默认分块：2 MiB
+     */
     const val DEFAULT_CHUNK_SIZE = 2L * 1024 * 1024
-    /** 最大分块：64 MiB */
+
+    /**
+     * 最大分块：64 MiB
+     */
     const val MAX_CHUNK_SIZE = 64L * 1024 * 1024
-    /** 单块本地重试次数（仅 Connect 类错误） */
+
+    /**
+     * 单块本地重试次数（仅 Connect 类错误）
+     */
     const val CHUNK_RETRIES = 3
-    /** 最终状态查询最大轮询次数 */
+
+    /**
+     * 最终状态查询最大轮询次数
+     */
     const val FINAL_STATUS_MAX_POLLS = 5
 
     /**

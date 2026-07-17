@@ -48,6 +48,7 @@ import io.github.yuanbaobaoo.petallink.ui.theme.BrandLighter
 import io.github.yuanbaobaoo.petallink.ui.theme.FolderAmber
 import io.github.yuanbaobaoo.petallink.ui.theme.LocalSemanticColors
 import io.github.yuanbaobaoo.petallink.drive.DriveFile
+import io.github.yuanbaobaoo.petallink.drive.displayName
 
 /**
  * 侧边栏（v2：design/v2/02-main.html .sidebar）。
@@ -182,7 +183,9 @@ fun Sidebar(
     }
 }
 
-/** 更新下载进度卡（v2：margin 0/10/10，BrandGradient 底 radius 10 padding 12，白字 + 白色进度条）。 */
+/**
+ * 更新下载进度卡（v2：margin 0/10/10，BrandGradient 底 radius 10 padding 12，白字 + 白色进度条）。
+ */
 @Composable
 private fun SidebarUpdateProgress(progress: Float) {
     Column(
@@ -206,7 +209,9 @@ private fun SidebarUpdateProgress(progress: Float) {
     }
 }
 
-/** 更新提示卡（v2：margin 0/10/10，BrandGradient 底 radius 10 padding 12，白字标题 + 圆形半透明 × + 白底「立即更新」按钮）。 */
+/**
+ * 更新提示卡（v2：margin 0/10/10，BrandGradient 底 radius 10 padding 12，白字标题 + 圆形半透明 × + 白底「立即更新」按钮）。
+ */
 @Composable
 private fun SidebarUpdateBanner(version: String, onDismiss: () -> Unit, onInstall: () -> Unit) {
     Column(
@@ -267,7 +272,7 @@ private fun SidebarTreeNode(
     val semantic = LocalSemanticColors.current
     val isSelected = folder.id == selectedId
     var expanded by remember(folder.id) { mutableStateOf(depth == 0) }
-    val name = folder.name ?: folder.fileName ?: "未命名"
+    val name = folder.displayName()
 
     Column {
         Row(
@@ -342,7 +347,9 @@ private fun parseQuotaRatio(quotaText: String): Float? {
     return (used.toDouble() / total.toDouble()).toFloat().coerceIn(0f, 1f)
 }
 
-/** 解析 "X.X GB/MB/KB" 或 "N B" 为字节数；格式不符返回 null。 */
+/**
+ * 解析 "X.X GB/MB/KB" 或 "N B" 为字节数；格式不符返回 null。
+ */
 private fun parseSizeBytes(text: String): Long? {
     val tokens = text.trim().split(' ')
     if (tokens.size != 2) return null
@@ -357,7 +364,9 @@ private fun parseSizeBytes(text: String): Long? {
     return (value * multiplier).toLong()
 }
 
-/** 在 Modifier 上绘制 0.5px 边框线（右边或底边），对标 CSS border-right/bottom。 */
+/**
+ * 在 Modifier 上绘制 0.5px 边框线（右边或底边），对标 CSS border-right/bottom。
+ */
 private fun Modifier.drawBehindBorder(color: Color, isRight: Boolean = false, isBottom: Boolean = false): Modifier =
     this.drawWithContent {
         drawContent()

@@ -5,7 +5,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 
-/** 不可变活动状态 */
+/**
+ * 不可变活动状态
+ */
 private data class ActivityState(
     val accepting: Boolean = true,
     val count: Int = 0,
@@ -23,7 +25,9 @@ class ActivityTracker {
     private val state = AtomicReference(ActivityState())
     private val active = MutableStateFlow(0)
 
-    /** 判定两个路径是否重叠（相等或祖先/后代） */
+    /**
+     * 判定两个路径是否重叠（相等或祖先/后代）
+     */
     fun syncPathsOverlap(left: String, right: String): Boolean {
         if (left == right) return true
         if (left.startsWith(right) && left.removePrefix(right).startsWith("/")) return true
@@ -31,7 +35,9 @@ class ActivityTracker {
         return false
     }
 
-    /** 获取共享租约 */
+    /**
+     * 获取共享租约
+     */
     fun begin(relativePath: String?): ActivityGuard? {
         while (true) {
             val cur = state.get()
@@ -48,7 +54,9 @@ class ActivityTracker {
         }
     }
 
-    /** 获取独占租约 */
+    /**
+     * 获取独占租约
+     */
     fun beginExclusive(relativePath: String): ActivityGuard? {
         while (true) {
             val cur = state.get()
@@ -66,7 +74,9 @@ class ActivityTracker {
         }
     }
 
-    /** 关闭追踪器 */
+    /**
+     * 关闭追踪器
+     */
     fun close() {
         while (true) {
             val cur = state.get()
@@ -74,17 +84,24 @@ class ActivityTracker {
         }
     }
 
-    /** 先封门，再等待封门前已登记的所有动作结算。 */
+    /**
+     * 先封门，再等待封门前已登记的所有动作结算。
+     */
     suspend fun closeAndWait() {
         close()
         active.first { it == 0 }
     }
 
+    /**
+     * 挂起直到所有租约释放、活动计数归零
+     */
     suspend fun waitUntilIdle() {
         active.first { it == 0 }
     }
 
-    /** 释放租约 */
+    /**
+     * 释放租约
+     */
     fun release(kind: ActivityKind) {
         while (true) {
             val cur = state.get()
@@ -109,15 +126,36 @@ class ActivityTracker {
         }
     }
 
+    /**
+     * 当前持有的活动租约数量
+     */
     fun activeCount(): Int = state.get().count
 }
 
+/**
+ * 活动租约类型基类：区分共享与独占两种租约
+ */
 sealed class ActivityKind
+
+/**
+ * 共享活动租约：同路径可并发持有多个（path 为 null 表示不绑定路径）
+ */
 data class Shared(val path: String?) : ActivityKind()
+
+/**
+ * 独占活动租约：与同路径及其祖先/后代路径互斥
+ */
 data class Exclusive(val path: String) : ActivityKind()
 
+/**
+ * 活动租约守卫（RAII）：持有一种租约，[close] 时向 [tracker] 释放，保证只释放一次。
+ */
 class ActivityGuard(private val kind: ActivityKind, private val tracker: ActivityTracker) : AutoCloseable {
     private val closed = AtomicBoolean(false)
+
+    /**
+     * 释放持有的活动租约，保证只释放一次
+     */
     override fun close() {
         if (closed.compareAndSet(false, true)) tracker.release(kind)
     }

@@ -43,6 +43,14 @@ object JnaMacOS {
      * 完整实现需：setxattr(path, name, value, size, position, options)
      */
     fun getXattr(path: String, name: String): ByteArray? = MacXattrAccess.get(path, name)
+
+    /**
+     * 用 JNA 写入指定路径的扩展属性。
+     */
     fun setXattr(path: String, name: String, value: ByteArray) = MacXattrAccess.set(path, name, value)
+
+    /**
+     * 用 JNA 移除指定路径的扩展属性。
+     */
     fun removeXattr(path: String, name: String) = MacXattrAccess.remove(path, name)
 }

@@ -120,12 +120,18 @@ class SyncExecutor(
         return results.map { it ?: ActionResult(success = false, errorMessage = "未执行") }
     }
 
+    /**
+     * 回填动作的云端父目录 id（缺失时置 null）
+     */
     private fun fillParentFileId(action: SyncAction, pathToId: Map<String, String>): SyncAction {
         if (action.parentFileId != null) return action
         val parentPath = action.relativePath.substringBeforeLast('/', missingDelimiterValue = "")
         return action.copy(parentFileId = pathToId[parentPath])
     }
 
+    /**
+     * 判定嵌套动作是否缺少已提交的云端父目录（无法执行）
+     */
     private fun requiresMissingParent(action: SyncAction): Boolean =
         '/' in action.relativePath && action.parentFileId.isNullOrBlank() &&
             action.type in setOf(SyncActionType.CREATE_FOLDER, SyncActionType.UPLOAD, SyncActionType.MOVE_IN_CLOUD)

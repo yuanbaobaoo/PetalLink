@@ -9,13 +9,20 @@ package io.github.yuanbaobaoo.petallink.core
 
 object EnvLoader {
 
-    /** 华为 OAuth client credentials（由 .env 或环境变量注入） */
+    /**
+     * 华为 OAuth client credentials（由 .env 或环境变量注入）
+     */
     private var envClientId: String? = System.getenv("HWCLOUD_CLIENT_ID")
     private var envClientSecret: String? = System.getenv("HWCLOUD_CLIENT_SECRET")
 
-    /** 占位符常量 */
+    /**
+     * 占位符常量
+     */
     const val PLACEHOLDER_SECRET = "REPLACE_WITH_REAL_SECRET"
-    /** 构建时注入的凭据（由外部设置） */
+
+    /**
+     * 构建时注入的凭据（由外部设置）
+     */
     var buildClientId: String = ""
     var buildSecret: String = ""
 
@@ -68,7 +75,9 @@ object EnvLoader {
         }
     }
 
-    /** 去除引号 */
+    /**
+     * 去除引号
+     */
     private fun cleanValue(raw: String): String {
         if (raw.length >= 2 &&
             (raw.startsWith("\"") && raw.endsWith("\"")) ||
@@ -79,21 +88,31 @@ object EnvLoader {
         return raw
     }
 
-    /** 解析后的 client_id（优先级：build > env > 空） */
+    /**
+     * 解析后的 client_id（优先级：build > env > 空）
+     */
     fun resolvedClientId(): String {
         if (buildClientId.isNotBlank()) return buildClientId
         if (envClientId != null && envClientId!!.isNotBlank()) return envClientId!!
         return ""
     }
 
-    /** 解析后的 client_secret（优先级：build > env > 占位符） */
+    /**
+     * 解析后的 client_secret（优先级：build > env > 占位符）
+     */
     fun resolvedClientSecret(): String {
         if (buildSecret.isNotBlank() && buildSecret != PLACEHOLDER_SECRET) return buildSecret
         if (envClientSecret != null && envClientSecret!!.isNotBlank() && envClientSecret != PLACEHOLDER_SECRET) return envClientSecret!!
         return PLACEHOLDER_SECRET
     }
 
-    /** 凭据是否已配置 */
+    /**
+     * 凭据是否已配置
+     */
     fun clientIdConfigured(): Boolean = resolvedClientId().isNotBlank()
+
+    /**
+     * client_secret 是否已配置为非占位符的有效值。
+     */
     fun clientSecretConfigured(): Boolean = resolvedClientSecret() != PLACEHOLDER_SECRET && resolvedClientSecret().isNotBlank()
 }

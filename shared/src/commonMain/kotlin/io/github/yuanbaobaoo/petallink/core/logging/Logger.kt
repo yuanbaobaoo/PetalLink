@@ -10,10 +10,29 @@ package io.github.yuanbaobaoo.petallink.core.logging
  * token/secret 绝不打印。但仍建议调用方不要把完整 token 拼进日志。
  */
 expect class Logger() {
+    /**
+     * 输出 TRACE 级别日志
+     */
     fun trace(target: String, message: () -> String)
+
+    /**
+     * 输出 DEBUG 级别日志
+     */
     fun debug(target: String, message: () -> String)
+
+    /**
+     * 输出 INFO 级别日志
+     */
     fun info(target: String, message: () -> String)
+
+    /**
+     * 输出 WARN 级别日志
+     */
     fun warn(target: String, message: () -> String)
+
+    /**
+     * 输出 ERROR 级别日志，可附带异常对象
+     */
     fun error(target: String, message: () -> String, throwable: Throwable? = null)
 }
 
@@ -27,6 +46,9 @@ class RingBufferAppender(private val capacity: Int = 1000) : LogAppender {
     // newest-first：index 0 是最新。整体是不可变 List，通过 CAS 替换。
     private val state = java.util.concurrent.atomic.AtomicReference<List<LogRecord>>(emptyList())
 
+    /**
+     * 追加一条日志，通过 CAS 无锁写入并按容量裁剪
+     */
     override fun append(record: LogRecord) {
         while (true) {
             val current = state.get()
@@ -36,10 +58,14 @@ class RingBufferAppender(private val capacity: Int = 1000) : LogAppender {
         }
     }
 
-    /** 取最近 [count] 条日志（newest-first） */
+    /**
+     * 取最近 [count] 条日志（newest-first）
+     */
     fun snapshot(count: Int = capacity): List<LogRecord> = state.get().take(count)
 
-    /** 清空缓冲 */
+    /**
+     * 清空缓冲
+     */
     fun clear() {
         state.set(emptyList())
     }

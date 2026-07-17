@@ -261,7 +261,9 @@ fun MateStepper(
     }
 }
 
-/** 步进器按钮（30×30，hover 白底柔影）。 */
+/**
+ * 步进器按钮（30×30，hover 白底柔影）。
+ */
 @Composable
 private fun StepperButton(enabled: Boolean, onClick: () -> Unit, content: @Composable (Color) -> Unit) {
     val interaction = remember { MutableInteractionSource() }
@@ -286,7 +288,9 @@ private fun StepperButton(enabled: Boolean, onClick: () -> Unit, content: @Compo
     }
 }
 
-/** x 图标旋转 45° 近似减号的 Modifier（封装保持调用点简洁）。 */
+/**
+ * x 图标旋转 45° 近似减号的 Modifier（封装保持调用点简洁）。
+ */
 private fun Modifier.rotate45(): Modifier = this.scale(scaleX = 0.8f, scaleY = 0.8f).rotate(45f)
 
 /**
@@ -439,7 +443,9 @@ fun MateCheckbox(
     }
 }
 
-/** 单选项（对标原 Vue `<MateRadio>`）。圆形，选中显示 brand 实心圆点。 */
+/**
+ * 单选项（对标原 Vue `<MateRadio>`）。圆形，选中显示 brand 实心圆点。
+ */
 @Composable
 fun MateRadio(
     selected: Boolean,

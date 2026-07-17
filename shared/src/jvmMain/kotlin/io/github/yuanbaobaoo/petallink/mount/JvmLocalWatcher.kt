@@ -11,7 +11,9 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
 
-/** FSEvents 递归监听 + 2s warmup + 3s debounce + generation 隔离。 */
+/**
+ * FSEvents 递归监听 + 2s warmup + 3s debounce + generation 隔离。
+ */
 class JvmLocalWatcher(
     mountRoot: Path,
     private val scope: CoroutineScope,
@@ -35,6 +37,9 @@ class JvmLocalWatcher(
     private val mutableChanges = MutableSharedFlow<List<String>>(extraBufferCapacity = 64)
     val changes: SharedFlow<List<String>> = mutableChanges.asSharedFlow()
 
+    /**
+     * 启动 FSEvents 监听：先停止旧代际，进入 warmup 后开始接收事件。
+     */
     fun start() {
         stop()
         val current = generation.incrementAndGet()
@@ -49,6 +54,9 @@ class JvmLocalWatcher(
         }
     }
 
+    /**
+     * 停止监听：失效当前代际、清理待处理事件、取消 debounce/warmup 任务并关闭原生事件源。
+     */
     fun stop() {
         generation.incrementAndGet()
         val oldSource: AutoCloseable?
@@ -64,6 +72,9 @@ class JvmLocalWatcher(
         runCatching { oldSource?.close() }
     }
 
+    /**
+     * 处理单条原生事件：warmup 与代际失配直接忽略，命中则加入待处理集合并启动 debounce。
+     */
     private fun handleEvent(current: Long, event: NativeFSEvent) {
         if (generation.get() != current || nanoTime() < warmupUntilNanos) return
         val relative = sanitize(event.path) ?: return
@@ -82,6 +93,9 @@ class JvmLocalWatcher(
         }
     }
 
+    /**
+     * 将原生事件路径规范化为相对挂载根的路径字符串，越界或命中跳过模式时返回 null。
+     */
     private fun sanitize(rawPath: String): String? {
         val path = runCatching { Path.of(rawPath).toAbsolutePath().normalize() }.getOrNull() ?: return null
         val eventRoot = when {
@@ -95,5 +109,8 @@ class JvmLocalWatcher(
         return relative.joinToString("/") { it.toString() }
     }
 
+    /**
+     * 关闭监听器，等价于 [stop]。
+     */
     override fun close() = stop()
 }

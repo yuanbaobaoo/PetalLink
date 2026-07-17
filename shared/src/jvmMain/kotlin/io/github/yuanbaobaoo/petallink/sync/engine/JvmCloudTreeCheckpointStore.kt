@@ -15,9 +15,14 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
+/**
+ * checkpoint 原子提交的各阶段：tmp 同步、备份就绪、替换完成、父目录同步。
+ */
 enum class CheckpointCommitStage { TMP_SYNCED, BACKUP_SYNCED, REPLACED, PARENT_SYNCED }
 
-/** JVM/macOS 云树单文件 checkpoint：tmp fsync → bak → rename → parent fsync。 */
+/**
+ * JVM/macOS 云树单文件 checkpoint：tmp fsync → bak → rename → parent fsync。
+ */
 class JvmCloudTreeCheckpointStore(
     private val file: Path,
     private val commitProbe: (CheckpointCommitStage) -> Unit = {},
@@ -27,11 +32,18 @@ class JvmCloudTreeCheckpointStore(
     private val tmp get() = file.resolveSibling("${file.fileName}.tmp")
     private val backup get() = file.resolveSibling("${file.fileName}.bak")
 
+    /**
+     * JVM 实现：先清理残留 tmp，再优先读取主文件、回退到 backup，校验不可信时返回 null。
+     */
     override suspend fun loadTrusted(): CloudTreeCache? = mutex.withLock { io {
         Files.deleteIfExists(tmp)
         loadOne(file) ?: loadOne(backup)
     } }
 
+    /**
+     * JVM 实现：tmp 写入并 fsync → 硬链接 backup → 原子替换 → 父目录 fsync；
+     * 任何阶段失败都尝试回滚到 backup，绝不留下半成品。
+     */
     override suspend fun persist(checkpoint: CloudTreeCache): Unit = mutex.withLock { io {
         checkpoint.validateTrusted()
         val parent = file.toAbsolutePath().normalize().parent
@@ -71,12 +83,18 @@ class JvmCloudTreeCheckpointStore(
         Unit
     } }
 
+    /**
+     * JVM 实现：删除未提交的 tmp 与 backup 暂存文件。
+     */
     override suspend fun discardUncommitted(): Unit = mutex.withLock { io {
         Files.deleteIfExists(tmp)
         Files.deleteIfExists(backup)
         Unit
     } }
 
+    /**
+     * 读取并解析单个候选文件，校验通过返回缓存，非普通文件或解析失败返回 null。
+     */
     private fun loadOne(candidate: Path): CloudTreeCache? {
         if (!Files.isRegularFile(candidate)) return null
         return runCatching {
@@ -84,6 +102,9 @@ class JvmCloudTreeCheckpointStore(
         }.getOrNull()
     }
 
+    /**
+     * 优先用 ATOMIC_MOVE 替换目标，不支持时退化为普通替换移动。
+     */
     private fun atomicReplace(source: Path, target: Path) {
         try {
             Files.move(source, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
@@ -92,9 +113,15 @@ class JvmCloudTreeCheckpointStore(
         }
     }
 
+    /**
+     * 打开目录只读通道并 fsync，确保目录条目变更落盘。
+     */
     private fun syncDirectory(directory: Path) {
         FileChannel.open(directory, StandardOpenOption.READ).use { it.force(true) }
     }
 
+    /**
+     * 把阻塞 IO 操作切到 Dispatchers.IO 执行。
+     */
     private suspend fun <T> io(block: () -> T): T = withContext(Dispatchers.IO) { block() }
 }

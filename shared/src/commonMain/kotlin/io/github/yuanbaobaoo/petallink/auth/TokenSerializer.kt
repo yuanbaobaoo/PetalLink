@@ -15,7 +15,9 @@ package io.github.yuanbaobaoo.petallink.auth
  */
 object TokenSerializer {
 
-    /** 序列化为明文字节（加密前） */
+    /**
+     * 序列化为明文字节（加密前）
+     */
     fun serialize(token: TokenPair): ByteArray {
         val parts = mutableListOf<ByteArray>()
         // access_token（u64 前缀）
@@ -39,7 +41,9 @@ object TokenSerializer {
         return parts.reduce { acc, b -> acc + b }
     }
 
-    /** 从明文字节反序列化（解密后） */
+    /**
+     * 从明文字节反序列化（解密后）
+     */
     fun deserialize(data: ByteArray): TokenPair {
         var pos = 0
         // access_token
@@ -68,14 +72,23 @@ object TokenSerializer {
 
     // --- 小端编码/解码辅助 ---
 
+    /**
+     * 将 Long 编码为 8 字节小端
+     */
     private fun uLongLe(v: Long): ByteArray = ByteArray(8) { i ->
         ((v ushr (i * 8)) and 0xFF).toByte()
     }
 
+    /**
+     * 将 Int 编码为 4 字节小端
+     */
     private fun uIntLe(v: Int): ByteArray = ByteArray(4) { i ->
         ((v ushr (i * 8)) and 0xFF).toByte()
     }
 
+    /**
+     * 从偏移处读取 8 字节小端 Long
+     */
     private fun readULongLe(data: ByteArray, offset: Int): Long {
         var v = 0L
         for (i in 0 until 8) {
@@ -84,6 +97,9 @@ object TokenSerializer {
         return v
     }
 
+    /**
+     * 从偏移处读取 4 字节小端 Int
+     */
     private fun readUIntLe(data: ByteArray, offset: Int): Int {
         var v = 0
         for (i in 0 until 4) {
@@ -92,6 +108,9 @@ object TokenSerializer {
         return v
     }
 
+    /**
+     * 读取 u64 长度前缀字符串，返回 (字符串, 下一个读取位置)
+     */
     private fun readLengthPrefixedU64(data: ByteArray, offset: Int): Pair<String, Int> {
         val len = readULongLe(data, offset).toInt()
         val start = offset + 8
@@ -99,6 +118,9 @@ object TokenSerializer {
         return str to (start + len)
     }
 
+    /**
+     * 读取 u32 长度前缀字符串，返回 (字符串, 下一个读取位置)
+     */
     private fun readLengthPrefixedU32(data: ByteArray, offset: Int): Pair<String, Int> {
         val len = readUIntLe(data, offset)
         val start = offset + 4

@@ -12,11 +12,16 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
-/** 64 KiB 流式 SHA-256，以 normalized path + mtime + size 作缓存合同。 */
+/**
+ * 64 KiB 流式 SHA-256，以 normalized path + mtime + size 作缓存合同。
+ */
 class JvmFileHasher : FileHasher {
     private val cache = ConcurrentHashMap<String, HashCacheEntry>()
     private val pathLocks = ConcurrentHashMap<String, Mutex>()
 
+    /**
+     * 计算文件 SHA-256：按 path 加锁后流式读取，命中 mtime/size 缓存直接复用。
+     */
     override suspend fun sha256(absolutePath: String): String {
         val path = Path.of(absolutePath).toAbsolutePath().normalize()
         val key = path.toString()
@@ -56,15 +61,24 @@ class JvmFileHasher : FileHasher {
         }
     }
 
+    /**
+     * 作废指定路径的哈希缓存，强制下次重新计算。
+     */
     fun invalidate(absolutePath: String) {
         cache.remove(Path.of(absolutePath).toAbsolutePath().normalize().toString())
     }
 
+    /**
+     * 清空所有哈希缓存与路径锁。
+     */
     fun clear() {
         cache.clear()
         pathLocks.clear()
     }
 
+    /**
+     * 读取文件的 BasicFileAttributes，拒绝符号链接并校验为普通文件。
+     */
     private fun attributes(path: Path): BasicFileAttributes {
         if (Files.isSymbolicLink(path)) throw AppError.LocalIo("拒绝哈希符号链接: $path")
         val attrs = Files.readAttributes(path, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)

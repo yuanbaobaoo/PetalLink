@@ -20,12 +20,17 @@ import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.time.Instant
 
-/** 直接云端写入后的本地路径、DB 基线与删除留痕结算。 */
+/**
+ * 直接云端写入后的本地路径、DB 基线与删除留痕结算。
+ */
 internal class JvmDriveMutationSettler(
     private val configStore: ConfigStore,
     private val db: PetalLinkDb,
     private val xattrs: XattrAccess = MacXattrAccess,
 ) {
+    /**
+     * 路径变更计划；记录 fileId、新旧相对路径、受影响的同步基线及挂载根目录。
+     */
     data class PathChangePlan(
         val fileId: String,
         val oldRoot: String,
@@ -34,6 +39,9 @@ internal class JvmDriveMutationSettler(
         val mountRoot: Path,
     )
 
+    /**
+     * 删除计划；记录 fileId、根同步项、受影响子树及挂载根目录。
+     */
     data class DeletePlan(
         val fileId: String,
         val rootItem: SyncItem?,
@@ -41,6 +49,9 @@ internal class JvmDriveMutationSettler(
         val mountRoot: Path?,
     )
 
+    /**
+     * 规划云端重命名对应的本地路径变更；该 fileId 无同步基线时返回 null。
+     */
     suspend fun planRename(fileId: String, newName: String): PathChangePlan? {
         validateSegment(newName)
         val item = db.syncItems.findByFileId(fileId) ?: run {
@@ -52,6 +63,9 @@ internal class JvmDriveMutationSettler(
         return planPathChange(item, newRoot)
     }
 
+    /**
+     * 规划云端移动到新父目录对应的本地路径变更；该 fileId 无同步基线时返回 null。
+     */
     suspend fun planMove(fileId: String, newParentFolder: String): PathChangePlan? {
         val item = db.syncItems.findByFileId(fileId) ?: run {
             ensureNoActiveTransfer(fileId, null)
@@ -68,6 +82,9 @@ internal class JvmDriveMutationSettler(
         return planPathChange(item, newRoot)
     }
 
+    /**
+     * 规划路径变更：校验目标合法、无活动传输、子树无冲突，并为旧路径打上 fileId 标记。
+     */
     private suspend fun planPathChange(item: SyncItem, newRoot: String): PathChangePlan {
         validateRelative(newRoot)
         val oldRoot = item.localPath
@@ -94,6 +111,9 @@ internal class JvmDriveMutationSettler(
         return PathChangePlan(item.fileId, oldRoot, newRoot, affected, root)
     }
 
+    /**
+     * 在云端路径变更已生效后结算本地：移动本地文件、更新受影响子树的同步基线路径。
+     */
     suspend fun settlePathChange(plan: PathChangePlan, verified: DriveFile) {
         val oldPath = safePath(plan.mountRoot, plan.oldRoot)
         val newPath = safePath(plan.mountRoot, plan.newRoot)
@@ -121,6 +141,9 @@ internal class JvmDriveMutationSettler(
         db.syncItems.replaceSubtree(plan.oldRoot, replacements)
     }
 
+    /**
+     * 规划云端删除：收集受影响子树并对本地快照做删除前一致性校验。
+     */
     suspend fun planDelete(fileId: String): DeletePlan {
         val item = db.syncItems.findByFileId(fileId)
         ensureNoActiveTransfer(fileId, item?.localPath)
@@ -131,6 +154,9 @@ internal class JvmDriveMutationSettler(
         return DeletePlan(fileId, item, affected, root)
     }
 
+    /**
+     * 在云端删除已生效后结算本地：删除本地子树、将基线置为 DELETED 并写入删除留痕传输记录。
+     */
     suspend fun settleDelete(plan: DeletePlan, fallbackName: String?) {
         if (plan.rootItem != null && plan.mountRoot != null) {
             verifyDeleteSnapshot(plan.mountRoot, plan.rootItem.localPath, plan.affected)
@@ -167,6 +193,9 @@ internal class JvmDriveMutationSettler(
         }
     }
 
+    /**
+     * 检查指定 fileId 或路径是否存在未终结的传输任务，存在则抛错。
+     */
     private suspend fun ensureNoActiveTransfer(fileId: String?, path: String?) {
         val terminal = setOf(TransferState.Completed, TransferState.Failed, TransferState.Canceled)
         val active = db.transfers.selectAll().any { task ->
@@ -176,6 +205,9 @@ internal class JvmDriveMutationSettler(
         if (active) throw AppError.Data("该文件存在活动或待恢复任务，请稍后重试")
     }
 
+    /**
+     * 删除前校验本地子树与同步基线一致：无符号链接、无未纳入基线的内容、大小/修改时间未变化。
+     */
     private fun verifyDeleteSnapshot(root: Path, rootRelative: String, affected: List<SyncItem>) {
         val absolute = safePath(root, rootRelative)
         if (!Files.exists(absolute, LinkOption.NOFOLLOW_LINKS)) return
@@ -199,6 +231,9 @@ internal class JvmDriveMutationSettler(
         }
     }
 
+    /**
+     * 读取配置并返回规范化挂载根目录；未配置、为空、不安全则抛错。
+     */
     private fun configuredRoot(): Path {
         val config = configStore.load() ?: throw AppError.LocalIo("尚未配置挂载目录")
         if (!config.mountConfigured || config.mountDir.isBlank()) throw AppError.LocalIo("尚未配置挂载目录")
@@ -209,6 +244,9 @@ internal class JvmDriveMutationSettler(
         return root.toRealPath()
     }
 
+    /**
+     * 校验相对路径合法性并将其解析为挂载根内绝对路径，拒绝越界与符号链接。
+     */
     private fun safePath(root: Path, relativePath: String): Path {
         validateRelative(relativePath)
         val path = root.resolve(Path.of(relativePath)).normalize()
@@ -223,6 +261,9 @@ internal class JvmDriveMutationSettler(
         return path
     }
 
+    /**
+     * 校验目标父目录链路存在且均为普通目录（无符号链接）。
+     */
     private fun requireSafeParent(root: Path, parent: Path) {
         val relative = root.relativize(parent)
         var current = root
@@ -234,6 +275,9 @@ internal class JvmDriveMutationSettler(
         }
     }
 
+    /**
+     * 拒绝不安全的本地路径类型：符号链接、与基线类型不一致、非普通文件。
+     */
     private fun rejectUnsafeType(path: Path, item: SyncItem) {
         if (Files.isSymbolicLink(path)) throw AppError.LocalIo("拒绝操作符号链接: $path")
         if (item.isFolder != Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)) {
@@ -244,6 +288,9 @@ internal class JvmDriveMutationSettler(
         }
     }
 
+    /**
+     * 移动文件到目标路径；优先原子移动，不支持时降级为普通移动（不覆盖）。
+     */
     private fun moveNoReplace(source: Path, target: Path) {
         try {
             Files.move(source, target, StandardCopyOption.ATOMIC_MOVE)
@@ -252,12 +299,18 @@ internal class JvmDriveMutationSettler(
         }
     }
 
+    /**
+     * 校验单段文件名合法（非空、非 ./..、不含 '/' 与空字符）。
+     */
     private fun validateSegment(value: String) {
         require(value.isNotBlank() && value != "." && value != ".." && '/' !in value && '\u0000' !in value) {
             "文件名不合法"
         }
     }
 
+    /**
+     * 校验相对路径合法（非空、非绝对路径、不含 ./.. 段）。
+     */
     private fun validateRelative(value: String) {
         val path = Path.of(value)
         require(value.isNotBlank() && !path.isAbsolute && path.none { it.toString() == "." || it.toString() == ".." }) {
@@ -265,8 +318,17 @@ internal class JvmDriveMutationSettler(
         }
     }
 
+    /**
+     * 判断路径是否等于 root 或位于 root 子树内。
+     */
     private fun inSubtree(path: String, root: String) = path == root || path.startsWith("$root/")
+    /**
+     * 判断两个路径是否存在任一方向的子树包含关系。
+     */
     private fun pathsOverlap(left: String, right: String) = inSubtree(left, right) || inSubtree(right, left)
+    /**
+     * 将 ISO-8601 时间字符串解析为毫秒时间戳，失败返回 null。
+     */
     private fun parseTime(raw: String): Long? = runCatching { Instant.parse(raw).toEpochMilli() }.getOrNull()
 }
 

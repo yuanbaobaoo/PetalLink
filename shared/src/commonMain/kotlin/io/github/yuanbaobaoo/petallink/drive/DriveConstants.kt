@@ -11,20 +11,28 @@ object DriveConstants {
     // OAuth / 授权（docs/07 §2）
     // ------------------------------------------------------------------
 
-    /** OAuth 授权端点 */
+    /**
+     * OAuth 授权端点
+     */
     const val OAUTH_AUTHORIZE_URL = "https://oauth.cloud.huawei.com/rest.php"
 
-    /** Token 端点（换 token / 刷新 token） */
+    /**
+     * Token 端点（换 token / 刷新 token）
+     */
     const val OAUTH_TOKEN_URL = "https://oauth.cloud.huawei.com/rest.php"
 
-    /** scope 中的 `/` 不编码（华为特例，docs/03 踩坑 1） */
+    /**
+     * scope 中的 `/` 不编码（华为特例，docs/03 踩坑 1）
+     */
     const val OAUTH_SCOPE = "https://www.huawei.com/auth/drive/file"
 
     // ------------------------------------------------------------------
     // Drive API 基址
     // ------------------------------------------------------------------
 
-    /** Drive 文件操作 API 基址 */
+    /**
+     * Drive 文件操作 API 基址
+     */
     const val DRIVE_API_BASE = "https://drive.cloud.huawei.com.cn/drive/v1"
 
     // ------------------------------------------------------------------
@@ -57,6 +65,8 @@ object DriveConstants {
     const val CHANGES_PARAM_NEXT_CURSOR = "nextCursor"
     const val CHANGES_PARAM_NEW_START_CURSOR = "newStartCursor"
 
-    /** 三种删除信号（docs/03 changes 章节）：deleted / trashDone / recycled */
+    /**
+     * 三种删除信号（docs/03 changes 章节）：deleted / trashDone / recycled
+     */
     val DELETE_SIGNALS = setOf("deleted", "trashDone", "recycled")
 }

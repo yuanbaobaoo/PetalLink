@@ -20,9 +20,14 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 
+/**
+ * 已下载并通过校验、等待安装的更新；包含更新清单和解压后的 .app 路径。
+ */
 data class StagedUpdate(val manifest: UpdateManifest, val appPath: Path)
 
-/** 签名、notarization、Team ID 和 SHA-256 四重校验的 macOS 更新器。 */
+/**
+ * 签名、notarization、Team ID 和 SHA-256 四重校验的 macOS 更新器。
+ */
 class JvmUpdateService(
     private val httpClient: HttpClient,
     private val paths: AppPaths,
@@ -32,6 +37,9 @@ class JvmUpdateService(
 ) {
     private val json = Json { ignoreUnknownKeys = true }
 
+    /**
+     * 拉取更新清单并校验，返回比当前版本更新的清单，否则返回 null
+     */
     suspend fun check(): UpdateManifest? {
         requireHttps(endpoint)
         val response = httpClient.get(endpoint)
@@ -41,6 +49,9 @@ class JvmUpdateService(
         return manifest.takeIf { it.isNewerThan(currentVersion) }
     }
 
+    /**
+     * 等待传输空闲后下载更新包，校验 SHA-256、解压并验证签名，返回就绪的 [StagedUpdate]
+     */
     suspend fun downloadAndStage(
         manifest: UpdateManifest,
         hasActiveTransfers: () -> Boolean,
@@ -74,6 +85,9 @@ class JvmUpdateService(
         return StagedUpdate(manifest, app)
     }
 
+    /**
+     * 启动后台安装脚本：等待当前进程退出后替换并重启应用，返回 true 表示已派发
+     */
     suspend fun launchInstaller(staged: StagedUpdate): Boolean = withContext(Dispatchers.IO) {
         val current = currentAppPath() ?: throw AppError.Internal("开发模式不能执行自更新安装")
         val parent = current.parent ?: throw AppError.LocalIo("无法定位应用目录")
@@ -91,6 +105,9 @@ class JvmUpdateService(
         true
     }
 
+    /**
+     * 下载到 .part 临时文件后原子重命名，按写盘量回调进度
+     */
     private suspend fun download(url: String, target: Path, onProgress: (Long, Long?) -> Unit) {
         requireHttps(url)
         val response = httpClient.get(url)
@@ -123,6 +140,9 @@ class JvmUpdateService(
         }
     }
 
+    /**
+     * 四重校验：代码签名、Gatekeeper/notarization、以及 Team ID 是否匹配预期
+     */
     private fun verifyApp(app: Path) {
         command("/usr/bin/codesign", "--verify", "--deep", "--strict", "--verbose=2", app.toString())
             .requireSuccess("更新应用代码签名无效")
@@ -133,6 +153,9 @@ class JvmUpdateService(
         if (team != expectedTeamId) throw AppError.Data("更新应用 Team ID 不匹配")
     }
 
+    /**
+     * 校验更新清单：版本号合法、HTTPS、SHA-256 格式，以及当前系统满足最低版本要求
+     */
     private fun validateManifest(manifest: UpdateManifest) {
         if (SemanticVersion.parse(manifest.version) == null) throw AppError.Data("更新版本号无效")
         requireHttps(manifest.url)
@@ -145,22 +168,34 @@ class JvmUpdateService(
         }
     }
 
+    /**
+     * 强制 URL 使用 HTTPS，否则抛错
+     */
     private fun requireHttps(url: String) {
         if (!url.startsWith("https://")) throw AppError.Data("更新地址必须使用 HTTPS")
     }
 
+    /**
+     * 推断当前运行中的 .app 路径；非 .app 打包（开发模式）返回 null
+     */
     private fun currentAppPath(): Path? {
         val executable = ProcessHandle.current().info().command().orElse(null)?.let(Path::of) ?: return null
         val app = executable.parent?.parent?.parent ?: return null
         return app.takeIf { it.fileName.toString().endsWith(".app") && Files.isDirectory(it) }
     }
 
+    /**
+     * 同步执行外部命令，合并 stdout/stderr 并返回退出码与输出
+     */
     private fun command(vararg args: String): CommandResult {
         val process = ProcessBuilder(args.toList()).redirectErrorStream(true).start()
         val output = process.inputStream.bufferedReader().readText()
         return CommandResult(process.waitFor(), output)
     }
 
+    /**
+     * 计算文件 SHA-256 摘要，返回小写十六进制字符串
+     */
     private fun sha256(path: Path): String {
         val digest = MessageDigest.getInstance("SHA-256")
         Files.newInputStream(path).use { input ->
@@ -174,17 +209,26 @@ class JvmUpdateService(
         return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
+    /**
+     * 递归删除目录树（先深后浅），路径不存在则直接返回
+     */
     private fun deleteTree(path: Path) {
         if (!Files.exists(path)) return
         Files.walk(path).use { files -> files.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists) }
     }
 
+    /**
+     * 解析形如 "14.5.1" 的系统版本号为三段整数列表，不足补 0
+     */
     private fun parseSystemVersion(value: String): List<Int>? {
         val parts = value.substringBefore('-').split('.').map { it.toIntOrNull() ?: return null }.toMutableList()
         while (parts.size < 3) parts += 0
         return parts.take(3)
     }
 
+    /**
+     * 逐段比较两版本号，返回首个不同段的大小关系；完全相同返回 0
+     */
     private fun compareVersionParts(left: List<Int>, right: List<Int>): Int {
         for (index in 0 until maxOf(left.size, right.size)) {
             val result = (left.getOrElse(index) { 0 }).compareTo(right.getOrElse(index) { 0 })
@@ -193,7 +237,13 @@ class JvmUpdateService(
         return 0
     }
 
+    /**
+     * 外部命令执行结果：进程退出码与标准输出/错误文本。
+     */
     private data class CommandResult(val exitCode: Int, val output: String) {
+        /**
+         * 退出码非 0 时抛出携带前 500 字符输出的错误
+         */
         fun requireSuccess(message: String) {
             if (exitCode != 0) throw AppError.Data("$message：${output.take(500)}")
         }

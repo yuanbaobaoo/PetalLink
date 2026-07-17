@@ -12,8 +12,19 @@ import kotlinx.coroutines.sync.Mutex
  * 7 位位集，每位代表一种触发来源。详见 docs/06 §8。
  */
 data class CycleRequest(val bits: Int) {
+    /**
+     * 当前位集是否完全包含 [other] 的所有触发位。
+     */
     fun contains(other: CycleRequest): Boolean = bits and other.bits == other.bits
+
+    /**
+     * 位集是否为空（无任何触发来源）。
+     */
     fun isEmpty(): Boolean = bits == 0
+
+    /**
+     * 合并另一位集，返回两者触发位的并集。
+     */
     operator fun plus(other: CycleRequest): CycleRequest = CycleRequest(bits or other.bits)
 
     companion object {
@@ -28,7 +39,9 @@ data class CycleRequest(val bits: Int) {
     }
 }
 
-/** 触发来源 → CycleRequest 映射（对标 cycle_request_for_trigger） */
+/**
+ * 触发来源 → CycleRequest 映射（对标 cycle_request_for_trigger）
+ */
 object CycleTrigger {
     const val MANUAL_REFRESH = "manual-refresh"
     const val AUTO_CLOUD_REFRESH = "auto-cloud-refresh"
@@ -38,6 +51,9 @@ object CycleTrigger {
     const val RETRY_REPLAN = "retry-replan"
     const val BACKOFF_DEADLINE = "backoff-deadline"
 
+    /**
+     * 把触发来源字符串映射为对应的请求位集组合。
+     */
     fun requestFor(trigger: String): CycleRequest = when (trigger) {
         MANUAL_REFRESH -> CycleRequest.LOCAL_RESCAN + CycleRequest.CLOUD_FULL
         AUTO_CLOUD_REFRESH -> CycleRequest.LOCAL_RESCAN + CycleRequest.CLOUD_INCREMENTAL
@@ -50,7 +66,9 @@ object CycleTrigger {
     }
 }
 
-/** 不可变协调器状态（用于 CAS） */
+/**
+ * 不可变协调器状态（用于 CAS）
+ */
 private data class CoordinatorState(
     val pending: Int = 0,
     val requestedSeq: Long = 0,
@@ -58,6 +76,9 @@ private data class CoordinatorState(
     val failures: List<CycleFailure> = emptyList(),
 )
 
+/**
+ * 单个同步周期的失败记录：覆盖的请求序号区间 [start, end] 与错误信息。
+ */
 private data class CycleFailure(val start: Long, val end: Long, val message: String)
 
 /**
@@ -68,7 +89,9 @@ class CycleCoordinator {
     private val state = AtomicReference(CoordinatorState())
     private val owner = Mutex()
 
-    /** 合并请求到位集，返回请求序号 */
+    /**
+     * 合并请求到位集，返回请求序号
+     */
     fun request(req: CycleRequest): Long {
         while (true) {
             val cur = state.get()
@@ -78,7 +101,9 @@ class CycleCoordinator {
         }
     }
 
-    /** 取出 pending 位集（清空），返回 (位集, 序号) */
+    /**
+     * 取出 pending 位集（清空），返回 (位集, 序号)
+     */
     fun takePending(): Pair<CycleRequest, Long> {
         while (true) {
             val cur = state.get()
@@ -87,7 +112,9 @@ class CycleCoordinator {
         }
     }
 
-    /** 恢复请求（sticky） */
+    /**
+     * 恢复请求（sticky）
+     */
     fun restore(request: CycleRequest) {
         while (true) {
             val cur = state.get()
@@ -96,7 +123,9 @@ class CycleCoordinator {
         }
     }
 
-    /** 完成一个请求序号 */
+    /**
+     * 完成一个请求序号
+     */
     fun complete(through: Long, error: String? = null) {
         while (true) {
             val cur = state.get()
@@ -112,7 +141,9 @@ class CycleCoordinator {
         }
     }
 
-    /** 查询某序号的结果 */
+    /**
+     * 查询某序号的结果
+     */
     fun resultIfCompleted(seq: Long): Result<Unit>? {
         val cur = state.get()
         if (seq > cur.completedSeq) return null
@@ -122,12 +153,19 @@ class CycleCoordinator {
         return Result.success(Unit)
     }
 
-    /** 是否有未完成的请求 */
+    /**
+     * 是否有未完成的请求
+     */
     fun hasUncompletedRequest(): Boolean = state.get().requestedSeq > state.get().completedSeq
 
+    /**
+     * 是否仍有未取走的 pending 请求位。
+     */
     fun hasPending(): Boolean = state.get().pending != 0
 
-    /** 同一时刻仅一个 owner 可以取走并执行合并后的周期请求。 */
+    /**
+     * 同一时刻仅一个 owner 可以取走并执行合并后的周期请求。
+     */
     suspend fun drainOwned(execute: suspend (CycleRequest) -> Result<Unit>): Boolean {
         if (!owner.tryLock()) return false
         try {
@@ -144,7 +182,9 @@ class CycleCoordinator {
     }
 }
 
-/** watcher/manual/timer/startup/recovery 统一只向这个入口提交请求。 */
+/**
+ * watcher/manual/timer/startup/recovery 统一只向这个入口提交请求。
+ */
 class CycleRequestDispatcher(
     private val scope: CoroutineScope,
     private val coordinator: CycleCoordinator,
@@ -152,14 +192,23 @@ class CycleRequestDispatcher(
 ) {
     private val workerScheduled = AtomicBoolean(false)
 
+    /**
+     * 提交一个请求位集到协调器并调度后台执行，返回该请求的序号。
+     */
     fun submit(request: CycleRequest): Long {
         val sequence = coordinator.request(request)
         schedule()
         return sequence
     }
 
+    /**
+     * 便捷重载：按触发来源字符串提交请求并返回序号。
+     */
     fun submit(trigger: String): Long = submit(CycleTrigger.requestFor(trigger))
 
+    /**
+     * 若无后台 worker 在跑则启动一个去消费 pending 请求；重复调度会被标志位去重。
+     */
     private fun schedule() {
         if (!workerScheduled.compareAndSet(false, true)) return
         scope.launch {

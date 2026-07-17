@@ -9,7 +9,9 @@ package io.github.yuanbaobaoo.petallink.sync
  */
 object ConflictResolver {
 
-    /** 副本命名（对标 copy format） */
+    /**
+     * 副本命名（对标 copy format）
+     */
     fun copyName(
         originalName: String,
         side: ConflictSide,
@@ -23,7 +25,9 @@ object ConflictResolver {
         return "$stem ($sideLabel $timestampFormatted$seqSuffix)$ext"
     }
 
-    /** 拆分文件名与扩展名 */
+    /**
+     * 拆分文件名与扩展名
+     */
     private fun splitNameExt(name: String): Pair<String, String> {
         val dotIdx = name.lastIndexOf('.')
         return if (dotIdx > 0) {
@@ -33,12 +37,16 @@ object ConflictResolver {
         }
     }
 
-    /** 冲突侧（败方） */
+    /**
+     * 冲突侧（败方）
+     */
     enum class ConflictSide(val label: String) {
         LOCAL("本地"),
         CLOUD("云端"),
     }
 
-    /** 副本序号上限（防无限重名） */
+    /**
+     * 副本序号上限（防无限重名）
+     */
     const val MAX_SEQUENCE = 1000
 }

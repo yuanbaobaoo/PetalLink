@@ -92,7 +92,9 @@ fun Breadcrumb(
     }
 }
 
-/** 面包屑底部分隔线（保留兼容，实际已内嵌在 Breadcrumb 内）。 */
+/**
+ * 面包屑底部分隔线（保留兼容，实际已内嵌在 Breadcrumb 内）。
+ */
 @Composable
 fun BreadcrumbDivider() {
     MateHDivider()

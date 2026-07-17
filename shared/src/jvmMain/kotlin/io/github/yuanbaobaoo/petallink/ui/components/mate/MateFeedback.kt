@@ -173,9 +173,14 @@ fun MateCircularProgress(
     }
 }
 
-/** 横幅变体（对标原 Vue MateInfoBanner variant）。 */
+/**
+ * 横幅变体（对标原 Vue MateInfoBanner variant）。
+ */
 enum class MateBannerVariant { INFO, SUCCESS, WARNING, ERROR }
 
+/**
+ * 根据横幅变体返回对应的背景色与图标色。
+ */
 private fun bannerVisual(variant: MateBannerVariant): Pair<Color, Color> {
     // 返回 (背景色, 图标色)
     return when (variant) {
@@ -186,6 +191,9 @@ private fun bannerVisual(variant: MateBannerVariant): Pair<Color, Color> {
     }
 }
 
+/**
+ * 根据横幅变体返回对应的图标名称。
+ */
 private fun bannerIcon(variant: MateBannerVariant): String = when (variant) {
     MateBannerVariant.INFO -> "info"
     MateBannerVariant.SUCCESS -> "check"
@@ -248,9 +256,14 @@ fun MateInfoBanner(
     }
 }
 
-/** 标签主题（对标原 Vue MateTag theme）。 */
+/**
+ * 标签主题（对标原 Vue MateTag theme）。
+ */
 enum class MateTagTheme { DEFAULT, PRIMARY, SUCCESS, WARNING, ERROR }
-/** 标签尺寸。 */
+
+/**
+ * 标签尺寸。
+ */
 enum class MateTagSize { SMALL, MEDIUM }
 
 /**
@@ -439,7 +452,9 @@ fun MateNavItem(
     }
 }
 
-/** 导航分组标签（v2 设置页：12px semibold placeholder，上 20 下 6）。 */
+/**
+ * 导航分组标签（v2 设置页：12px semibold placeholder，上 20 下 6）。
+ */
 @Composable
 fun MateNavGroupLabel(
     label: String,

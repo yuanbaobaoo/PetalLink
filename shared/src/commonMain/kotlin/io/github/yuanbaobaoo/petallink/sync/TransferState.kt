@@ -63,11 +63,15 @@ enum class TransferState {
             return TRANSITIONS[from]?.contains(to) == true
         }
 
-        /** 终态判定（不再变化） */
+        /**
+         * 终态判定（不再变化）
+         */
         fun isTerminal(state: TransferState): Boolean =
             state == Completed || state == Failed || state == Canceled
 
-        /** 活跃态判定（占用传输槽位） */
+        /**
+         * 活跃态判定（占用传输槽位）
+         */
         fun isActive(state: TransferState): Boolean =
             state == Running || state == VerifyingRemote
     }

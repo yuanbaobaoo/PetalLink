@@ -11,7 +11,9 @@ import java.nio.file.StandardCopyOption
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-/** macOS JVM 占位符管理；state xattr 是唯一身份判据，FinderInfo 只负责视觉。 */
+/**
+ * macOS JVM 占位符管理；state xattr 是唯一身份判据，FinderInfo 只负责视觉。
+ */
 class JvmPlaceholderManager(
     mountRoot: Path,
     private val xattrs: XattrAccess = MacXattrAccess,
@@ -20,6 +22,9 @@ class JvmPlaceholderManager(
     private val lexicalRoot = mountRoot.toAbsolutePath().normalize()
     private val root = requireSafeRoot(lexicalRoot)
 
+    /**
+     * 必要时为相对路径创建占位符；已存在文件则补齐 Finder 灰色标签后返回 false，新建成功返回 true。
+     */
     override suspend fun createPlaceholderIfNeeded(relativePath: String): Boolean = io {
         val target = safeRelative(relativePath)
         if (Files.exists(target, LinkOption.NOFOLLOW_LINKS)) {
@@ -36,12 +41,18 @@ class JvmPlaceholderManager(
         true
     }
 
+    /**
+     * 强制为相对路径创建占位符；父路径不存在时逐级创建，文件已存在则抛出异常。
+     */
     override suspend fun createPlaceholderStrict(relativePath: String) = io {
         val target = safeRelative(relativePath)
         ensureSafeParents(target.parent)
         createNewPlaceholder(target)
     }
 
+    /**
+     * 判断绝对路径是否为未下载的 0 字节占位符文件。
+     */
     override suspend fun isPlaceholder(absolutePath: String): Boolean = io {
         val path = safeAbsolute(absolutePath)
         if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) return@io false
@@ -49,6 +60,9 @@ class JvmPlaceholderManager(
         Files.size(path) == 0L && readState(path) == PlaceholderState.PLACEHOLDER
     }
 
+    /**
+     * 将文件 state 标记为已下载并移除 Finder 灰色标签。
+     */
     override suspend fun markDownloaded(absolutePath: String) = io {
         val path = safeAbsolute(absolutePath)
         rejectSymlink(path)
@@ -59,10 +73,16 @@ class JvmPlaceholderManager(
         setFinderGreyLabelSync(path, false)
     }
 
+    /**
+     * 设置或清除文件的 Finder 灰色标签（通过 FinderInfo 扩展属性）。
+     */
     override suspend fun setFinderGreyLabel(absolutePath: String, on: Boolean) = io {
         setFinderGreyLabelSync(safeAbsolute(absolutePath), on)
     }
 
+    /**
+     * 删除本地文件或目录；目录按逆序删除，遇到用户写入的 0 字节文件会拒绝以防误删。
+     */
     override suspend fun deleteLocal(absolutePath: String) = io {
         val path = safeAbsolute(absolutePath)
         if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) return@io
@@ -87,6 +107,9 @@ class JvmPlaceholderManager(
         Files.deleteIfExists(path)
     }
 
+    /**
+     * 当占位符被本地修改后原子迁移到带时间戳的备份路径，清除其 state 标签并返回备份绝对路径；非占位符返回 null。
+     */
     override suspend fun backupModifiedPlaceholder(absolutePath: String): String? = io {
         val source = safeAbsolute(absolutePath)
         if (!Files.isRegularFile(source, LinkOption.NOFOLLOW_LINKS)) return@io null
@@ -105,6 +128,9 @@ class JvmPlaceholderManager(
         backup.toString()
     }
 
+    /**
+     * 创建 0 字节占位符文件，写入 state xattr 并打上 Finder 灰色标签；中途失败会回滚。
+     */
     private fun createNewPlaceholder(path: Path) {
         var created = false
         try {
@@ -123,6 +149,9 @@ class JvmPlaceholderManager(
         }
     }
 
+    /**
+     * 同步改写 FinderInfo 扩展属性以开启/关闭灰色标签；关闭后若 FinderInfo 全零则删除该属性。
+     */
     private fun setFinderGreyLabelSync(path: Path, on: Boolean) {
         rejectSymlink(path)
         val current = xattrs.get(path.toString(), AppConfig.XATTR_FINDER_INFO)
@@ -139,6 +168,9 @@ class JvmPlaceholderManager(
         }
     }
 
+    /**
+     * 读取并解析文件的 state xattr，缺失返回 null，非法值抛出异常。
+     */
     private fun readState(path: Path): PlaceholderState? {
         val raw = xattrs.get(path.toString(), AppConfig.XATTR_STATE) ?: return null
         val text = raw.decodeToString().trimEnd('\u0000')
@@ -146,6 +178,9 @@ class JvmPlaceholderManager(
             ?: throw AppError.LocalIo("非法占位符 state xattr: $text ($path)")
     }
 
+    /**
+     * 校验相对路径不含 `..`/`.` 且落在挂载根内，返回规范化后的绝对路径。
+     */
     private fun safeRelative(relativePath: String): Path {
         require(relativePath.isNotBlank()) { "占位符相对路径不能为空" }
         val relative = Path.of(relativePath)
@@ -155,6 +190,9 @@ class JvmPlaceholderManager(
         return safeAbsolute(root.resolve(relative).normalize().toString())
     }
 
+    /**
+     * 将绝对路径校验、规范化到挂载根之下，并拒绝路径中的符号链接组件。
+     */
     private fun safeAbsolute(absolutePath: String): Path {
         val path = Path.of(absolutePath).toAbsolutePath().normalize()
         val acceptedRoot = when {
@@ -170,6 +208,9 @@ class JvmPlaceholderManager(
         return root.resolve(relative).normalize()
     }
 
+    /**
+     * 沿相对路径逐级解析，对存在的任一段执行符号链接校验。
+     */
     private fun rejectSymlinkComponents(base: Path, relative: Path) {
         var current = base
         for (segment in relative) {
@@ -178,6 +219,9 @@ class JvmPlaceholderManager(
         }
     }
 
+    /**
+     * 逐级确保占位符的父目录存在、不是符号链接且确为目录，缺失则创建。
+     */
     private fun ensureSafeParents(parent: Path) {
         val relative = root.relativize(parent)
         var current = root
@@ -194,10 +238,16 @@ class JvmPlaceholderManager(
         }
     }
 
+    /**
+     * 对符号链接抛出异常，阻断操作。
+     */
     private fun rejectSymlink(path: Path) {
         if (Files.isSymbolicLink(path)) throw AppError.LocalIo("拒绝操作符号链接: $path")
     }
 
+    /**
+     * 基于源文件名与当前时间戳生成同目录下不冲突的备份路径，必要时追加序号。
+     */
     private fun uniqueBackupPath(source: Path): Path {
         val name = source.fileName.toString()
         val dot = name.lastIndexOf('.').takeIf { it > 0 } ?: name.length
@@ -213,6 +263,9 @@ class JvmPlaceholderManager(
         return candidate
     }
 
+    /**
+     * 优先尝试原子移动，不支持时回退到普通移动。
+     */
     private fun moveAtomicallyWhenPossible(source: Path, target: Path) {
         try {
             Files.move(source, target, StandardCopyOption.ATOMIC_MOVE)
@@ -221,6 +274,9 @@ class JvmPlaceholderManager(
         }
     }
 
+    /**
+     * 在 IO 调度器执行 [block]，捕获异常并统一包装为 [AppError.LocalIo]。
+     */
     private suspend fun <T> io(block: () -> T): T = try {
         withContext(Dispatchers.IO) { block() }
     } catch (error: AppError) {
@@ -229,6 +285,9 @@ class JvmPlaceholderManager(
         throw AppError.LocalIo(error.message ?: "本地文件操作失败", error)
     }
 
+    /**
+     * 校验挂载根真实存在、为目录且非符号链接，返回解析后的真实路径。
+     */
     private fun requireSafeRoot(root: Path): Path {
         val normalized = root.toAbsolutePath().normalize()
         if (Files.isSymbolicLink(normalized) || !Files.isDirectory(normalized, LinkOption.NOFOLLOW_LINKS)) {

@@ -9,7 +9,9 @@ package io.github.yuanbaobaoo.petallink.core.logging
  * - RingBufferAppender：环形缓冲（MAX_BUFFER_SIZE=1000，newest-first，供日志查看页）
  */
 interface LogAppender {
-    /** 输出一条日志 */
+    /**
+     * 输出一条日志
+     */
     fun append(record: LogRecord)
 }
 
@@ -20,7 +22,9 @@ interface LogAppender {
  * 默认实现遮蔽常见敏感模式（token=xxx、Authorization: xxx）。
  */
 object LogRedactor {
-    /** 敏感字段名（出现则遮蔽值） */
+    /**
+     * 敏感字段名（出现则遮蔽值）
+     */
     private val SENSITIVE_KEYS = setOf(
         "token", "access_token", "refresh_token", "authorization",
         "password", "secret", "api_key", "apikey",

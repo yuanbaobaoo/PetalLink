@@ -53,7 +53,9 @@ import io.github.yuanbaobaoo.petallink.ui.theme.SuccessColor
 import io.github.yuanbaobaoo.petallink.ui.theme.WarningColor
 import io.github.yuanbaobaoo.petallink.ui.viewmodel.TransferTaskUi
 
-/** 传输状态元信息（对标原 Vue stateMeta）。 */
+/**
+ * 传输状态元信息（对标原 Vue stateMeta）。
+ */
 private data class StateMeta(val icon: String, val label: String, val color: Color, val spin: Boolean)
 
 /**
@@ -73,7 +75,9 @@ private fun stateMeta(state: TransferState, neutral: Color): StateMeta = when (s
     TransferState.Canceled -> StateMeta("x", "已取消", neutral, false)
 }
 
-/** 方向图标（对标原 Vue dirIcon）。 */
+/**
+ * 方向图标（对标原 Vue dirIcon）。
+ */
 private fun dirIcon(direction: String): String = when (direction) {
     "download" -> "download"
     "download_update" -> "refresh"
@@ -81,7 +85,9 @@ private fun dirIcon(direction: String): String = when (direction) {
     else -> "transfer"
 }
 
-/** 方向标签（对标原 Vue DIR_LABEL）。 */
+/**
+ * 方向标签（对标原 Vue DIR_LABEL）。
+ */
 private fun dirLabel(direction: String): String = when (direction) {
     "upload" -> "上传"
     "download" -> "下载"
@@ -103,7 +109,9 @@ private fun progressColor(state: TransferState, waitingColor: Color): Color = wh
     else -> BrandColor
 }
 
-/** 是否可重试（对标原 Vue canRetryTransferTask）。 */
+/**
+ * 是否可重试（对标原 Vue canRetryTransferTask）。
+ */
 private fun canRetry(task: TransferTaskUi): Boolean {
     val stateOk = task.state == TransferState.Failed || task.state == TransferState.RestartRequired
     // operation ∈ CREATE/UPDATE/DOWNLOAD/DOWNLOAD_UPDATE；这里用 direction 近似（upload/download 可重试，delete 不可）
@@ -246,7 +254,9 @@ private fun StatPill(num: Int, label: String, modifier: Modifier = Modifier, err
     }
 }
 
-/** 单个传输任务行（v2：minHeight 68，padding 10/20，含底分隔线）。 */
+/**
+ * 单个传输任务行（v2：minHeight 68，padding 10/20，含底分隔线）。
+ */
 @Composable
 private fun TransferItemRow(task: TransferTaskUi, onRetry: (Long) -> Unit) {
     val semantic = LocalSemanticColors.current

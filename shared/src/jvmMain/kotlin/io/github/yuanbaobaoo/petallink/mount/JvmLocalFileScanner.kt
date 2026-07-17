@@ -12,7 +12,9 @@ import java.nio.file.attribute.BasicFileAttributes
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-/** JVM/macOS 递归扫描器；不跟随 symlink，所有路径统一过 [SkipFilter]。 */
+/**
+ * JVM/macOS 递归扫描器；不跟随 symlink，所有路径统一过 [SkipFilter]。
+ */
 class JvmLocalFileScanner(
     mountRoot: Path,
     private val xattrs: XattrAccess,
@@ -20,6 +22,9 @@ class JvmLocalFileScanner(
 ) : LocalFileScanner {
     private val root = mountRoot.toAbsolutePath().normalize()
 
+    /**
+     * 递归遍历挂载根，收集所有非跳过的文件与目录条目，按相对路径排序后返回。
+     */
     override suspend fun scan(): List<LocalFileEntry> = withContext(Dispatchers.IO) {
         try {
             require(Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS)) {
@@ -27,6 +32,9 @@ class JvmLocalFileScanner(
             }
             val result = mutableListOf<LocalFileEntry>()
             Files.walkFileTree(root, object : SimpleFileVisitor<Path>() {
+                /**
+                 * 访问目录前判断是否跳过；命中跳过规则则跳过整个子树，否则记录目录条目。
+                 */
                 override fun preVisitDirectory(dir: Path, attrs: BasicFileAttributes): FileVisitResult {
                     if (dir == root) return FileVisitResult.CONTINUE
                     if (shouldSkip(dir)) return FileVisitResult.SKIP_SUBTREE
@@ -34,6 +42,9 @@ class JvmLocalFileScanner(
                     return FileVisitResult.CONTINUE
                 }
 
+                /**
+                 * 访问普通文件时跳过符号链接与命中规则的文件，其余记录为文件条目。
+                 */
                 override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
                     if (attrs.isSymbolicLink || !attrs.isRegularFile || shouldSkip(file)) {
                         return FileVisitResult.CONTINUE
@@ -50,9 +61,15 @@ class JvmLocalFileScanner(
         }
     }
 
+    /**
+     * 按文件名和跳过模式判断该条目是否应被忽略。
+     */
     private fun shouldSkip(path: Path): Boolean =
         SkipFilter.shouldSkip(path.fileName.toString(), skipPatterns)
 
+    /**
+     * 将单条路径转换为扫描结果条目，包含相对路径、大小、mtime、inode 及占位符状态。
+     */
     private fun entry(path: Path, attrs: BasicFileAttributes, isDirectory: Boolean): LocalFileEntry {
         val normalized = path.toAbsolutePath().normalize()
         if (!normalized.startsWith(root)) throw AppError.LocalIo("扫描路径逸出挂载目录: $path")
@@ -71,6 +88,9 @@ class JvmLocalFileScanner(
         )
     }
 
+    /**
+     * 读取并解析文件 state xattr，缺失返回 null，非法值抛出异常。
+     */
     private fun readState(path: Path): PlaceholderState? {
         val raw = xattrs.get(path.toString(), AppConfig.XATTR_STATE) ?: return null
         val value = raw.decodeToString().trimEnd('\u0000')

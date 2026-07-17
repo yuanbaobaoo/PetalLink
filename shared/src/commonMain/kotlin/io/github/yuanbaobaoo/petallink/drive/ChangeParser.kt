@@ -11,6 +11,9 @@ data class DriveChange(
     val file: DriveFile?,
 )
 
+/**
+ * 增量变更类型：修改或删除
+ */
 enum class ChangeKind { MODIFIED, REMOVED }
 
 /**
