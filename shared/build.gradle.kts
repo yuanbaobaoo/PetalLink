@@ -1,9 +1,6 @@
 // shared 模块：JVM + Compose Multiplatform Desktop
 // 产出可执行 JAR / macOS .app，通过 Compose Desktop Window 运行
 
-import java.nio.file.Files
-import java.nio.file.Path
-
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
     alias(libs.plugins.kotlinSerialization)
@@ -137,58 +134,3 @@ compose.desktop {
         }
     }
 }
-
-/**
- * 修复 jpackage --type dmg 的 entitlements 丢失问题。
- *
- * jpackage 从 --app-image 封 DMG 时，会用内部复制/重签流程，adhoc 签名场景下会丢掉主可执行的
- * entitlements（createDistributable 阶段产出的 app-image 本身是带 entitlements 的）。
- * 该任务在 packageDmg 之后，用 ditto + hdiutil 从带 entitlements 的 app-image 重新封一个 DMG，
- * 覆盖 jpackage 产物。ditto 保留全部签名元数据，hdiutil UDZO 压缩，entitlements 完整保留。
- */
-val appImageDir = layout.buildDirectory.dir("compose/binaries/main/app/PetalLink.app")
-val dmgOutputDir = layout.buildDirectory.dir("compose/binaries/main/dmg")
-val repackDmgForEntitlements by tasks.registering {
-    description = "从 app-image 用 hdiutil 重封 DMG，修复 jpackage 丢失 entitlements 的问题。"
-    group = "compose desktop packaging"
-    dependsOn("packageDmg")
-    inputs.dir(appImageDir)
-    outputs.file(dmgOutputDir.map { it.file("PetalLink-$petalLinkVersion.dmg") })
-    doLast {
-        val app = appImageDir.get().asFile
-        check(app.isDirectory) { "app-image 不存在：$app（先执行 createDistributable）" }
-        val dest = dmgOutputDir.get().asFile.apply { mkdirs() }
-        val dmg = dest.resolve("PetalLink-$petalLinkVersion.dmg")
-        val staging = dest.resolveSibling("tmp/dmg-repack-${System.currentTimeMillis()}")
-        try {
-            staging.mkdirs()
-            // ditto 保留所有扩展属性与签名元数据（entitlements 随签名存储）。
-            val ditto = ProcessBuilder("ditto", app.absolutePath, staging.resolve("PetalLink.app").absolutePath)
-                .redirectErrorStream(true).start().also { it.waitFor() }
-            check(ditto.exitValue() == 0) { "ditto 失败：${ditto.inputStream.bufferedReader().readText()}" }
-            // Applications 软链，与 Compose DMG 布局一致。
-            val appsLink = staging.resolve("Applications").toPath()
-            if (!Files.exists(appsLink)) {
-                Files.createSymbolicLink(appsLink, Path.of("/Applications"))
-            }
-            if (dmg.exists()) dmg.delete()
-            val hdiutil = ProcessBuilder(
-                "hdiutil", "create",
-                "-volname", "PetalLink",
-                "-srcfolder", staging.absolutePath,
-                "-fs", "HFS+",
-                "-format", "UDZO",
-                "-imagekey", "zlib-level=9",
-                dmg.absolutePath,
-            ).redirectErrorStream(true).start().also { it.waitFor() }
-            check(hdiutil.exitValue() == 0) { "hdiutil 失败：${hdiutil.inputStream.bufferedReader().readText()}" }
-            logger.lifecycle("DMG 重封完成（保留 entitlements）：$dmg")
-        } finally {
-            staging.deleteRecursively()
-        }
-    }
-}
-
-// 让标准的 packageDmg 链路最终落到修复后的 DMG。
-// packageDmg 由 Compose 插件延迟注册，用 matching/configureEach 在任务实际创建时再绑定。
-tasks.matching { it.name == "packageDmg" }.configureEach { finalizedBy(repackDmgForEntitlements) }
