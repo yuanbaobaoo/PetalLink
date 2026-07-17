@@ -64,10 +64,6 @@ fun main(args: Array<String>) {
             var exiting by remember { mutableStateOf(false) }
             val windowState = rememberWindowState()
             val scope = rememberCoroutineScope()
-            val trayIcon = rememberTrayIcon()
-            var trayTransfers by remember { mutableStateOf(state.transfers) }
-            var lastTrayRebuild by remember { mutableStateOf(0L) }
-            val transferSignature = state.transfers.joinToString("|") { "${it.fileName}:${it.state}:${it.progress}" }
 
             fun show() {
                 visible = true
@@ -108,12 +104,31 @@ fun main(args: Array<String>) {
                 onDispose { showWindow.set({}) }
             }
 
-            LaunchedEffect(transferSignature) {
-                val now = System.currentTimeMillis()
-                val remaining = (5_000L - (now - lastTrayRebuild)).coerceAtLeast(0L)
-                if (remaining > 0) delay(remaining)
-                trayTransfers = state.transfers
-                lastTrayRebuild = System.currentTimeMillis()
+            // 原生系统托盘（AWT TrayIcon，对标原 Tauri NSStatusItem）：
+            // setImageAutoSize(true) 解决图标模糊；macOS 左键点击弹出 PopupMenu。
+            val tray = remember {
+                io.github.yuanbaobaoo.petallink.platform.DesktopTray(
+                    onShow = { SwingUtilities.invokeLater(::show) },
+                    onRefresh = { scope.launch { root.viewModel.refresh() } },
+                    onQuit = { SwingUtilities.invokeLater(::quit) },
+                ).also { it.install() }
+            }
+            DisposableEffect(Unit) {
+                onDispose { tray.remove() }
+            }
+            // 同步状态到托盘（tooltip / 登录态 / 传输段 / 版本号）
+            LaunchedEffect(state.syncStatus) { tray.tooltip = "PetalLink · ${state.syncStatus}" }
+            LaunchedEffect(state.loggedIn) { tray.loggedIn = state.loggedIn }
+            LaunchedEffect(state.appVersion) { tray.versionLabel = "PetalLink ${state.appVersion}" }
+            LaunchedEffect(state.transfers) {
+                // 仅展示进行中（Pending/Running/VerifyingRemote）任务
+                tray.activeTransfers = state.transfers.filter {
+                    it.state in setOf(
+                        io.github.yuanbaobaoo.petallink.sync.TransferState.Pending,
+                        io.github.yuanbaobaoo.petallink.sync.TransferState.Running,
+                        io.github.yuanbaobaoo.petallink.sync.TransferState.VerifyingRemote,
+                    )
+                }
             }
 
             LaunchedEffect(visible) {
@@ -126,28 +141,6 @@ fun main(args: Array<String>) {
             LaunchedEffect(state.updateReadyToQuit) {
                 if (state.updateReadyToQuit) quit()
             }
-
-            Tray(
-                icon = trayIcon,
-                tooltip = "PetalLink · ${state.syncStatus}",
-                onAction = ::show,
-                menu = {
-                    Item("显示 PetalLink", onClick = ::show)
-                    Item("立即刷新", onClick = root.viewModel::refresh, enabled = state.loggedIn)
-                    if (trayTransfers.isNotEmpty()) {
-                        Separator()
-                        trayTransfers.forEach { transfer ->
-                            Item(transfer.fileName.take(20), onClick = {}, enabled = false)
-                            Item(
-                                "${if (transfer.direction == "upload") "上传" else "下载"} ${(transfer.progress * 100).toInt()}% · ${transfer.state}",
-                                onClick = {}, enabled = false,
-                            )
-                        }
-                    }
-                    Separator()
-                    Item("退出", onClick = ::quit)
-                },
-            )
 
             Window(
                 visible = visible,
@@ -285,28 +278,5 @@ fun main(args: Array<String>) {
         }
     } finally {
         instance.close()
-    }
-}
-
-/**
- * 加载托盘图标 Painter（对标原 Tauri menubar-icon.png）。
- *
- * 从 resources/assets/menubar-icon.png 加载真实图标；加载失败回退 Material Menu 图标，
- * 保证托盘始终可用。
- */
-@Composable
-private fun rememberTrayIcon(): Painter {
-    val pngIcon = remember {
-        runCatching {
-            val loader = Thread.currentThread().contextClassLoader ?: ClassLoader.getSystemClassLoader()
-            loader.getResourceAsStream("assets/menubar-icon.png")?.use { it.readAllBytes() }
-        }.getOrNull()
-    }
-    return if (pngIcon != null) {
-        remember(pngIcon) {
-            BitmapPainter(org.jetbrains.skia.Image.makeFromEncoded(pngIcon).toComposeImageBitmap())
-        }
-    } else {
-        rememberVectorPainter(Icons.Default.Menu)
     }
 }

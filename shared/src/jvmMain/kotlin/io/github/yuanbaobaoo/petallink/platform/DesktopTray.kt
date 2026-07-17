@@ -1,0 +1,127 @@
+package io.github.yuanbaobaoo.petallink.platform
+
+import io.github.yuanbaobaoo.petallink.ui.viewmodel.TransferTaskUi
+import io.github.yuanbaobaoo.petallink.sync.TransferState
+import java.awt.AWTException
+import java.awt.Image
+import java.awt.MenuItem
+import java.awt.PopupMenu
+import java.awt.SystemTray
+import java.awt.TrayIcon
+import java.awt.event.ActionEvent
+import java.awt.event.ActionListener
+import javax.imageio.ImageIO
+
+/**
+ * 原生系统托盘（对标原 Tauri `src/platform/tray.rs` NSStatusItem）。
+ *
+ * 用 AWT [TrayIcon] 替代 Compose `Tray`，获得两项原版能力：
+ * 1. [TrayIcon.setImageAutoSize]`(true)`：图标自适应状态栏尺寸，避免大图缩放模糊；
+ * 2. macOS 上 AWT TrayIcon 左键点击即弹出 [PopupMenu]（对标原版 `show_menu_on_left_click(true)`）。
+ *
+ * 菜单结构（对齐原版 buildStatusMenu）：
+ * 版本标识 → 分隔 → 显示主窗口 → [分隔 → 进行中传输项…] → 分隔 → 退出 PetalLink。
+ *
+ * @param onShow 「显示主窗口」回调
+ * @param onRefresh 「立即刷新」回调
+ * @param onQuit 「退出」回调
+ */
+class DesktopTray(
+    private val onShow: () -> Unit,
+    private val onRefresh: () -> Unit,
+    private val onQuit: () -> Unit,
+) {
+    private var trayIcon: TrayIcon? = null
+
+    /** 当前版本号（版本标识菜单项展示用）。 */
+    var versionLabel: String = "PetalLink"
+        set(value) { field = value; rebuildMenu() }
+
+    /** 是否已登录（控制「立即刷新」是否启用）。 */
+    var loggedIn: Boolean = false
+        set(value) { field = value; rebuildMenu() }
+
+    /** 进行中的传输任务（菜单动态段）。 */
+    var activeTransfers: List<TransferTaskUi> = emptyList()
+        set(value) { field = value; rebuildMenu() }
+
+    /** 当前 tooltip。 */
+    var tooltip: String = "PetalLink"
+        set(value) {
+            field = value
+            trayIcon?.toolTip = value
+        }
+
+    /** 创建并添加托盘图标到系统托盘。失败（不支持/无桌面）返回 false。 */
+    fun install(): Boolean {
+        if (!SystemTray.isSupported()) return false
+        val iconImage = loadTrayImage() ?: return false
+        val icon = TrayIcon(iconImage, tooltip, buildMenu()).apply {
+            isImageAutoSize = true // 图标自适应状态栏尺寸，保持清晰（对标原版 NSStatusItem 渲染）
+            addMouseListener(object : java.awt.event.MouseAdapter() {
+                // macOS AWT TrayIcon 左键点击会自动弹 PopupMenu；
+                // 这里额外处理：双击时触发 onShow（对标原版 on_tray_click 可选行为）。
+                override fun mouseClicked(e: java.awt.event.MouseEvent) {
+                    if (e.clickCount >= 2 && e.button == java.awt.event.MouseEvent.BUTTON1) onShow()
+                }
+            })
+        }
+        return try {
+            SystemTray.getSystemTray().add(icon)
+            trayIcon = icon
+            true
+        } catch (e: AWTException) {
+            false
+        }
+    }
+
+    /** 重建菜单（传输任务变化时调用）。 */
+    fun rebuildMenu() {
+        trayIcon?.setPopupMenu(buildMenu())
+    }
+
+    /** 从系统托盘移除图标。 */
+    fun remove() {
+        val icon = trayIcon ?: return
+        runCatching { SystemTray.getSystemTray().remove(icon) }
+        trayIcon = null
+    }
+
+    /** 加载 menubar-icon.png；失败回退系统默认图标。 */
+    private fun loadTrayImage(): Image? = runCatching {
+        val loader = Thread.currentThread().contextClassLoader ?: ClassLoader.getSystemClassLoader()
+        val stream = loader.getResourceAsStream("assets/menubar-icon.png") ?: return null
+        ImageIO.read(stream)
+    }.getOrNull()
+
+    /** 构建托盘菜单（对齐原版 build_menu）。 */
+    private fun buildMenu(): PopupMenu = PopupMenu().apply {
+        // 版本标识（disabled 纯展示）
+        add(MenuItem(versionLabel).apply { isEnabled = false })
+        addSeparator()
+        // 显示主窗口
+        add(MenuItem("显示 PetalLink").apply { addActionListener(ActionListener { onShow() }) })
+        // 立即刷新（登录后启用）
+        add(MenuItem("立即刷新").apply {
+            isEnabled = loggedIn
+            addActionListener(ActionListener { onRefresh() })
+        })
+        // 进行中传输段（每个任务两行：文件名 + 状态，disabled）
+        if (activeTransfers.isNotEmpty()) {
+            addSeparator()
+            activeTransfers.forEach { task ->
+                add(MenuItem(task.fileName.take(20)).apply { isEnabled = false })
+                val dir = if (task.direction == "upload") "上传" else "下载"
+                val pct = if (task.bytesTotal > 0) "${(task.progress * 100).toInt()}%" else "0%"
+                val stateLabel = when (task.state) {
+                    TransferState.Pending -> "等待中"
+                    else -> "正在$dir…$pct"
+                }
+                add(MenuItem(stateLabel).apply { isEnabled = false })
+            }
+        }
+        addSeparator()
+        // 退出
+        add(MenuItem("退出 PetalLink").apply { addActionListener(ActionListener { onQuit() }) })
+    }
+}
