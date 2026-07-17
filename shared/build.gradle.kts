@@ -10,25 +10,39 @@ plugins {
 }
 
 val petalLinkVersion = providers.gradleProperty("petalLinkVersion").get()
+// 构建档案（dev/release）是 bundle id、运行时数据目录与 LaunchAgent label 的唯一真相源。
+// 默认 release：沿用原 Tauri 的 prod bundle id，保证老用户数据目录与单实例锁不变。
+// dev：附加 -dev 后缀，与 release 包在系统层（LaunchServices）、数据目录、开机自启上完全隔离。
+val buildProfile = providers.gradleProperty("petalLinkBuildProfile").orElse("release").get().lowercase()
+require(buildProfile == "dev" || buildProfile == "release") {
+    "petalLinkBuildProfile 仅支持 dev/release，当前值：$buildProfile"
+}
+val prodBundleId = "io.github.yuanbaobaoo.PetalLink"
+val devBundleId = "$prodBundleId-dev"
+val bundleId = if (buildProfile == "dev") devBundleId else prodBundleId
 val updateEndpoint = providers.environmentVariable("PETALLINK_UPDATE_ENDPOINT")
     .orElse("https://github.com/yuanbaobaoo/PetalLink/releases/latest/download/PetalLink-update.json")
 val updateTeamId = providers.environmentVariable("PETALLINK_UPDATE_TEAM_ID").orElse("")
 val generatedBuildInfo = layout.buildDirectory.dir("generated/petallink-build-info/kotlin")
 val generatePetalLinkBuildInfo by tasks.registering {
     inputs.property("version", petalLinkVersion)
+    inputs.property("buildProfile", buildProfile)
+    inputs.property("bundleId", bundleId)
     inputs.property("updateEndpoint", updateEndpoint)
     inputs.property("updateTeamId", updateTeamId)
     outputs.dir(generatedBuildInfo)
     doLast {
         val output = generatedBuildInfo.get().file(
-            "io/github/yuanbaobaao/petallink/core/BuildInfo.kt",
+            "io/github/yuanbaobaoo/petallink/core/BuildInfo.kt",
         ).asFile
         output.parentFile.mkdirs()
         output.writeText(
-            """package io.github.yuanbaobaao.petallink.core
+            """package io.github.yuanbaobaoo.petallink.core
 
 object BuildInfo {
     const val VERSION: String = "$petalLinkVersion"
+    const val BUILD_PROFILE: String = "$buildProfile"
+    const val BUNDLE_ID: String = "$bundleId"
     const val UPDATE_ENDPOINT: String = "${updateEndpoint.get()}"
     const val UPDATE_TEAM_ID: String = "${updateTeamId.get()}"
 }
@@ -79,7 +93,7 @@ tasks.named("compileKotlinJvm").configure { dependsOn(generatePetalLinkBuildInfo
 sqldelight {
     databases {
         create("PetalLinkDatabase") {
-            packageName.set("io.github.yuanbaobaao.petallink.data")
+            packageName.set("io.github.yuanbaobaoo.petallink.data")
         }
     }
 }
@@ -87,7 +101,7 @@ sqldelight {
 // Compose Desktop 可运行分发
 compose.desktop {
     application {
-        mainClass = "io.github.yuanbaobaao.petallink.MainKt"
+        mainClass = "io.github.yuanbaobaoo.petallink.MainKt"
         nativeDistributions {
             // SQLite JDBC 通过反射使用 JDBC；jlink 的静态分析无法自动发现该模块。
             modules("java.sql")
@@ -97,7 +111,7 @@ compose.desktop {
             description = "华为云盘 macOS 客户端开源版"
             vendor = "PetalLink"
             macOS {
-                bundleID = "io.github.yuanbaobaoo.PetalLink"
+                bundleID = bundleId
                 minimumSystemVersion = "12.0"
                 packageVersion = petalLinkVersion
                 packageBuildVersion = petalLinkVersion

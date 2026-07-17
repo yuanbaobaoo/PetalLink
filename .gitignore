@@ -32,12 +32,6 @@ build/
 !gradle/wrapper/gradle-wrapper.jar
 *.kotlin/
 
-# Xcode / CocoaPods 生成产物（由 XcodeGen + pod install 生成）
-macosApp/*.xcodeproj
-macosApp/*.xcworkspace
-macosApp/Podfile.lock
-macosApp/Pods/
-
 # Kotlin/Native 临时
 .kotlin/
 konan/

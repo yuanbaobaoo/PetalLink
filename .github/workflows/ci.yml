@@ -27,8 +27,17 @@ jobs:
       - name: Build unsigned DMG
         run: ./gradlew :shared:packageDmg --stacktrace
       - name: Verify unsigned app metadata
-        run: scripts/verify-macos-artifacts.sh shared/build/compose/binaries/main/app/PetalLink.app
+        run: scripts/verify-macos-artifacts.sh shared/build/compose/binaries/main/app/PetalLink.app "" unsigned release
       - name: Smoke test packaged app
+        run: scripts/smoke-test-macos-app.sh shared/build/compose/binaries/main/app/PetalLink.app
+      - name: Build unsigned dev DMG
+        run: |
+          # packageDmg 输出到固定的 main/ 目录，dev 构建前清掉 release 产物避免混存。
+          rm -rf shared/build/compose/binaries/main
+          ./gradlew :shared:packageDmg -PpetalLinkBuildProfile=dev --stacktrace
+      - name: Verify unsigned dev app metadata
+        run: scripts/verify-macos-artifacts.sh shared/build/compose/binaries/main/app/PetalLink.app "" unsigned dev
+      - name: Smoke test packaged dev app
         run: scripts/smoke-test-macos-app.sh shared/build/compose/binaries/main/app/PetalLink.app
       - name: Upload test reports
         if: always()
