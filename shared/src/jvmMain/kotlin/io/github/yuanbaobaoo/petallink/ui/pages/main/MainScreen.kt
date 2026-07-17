@@ -15,9 +15,12 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -26,7 +29,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -40,8 +45,8 @@ import io.github.yuanbaobaoo.petallink.ui.components.mate.MateEmpty
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateHDivider
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateInfoBanner
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateSearchField
-import io.github.yuanbaobaoo.petallink.ui.components.mate.MateVDivider
-import io.github.yuanbaobaoo.petallink.ui.theme.BrandColor
+import io.github.yuanbaobaoo.petallink.ui.theme.FolderAmber
+import io.github.yuanbaobaoo.petallink.ui.theme.FolderAmberBg
 import io.github.yuanbaobaoo.petallink.ui.theme.LocalSemanticColors
 import io.github.yuanbaobaoo.petallink.ui.viewmodel.BrowserBreadcrumb
 import io.github.yuanbaobaoo.petallink.ui.viewmodel.FileBrowserViewModel
@@ -53,8 +58,8 @@ import io.github.yuanbaobaoo.petallink.update.UpdateManifest
 /**
  * 主界面（对标原 Vue MainPage.vue）。
  *
- * 左栏 Sidebar(220px) + 右侧主区：
- * AppBar(56px) + info-area + Breadcrumb(32px+底分隔线) + 文件区（搜索结果 / 文件列表）+ TransferPopover 浮层。
+ * 左栏 Sidebar(248px) + 右侧主区：
+ * AppBar(64px，v2 .toolbar) + info-area + Breadcrumb(40px+底分隔线) + 文件区（搜索结果 / 文件列表）+ TransferPopover 浮层。
  */
 @Composable
 fun MainScreen(
@@ -110,17 +115,18 @@ fun MainScreen(
             updateDownloadProgress = updateDownloadProgress,
             updateAvailableVersion = updateAvailableVersion,
             onDismissUpdate = onDismissUpdate,
+            onInstallUpdate = onInstallUpdate,
             onNavigate = onNavigate,
         )
 
         // 右侧主区
         Column(modifier = Modifier.fillMaxHeight().background(semantic.bgContainer)) {
-            // AppBar 56px
+            // AppBar 64px（v2 .toolbar：h64，padding 0 20px，gap 8px）
             Row(
-                modifier = Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 16.dp),
+                modifier = Modifier.fillMaxWidth().height(64.dp).padding(horizontal = 20.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                // 左侧：搜索框 + 清除按钮（flex:1）
+                // 左侧：搜索框 + 清除按钮（v2：flex:1，max-width 420px；weight fill=false 让剩余空间留在按钮前）
                 MateSearchField(
                     value = searchKeyword,
                     onValueChange = { searchKeyword = it },
@@ -131,7 +137,7 @@ fun MainScreen(
                             onSearch(searchKeyword)
                         }
                     },
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.weight(1f, fill = false).widthIn(max = 420.dp),
                     placeholder = "搜索文件和文件夹...",
                 )
                 if (searchKeyword.isNotEmpty()) {
@@ -145,30 +151,29 @@ fun MainScreen(
                         },
                     )
                 }
-                Spacer(Modifier.width(4.dp))
-                // 分隔线（app-bar__sep，1px×24px）
-                MateVDivider(height = 24.dp)
-                Spacer(Modifier.width(4.dp))
-                // 工具组（gap 4px）
+                Spacer(Modifier.weight(1f))
+                // 工具组（v2：无分隔线，按钮直接排，gap 8px；整体右对齐——weight(1f) 弹簧把按钮组推到右侧）
                 if (mountConfigured) {
+                    // 「同步索引」：v2 主按钮（PRIMARY 品牌渐变）
                     MateButton(
                         label = "同步索引",
-                        variant = MateButtonVariant.ICON_TEXT,
+                        variant = MateButtonVariant.PRIMARY,
                         icon = "refresh",
                         onClick = onRefresh,
                         loading = sync.isIndexing,
                         disabled = sync.isIndexing,
                     )
-                    Spacer(Modifier.width(4.dp))
+                    Spacer(Modifier.width(8.dp))
                 }
+                // 「传输队列」：v2 软色按钮（SOFT 浅蓝底）
                 MateButton(
                     label = "传输队列",
-                    variant = MateButtonVariant.ICON_TEXT,
+                    variant = MateButtonVariant.SOFT,
                     icon = "transfer",
                     onClick = { showTransferPopover = !showTransferPopover },
                 )
                 if (mountConfigured) {
-                    Spacer(Modifier.width(4.dp))
+                    Spacer(Modifier.width(8.dp))
                     MateButton(
                         label = "Finder",
                         variant = MateButtonVariant.ICON_TEXT,
@@ -176,7 +181,7 @@ fun MainScreen(
                         onClick = onOpenFinder,
                     )
                 }
-                Spacer(Modifier.width(4.dp))
+                Spacer(Modifier.width(8.dp))
                 MateButton(variant = MateButtonVariant.ICON, icon = "settings", onClick = onOpenSettings)
             }
             // AppBar 底分隔线
@@ -239,7 +244,7 @@ fun MainScreen(
     }
 }
 
-/** 搜索结果区（对标原 Vue .search-results）。 */
+/** 搜索结果区（v2：对标 02-main.html 场景 3，header + 56px 结果行 + 32px 色块 tile）。 */
 @Composable
 private fun SearchResults(
     keyword: String,
@@ -249,14 +254,14 @@ private fun SearchResults(
 ) {
     val semantic = LocalSemanticColors.current
     Column(modifier = Modifier.fillMaxSize()) {
-        // header
+        // header（v2：13.5sp semibold textSecondary，padding 14/12/10）
         Box(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+            modifier = Modifier.fillMaxWidth().padding(start = 12.dp, top = 14.dp, end = 12.dp, bottom = 10.dp),
         ) {
             Text(
                 if (searching) "搜索中…" else "搜索：$keyword",
-                fontSize = 13.sp,
-                fontWeight = androidx.compose.ui.text.font.FontWeight.Medium,
+                fontSize = 13.5.sp,
+                fontWeight = FontWeight.SemiBold,
                 color = semantic.textSecondary,
             )
         }
@@ -265,26 +270,37 @@ private fun SearchResults(
         } else {
             LazyColumn(modifier = Modifier.fillMaxSize()) {
                 items(results, key = { it.id ?: it.name ?: "" }) { file ->
+                    // 结果行（v2 .file-row：h56，padding 0 12px，gap 12px）
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .height(56.dp)
                             .clickable(
                                 interactionSource = remember { MutableInteractionSource() },
                                 indication = null,
                             ) { if (file.isFolder()) onEnterFolder(file) }
-                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                            .padding(horizontal = 12.dp),
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
-                        MateIcon(
-                            name = if (file.isFolder()) "folder" else "file",
-                            size = 20.dp,
-                            tint = if (file.isFolder()) BrandColor else semantic.textPlaceholder,
-                        )
+                        // 32×32 radius 6 色块 tile（v2 .ftile：文件夹 FolderAmberBg/FolderAmber，文件 bgFill/textSecondary）
+                        Box(
+                            modifier = Modifier
+                                .size(32.dp)
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(if (file.isFolder()) FolderAmberBg else semantic.bgFill),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            MateIcon(
+                                name = if (file.isFolder()) "folder" else "file",
+                                size = 18.dp,
+                                tint = if (file.isFolder()) FolderAmber else semantic.textSecondary,
+                            )
+                        }
                         Column {
                             Text(
                                 file.name ?: file.fileName ?: "未命名",
-                                fontSize = 14.sp,
+                                fontSize = 15.sp,
                                 color = semantic.textPrimary,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,

@@ -5,9 +5,10 @@ package io.github.yuanbaobaoo.petallink.ui.pages.main
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -17,12 +18,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -32,10 +30,11 @@ import io.github.yuanbaobaoo.petallink.ui.theme.LocalSemanticColors
 import io.github.yuanbaobaoo.petallink.ui.viewmodel.BrowserBreadcrumb
 
 /**
- * 面包屑导航（对标原 Vue Breadcrumb.vue）。
+ * 面包屑导航（视觉对标 design/v2/02-main.html 的 .breadcrumb）。
  *
- * 高 32px，横向 scroll（超宽不换行），padding 0/16，gap 4；底 0.5px border，白底。
- * 分隔符 `›`（11px placeholder 灰）；普通段 13px secondary 可点 hover→brand；当前段 primary + medium + 不可点。
+ * v2：高 40px，横向 scroll（超宽不换行），padding 0/20，gap 6；底部 MateHDivider 分隔线保留。
+ * 分隔符 `›`（13sp placeholder 灰）；普通段 14sp secondary 可点 hover→BrandColor；
+ * 当前段 14sp primary + semibold + 不可点。
  *
  * @param crumbs 路径栈（最后一个为当前目录）
  * @param onNavigate 点击非末级段跳转
@@ -51,20 +50,21 @@ fun Breadcrumb(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(32.dp)
+                .height(40.dp)
                 .background(semantic.bgContainer)
                 .horizontalScroll(scroll)
-                .padding(horizontal = 16.dp),
+                .padding(horizontal = 20.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             crumbs.forEachIndexed { index, crumb ->
                 if (index > 0) {
-                    Text("›", fontSize = 11.sp, color = semantic.textPlaceholder)
+                    Text("›", fontSize = 13.sp, color = semantic.textPlaceholder)
                 }
                 val isCurrent = index == crumbs.lastIndex
-                // hover 变 brand 色（对标 .crumb:hover）
-                var hovered by remember { mutableStateOf(false) }
+                // hover 变 brand 色（对标 .breadcrumb__item:hover）
+                val interactionSource = remember { MutableInteractionSource() }
+                val hovered by interactionSource.collectIsHoveredAsState()
                 val color = when {
                     isCurrent -> semantic.textPrimary
                     hovered -> BrandColor
@@ -72,25 +72,27 @@ fun Breadcrumb(
                 }
                 Text(
                     crumb.name,
-                    fontSize = 13.sp,
+                    fontSize = 14.sp,
                     color = color,
-                    fontWeight = if (isCurrent) FontWeight.Medium else FontWeight.Normal,
-                    modifier = Modifier.then(
-                        if (isCurrent) Modifier
-                        else Modifier.clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null,
-                        ) { onNavigate(crumb) },
-                    ),
+                    fontWeight = if (isCurrent) FontWeight.SemiBold else FontWeight.Normal,
+                    modifier = Modifier
+                        .hoverable(interactionSource = interactionSource, enabled = !isCurrent)
+                        .then(
+                            if (isCurrent) Modifier
+                            else Modifier.clickable(
+                                interactionSource = interactionSource,
+                                indication = null,
+                            ) { onNavigate(crumb) },
+                        ),
                 )
             }
         }
-        // 底分隔线（对标 .breadcrumb border-bottom: 0.5px）
+        // 底部分隔线（v2 保留 MateHDivider）
         MateHDivider()
     }
 }
 
-/** 面包屑底部 0.5px 分隔线（保留兼容，实际已内嵌在 Breadcrumb 内）。 */
+/** 面包屑底部分隔线（保留兼容，实际已内嵌在 Breadcrumb 内）。 */
 @Composable
 fun BreadcrumbDivider() {
     MateHDivider()

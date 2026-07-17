@@ -35,14 +35,14 @@ import io.github.yuanbaobaoo.petallink.ui.theme.BrandColor
 import io.github.yuanbaobaoo.petallink.ui.theme.LocalSemanticColors
 
 /**
- * 应用 Logo（对标原 Vue `<MateAppLogo size text container>`）。
+ * 应用 Logo（v2：直接使用真实 logo.png，品牌蓝 squircle）。
  *
- * 从 resources 加载 PNG 图标；container 模式包 64×64 圆角容器 + 品牌阴影。
+ * 从 resources 加载 PNG 图标；container 模式显示 64×64 大图（登录页用），不再包白色容器。
  * text 非空时在右侧显示「PetalLink」文字（字号 = round(size*0.42)，semibold）。
  *
  * @param size 图标尺寸（dp），默认 26
  * @param text 附加文字，空串则隐藏
- * @param container 是否包 64×64 容器（登录页用）
+ * @param container 是否 64×64 大图模式（登录页用）
  */
 @Composable
 fun MateAppLogo(
@@ -51,27 +51,20 @@ fun MateAppLogo(
     container: Boolean = false,
 ) {
     if (container) {
-        // container 模式：64×64，padding 5，radius 16，品牌阴影
-        Box(
-            modifier = Modifier
-                .size(64.dp)
-                .clip(RoundedCornerShape(16.dp))
-                .background(Color.White)
-                .padding(5.dp),
-            contentAlignment = Alignment.Center,
-        ) { LogoImage(size = 54.dp) }
+        // container 模式：64×64 真实 logo（自带品牌蓝 squircle 底）
+        LogoImage(size = 64.dp)
         return
     }
     Row(verticalAlignment = Alignment.CenterVertically) {
         LogoImage(size = size)
         if (text.isNotEmpty()) {
-            Spacer(Modifier.width(6.dp))
+            Spacer(Modifier.width(8.dp))
             // 文字字号 = round(size_px * 0.42)；近似用 size.value*0.42。
             Text(
                 text,
                 fontSize = (size.value * 0.42f).sp,
                 fontWeight = FontWeight.SemiBold,
-                color = Color(0xFF181818),
+                color = Color(0xFF1C1C1E),
             )
         }
     }
@@ -111,15 +104,15 @@ private fun LogoImage(size: Dp) {
         Image(
             bitmap = bitmap,
             contentDescription = "PetalLink",
-            modifier = Modifier.size(size).clip(RoundedCornerShape(size * 0.2f)),
+            modifier = Modifier.size(size).clip(RoundedCornerShape(size * 0.225f)),
         )
     } else {
-        // 回退：品牌色圆角方块 + 云朵图标（仅在 logo.png 加载失败时出现）
+        // 回退：品牌渐变圆角方块 + 云朵图标（仅在 logo.png 加载失败时出现）
         Box(
             modifier = Modifier
                 .size(size)
-                .clip(RoundedCornerShape(size * 0.2f))
-                .background(BrandColor),
+                .clip(RoundedCornerShape(size * 0.225f))
+                .background(io.github.yuanbaobaoo.petallink.ui.theme.BrandGradient),
             contentAlignment = Alignment.Center,
         ) {
             io.github.yuanbaobaoo.petallink.ui.components.MateIcon(

@@ -1,34 +1,51 @@
 package io.github.yuanbaobaoo.petallink.ui.theme
 
 /**
- * 设计系统 Token（对标原项目 `app/styles/tokens.css` + `docs/09-设计系统.md`）。
+ * 设计系统 Token（v2 重设计：logo 品牌蓝 + 小圆角 + 卡片化）。
  *
- * 视觉学派：Modern Minimal（Tech Utility）· TDesign Enterprise × macOS Native。
+ * 视觉学派：品牌蓝（取自 app logo 主色 #0053DB）× macOS Native。
  * 这里集中定义颜色、间距、圆角、字号、字体栈等不变量；随明暗主题切换的语义别名见 [SemanticColors]。
  */
 object DesignTokens {
 
     // ------------------------------------------------------------------
-    // 品牌色（对标 TDesign brand）
+    // 品牌色（取自 logo 主色 #0053DB 及其派生色阶）
     // ------------------------------------------------------------------
-    const val BRAND = "#0052D9"
-    const val BRAND_HOVER = "#366EF4"
-    const val BRAND_ACTIVE = "#003CAB"
-    const val BRAND_LIGHT = "#D9E1FF"
-    const val BRAND_LIGHTER = "#F2F3FF"
+    const val BRAND = "#0053DB"
+    const val BRAND_HOVER = "#4A8BF0"
+    const val BRAND_ACTIVE = "#0047B8"
+    const val BRAND_LIGHT = "#B7D0F7"
+    const val BRAND_100 = "#DCE8FC"
+    const val BRAND_LIGHTER = "#EFF4FE"
 
     // ------------------------------------------------------------------
     // 功能色（语义色主体）
     // ------------------------------------------------------------------
-    const val SUCCESS = "#2BA471"
-    const val SUCCESS_BG = "#E3F9E9"
-    const val WARNING = "#E37318"
-    const val WARNING_BG = "#FFF1E9"
-    const val ERROR = "#D54941"
-    const val ERROR_BG = "#FFF0ED"
+    const val SUCCESS = "#0CA678"
+    const val SUCCESS_BG = "#E3F5EE"
+    const val WARNING = "#F08C00"
+    const val WARNING_BG = "#FFF3DE"
+    const val ERROR = "#E5484D"
+    const val ERROR_BG = "#FDECEC"
+    const val INFO = "#3B82F6"
+    const val INFO_BG = "#E8F0FE"
 
     // ------------------------------------------------------------------
-    // 灰阶（14 级，对标 TDesign gray，逐级加深）
+    // 文件类型 tile 类别色（文件夹琥珀 / 文档靛蓝 / 图片粉 / 视频紫 / 表格绿）
+    // ------------------------------------------------------------------
+    const val FOLDER_AMBER = "#F0A63C"
+    const val FOLDER_AMBER_BG = "#FFF4DE"
+    const val TILE_DOC = "#6366F1"
+    const val TILE_DOC_BG = "#EEF2FF"
+    const val TILE_IMAGE = "#EC4899"
+    const val TILE_IMAGE_BG = "#FDE7F3"
+    const val TILE_VIDEO = "#8B5CF6"
+    const val TILE_VIDEO_BG = "#F3E8FF"
+    const val TILE_SHEET = "#10B981"
+    const val TILE_SHEET_BG = "#E6F7EE"
+
+    // ------------------------------------------------------------------
+    // 灰阶（14 级，逐级加深）
     // ------------------------------------------------------------------
     const val GRAY_1 = "#F3F3F3"
     const val GRAY_2 = "#EEEEEE"
@@ -66,22 +83,23 @@ object DesignTokens {
     const val SPACING_XXL = 32
 
     // ------------------------------------------------------------------
-    // 圆角（px）
+    // 圆角（px，整体收小）
     // ------------------------------------------------------------------
-    const val RADIUS_SM = 3
-    const val RADIUS_MD = 6
-    const val RADIUS_LG = 9
+    const val RADIUS_SM = 5
+    const val RADIUS_MD = 8
+    const val RADIUS_LG = 10
+    const val RADIUS_XL = 12
 
     // ------------------------------------------------------------------
-    // 字号阶梯（px）
+    // 字号阶梯（px，整体 +1，避免桌面端文字发虚）
     // ------------------------------------------------------------------
-    const val FONT_DISPLAY = 36
-    const val FONT_TITLE_LG = 24
-    const val FONT_TITLE_MD = 20
-    const val FONT_TITLE_SM = 16
-    const val FONT_BODY = 14
-    const val FONT_BODY_SM = 13
-    const val FONT_CAPTION = 12
+    const val FONT_DISPLAY = 37
+    const val FONT_TITLE_LG = 25
+    const val FONT_TITLE_MD = 21
+    const val FONT_TITLE_SM = 17
+    const val FONT_BODY = 15
+    const val FONT_BODY_SM = 14
+    const val FONT_CAPTION = 13
 
     // ------------------------------------------------------------------
     // 字重
@@ -103,27 +121,29 @@ object DesignTokens {
     const val WINDOW_HEIGHT = 800
     const val WINDOW_MIN_WIDTH = 700
     const val WINDOW_MIN_HEIGHT = 480
-    const val TITLEBAR_HEIGHT = 38
-    const val APPBAR_HEIGHT = 56
-    const val SIDEBAR_WIDTH = 220
-    const val SETTINGS_NAV_WIDTH = 200
-    const val BREADCRUMB_HEIGHT = 32
-    const val SYNC_BAR_HEIGHT = 32
-    const val FILE_HEADER_HEIGHT = 36
-    const val FILE_ROW_HEIGHT = 44
-    const val TRANSFER_POPOVER_WIDTH = 420
-    const val TRANSFER_POPOVER_HEIGHT = 560
+    const val TITLEBAR_HEIGHT = 44
+    const val APPBAR_HEIGHT = 64
+    const val SIDEBAR_WIDTH = 248
+    const val SETTINGS_NAV_WIDTH = 240
+    const val BREADCRUMB_HEIGHT = 40
+    const val SYNC_BAR_HEIGHT = 44
+    const val FILE_HEADER_HEIGHT = 38
+    const val FILE_ROW_HEIGHT = 56
+    const val TRANSFER_POPOVER_WIDTH = 440
+    const val TRANSFER_POPOVER_HEIGHT = 580
 }
 
 /**
- * 随明暗主题切换的语义别名（对标 tokens.css 的 `:root` 与 `@media dark` 覆盖）。
+ * 随明暗主题切换的语义别名（对标 v2 设计的 `:root` 语义变量）。
  *
- * 浅色用 [Light]，深色用 [Dark]，由 [PetalLinkTheme] 按 `isSystemInDarkTheme` 注入 [LocalSemanticColors]。
+ * 浅色用 [LightSemanticColors]，深色用 [DarkSemanticColors]，
+ * 由 PetalLinkTheme 按 `isSystemInDarkTheme` 注入 LocalSemanticColors。
  */
 data class SemanticColors(
     // 页面与容器背景
     val bgPage: String,
     val bgContainer: String,
+    val bgFill: String,
     val bgHover: String,
     val bgActive: String,
     // 边框
@@ -144,30 +164,32 @@ data class SemanticColors(
 
 /** 浅色主题语义别名。 */
 val LightSemanticColors = SemanticColors(
-    bgPage = "#F5F5F5",
+    bgPage = "#F5F5F7",
     bgContainer = "#FFFFFF",
-    bgHover = "#F3F3F3",
-    bgActive = "#E8E8E8",
-    border = "#DDDDDD",
-    borderHover = "#C6C6C6",
+    bgFill = "#F1F1F3",
+    bgHover = "#F7F7F9",
+    bgActive = "#ECECEF",
+    border = "rgba(0,0,0,0.06)",
+    borderHover = "rgba(0,0,0,0.1)",
     textPrimary = "rgba(0,0,0,0.9)",
     textSecondary = "rgba(0,0,0,0.6)",
     textPlaceholder = "rgba(0,0,0,0.35)",
     brandLight = DesignTokens.BRAND_LIGHT,
     brandLighter = DesignTokens.BRAND_LIGHTER,
-    shadowCard = "0 1px 4px rgba(0,0,0,0.08), 0 0 0 0.5px rgba(0,0,0,0.06)",
-    shadowDropdown = "0 4px 12px rgba(0,0,0,0.12), 0 0 0 0.5px rgba(0,0,0,0.06)",
-    shadowModal = "0 8px 24px rgba(0,0,0,0.16)",
+    shadowCard = "0 1px 2px rgba(16,24,40,0.05)",
+    shadowDropdown = "0 24px 64px -12px rgba(16,24,40,0.22), 0 0 0 0.5px rgba(0,0,0,0.05)",
+    shadowModal = "0 24px 64px -12px rgba(16,24,40,0.22)",
 )
 
-/** 深色主题语义别名（对标 tokens.css `@media dark`）。 */
+/** 深色主题语义别名。 */
 val DarkSemanticColors = SemanticColors(
     bgPage = "#181818",
     bgContainer = "#242424",
+    bgFill = "#2C2C2C",
     bgHover = "#2C2C2C",
-    bgActive = "#2C2C2C",
-    border = "#3E3E3E",
-    borderHover = "#5E5E5E",
+    bgActive = "#333333",
+    border = "rgba(255,255,255,0.08)",
+    borderHover = "rgba(255,255,255,0.16)",
     textPrimary = "rgba(255,255,255,0.9)",
     textSecondary = "rgba(255,255,255,0.6)",
     textPlaceholder = "rgba(255,255,255,0.35)",
@@ -180,10 +202,10 @@ val DarkSemanticColors = SemanticColors(
 )
 
 /**
- * 文件列表列定义（对标 FileListView 6 列）。
+ * 文件列表列定义（6 列）。
  *
- * checkbox 固定 40px，actions 固定 40px，status 固定 60px；
- * size/time 列宽可拖拽（默认 100/150，范围 64–400）。
+ * checkbox 固定 40px，actions 固定 44px，status 固定 72px；
+ * size/time 列宽可拖拽（默认 110/160，范围 64–400）。
  */
 object FileListColumns {
     data class Column(val key: String, val title: String, val defaultWidth: Int, val minWidth: Int, val maxWidth: Int)
@@ -191,9 +213,9 @@ object FileListColumns {
     val COLUMNS: List<Column> = listOf(
         Column("checkbox", "", 40, 40, 40),
         Column("name", "名称", 240, 80, 2000),
-        Column("size", "大小", 100, 64, 400),
-        Column("modified", "修改时间", 150, 64, 400),
-        Column("status", "状态", 60, 60, 60),
-        Column("actions", "操作", 40, 40, 40),
+        Column("size", "大小", 110, 64, 400),
+        Column("modified", "修改时间", 160, 64, 400),
+        Column("status", "状态", 72, 60, 80),
+        Column("actions", "操作", 44, 40, 48),
     )
 }

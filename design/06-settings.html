@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>06 · 设置 - PetalLink v2 原型</title>
+<link rel="stylesheet" href="assets/v2.css">
+<script src="assets/sprite.js"></script>
+</head>
+<body>
+<div class="canvas">
+
+  <!-- ============ 标签 1：同步目录 ============ -->
+  <div class="scene">
+    <div class="scene__label"><b>设置 · 同步目录</b>　已配置态（成功描边卡片）＋ 更换目录警示；底栏 保存 / 重置 / 已保存指示</div>
+    <div class="mac-window">
+      <div class="mac-titlebar">
+        <div class="traffic"><i></i><i></i><i></i></div>
+        <button class="btn-circle btn-circle--sm" style="margin-left:8px;"><span class="icon icon--16" style="transform:rotate(180deg);"><svg><use href="#i-arrow"/></svg></span></button>
+        <div class="mac-titlebar__title">PetalLink - 华为云盘客户端开源版</div>
+      </div>
+      <div class="mac-body">
+        <nav class="settings-nav">
+          <div class="settings-nav__title">设置</div>
+          <div class="settings-nav__group">通用</div>
+          <div class="nav-item is-active"><span class="icon icon--18"><svg><use href="#i-folder"/></svg></span>同步目录</div>
+          <div class="nav-item"><span class="icon icon--18"><svg><use href="#i-transfer"/></svg></span>传输设置</div>
+          <div class="nav-item"><span class="icon icon--18"><svg><use href="#i-settings"/></svg></span>高级设置</div>
+          <div class="settings-nav__group">其他</div>
+          <div class="nav-item"><span class="icon icon--18"><svg><use href="#i-info"/></svg></span>账号管理</div>
+          <div class="nav-item"><span class="icon icon--18"><svg><use href="#i-list"/></svg></span>日志查看</div>
+          <div class="nav-item"><span class="icon icon--18"><svg><use href="#i-cloud"/></svg></span>关于</div>
+        </nav>
+        <div style="flex:1;display:flex;flex-direction:column;min-width:0;">
+          <div class="settings-body" style="flex:1;">
+            <div class="section-header"><span class="icon icon--20"><svg><use href="#i-folder"/></svg></span>同步目录</div>
+            <div class="settings-panel" style="display:flex;flex-direction:column;align-items:center;gap:12px;padding:32px 24px;box-shadow:var(--sh-sm),0 0 0 1.5px rgba(12,166,120,0.35);">
+              <span class="dialog__icon-badge dialog__icon-badge--ok"><span class="icon icon--20"><svg><use href="#i-check"/></svg></span></span>
+              <div style="font-size:14px;font-weight:600;">当前同步目录</div>
+              <div style="font-size:12px;font-family:var(--mono);color:var(--ink-600);background:var(--bg-fill);border-radius:12px;padding:4px 12px;max-width:100%;overflow:hidden;text-overflow:ellipsis;">/Users/huawei/PetalLink</div>
+              <button class="btn-soft"><span class="icon icon--16"><svg><use href="#i-folder-open"/></svg></span>更换目录</button>
+            </div>
+            <div style="height:16px;"></div>
+            <div class="banner banner--info">
+              <span class="icon icon--16"><svg><use href="#i-info"/></svg></span>
+              <span class="banner__msg">更换同步目录将清除所有本地缓存与登录状态并重启，云盘文件不受影响。</span>
+            </div>
+          </div>
+          <div class="settings-footer">
+            <button class="btn"><span class="icon icon--16"><svg><use href="#i-check"/></svg></span>保存设置</button>
+            <button class="btn-ghost">重置默认</button>
+            <span style="flex:1;"></span>
+            <span class="chip chip--ok"><span class="dot dot--ok"></span>配置已保存</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 标签 2：传输设置 ============ -->
+  <div class="scene">
+    <div class="scene__label"><b>设置 · 传输设置</b>　并发数步进器（1-20）/ Debounce / 自动同步间隔 / 跳过文件</div>
+    <div class="mac-window">
+      <div class="mac-titlebar">
+        <div class="traffic"><i></i><i></i><i></i></div>
+        <button class="btn-circle btn-circle--sm" style="margin-left:8px;"><span class="icon icon--16" style="transform:rotate(180deg);"><svg><use href="#i-arrow"/></svg></span></button>
+        <div class="mac-titlebar__title">PetalLink - 华为云盘客户端开源版</div>
+      </div>
+      <div class="mac-body">
+        <nav class="settings-nav">
+          <div class="settings-nav__title">设置</div>
+          <div class="settings-nav__group">通用</div>
+          <div class="nav-item"><span class="icon icon--18"><svg><use href="#i-folder"/></svg></span>同步目录</div>
+          <div class="nav-item is-active"><span class="icon icon--18"><svg><use href="#i-transfer"/></svg></span>传输设置</div>
+          <div class="nav-item"><span class="icon icon--18"><svg><use href="#i-settings"/></svg></span>高级设置</div>
+          <div class="settings-nav__group">其他</div>
+          <div class="nav-item"><span class="icon icon--18"><svg><use href="#i-info"/></svg></span>账号管理</div>
+          <div class="nav-item"><span class="icon icon--18"><svg><use href="#i-list"/></svg></span>日志查看</div>
+          <div class="nav-item"><span class="icon icon--18"><svg><use href="#i-cloud"/></svg></span>关于</div>
+        </nav>
+        <div style="flex:1;display:flex;flex-direction:column;min-width:0;">
+          <div class="settings-body" style="flex:1;">
+            <div class="section-header"><span class="icon icon--20"><svg><use href="#i-transfer"/></svg></span>传输设置</div>
+            <div class="settings-panel">
+              <div class="group-header">传输参数</div>
+              <div class="setting-row">
+                <div class="setting-row__text">
+                  <div class="setting-row__label">并发上传数</div>
+                  <div class="setting-row__desc">同时进行的文件传输任务数量。较高值可提升大文件传输效率，但会占用更多网络带宽。</div>
+                </div>
+                <div class="setting-row__control">
+                  <div class="stepper">
+                    <button>−</button><span class="stepper__value">6</span><button>＋</button>
+                  </div>
+                  <span style="font-size:13px;color:var(--ink-400);">范围 1-20</span>
+                </div>
+              </div>
+              <div class="setting-row">
+                <div class="setting-row__text">
+                  <div class="setting-row__label">Debounce 时长</div>
+                  <div class="setting-row__desc">文件变更后等待多少秒再触发同步上传，避免频繁修改导致重复传输。</div>
+                </div>
+                <div class="setting-row__control">
+                  <div class="number-field"><input class="input" value="3"><span class="number-field__suffix">秒</span></div>
+                </div>
+              </div>
+              <div class="setting-row">
+                <div class="setting-row__text">
+                  <div class="setting-row__label">自动同步间隔</div>
+                  <div class="setting-row__desc">每隔多久自动从云端拉取最新变更（新增/修改/删除）。0 = 关闭自动同步，仅手动点「同步索引」。设为 60 以上时生效。</div>
+                </div>
+                <div class="setting-row__control">
+                  <div class="number-field"><input class="input" value="60"><span class="number-field__suffix">秒</span></div>
+                </div>
+              </div>
+              <div class="group-header">同步过滤</div>
+              <div class="setting-row" style="border-bottom:none;">
+                <div class="setting-row__text">
+                  <div class="setting-row__label">跳过文件（逗号分隔）</div>
+                  <div class="setting-row__desc">匹配名称的文件不会被同步，如 .DS_Store、临时文件。</div>
+                </div>
+                <div class="setting-row__control">
+                  <input class="input" style="width:280px;" value=".DS_Store, .tmp, ~$*, .Trash" placeholder=".DS_Store, .tmp, ~$*, .Trash">
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="settings-footer">
+            <button class="btn"><span class="icon icon--16"><svg><use href="#i-check"/></svg></span>保存设置</button>
+            <button class="btn-ghost">重置默认</button>
+            <span style="flex:1;"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 标签 3：高级设置 ============ -->
+  <div class="scene">
+    <div class="scene__label"><b>设置 · 高级设置</b>　开机自启 / OAuth 回调端口 / 清空缓存并重启</div>
+    <div class="mac-window">
+      <div class="mac-titlebar">
+        <div class="traffic"><i></i><i></i><i></i></div>
+        <button class="btn-circle btn-circle--sm" style="margin-left:8px;"><span class="icon icon--16" style="transform:rotate(180deg);"><svg><use href="#i-arrow"/></svg></span></button>
+        <div class="mac-titlebar__title">PetalLink - 华为云盘客户端开源版</div>
+      </div>
+      <div class="mac-body">
+        <nav class="settings-nav">
+          <div class="settings-nav__title">设置</div>
+          <div class="settings-nav__group">通用</div>
+          <div class="nav-item"><span class="icon icon--18"><svg><use href="#i-folder"/></svg></span>同步目录</div>
+          <div class="nav-item"><span class="icon icon--18"><svg><use href="#i-transfer"/></svg></span>传输设置</div>
+          <div class="nav-item is-active"><span class="icon icon--18"><svg><use href="#i-settings"/></svg></span>高级设置</div>
+          <div class="settings-nav__group">其他</div>
+          <div class="nav-item"><span class="icon icon--18"><svg><use href="#i-info"/></svg></span>账号管理</div>
+          <div class="nav-item"><span class="icon icon--18"><svg><use href="#i-list"/></svg></span>日志查看</div>
+          <div class="nav-item"><span class="icon icon--18"><svg><use href="#i-cloud"/></svg></span>关于</div>
+        </nav>
+        <div style="flex:1;display:flex;flex-direction:column;min-width:0;">
+          <div class="settings-body" style="flex:1;">
+            <div class="section-header"><span class="icon icon--20"><svg><use href="#i-settings"/></svg></span>高级设置</div>
+            <div class="settings-panel">
+              <div class="group-header">通用</div>
+              <div class="setting-row">
+                <div class="setting-row__text">
+                  <div class="setting-row__label">开机自启动</div>
+                  <div class="setting-row__desc">开机登录后自动在后台启动（仅菜单栏图标，不显示主窗口）。关闭后需手动打开 App。</div>
+                </div>
+                <div class="setting-row__control"><span class="switch is-on"></span></div>
+              </div>
+              <div class="group-header">OAuth</div>
+              <div class="setting-row">
+                <div class="setting-row__text">
+                  <div class="setting-row__label">OAuth 回调端口</div>
+                  <div class="setting-row__desc">本地 HTTP 回调服务器监听端口。修改后需与 AGC 后台 redirect_uri 保持一致。</div>
+                </div>
+                <div class="setting-row__control">
+                  <div class="number-field"><input class="input" value="9999"></div>
+                </div>
+              </div>
+              <div class="banner banner--info" style="margin:4px 0 8px;">
+                <span class="icon icon--16"><svg><use href="#i-info"/></svg></span>
+                <span class="banner__msg">回调地址固定为 http://127.0.0.1:&lt;端口&gt;/oauth/callback，修改端口后请同步更新 AGC 后台配置。</span>
+              </div>
+              <div class="group-header">维护</div>
+              <div class="setting-row" style="border-bottom:none;">
+                <div class="setting-row__text">
+                  <div class="setting-row__label">清空缓存并重启</div>
+                  <div class="setting-row__desc">清除登录状态、同步数据库、同步快照与配置文件，然后重启 App。适用于排查同步异常或切换账号时使用。</div>
+                </div>
+                <div class="setting-row__control">
+                  <button class="btn btn--danger"><span class="icon icon--16"><svg><use href="#i-trash"/></svg></span>清空</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="settings-footer">
+            <button class="btn"><span class="icon icon--16"><svg><use href="#i-check"/></svg></span>保存设置</button>
+            <button class="btn-ghost">重置默认</button>
+            <span style="flex:1;"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 标签 4：账号管理 ============ -->
+  <div class="scene">
+    <div class="scene__label"><b>设置 · 账号管理</b>　头像卡片 / 账号信息 / 存储配额 / 退出登录（无保存底栏）</div>
+    <div class="mac-window">
+      <div class="mac-titlebar">
+        <div class="traffic"><i></i><i></i><i></i></div>
+        <button class="btn-circle btn-circle--sm" style="margin-left:8px;"><span class="icon icon--16" style="transform:rotate(180deg);"><svg><use href="#i-arrow"/></svg></span></button>
+        <div class="mac-titlebar__title">PetalLink - 华为云盘客户端开源版</div>
+      </div>
+      <div class="mac-body">
+        <nav class="settings-nav">
+          <div class="settings-nav__title">设置</div>
+          <div class="settings-nav__group">通用</div>
+          <div class="nav-item"><span class="icon icon--18"><svg><use href="#i-folder"/></svg></span>同步目录</div>
+          <div class="nav-item"><span class="icon icon--18"><svg><use href="#i-transfer"/></svg></span>传输设置</div>
+          <div class="nav-item"><span class="icon icon--18"><svg><use href="#i-settings"/></svg></span>高级设置</div>
+          <div class="settings-nav__group">其他</div>
+          <div class="nav-item is-active"><span class="icon icon--18"><svg><use href="#i-info"/></svg></span>账号管理</div>
+          <div class="nav-item"><span class="icon icon--18"><svg><use href="#i-list"/></svg></span>日志查看</div>
+          <div class="nav-item"><span class="icon icon--18"><svg><use href="#i-cloud"/></svg></span>关于</div>
+        </nav>
+        <div style="flex:1;display:flex;flex-direction:column;min-width:0;">
+          <div class="settings-body" style="flex:1;">
+            <div class="section-header"><span class="icon icon--20"><svg><use href="#i-info"/></svg></span>账号管理</div>
+            <div class="settings-panel" style="display:flex;align-items:center;gap:16px;padding:16px 24px;">
+              <div class="avatar avatar--56">华</div>
+              <div style="font-size:16px;font-weight:600;">华小为</div>
+            </div>
+            <div class="settings-panel" style="margin-top:16px;">
+              <div class="group-header">账号信息</div>
+              <div class="info-row"><span class="info-row__label">显示名</span><span class="info-row__value">华小为</span></div>
+              <div class="info-row"><span class="info-row__label">手机号</span><span class="info-row__value">+86 138****6688</span></div>
+              <div class="info-row"><span class="info-row__label">邮箱</span><span class="info-row__value">未授权</span></div>
+              <div class="info-row"><span class="info-row__label">OpenID</span><span class="info-row__value info-row__value--mono">o6_bJ7ZkQ9x2mP4wT8vN1sL5dF3gH0jK</span></div>
+              <div class="group-header">存储配额</div>
+              <div class="info-row"><span class="info-row__label">已用空间</span><span class="info-row__value num">36.5 GB</span></div>
+              <div class="info-row"><span class="info-row__label">总容量</span><span class="info-row__value num">200.0 GB</span></div>
+              <div class="info-row"><span class="info-row__label">剩余空间</span><span class="info-row__value num">163.5 GB</span></div>
+              <div class="group-header">账号操作</div>
+              <div class="setting-row" style="border-bottom:none;">
+                <div class="setting-row__text">
+                  <div class="setting-row__label">退出登录</div>
+                  <div class="setting-row__desc">清除本地 token 并返回登录页。后台进程仍会继续，可从菜单栏彻底退出。</div>
+                </div>
+                <div class="setting-row__control">
+                  <button class="btn btn--danger"><span class="icon icon--16"><svg><use href="#i-x"/></svg></span>退出登录</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 标签 5：日志查看 ============ -->
+  <div class="scene">
+    <div class="scene__label"><b>设置 · 日志查看</b>　环形缓冲 1000 条 + 30 天滚动文件，入口跳转日志查看器</div>
+    <div class="mac-window">
+      <div class="mac-titlebar">
+        <div class="traffic"><i></i><i></i><i></i></div>
+        <button class="btn-circle btn-circle--sm" style="margin-left:8px;"><span class="icon icon--16" style="transform:rotate(180deg);"><svg><use href="#i-arrow"/></svg></span></button>
+        <div class="mac-titlebar__title">PetalLink - 华为云盘客户端开源版</div>
+      </div>
+      <div class="mac-body">
+        <nav class="settings-nav">
+          <div class="settings-nav__title">设置</div>
+          <div class="settings-nav__group">通用</div>
+          <div class="nav-item"><span class="icon icon--18"><svg><use href="#i-folder"/></svg></span>同步目录</div>
+          <div class="nav-item"><span class="icon icon--18"><svg><use href="#i-transfer"/></svg></span>传输设置</div>
+          <div class="nav-item"><span class="icon icon--18"><svg><use href="#i-settings"/></svg></span>高级设置</div>
+          <div class="settings-nav__group">其他</div>
+          <div class="nav-item"><span class="icon icon--18"><svg><use href="#i-info"/></svg></span>账号管理</div>
+          <div class="nav-item is-active"><span class="icon icon--18"><svg><use href="#i-list"/></svg></span>日志查看</div>
+          <div class="nav-item"><span class="icon icon--18"><svg><use href="#i-cloud"/></svg></span>关于</div>
+        </nav>
+        <div style="flex:1;display:flex;flex-direction:column;min-width:0;">
+          <div class="settings-body" style="flex:1;">
+            <div class="section-header"><span class="icon icon--20"><svg><use href="#i-list"/></svg></span>日志查看</div>
+            <div class="settings-panel" style="padding:24px;display:flex;flex-direction:column;gap:14px;align-items:flex-start;">
+              <div style="font-size:14px;color:var(--ink-700);line-height:1.6;">运行日志使用共享 1000 条 ring buffer，并保留 30 天滚动文件。</div>
+              <button class="btn">打开日志查看器</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 标签 6：关于 ============ -->
+  <div class="scene">
+    <div class="scene__label"><b>设置 · 关于</b>　版本 / 检查更新 / 安装新版本 / GitHub · GitCode 外链</div>
+    <div class="mac-window">
+      <div class="mac-titlebar">
+        <div class="traffic"><i></i><i></i><i></i></div>
+        <button class="btn-circle btn-circle--sm" style="margin-left:8px;"><span class="icon icon--16" style="transform:rotate(180deg);"><svg><use href="#i-arrow"/></svg></span></button>
+        <div class="mac-titlebar__title">PetalLink - 华为云盘客户端开源版</div>
+      </div>
+      <div class="mac-body">
+        <nav class="settings-nav">
+          <div class="settings-nav__title">设置</div>
+          <div class="settings-nav__group">通用</div>
+          <div class="nav-item"><span class="icon icon--18"><svg><use href="#i-folder"/></svg></span>同步目录</div>
+          <div class="nav-item"><span class="icon icon--18"><svg><use href="#i-transfer"/></svg></span>传输设置</div>
+          <div class="nav-item"><span class="icon icon--18"><svg><use href="#i-settings"/></svg></span>高级设置</div>
+          <div class="settings-nav__group">其他</div>
+          <div class="nav-item"><span class="icon icon--18"><svg><use href="#i-info"/></svg></span>账号管理</div>
+          <div class="nav-item"><span class="icon icon--18"><svg><use href="#i-list"/></svg></span>日志查看</div>
+          <div class="nav-item is-active"><span class="icon icon--18"><svg><use href="#i-cloud"/></svg></span>关于</div>
+        </nav>
+        <div style="flex:1;display:flex;flex-direction:column;min-width:0;">
+          <div class="settings-body" style="flex:1;">
+            <div class="section-header"><span class="icon icon--20"><svg><use href="#i-cloud"/></svg></span>关于</div>
+            <div class="settings-panel" style="display:flex;flex-direction:column;gap:14px;padding:24px;">
+              <div style="display:flex;align-items:center;gap:10px;">
+                <span class="logo-tile" style="width:30px;height:30px;"><span class="icon icon--16"><svg><use href="#i-cloud"/></svg></span></span>
+                <span style="font-size:18px;font-weight:600;">PetalLink</span>
+              </div>
+              <div style="display:flex;align-items:center;gap:10px;">
+                <span style="font-size:12.5px;color:var(--ink-400);">版本 1.0.12</span>
+                <button class="btn-soft" style="height:30px;font-size:13px;"><span class="icon icon--16"><svg><use href="#i-refresh"/></svg></span>检查更新</button>
+                <span class="chip chip--brand">发现新版本 1.1.0</span>
+              </div>
+              <div><button class="btn"><span class="icon icon--16"><svg><use href="#i-download"/></svg></span>安装 1.1.0</button></div>
+              <div style="font-size:12.5px;color:var(--ink-400);">一款开源免费的华为云盘客户端</div>
+              <div style="display:flex;gap:16px;">
+                <span style="display:flex;align-items:center;gap:4px;color:var(--brand-600);font-size:13px;">
+                  <span class="icon icon--16"><svg><use href="#i-github"/></svg></span>GitHub
+                </span>
+                <span style="display:flex;align-items:center;gap:4px;color:var(--brand-600);font-size:13px;">
+                  <span class="icon icon--16"><svg><use href="#i-gitcode"/></svg></span>GitCode
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 补充：同步目录未配置态卡片 ============ -->
+  <div class="scene">
+    <div class="scene__label"><b>设置 · 同步目录（未配置态卡片）</b>　引导选择本地空目录作为云盘镜像</div>
+    <div style="width:640px;">
+      <div class="settings-panel" style="display:flex;flex-direction:column;align-items:center;gap:12px;padding:40px 24px;">
+        <div class="empty__badge"><span class="icon icon--48"><svg><use href="#i-folder-open"/></svg></span></div>
+        <div style="font-size:14px;font-weight:600;">尚未配置同步目录</div>
+        <div style="font-size:13px;color:var(--ink-400);">选择一个本地空目录作为云盘镜像，文件将自动双向同步。</div>
+        <button class="btn"><span class="icon icon--16"><svg><use href="#i-folder-open"/></svg></span>选择目录</button>
+      </div>
+    </div>
+  </div>
+
+  <a class="back-link" href="index.html">← 返回 v2 原型导航</a>
+</div>
+</body>
+</html>

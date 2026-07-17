@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>02 · 主界面 - PetalLink v2 原型</title>
+<link rel="stylesheet" href="assets/v2.css">
+<script src="assets/sprite.js"></script>
+</head>
+<body>
+<div class="canvas">
+
+  <!-- ============ 场景 1：主界面 · 同步完成 ============ -->
+  <div class="scene">
+    <div class="scene__label"><b>主界面 · 同步完成</b>　毛玻璃侧栏 / 统一工具栏 / 六列文件列表（排序·缩略图·同步状态）</div>
+    <div class="mac-window">
+      <div class="mac-titlebar">
+        <div class="traffic"><i></i><i></i><i></i></div>
+        <div class="mac-titlebar__title">PetalLink - 华为云盘客户端开源版</div>
+      </div>
+      <div class="mac-body">
+        <!-- 毛玻璃侧栏 248px -->
+        <aside class="sidebar">
+          <div class="sidebar__logo">
+            <span class="logo-tile logo-tile--28"><span class="icon icon--16"><svg><use href="#i-cloud"/></svg></span></span>
+            <span style="font-size:15px;font-weight:600;">PetalLink</span>
+          </div>
+          <div class="sidebar__section">位置</div>
+          <div class="sidebar__tree">
+            <div class="tree-node">
+              <span class="tree-node__chevron is-open"><span class="icon icon--12"><svg><use href="#i-arrow"/></svg></span></span>
+              <span class="icon icon--16 icon--folder"><svg><use href="#i-folder"/></svg></span>
+              <span class="tree-node__name">全部文件</span>
+            </div>
+            <div class="tree-node" style="padding-left:24px;">
+              <span class="tree-node__chevron is-open"><span class="icon icon--12"><svg><use href="#i-arrow"/></svg></span></span>
+              <span class="icon icon--16 icon--folder"><svg><use href="#i-folder"/></svg></span>
+              <span class="tree-node__name">文档</span>
+            </div>
+            <div class="tree-node is-active" style="padding-left:38px;">
+              <span class="tree-node__chevron"><span class="icon icon--12"><svg><use href="#i-arrow"/></svg></span></span>
+              <span class="icon icon--16 icon--folder"><svg><use href="#i-folder"/></svg></span>
+              <span class="tree-node__name">工作</span>
+            </div>
+            <div class="tree-node" style="padding-left:38px;">
+              <span class="tree-node__chevron"><span class="icon icon--12"><svg><use href="#i-arrow"/></svg></span></span>
+              <span class="icon icon--16 icon--folder"><svg><use href="#i-folder"/></svg></span>
+              <span class="tree-node__name">个人</span>
+            </div>
+            <div class="tree-node" style="padding-left:24px;">
+              <span class="tree-node__chevron"><span class="icon icon--12"><svg><use href="#i-arrow"/></svg></span></span>
+              <span class="icon icon--16 icon--folder"><svg><use href="#i-folder"/></svg></span>
+              <span class="tree-node__name">图片</span>
+            </div>
+            <div class="tree-node" style="padding-left:24px;">
+              <span class="tree-node__chevron"><span class="icon icon--12"><svg><use href="#i-arrow"/></svg></span></span>
+              <span class="icon icon--16 icon--folder"><svg><use href="#i-folder"/></svg></span>
+              <span class="tree-node__name">视频</span>
+            </div>
+            <div class="tree-node" style="padding-left:24px;">
+              <span class="tree-node__chevron"><span class="icon icon--12"><svg><use href="#i-arrow"/></svg></span></span>
+              <span class="icon icon--16 icon--folder"><svg><use href="#i-folder"/></svg></span>
+              <span class="tree-node__name">归档备份</span>
+            </div>
+            <div class="tree-node" style="padding-left:24px;">
+              <span class="tree-node__chevron"><span class="icon icon--12"><svg><use href="#i-arrow"/></svg></span></span>
+              <span class="icon icon--16 icon--folder"><svg><use href="#i-folder"/></svg></span>
+              <span class="tree-node__name">设计资源</span>
+            </div>
+          </div>
+          <!-- 账号卡 -->
+          <div class="sidebar__account">
+            <div class="avatar avatar--32">华</div>
+            <div style="flex:1;min-width:0;">
+              <div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">华小为</div>
+              <div style="font-size:11.5px;color:var(--ink-400);margin-top:1px;">36.5 GB / 200 GB</div>
+              <div class="progress" style="height:4px;margin-top:6px;"><div class="progress__fill" style="width:18%;"></div></div>
+            </div>
+          </div>
+        </aside>
+
+        <!-- 右侧主区 -->
+        <div style="flex:1;display:flex;flex-direction:column;min-width:0;background:var(--bg-card);">
+          <!-- 工具栏 64px -->
+          <div class="toolbar">
+            <div class="search-field" style="flex:1;max-width:420px;">
+              <span class="icon icon--16"><svg><use href="#i-search"/></svg></span>
+              <input placeholder="搜索文件和文件夹...">
+            </div>
+            <span style="flex:1;"></span>
+            <button class="btn btn--sm" style="height:34px;"><span class="icon icon--16"><svg><use href="#i-refresh"/></svg></span>同步索引</button>
+            <button class="btn-soft"><span class="icon icon--16"><svg><use href="#i-transfer"/></svg></span>传输队列</button>
+            <button class="btn-ghost"><span class="icon icon--16"><svg><use href="#i-folder-open"/></svg></span>Finder</button>
+            <button class="btn-circle"><span class="icon icon--18"><svg><use href="#i-settings"/></svg></span></button>
+          </div>
+
+          <!-- 同步状态条 -->
+          <div class="sync-bar">
+            <div class="sync-bar__left">
+              <span class="dot dot--ok"></span>
+              <span style="font-weight:500;">同步完成</span>
+              <span class="sync-bar__time">上次同步 14:32</span>
+            </div>
+            <div class="sync-bar__tags"></div>
+          </div>
+
+          <!-- 面包屑 -->
+          <div class="breadcrumb">
+            <span class="breadcrumb__item">全部文件</span>
+            <span class="breadcrumb__sep">›</span>
+            <span class="breadcrumb__item">文档</span>
+            <span class="breadcrumb__sep">›</span>
+            <span class="breadcrumb__item--current">工作</span>
+          </div>
+
+          <!-- 文件列表 -->
+          <div class="file-table">
+            <div class="file-header">
+              <div class="col-check">
+                <button class="btn-circle btn-circle--sm" title="多选"><span class="icon icon--14"><svg><use href="#i-check"/></svg></span></button>
+              </div>
+              <div class="col-name file-header__cell file-header__cell--sortable is-sorted">名称 <span class="icon icon--12"><svg><use href="#i-arrow"/></svg></span></div>
+              <div class="col-size file-header__cell file-header__cell--sortable">大小</div>
+              <div class="col-time file-header__cell file-header__cell--sortable">修改时间</div>
+              <div class="col-status">状态</div>
+              <div class="col-actions">操作</div>
+            </div>
+
+            <div class="file-row">
+              <div class="col-check"></div>
+              <div class="col-name file-row__name">
+                <span class="ftile ftile--folder"><span class="icon icon--18"><svg><use href="#i-folder"/></svg></span></span>
+                <span>项目文档</span>
+              </div>
+              <div class="col-size file-row__meta">—</div>
+              <div class="col-time file-row__meta num">2026-07-15 09:20</div>
+              <div class="col-status"><span class="icon icon--16" style="color:var(--ink-300);"><svg><use href="#i-folder"/></svg></span></div>
+              <div class="col-actions"><button class="btn-circle btn-circle--sm"><span class="icon icon--16"><svg><use href="#i-list"/></svg></span></button></div>
+            </div>
+            <div class="file-row">
+              <div class="col-check"></div>
+              <div class="col-name file-row__name">
+                <span class="ftile ftile--folder"><span class="icon icon--18"><svg><use href="#i-folder"/></svg></span></span>
+                <span>设计稿</span>
+              </div>
+              <div class="col-size file-row__meta">—</div>
+              <div class="col-time file-row__meta num">2026-07-12 16:08</div>
+              <div class="col-status"><span class="icon icon--16" style="color:var(--ink-300);"><svg><use href="#i-folder"/></svg></span></div>
+              <div class="col-actions"><button class="btn-circle btn-circle--sm"><span class="icon icon--16"><svg><use href="#i-list"/></svg></span></button></div>
+            </div>
+            <div class="file-row is-selected">
+              <div class="col-check"></div>
+              <div class="col-name file-row__name">
+                <span class="ftile ftile--doc"><span class="icon icon--18"><svg><use href="#i-file-text"/></svg></span></span>
+                <span>Q4经营分析报告.docx</span>
+              </div>
+              <div class="col-size file-row__meta num">2.4 MB</div>
+              <div class="col-time file-row__meta num">2026-07-17 14:32</div>
+              <div class="col-status"><span class="icon icon--16" style="color:var(--ok);"><svg><use href="#i-local"/></svg></span></div>
+              <div class="col-actions"><button class="btn-circle btn-circle--sm"><span class="icon icon--16"><svg><use href="#i-list"/></svg></span></button></div>
+            </div>
+            <div class="file-row">
+              <div class="col-check"></div>
+              <div class="col-name file-row__name">
+                <span class="ftile ftile--file"><span class="icon icon--18"><svg><use href="#i-file"/></svg></span></span>
+                <span>产品路线图-2026.key</span>
+              </div>
+              <div class="col-size file-row__meta num">18.2 MB</div>
+              <div class="col-time file-row__meta num">2026-07-16 11:05</div>
+              <div class="col-status"><span class="icon icon--16" style="color:var(--ink-300);"><svg><use href="#i-cloud"/></svg></span></div>
+              <div class="col-actions"><button class="btn-circle btn-circle--sm"><span class="icon icon--16"><svg><use href="#i-list"/></svg></span></button></div>
+            </div>
+            <div class="file-row">
+              <div class="col-check"></div>
+              <div class="col-name file-row__name">
+                <span class="ftile ftile--image"><span class="ftile__thumb" style="background:linear-gradient(135deg,#FDA4AF,#E11D48);"></span></span>
+                <span>首页 Banner 终稿.png</span>
+              </div>
+              <div class="col-size file-row__meta num">3.8 MB</div>
+              <div class="col-time file-row__meta num">2026-07-16 18:44</div>
+              <div class="col-status"><span class="icon icon--16" style="color:var(--ok);"><svg><use href="#i-local"/></svg></span></div>
+              <div class="col-actions"><button class="btn-circle btn-circle--sm"><span class="icon icon--16"><svg><use href="#i-list"/></svg></span></button></div>
+            </div>
+            <div class="file-row">
+              <div class="col-check"></div>
+              <div class="col-name file-row__name">
+                <span class="ftile ftile--image"><span class="ftile__thumb" style="background:linear-gradient(135deg,#FCD34D,#F08C00);"></span></span>
+                <span>团队合影.jpg</span>
+              </div>
+              <div class="col-size file-row__meta num">5.1 MB</div>
+              <div class="col-time file-row__meta num">2026-07-11 10:26</div>
+              <div class="col-status"><span class="icon icon--16" style="color:var(--ink-300);"><svg><use href="#i-cloud"/></svg></span></div>
+              <div class="col-actions"><button class="btn-circle btn-circle--sm"><span class="icon icon--16"><svg><use href="#i-list"/></svg></span></button></div>
+            </div>
+            <div class="file-row">
+              <div class="col-check"></div>
+              <div class="col-name file-row__name">
+                <span class="ftile ftile--video"><span class="icon icon--18"><svg><use href="#i-video"/></svg></span></span>
+                <span>产品演示视频.mp4</span>
+              </div>
+              <div class="col-size file-row__meta num">128.6 MB</div>
+              <div class="col-time file-row__meta num">2026-07-09 15:52</div>
+              <div class="col-status"><span class="icon icon--16" style="color:var(--ink-300);"><svg><use href="#i-cloud"/></svg></span></div>
+              <div class="col-actions"><button class="btn-circle btn-circle--sm"><span class="icon icon--16"><svg><use href="#i-list"/></svg></span></button></div>
+            </div>
+            <div class="file-row">
+              <div class="col-check"></div>
+              <div class="col-name file-row__name">
+                <span class="ftile ftile--sheet"><span class="icon icon--18"><svg><use href="#i-chart"/></svg></span></span>
+                <span>预算表-2026H2.xlsx</span>
+              </div>
+              <div class="col-size file-row__meta num">356.0 KB</div>
+              <div class="col-time file-row__meta num">2026-07-14 09:13</div>
+              <div class="col-status"><span class="icon icon--16" style="color:var(--ok);"><svg><use href="#i-local"/></svg></span></div>
+              <div class="col-actions"><button class="btn-circle btn-circle--sm"><span class="icon icon--16"><svg><use href="#i-list"/></svg></span></button></div>
+            </div>
+            <div class="file-row">
+              <div class="col-check"></div>
+              <div class="col-name file-row__name">
+                <span class="ftile ftile--doc"><span class="icon icon--18"><svg><use href="#i-file-text"/></svg></span></span>
+                <span>会议纪要 0717.md</span>
+              </div>
+              <div class="col-size file-row__meta num">8.2 KB</div>
+              <div class="col-time file-row__meta num">2026-07-17 13:58</div>
+              <div class="col-status"><span class="icon icon--16" style="color:var(--ok);"><svg><use href="#i-local"/></svg></span></div>
+              <div class="col-actions"><button class="btn-circle btn-circle--sm"><span class="icon icon--16"><svg><use href="#i-list"/></svg></span></button></div>
+            </div>
+            <div class="file-row">
+              <div class="col-check"></div>
+              <div class="col-name file-row__name">
+                <span class="ftile ftile--file"><span class="icon icon--18"><svg><use href="#i-file"/></svg></span></span>
+                <span>季度汇报 (云端副本 2026-07-10 09-12-33).pptx</span>
+              </div>
+              <div class="col-size file-row__meta num">9.6 MB</div>
+              <div class="col-time file-row__meta num">2026-07-10 09:12</div>
+              <div class="col-status"><span class="icon icon--16" style="color:var(--ok);"><svg><use href="#i-local"/></svg></span></div>
+              <div class="col-actions"><button class="btn-circle btn-circle--sm"><span class="icon icon--16"><svg><use href="#i-list"/></svg></span></button></div>
+            </div>
+
+            <div style="flex:1;"></div>
+            <div class="file-footer">10 项 · 已全部加载</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 场景 2：空文件夹 ============ -->
+  <div class="scene">
+    <div class="scene__label"><b>主界面 · 空状态</b>　空文件夹引导</div>
+    <div class="mac-window">
+      <div class="mac-titlebar">
+        <div class="traffic"><i></i><i></i><i></i></div>
+        <div class="mac-titlebar__title">PetalLink - 华为云盘客户端开源版</div>
+      </div>
+      <div class="mac-body">
+        <aside class="sidebar">
+          <div class="sidebar__logo">
+            <span class="logo-tile logo-tile--28"><span class="icon icon--16"><svg><use href="#i-cloud"/></svg></span></span>
+            <span style="font-size:15px;font-weight:600;">PetalLink</span>
+          </div>
+          <div class="sidebar__section">位置</div>
+          <div class="sidebar__tree">
+            <div class="tree-node is-active">
+              <span class="tree-node__chevron is-open"><span class="icon icon--12"><svg><use href="#i-arrow"/></svg></span></span>
+              <span class="icon icon--16 icon--folder"><svg><use href="#i-folder"/></svg></span>
+              <span class="tree-node__name">全部文件</span>
+            </div>
+            <div class="tree-node" style="padding-left:24px;">
+              <span class="tree-node__chevron"><span class="icon icon--12"><svg><use href="#i-arrow"/></svg></span></span>
+              <span class="icon icon--16 icon--folder"><svg><use href="#i-folder"/></svg></span>
+              <span class="tree-node__name">文档</span>
+            </div>
+            <div class="tree-node" style="padding-left:24px;">
+              <span class="tree-node__chevron"><span class="icon icon--12"><svg><use href="#i-arrow"/></svg></span></span>
+              <span class="icon icon--16 icon--folder"><svg><use href="#i-folder"/></svg></span>
+              <span class="tree-node__name">图片</span>
+            </div>
+          </div>
+          <div class="sidebar__account">
+            <div class="avatar avatar--32">华</div>
+            <div style="flex:1;min-width:0;">
+              <div style="font-size:13px;font-weight:600;">华小为</div>
+              <div style="font-size:11.5px;color:var(--ink-400);margin-top:1px;">36.5 GB / 200 GB</div>
+              <div class="progress" style="height:4px;margin-top:6px;"><div class="progress__fill" style="width:18%;"></div></div>
+            </div>
+          </div>
+        </aside>
+        <div style="flex:1;display:flex;flex-direction:column;min-width:0;background:var(--bg-card);">
+          <div class="toolbar">
+            <div class="search-field" style="flex:1;max-width:420px;">
+              <span class="icon icon--16"><svg><use href="#i-search"/></svg></span>
+              <input placeholder="搜索文件和文件夹...">
+            </div>
+            <span style="flex:1;"></span>
+            <button class="btn btn--sm" style="height:34px;"><span class="icon icon--16"><svg><use href="#i-refresh"/></svg></span>同步索引</button>
+            <button class="btn-soft"><span class="icon icon--16"><svg><use href="#i-transfer"/></svg></span>传输队列</button>
+            <button class="btn-ghost"><span class="icon icon--16"><svg><use href="#i-folder-open"/></svg></span>Finder</button>
+            <button class="btn-circle"><span class="icon icon--18"><svg><use href="#i-settings"/></svg></span></button>
+          </div>
+          <div class="sync-bar">
+            <div class="sync-bar__left">
+              <span class="dot dot--ok"></span>
+              <span style="font-weight:500;">同步完成</span>
+              <span class="sync-bar__time">上次同步 14:32</span>
+            </div>
+            <div class="sync-bar__tags"></div>
+          </div>
+          <div class="breadcrumb">
+            <span class="breadcrumb__item">全部文件</span>
+            <span class="breadcrumb__sep">›</span>
+            <span class="breadcrumb__item--current">新建文件夹</span>
+          </div>
+          <div class="empty">
+            <div class="empty__badge"><span class="icon icon--48"><svg><use href="#i-folder-open"/></svg></span></div>
+            <div class="empty__title">此文件夹为空</div>
+            <div class="empty__desc">上传或拖入文件即可同步到云端</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 场景 3：搜索结果 ============ -->
+  <div class="scene">
+    <div class="scene__label"><b>主界面 · 搜索结果</b>　回车触发远端搜索，文件夹结果可点击进入</div>
+    <div class="mac-window">
+      <div class="mac-titlebar">
+        <div class="traffic"><i></i><i></i><i></i></div>
+        <div class="mac-titlebar__title">PetalLink - 华为云盘客户端开源版</div>
+      </div>
+      <div class="mac-body">
+        <aside class="sidebar">
+          <div class="sidebar__logo">
+            <span class="logo-tile logo-tile--28"><span class="icon icon--16"><svg><use href="#i-cloud"/></svg></span></span>
+            <span style="font-size:15px;font-weight:600;">PetalLink</span>
+          </div>
+          <div class="sidebar__section">位置</div>
+          <div class="sidebar__tree">
+            <div class="tree-node is-active">
+              <span class="tree-node__chevron is-open"><span class="icon icon--12"><svg><use href="#i-arrow"/></svg></span></span>
+              <span class="icon icon--16 icon--folder"><svg><use href="#i-folder"/></svg></span>
+              <span class="tree-node__name">全部文件</span>
+            </div>
+            <div class="tree-node" style="padding-left:24px;">
+              <span class="tree-node__chevron"><span class="icon icon--12"><svg><use href="#i-arrow"/></svg></span></span>
+              <span class="icon icon--16 icon--folder"><svg><use href="#i-folder"/></svg></span>
+              <span class="tree-node__name">文档</span>
+            </div>
+          </div>
+          <div class="sidebar__account">
+            <div class="avatar avatar--32">华</div>
+            <div style="flex:1;min-width:0;">
+              <div style="font-size:13px;font-weight:600;">华小为</div>
+              <div style="font-size:11.5px;color:var(--ink-400);margin-top:1px;">36.5 GB / 200 GB</div>
+              <div class="progress" style="height:4px;margin-top:6px;"><div class="progress__fill" style="width:18%;"></div></div>
+            </div>
+          </div>
+        </aside>
+        <div style="flex:1;display:flex;flex-direction:column;min-width:0;background:var(--bg-card);">
+          <div class="toolbar">
+            <div class="search-field is-focus" style="flex:1;max-width:420px;">
+              <span class="icon icon--16" style="color:var(--brand-500);"><svg><use href="#i-search"/></svg></span>
+              <input value="报告">
+              <button class="btn-circle btn-circle--sm"><span class="icon icon--12"><svg><use href="#i-x"/></svg></span></button>
+            </div>
+            <span style="flex:1;"></span>
+            <button class="btn btn--sm" style="height:34px;"><span class="icon icon--16"><svg><use href="#i-refresh"/></svg></span>同步索引</button>
+            <button class="btn-soft"><span class="icon icon--16"><svg><use href="#i-transfer"/></svg></span>传输队列</button>
+            <button class="btn-ghost"><span class="icon icon--16"><svg><use href="#i-folder-open"/></svg></span>Finder</button>
+            <button class="btn-circle"><span class="icon icon--18"><svg><use href="#i-settings"/></svg></span></button>
+          </div>
+          <div class="sync-bar">
+            <div class="sync-bar__left">
+              <span class="dot dot--ok"></span>
+              <span style="font-weight:500;">同步完成</span>
+              <span class="sync-bar__time">上次同步 14:32</span>
+            </div>
+            <div class="sync-bar__tags"></div>
+          </div>
+          <div class="breadcrumb">
+            <span class="breadcrumb__item--current">全部文件</span>
+          </div>
+          <!-- 搜索结果区 -->
+          <div style="flex:1;display:flex;flex-direction:column;min-height:0;padding:0 12px;">
+            <div style="padding:14px 12px 10px;font-size:12.5px;font-weight:600;color:var(--ink-400);">搜索「报告」· 4 个结果</div>
+            <div class="file-row">
+              <div class="col-name file-row__name">
+                <span class="ftile ftile--folder"><span class="icon icon--18"><svg><use href="#i-folder"/></svg></span></span>
+                <div style="min-width:0;">
+                  <div style="font-size:14px;">年度报告存档</div>
+                  <div style="font-size:12px;color:var(--ink-400);margin-top:1px;">文件夹</div>
+                </div>
+              </div>
+            </div>
+            <div class="file-row">
+              <div class="col-name file-row__name">
+                <span class="ftile ftile--doc"><span class="icon icon--18"><svg><use href="#i-file-text"/></svg></span></span>
+                <div style="min-width:0;">
+                  <div style="font-size:14px;">Q4经营分析报告.docx</div>
+                  <div style="font-size:12px;color:var(--ink-400);margin-top:1px;">2,516,582 字节</div>
+                </div>
+              </div>
+            </div>
+            <div class="file-row">
+              <div class="col-name file-row__name">
+                <span class="ftile ftile--file"><span class="icon icon--18"><svg><use href="#i-file"/></svg></span></span>
+                <div style="min-width:0;">
+                  <div style="font-size:14px;">2025 年度总结报告.pdf</div>
+                  <div style="font-size:12px;color:var(--ink-400);margin-top:1px;">6,336,512 字节</div>
+                </div>
+              </div>
+            </div>
+            <div class="file-row">
+              <div class="col-name file-row__name">
+                <span class="ftile ftile--file"><span class="icon icon--18"><svg><use href="#i-file"/></svg></span></span>
+                <div style="min-width:0;">
+                  <div style="font-size:14px;">季度汇报 (云端副本 2026-07-10 09-12-33).pptx</div>
+                  <div style="font-size:12px;color:var(--ink-400);margin-top:1px;">10,066,330 字节</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <a class="back-link" href="index.html">← 返回 v2 原型导航</a>
+</div>
+</body>
+</html>

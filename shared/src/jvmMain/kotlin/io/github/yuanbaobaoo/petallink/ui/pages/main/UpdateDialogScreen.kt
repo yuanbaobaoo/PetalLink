@@ -17,13 +17,14 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.Text
@@ -34,7 +35,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
-import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -43,18 +44,20 @@ import io.github.yuanbaobaoo.petallink.ui.components.MateIcon
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateButton
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateButtonVariant
 import io.github.yuanbaobaoo.petallink.ui.theme.BrandColor
-import io.github.yuanbaobaoo.petallink.ui.theme.BrandHover
+import io.github.yuanbaobaoo.petallink.ui.theme.BrandGradient
+import io.github.yuanbaobaoo.petallink.ui.theme.BrandLighter
 import io.github.yuanbaobaoo.petallink.ui.theme.ErrorColor
 import io.github.yuanbaobaoo.petallink.ui.theme.LocalSemanticColors
 import io.github.yuanbaobaoo.petallink.ui.viewmodel.UpdaterPhase
 import io.github.yuanbaobaoo.petallink.update.UpdateManifest
 
 /**
- * 更新对话框（对标原 Vue UpdateDialog.vue）。
+ * 更新对话框（v2 重设计，对标原 Vue UpdateDialog.vue / design/v2/08-update.html）。
  *
  * 9 phase 状态机：visible 仅在 available/downloading/downloaded/waitingTransfer/ready/error 显示。
- * 自绘 overlay（rgba 0.3），不复用 MateDialog（与原 Vue 一致，独立状态机）。
- * dialog 宽 440，max-width calc(100vw-48px)，radius-lg，shadow-modal，fade-in 0.15s。
+ * 自绘 overlay（rgba 0.36），不复用 MateDialog（与原 Vue 一致，独立状态机）。
+ * dialog 宽 440，radius 12，24dp 柔影（v2：去 0.5dp 描边），fade-in 0.15s；
+ * header 为 40×40 BrandLighter 图标徽章 + 18sp 标题（参照 MateDialogHost）。
  *
  * @param phase 当前更新阶段
  * @param manifest 可用更新信息（version/notes），available 态显示版本号和日志
@@ -98,36 +101,45 @@ fun UpdateDialogScreen(
         else -> ""
     }
 
-    // overlay（fixed inset 0，bg rgba 0.3，居中）
+    // overlay（fixed inset 0，bg rgba 0.36，居中）
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color.Black.copy(alpha = 0.3f))
+            .background(Color.Black.copy(alpha = 0.36f))
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
             ) { onDismiss() },
         contentAlignment = Alignment.Center,
     ) {
+        // dialog：宽 440，radius 12，24dp 柔影（v2：去 0.5dp 描边）
         Column(
             modifier = Modifier
                 .width(440.dp)
-                .clip(RoundedCornerShape(9.dp))
+                .shadow(24.dp, RoundedCornerShape(12.dp))
+                .clip(RoundedCornerShape(12.dp))
                 .background(semantic.bgContainer)
-                .border(0.5.dp, Color.Black.copy(alpha = 0.2f), RoundedCornerShape(9.dp))
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null,
                 ) { /* 阻止点击穿透到 overlay */ },
         ) {
-            // header：download 图标 + 标题
+            // header：40×40 BrandLighter 图标徽章 + 标题（v2，参照 MateDialogHost）
             Row(
                 modifier = Modifier.fillMaxWidth().padding(start = 32.dp, end = 32.dp, top = 32.dp, bottom = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                MateIcon(name = "download", size = 20.dp, tint = BrandColor)
-                Text(title, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = semantic.textPrimary)
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(BrandLighter),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    MateIcon(name = "download", size = 20.dp, tint = BrandColor)
+                }
+                Text(title, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = semantic.textPrimary)
             }
             // 版本号（available 态显示）
             if (phase == UpdaterPhase.AVAILABLE && manifest != null) {
@@ -149,7 +161,7 @@ fun UpdateDialogScreen(
                     UpdaterPhase.WAITING_TRANSFERS, UpdaterPhase.READY -> UpdateWaitingBody(hasActiveTransfers, phase)
                     UpdaterPhase.FAILED -> Text(
                         errorMessage ?: "更新失败，请稍后重试。",
-                        fontSize = 14.sp,
+                        fontSize = 15.sp,
                         color = ErrorColor,
                     )
                     else -> {}
@@ -174,38 +186,38 @@ fun UpdateDialogScreen(
     }
 }
 
-/** available 态正文：更新日志或提示（对标原 Vue .update-dialog__notes）。 */
+/** available 态正文：更新日志或提示（v2：notes 块 radius 8 + 13sp，对标原 Vue .update-dialog__notes）。 */
 @Composable
 private fun UpdateAvailableBody(manifest: UpdateManifest?) {
     val semantic = LocalSemanticColors.current
     val notes = manifest?.notes?.takeIf { it.isNotBlank() }
     if (notes != null) {
         Column {
-            Text("更新内容", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = semantic.textSecondary)
+            Text("更新内容", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = semantic.textSecondary)
             Spacer(Modifier.height(4.dp))
-            // notes 文本块：bg-page，radius-md，padding md，max-height 180，scroll
+            // notes 文本块：bg-page，radius 8，padding 12，max-height 180，scroll
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .heightIn(max = 180.dp)
-                    .clip(RoundedCornerShape(6.dp))
+                    .clip(RoundedCornerShape(8.dp))
                     .background(semantic.bgPage)
                     .verticalScroll(rememberScrollState())
                     .padding(12.dp),
             ) {
-                Text(notes, fontSize = 12.sp, color = semantic.textSecondary)
+                Text(notes, fontSize = 13.sp, color = semantic.textSecondary)
             }
         }
     } else {
         Text(
             "暂无更新日志。是否下载并安装此更新？",
-            fontSize = 14.sp,
+            fontSize = 15.sp,
             color = semantic.textSecondary,
         )
     }
 }
 
-/** downloading 态正文：进度条 + 百分比（对标原 Vue .update-dialog__progress）。 */
+/** downloading 态正文：进度条 + 百分比（v2：fill 用 BrandGradient 品牌渐变，对标原 Vue .update-dialog__progress）。 */
 @Composable
 private fun UpdateDownloadingBody(progress: Float) {
     val semantic = LocalSemanticColors.current
@@ -219,16 +231,16 @@ private fun UpdateDownloadingBody(progress: Float) {
                 .clip(RoundedCornerShape(4.dp))
                 .background(semantic.bgPage),
         ) {
-            // fill（渐变 brand→brand-hover，width = progress）
+            // fill（BrandGradient 品牌渐变，width = progress）
             Box(
                 modifier = Modifier
                     .fillMaxWidth(progress.coerceIn(0f, 1f))
                     .height(8.dp)
                     .clip(RoundedCornerShape(4.dp))
-                    .background(Brush.horizontalGradient(listOf(BrandColor, BrandHover))),
+                    .background(BrandGradient),
             )
         }
-        Text("$pct%", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = semantic.textPrimary)
+        Text("$pct%", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = semantic.textPrimary)
     }
 }
 
@@ -243,7 +255,7 @@ private fun UpdateWaitingBody(hasActiveTransfers: Boolean, phase: UpdaterPhase) 
             hasActiveTransfers -> "下载完成。等待所有文档上传/下载完成后自动重启…"
             else -> "准备安装…"
         }
-        Text(text, fontSize = 14.sp, color = semantic.textSecondary)
+        Text(text, fontSize = 15.sp, color = semantic.textSecondary)
     }
 }
 
@@ -288,7 +300,7 @@ private fun UpdateSpinner() {
     }
 }
 
-/** footer 按钮组合（按 phase 切换，对标原 Vue .update-dialog__footer）。 */
+/** footer 按钮组合（按 phase 切换，v2：次要按钮 ICON_TEXT 幽灵灰，主按钮 PRIMARY 渐变+柔影）。 */
 @Composable
 private fun UpdateFooter(
     phase: UpdaterPhase,
@@ -300,22 +312,22 @@ private fun UpdateFooter(
 ) {
     when (phase) {
         UpdaterPhase.AVAILABLE -> {
-            MateButton(label = "稍后提醒", variant = MateButtonVariant.TEXT, onClick = onDismiss)
+            MateButton(label = "稍后提醒", variant = MateButtonVariant.ICON_TEXT, onClick = onDismiss)
             Spacer(Modifier.width(8.dp))
             MateButton(label = "立即更新", icon = "download", onClick = onStartUpdate)
         }
         UpdaterPhase.FAILED -> {
-            MateButton(label = "关闭", variant = MateButtonVariant.TEXT, onClick = onDismiss)
+            MateButton(label = "关闭", variant = MateButtonVariant.ICON_TEXT, onClick = onDismiss)
             Spacer(Modifier.width(8.dp))
             MateButton(label = "重试", icon = "refresh", onClick = onRetry)
         }
         UpdaterPhase.READY -> {
-            MateButton(label = "稍后", variant = MateButtonVariant.TEXT, onClick = onDismiss)
+            MateButton(label = "稍后", variant = MateButtonVariant.ICON_TEXT, onClick = onDismiss)
             Spacer(Modifier.width(8.dp))
             MateButton(label = "立即重启", icon = "check", onClick = onRelaunch)
         }
         UpdaterPhase.WAITING_TRANSFERS -> {
-            MateButton(label = "后台等待", variant = MateButtonVariant.TEXT, onClick = onDismiss)
+            MateButton(label = "后台等待", variant = MateButtonVariant.ICON_TEXT, onClick = onDismiss)
             Spacer(Modifier.width(8.dp))
             MateButton(
                 label = if (hasActiveTransfers) "等待传输完成…" else "立即重启",
@@ -325,7 +337,7 @@ private fun UpdateFooter(
             )
         }
         UpdaterPhase.DOWNLOADING -> {
-            MateButton(label = "后台下载", variant = MateButtonVariant.TEXT, onClick = onDismiss)
+            MateButton(label = "后台下载", variant = MateButtonVariant.ICON_TEXT, onClick = onDismiss)
         }
         else -> {}
     }

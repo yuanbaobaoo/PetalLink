@@ -7,7 +7,9 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,16 +19,13 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material.DropdownMenu
-import androidx.compose.material.DropdownMenuItem
 import androidx.compose.material.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -36,43 +35,72 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
 import io.github.yuanbaobaoo.petallink.drive.DriveFile
 import io.github.yuanbaobaoo.petallink.sync.isFolder
 import io.github.yuanbaobaoo.petallink.ui.components.MateIcon
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateButton
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateButtonVariant
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateCheckbox
-import io.github.yuanbaobaoo.petallink.ui.components.mate.MateCircularProgress
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateDialogOptions
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateEmpty
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateHDivider
 import io.github.yuanbaobaoo.petallink.ui.components.mate.confirmDialog
-import io.github.yuanbaobaoo.petallink.ui.components.mate.showToast
-import io.github.yuanbaobaoo.petallink.ui.components.mate.MateToastVariant
 import io.github.yuanbaobaoo.petallink.ui.theme.BrandColor
+import io.github.yuanbaobaoo.petallink.ui.theme.BrandLighter
 import io.github.yuanbaobaoo.petallink.ui.theme.ErrorColor
+import io.github.yuanbaobaoo.petallink.ui.theme.FolderAmber
+import io.github.yuanbaobaoo.petallink.ui.theme.FolderAmberBg
 import io.github.yuanbaobaoo.petallink.ui.theme.LocalSemanticColors
 import io.github.yuanbaobaoo.petallink.ui.theme.SuccessColor
+import io.github.yuanbaobaoo.petallink.ui.theme.TileDoc
+import io.github.yuanbaobaoo.petallink.ui.theme.TileDocBg
+import io.github.yuanbaobaoo.petallink.ui.theme.TileImage
+import io.github.yuanbaobaoo.petallink.ui.theme.TileImageBg
+import io.github.yuanbaobaoo.petallink.ui.theme.TileSheet
+import io.github.yuanbaobaoo.petallink.ui.theme.TileSheetBg
+import io.github.yuanbaobaoo.petallink.ui.theme.TileVideo
+import io.github.yuanbaobaoo.petallink.ui.theme.TileVideoBg
 import io.github.yuanbaobaoo.petallink.ui.viewmodel.BrowserSortField
 import io.github.yuanbaobaoo.petallink.ui.viewmodel.FileBrowserState
 
-/** 文件类型图标（对标原 Vue driveApi.fileTypeIcon）。 */
-private fun fileTypeIcon(file: DriveFile): String = when {
-    file.isFolder() -> "folder"
-    file.category == "images" || (file.mimeType?.startsWith("image/") == true) -> "image"
-    file.category == "videos" || (file.mimeType?.startsWith("video/") == true) -> "video"
-    else -> "file"
+/** v2：文档类扩展名 → file-text tile（对标原型 .docx/.md/.pdf）。 */
+private val DOC_TILE_EXTS = setOf("doc", "docx", "txt", "md", "pdf", "rtf", "odt", "pages")
+
+/** v2：表格/图表类扩展名 → chart tile（对标原型 .xlsx）。 */
+private val SHEET_TILE_EXTS = setOf("xls", "xlsx", "csv", "ods", "numbers", "et")
+
+/**
+ * 文件类型图标（对标原 Vue driveApi.fileTypeIcon）。
+ *
+ * v2 扩展返回 tile 类型（folder / file-text / image / video / chart / file），
+ * 名称列色块依此取色；image/video 判断逻辑与原有一致，doc/sheet 为原 "file" 桶的细分。
+ */
+private fun fileTypeIcon(file: DriveFile): String {
+    if (file.isFolder()) return "folder"
+    val mime = file.mimeType.orEmpty()
+    val ext = (file.name ?: file.fileName).orEmpty().substringAfterLast('.', "").lowercase()
+    return when {
+        file.category == "images" || mime.startsWith("image/") -> "image"
+        file.category == "videos" || mime.startsWith("video/") -> "video"
+        // 表格/图表类（category 或扩展名）→ sheet tile
+        file.category == "sheets" || ext in SHEET_TILE_EXTS -> "chart"
+        // 文档类（text/*、pdf、常见文档扩展名）→ doc tile
+        file.category == "docs" || mime.startsWith("text/") || mime == "application/pdf" || ext in DOC_TILE_EXTS -> "file-text"
+        else -> "file"
+    }
 }
 
 /** 文件大小格式化（对标原 Vue formatFileSize）。 */
@@ -84,10 +112,10 @@ fun formatFileSize(bytes: Long): String = when {
 }
 
 /**
- * 文件列表（对标原 Vue FileListView.vue）。
+ * 文件列表（对标原 Vue FileListView.vue；视觉按 v2 原型 design/v2/02-main.html + 05-file-ops.html）。
  *
  * 6 列 + 拖拽列宽 + hover/selected 态 + 右键菜单条件渲染 + 双击行 +
- * 批量操作栏 + 4 个对话框（重命名/属性/下载进度/释放空间预览）。
+ * 批量操作栏（v2 深色浮动条）+ 4 个对话框（重命名/属性/下载进度/释放空间预览）。
  */
 @Composable
 fun FileListScreen(
@@ -112,8 +140,9 @@ fun FileListScreen(
     var checked by remember(browser.folderId) { mutableStateOf<Set<String>>(emptySet()) }
     var showCheckboxes by remember { mutableStateOf(false) }
     var selectedId by remember { mutableStateOf<String?>(null) }
-    var sizeWidth by remember { mutableStateOf(100.dp) }
-    var timeWidth by remember { mutableStateOf(150.dp) }
+    // v2 列宽（FileListColumns）：size 110 / time 160
+    var sizeWidth by remember { mutableStateOf(110.dp) }
+    var timeWidth by remember { mutableStateOf(160.dp) }
     val files = browser.visibleFiles
     val checkedCount = checked.size
 
@@ -123,29 +152,31 @@ fun FileListScreen(
     var propsTarget by remember { mutableStateOf<DriveFile?>(null) }
 
     Column(modifier = Modifier.fillMaxSize()) {
-        // 批量操作栏（选中>0 时，36px brand-lighter 底）
+        // 批量操作栏（选中>0 时；v2 05-file-ops：深色浮动条 h44 radius10，
+        // margin 10/12/0 叠加 file-table 容器 padding 12 → 水平内缩 24）
         if (checkedCount > 0) {
             val bulkBusy = isIndexing
             Row(
-                modifier = Modifier.fillMaxWidth().height(36.dp)
-                    .background(BrandLighter())
-                    .padding(horizontal = 16.dp),
+                modifier = Modifier.fillMaxWidth()
+                    .padding(start = 24.dp, top = 10.dp, end = 24.dp)
+                    .height(44.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Color(0xF01C1C1E))
+                    .padding(start = 16.dp, end = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                Text("已选 $checkedCount 项", fontSize = 13.sp, fontWeight = FontWeight.Medium, color = BrandColor)
+                Text("已选 $checkedCount 项", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
                 Spacer(Modifier.weight(1f))
-                MateButton(label = "批量下载", variant = MateButtonVariant.TEXT, icon = "download",
-                    onClick = { val s = files.filter { it.id in checked }; onDownload(s) }, disabled = bulkBusy)
-                MateButton(label = "释放空间", variant = MateButtonVariant.TEXT, icon = "cloud",
+                BulkBarButton(label = "批量下载", icon = "download", disabled = bulkBusy,
+                    onClick = { val s = files.filter { it.id in checked }; onDownload(s) })
+                BulkBarButton(label = "释放空间", icon = "cloud",
                     onClick = { val s = files.filter { it.id in checked }; onFreeUp(s) })
                 if (mountConfigured) {
-                    MateButton(label = "批量删除", variant = MateButtonVariant.TEXT, icon = "trash", danger = true,
-                        onClick = { val s = files.filter { it.id in checked }; onDelete(s); checked = emptySet() },
-                        disabled = bulkBusy)
+                    BulkBarButton(label = "批量删除", icon = "trash", danger = true, disabled = bulkBusy,
+                        onClick = { val s = files.filter { it.id in checked }; onDelete(s); checked = emptySet() })
                 }
-                MateButton(variant = MateButtonVariant.ICON, icon = "x",
-                    onClick = { checked = emptySet(); showCheckboxes = false })
+                BulkBarCloseButton(onClick = { checked = emptySet(); showCheckboxes = false })
             }
         }
 
@@ -155,72 +186,79 @@ fun FileListScreen(
         }
 
         if (files.isNotEmpty()) {
-            // 表头 36px
-            Row(
-                modifier = Modifier.fillMaxWidth().height(36.dp)
-                    .background(semantic.bgHover)
-                    .padding(horizontal = 16.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Box(modifier = Modifier.width(40.dp), contentAlignment = Alignment.CenterStart) {
-                    if (showCheckboxes) {
-                        val headerCheck: Boolean? = if (checkedCount == 0) false
-                        else if (checkedCount == files.size) true else null
-                        MateCheckbox(checked = headerCheck, onCheckedChange = { _ ->
-                            checked = if (checkedCount == files.size) emptySet()
-                            else files.mapNotNull { it.id }.toSet()
-                        })
-                    } else {
-                        MateButton(variant = MateButtonVariant.ICON, icon = "check", onClick = { showCheckboxes = true })
+            // v2：file-table 容器 padding 0 12
+            Column(modifier = Modifier.fillMaxWidth().weight(1f).padding(horizontal = 12.dp)) {
+                // 表头（v2：38px，12.5sp semibold textSecondary，底部分隔线）
+                Row(
+                    modifier = Modifier.fillMaxWidth().height(38.dp).padding(horizontal = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(modifier = Modifier.width(40.dp), contentAlignment = Alignment.CenterStart) {
+                        if (showCheckboxes) {
+                            val headerCheck: Boolean? = if (checkedCount == 0) false
+                            else if (checkedCount == files.size) true else null
+                            MateCheckbox(checked = headerCheck, onCheckedChange = { _ ->
+                                checked = if (checkedCount == files.size) emptySet()
+                                else files.mapNotNull { it.id }.toSet()
+                            })
+                        } else {
+                            MateButton(variant = MateButtonVariant.ICON, icon = "check", onClick = { showCheckboxes = true })
+                        }
+                    }
+                    HeaderCell("名称", browser.sortField == BrowserSortField.NAME, browser.ascending, Modifier.weight(1f)) {
+                        onSort(BrowserSortField.NAME)
+                    }
+                    HeaderCell("大小", browser.sortField == BrowserSortField.SIZE, browser.ascending, Modifier.width(sizeWidth),
+                        resizable = true, onResize = { delta -> sizeWidth = (sizeWidth + delta).coerceIn(64.dp, 400.dp) }) {
+                        onSort(BrowserSortField.SIZE)
+                    }
+                    HeaderCell("修改时间", browser.sortField == BrowserSortField.MODIFIED_TIME, browser.ascending, Modifier.width(timeWidth),
+                        resizable = true, onResize = { delta -> timeWidth = (timeWidth + delta).coerceIn(64.dp, 400.dp) }) {
+                        onSort(BrowserSortField.MODIFIED_TIME)
+                    }
+                    // v2 列宽：状态 72 / 操作 44
+                    Box(modifier = Modifier.width(72.dp), contentAlignment = Alignment.Center) {
+                        Text("状态", fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold, color = semantic.textSecondary)
+                    }
+                    Box(modifier = Modifier.width(44.dp), contentAlignment = Alignment.Center) {
+                        Text("操作", fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold, color = semantic.textSecondary)
                     }
                 }
-                HeaderCell("名称", browser.sortField == BrowserSortField.NAME, browser.ascending, Modifier.weight(1f)) {
-                    onSort(BrowserSortField.NAME)
-                }
-                HeaderCell("大小", browser.sortField == BrowserSortField.SIZE, browser.ascending, Modifier.width(sizeWidth),
-                    resizable = true, onResize = { delta -> sizeWidth = (sizeWidth + delta).coerceIn(64.dp, 400.dp) }) {
-                    onSort(BrowserSortField.SIZE)
-                }
-                HeaderCell("修改时间", browser.sortField == BrowserSortField.MODIFIED_TIME, browser.ascending, Modifier.width(timeWidth),
-                    resizable = true, onResize = { delta -> timeWidth = (timeWidth + delta).coerceIn(64.dp, 400.dp) }) {
-                    onSort(BrowserSortField.MODIFIED_TIME)
-                }
-                Text("状态", fontSize = 12.sp, color = semantic.textSecondary, modifier = Modifier.width(60.dp))
-                Text("操作", fontSize = 12.sp, color = semantic.textSecondary, modifier = Modifier.width(40.dp))
-            }
+                MateHDivider()
 
-            LazyColumn(modifier = Modifier.weight(1f)) {
-                items(files, key = { it.id ?: "${it.name}-${it.editedTime}" }) { file ->
-                    FileRow(
-                        file = file,
-                        checked = file.id in checked,
-                        selected = file.id == selectedId,
-                        showCheckbox = showCheckboxes,
-                        status = fileStatuses[file.id] ?: "not_synced",
-                        thumbnail = file.id?.let(thumbnails::get),
-                        mountConfigured = mountConfigured,
-                        isIndexing = isIndexing,
-                        sizeWidth = sizeWidth,
-                        timeWidth = timeWidth,
-                        onCheckedChange = { c ->
-                            val id = file.id ?: return@FileRow
-                            checked = if (c) checked + id else checked - id
-                        },
-                        onClick = { selectedId = file.id },
-                        onDoubleClick = { if (file.isFolder()) onEnterFolder(file) else onOpenItem(file) },
-                        onThumbnailNeeded = { onThumbnailNeeded(file) },
-                        onSync = { onSyncFolder(file) },
-                        onRename = { renameTarget = file; renameValue = file.name ?: file.fileName ?: "" },
-                        onShowProps = { propsTarget = file; onShowProps(file) },
-                        onDelete = { onDelete(listOf(file)) },
-                        onFreeUp = { onFreeUp(listOf(file)) },
-                        onCanFreeUp = onCanFreeUp,
-                    )
+                LazyColumn(modifier = Modifier.weight(1f)) {
+                    items(files, key = { it.id ?: "${it.name}-${it.editedTime}" }) { file ->
+                        FileRow(
+                            file = file,
+                            checked = file.id in checked,
+                            selected = file.id == selectedId,
+                            showCheckbox = showCheckboxes,
+                            status = fileStatuses[file.id] ?: "not_synced",
+                            thumbnail = file.id?.let(thumbnails::get),
+                            mountConfigured = mountConfigured,
+                            isIndexing = isIndexing,
+                            sizeWidth = sizeWidth,
+                            timeWidth = timeWidth,
+                            onCheckedChange = { c ->
+                                val id = file.id ?: return@FileRow
+                                checked = if (c) checked + id else checked - id
+                            },
+                            onClick = { selectedId = file.id },
+                            onDoubleClick = { if (file.isFolder()) onEnterFolder(file) else onOpenItem(file) },
+                            onThumbnailNeeded = { onThumbnailNeeded(file) },
+                            onSync = { onSyncFolder(file) },
+                            onRename = { renameTarget = file; renameValue = file.name ?: file.fileName ?: "" },
+                            onShowProps = { propsTarget = file; onShowProps(file) },
+                            onDelete = { onDelete(listOf(file)) },
+                            onFreeUp = { onFreeUp(listOf(file)) },
+                            onCanFreeUp = onCanFreeUp,
+                        )
+                    }
                 }
-            }
-            // 底部信息
-            Box(modifier = Modifier.fillMaxWidth().height(32.dp), contentAlignment = Alignment.Center) {
-                Text("${files.size} 项 · 已全部加载", fontSize = 12.sp, color = semantic.textSecondary)
+                // 底部信息（v2 file-footer：h36，13sp textPlaceholder）
+                Box(modifier = Modifier.fillMaxWidth().height(36.dp), contentAlignment = Alignment.Center) {
+                    Text("${files.size} 项 · 已全部加载", fontSize = 13.sp, color = semantic.textPlaceholder)
+                }
             }
         }
     }
@@ -248,9 +286,60 @@ fun FileListScreen(
     }
 }
 
-/** brand-lighter 色（浅色 #F2F3FF，暗色由主题决定，这里简化用浅色）。 */
+/**
+ * 批量栏文字按钮（v2 .bulk-bar .btn-ghost：h32 radius8，白字 85% + 图标 70%，
+ * hover 白 12% 底；danger 文字 #FDA4AF、hover 红 18% 底；disabled 整体 40% 透明）。
+ */
 @Composable
-private fun BrandLighter(): Color = Color(0xFFF2F3FF)
+private fun BulkBarButton(
+    label: String,
+    icon: String,
+    danger: Boolean = false,
+    disabled: Boolean = false,
+    onClick: () -> Unit,
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val hovered by interaction.collectIsHoveredAsState()
+    val contentColor = if (danger) Color(0xFFFDA4AF) else Color.White.copy(alpha = 0.85f)
+    val iconColor = if (danger) Color(0xFFFDA4AF) else Color.White.copy(alpha = 0.7f)
+    val bg = when {
+        disabled -> Color.Transparent
+        hovered && danger -> Color(0xFFFDA4AF).copy(alpha = 0.18f)
+        hovered -> Color.White.copy(alpha = 0.12f)
+        else -> Color.Transparent
+    }
+    Row(
+        modifier = Modifier.height(32.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(bg)
+            .alpha(if (disabled) 0.4f else 1f)
+            .hoverable(interaction)
+            .clickable(interactionSource = interaction, indication = null, enabled = !disabled, onClick = onClick)
+            .padding(horizontal = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        MateIcon(name = icon, size = 16.dp, tint = iconColor)
+        Text(label, fontSize = 15.sp, fontWeight = FontWeight.Medium, color = contentColor)
+    }
+}
+
+/** 批量栏关闭按钮（v2 .bulk-bar .btn-circle：32×32 正圆，白 70% 图标，hover 白 12% 底 + 纯白图标）。 */
+@Composable
+private fun BulkBarCloseButton(onClick: () -> Unit) {
+    val interaction = remember { MutableInteractionSource() }
+    val hovered by interaction.collectIsHoveredAsState()
+    Box(
+        modifier = Modifier.size(32.dp)
+            .clip(CircleShape)
+            .background(if (hovered) Color.White.copy(alpha = 0.12f) else Color.Transparent)
+            .hoverable(interaction)
+            .clickable(interactionSource = interaction, indication = null, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        MateIcon(name = "x", size = 16.dp, tint = if (hovered) Color.White else Color.White.copy(alpha = 0.7f))
+    }
+}
 
 /** 表头单元格（排序指示 + 可选 resize-handle）。 */
 @Composable
@@ -274,7 +363,8 @@ private fun HeaderCell(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            Text(title, fontSize = 12.sp, color = semantic.textSecondary, fontWeight = FontWeight.Medium)
+            // v2：表头 12.5sp semibold textSecondary
+            Text(title, fontSize = 12.5.sp, color = semantic.textSecondary, fontWeight = FontWeight.SemiBold)
             if (active) {
                 MateIcon(name = "arrow", size = 12.dp, tint = semantic.textSecondary,
                     modifier = Modifier.rotate(if (ascending) 0f else 90f))
@@ -297,7 +387,7 @@ private fun HeaderCell(
     }
 }
 
-/** 文件行（44px，hover bg-hover，selected brand-lighter，双击触发，右键菜单条件渲染）。 */
+/** 文件行（v2：56px，radius 8，hover bgHover，selected BrandLighter，双击触发，右键菜单条件渲染）。 */
 @Composable
 private fun FileRow(
     file: DriveFile,
@@ -322,18 +412,23 @@ private fun FileRow(
     onCanFreeUp: (DriveFile, (Boolean) -> Unit) -> Unit,
 ) {
     val semantic = LocalSemanticColors.current
-    var hovered by remember { mutableStateOf(false) }
     var menuExpanded by remember { mutableStateOf(false) }
     var canFree by remember { mutableStateOf<Boolean?>(null) }
+    // v2：hover 态接入 hoverable（此前 hovered 变量未接线，hover 背景从未生效）
+    val interaction = remember { MutableInteractionSource() }
+    val hovered by interaction.collectIsHoveredAsState()
     val bg = when {
-        selected -> BrandLighter()
+        selected -> BrandLighter
         hovered -> semantic.bgHover
         else -> Color.Transparent
     }
     // 双击检测：用 pointerInput detectTapGestures(onDoubleTap)
     Column {
         Row(
-            modifier = Modifier.fillMaxWidth().height(44.dp).background(bg).padding(horizontal = 16.dp)
+            modifier = Modifier.fillMaxWidth().height(56.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(bg)
+                .hoverable(interaction)
                 .pointerInput(file.id) {
                     detectTapGestures(
                         onTap = { onClick() },
@@ -346,41 +441,31 @@ private fun FileRow(
                     )
                 }
                 .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
+                    interactionSource = interaction,
                     indication = null,
                 ) {
                     // 右键菜单触发条件：这里用 secondary press 不便检测，简化为操作按钮触发
-                },
+                }
+                .padding(horizontal = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             // checkbox 列
             Box(modifier = Modifier.width(40.dp)) {
                 if (showCheckbox) MateCheckbox(checked = checked, onCheckedChange = { c -> if (c != null) onCheckedChange(c) })
             }
-            // name 列
-            Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            // name 列（v2：图标 32×32 色块 tile，间距 12）
+            Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 LaunchedEffect(file.id, file.thumbnailLink) { onThumbnailNeeded() }
-                if (thumbnail != null && !file.isFolder()) {
-                    val bitmap = remember(thumbnail) {
-                        runCatching { org.jetbrains.skia.Image.makeFromEncoded(thumbnail).toComposeImageBitmap() }.getOrNull()
-                    }
-                    if (bitmap != null) {
-                        androidx.compose.foundation.Image(bitmap, null, Modifier.width(20.dp).height(20.dp).clip(RoundedCornerShape(3.dp)))
-                    } else {
-                        MateIcon(name = fileTypeIcon(file), size = 20.dp, tint = if (file.isFolder()) BrandColor else semantic.textPlaceholder)
-                    }
-                } else {
-                    MateIcon(name = fileTypeIcon(file), size = 20.dp, tint = if (file.isFolder()) BrandColor else semantic.textPlaceholder)
-                }
-                Text(file.name ?: file.fileName ?: "未命名", fontSize = 14.sp, color = semantic.textPrimary,
+                FileTypeTile(file = file, thumbnail = thumbnail)
+                Text(file.name ?: file.fileName ?: "未命名", fontSize = 15.sp, color = semantic.textPrimary,
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             // size 列
-            Text(if (file.isFolder()) "—" else formatFileSize(file.sizeBytes), fontSize = 13.sp, color = semantic.textSecondary, modifier = Modifier.width(sizeWidth))
+            Text(if (file.isFolder()) "—" else formatFileSize(file.sizeBytes), fontSize = 14.sp, color = semantic.textSecondary, modifier = Modifier.width(sizeWidth))
             // time 列
-            Text(file.modifiedTime.orEmpty().replace("T", " ").take(16), fontSize = 13.sp, color = semantic.textSecondary, modifier = Modifier.width(timeWidth))
-            // status 列
-            Box(modifier = Modifier.width(60.dp), contentAlignment = Alignment.Center) {
+            Text(file.modifiedTime.orEmpty().replace("T", " ").take(16), fontSize = 14.sp, color = semantic.textSecondary, modifier = Modifier.width(timeWidth))
+            // status 列（v2 列宽 72）
+            Box(modifier = Modifier.width(72.dp), contentAlignment = Alignment.Center) {
                 val (statusIcon, statusColor) = when (status) {
                     "synced" -> "local" to SuccessColor
                     "placeholder" -> "cloud" to semantic.textSecondary
@@ -389,29 +474,45 @@ private fun FileRow(
                 }
                 MateIcon(name = statusIcon, size = 16.dp, tint = statusColor)
             }
-            // actions 列（操作按钮 → 右键菜单）
-            Box(modifier = Modifier.width(40.dp), contentAlignment = Alignment.Center) {
+            // actions 列（v2 列宽 44；操作按钮 → 右键菜单，锚点为本 Box）
+            Box(modifier = Modifier.width(44.dp), contentAlignment = Alignment.Center) {
                 MateButton(variant = MateButtonVariant.ICON, icon = "list", onClick = {
                     canFree = null; menuExpanded = true
                     onCanFreeUp(file) { canFree = it }
                 })
-                DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
-                    // 按条件渲染（对标原 Vue ctx-menu）
-                    if (mountConfigured) {
-                        CtxItem("执行双端对齐", "sync", enabled = !isIndexing) { menuExpanded = false; onSync() }
-                        MateHDivider(modifier = Modifier.padding(vertical = 4.dp))
-                    }
-                    if (canFree == true) {
-                        CtxItem("释放空间", "cloud") { menuExpanded = false; onFreeUp() }
-                        MateHDivider(modifier = Modifier.padding(vertical = 4.dp))
-                    }
-                    if (mountConfigured) {
-                        CtxItem("重命名", "edit", enabled = !isIndexing) { menuExpanded = false; onRename() }
-                    }
-                    CtxItem("属性", "info") { menuExpanded = false; onShowProps() }
-                    if (mountConfigured) {
-                        MateHDivider(modifier = Modifier.padding(vertical = 4.dp))
-                        CtxItem("删除", "trash", danger = true, enabled = !isIndexing) { menuExpanded = false; onDelete() }
+                if (menuExpanded) {
+                    // v2 自绘菜单（对标 05-file-ops .menu：w200 radius10 + 阴影 + 0.5px 描边，padding 6）
+                    Popup(
+                        onDismissRequest = { menuExpanded = false },
+                        properties = PopupProperties(focusable = true),
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .width(200.dp)
+                                .shadow(16.dp, RoundedCornerShape(10.dp))
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(semantic.bgContainer)
+                                .border(0.5.dp, semantic.border, RoundedCornerShape(10.dp))
+                                .padding(6.dp),
+                        ) {
+                            // 按条件渲染（对标原 Vue ctx-menu）
+                            if (mountConfigured) {
+                                CtxItem("执行双端对齐", "sync", enabled = !isIndexing) { menuExpanded = false; onSync() }
+                                CtxDivider()
+                            }
+                            if (canFree == true) {
+                                CtxItem("释放空间", "cloud") { menuExpanded = false; onFreeUp() }
+                                CtxDivider()
+                            }
+                            if (mountConfigured) {
+                                CtxItem("重命名", "edit", enabled = !isIndexing) { menuExpanded = false; onRename() }
+                            }
+                            CtxItem("属性", "info") { menuExpanded = false; onShowProps() }
+                            if (mountConfigured) {
+                                CtxDivider()
+                                CtxItem("删除", "trash", danger = true, enabled = !isIndexing) { menuExpanded = false; onDelete() }
+                            }
+                        }
                     }
                 }
             }
@@ -421,16 +522,83 @@ private fun FileRow(
     }
 }
 
-/** 右键菜单项（对标原 Vue .ctx-item）。 */
+/**
+ * 文件类型色块 tile（v2 .ftile：32×32 radius 6，柔和底色 + 彩色图标 18dp）。
+ * 图片有缩略图时直接显示缩略图（同尺寸 clip radius 6），解码失败回退到色块图标。
+ */
+@Composable
+private fun FileTypeTile(file: DriveFile, thumbnail: ByteArray?) {
+    val semantic = LocalSemanticColors.current
+    val type = fileTypeIcon(file)
+    if (thumbnail != null && !file.isFolder()) {
+        val bitmap = remember(thumbnail) {
+            runCatching { org.jetbrains.skia.Image.makeFromEncoded(thumbnail).toComposeImageBitmap() }.getOrNull()
+        }
+        if (bitmap != null) {
+            androidx.compose.foundation.Image(bitmap, null, Modifier.size(32.dp).clip(RoundedCornerShape(6.dp)))
+            return
+        }
+    }
+    val (bg, tint) = when (type) {
+        "folder" -> FolderAmberBg to FolderAmber
+        "file-text" -> TileDocBg to TileDoc
+        "image" -> TileImageBg to TileImage
+        "video" -> TileVideoBg to TileVideo
+        "chart" -> TileSheetBg to TileSheet
+        else -> semantic.bgFill to semantic.textSecondary
+    }
+    Box(
+        modifier = Modifier.size(32.dp).clip(RoundedCornerShape(6.dp)).background(bg),
+        contentAlignment = Alignment.Center,
+    ) {
+        MateIcon(name = type, size = 18.dp, tint = tint)
+    }
+}
+
+/**
+ * 右键菜单项（v2 .menu__item：h36 radius8，hover bgFill，padding 0 12，gap 10；
+ * icon 16（默认 textSecondary，danger ErrorColor），文字 15sp（默认 textPrimary，danger ErrorColor）；
+ * enabled=false 时文字/图标 textPlaceholder 且不响应点击与 hover。
+ */
 @Composable
 private fun CtxItem(label: String, icon: String, danger: Boolean = false, enabled: Boolean = true, onClick: () -> Unit) {
     val semantic = LocalSemanticColors.current
-    DropdownMenuItem(onClick = onClick, enabled = enabled) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            MateIcon(name = icon, size = 16.dp, tint = if (danger) ErrorColor else semantic.textPrimary)
-            Text(label, color = if (danger) ErrorColor else semantic.textPrimary, fontSize = 14.sp)
-        }
+    val interaction = remember { MutableInteractionSource() }
+    val hovered by interaction.collectIsHoveredAsState()
+    val contentColor = when {
+        !enabled -> semantic.textPlaceholder
+        danger -> ErrorColor
+        else -> semantic.textPrimary
     }
+    val iconColor = when {
+        !enabled -> semantic.textPlaceholder
+        danger -> ErrorColor
+        else -> semantic.textSecondary
+    }
+    Row(
+        modifier = Modifier.fillMaxWidth().height(36.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(if (hovered && enabled) semantic.bgFill else Color.Transparent)
+            .hoverable(interaction)
+            .clickable(interactionSource = interaction, indication = null, enabled = enabled, onClick = onClick)
+            .padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        MateIcon(name = icon, size = 16.dp, tint = iconColor)
+        Text(label, color = contentColor, fontSize = 15.sp)
+    }
+}
+
+/** 右键菜单分隔线（v2 .menu__sep：0.5px，margin 8/4，bg border）。 */
+@Composable
+private fun CtxDivider() {
+    Box(
+        modifier = Modifier.fillMaxWidth()
+            .padding(horizontal = 8.dp, vertical = 4.dp)
+            .height(0.5.dp)
+            .background(LocalSemanticColors.current.border),
+    )
 }
 
 /** 重命名对话框（对标原 Vue MateDialog 重命名）。 */

@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>08 · 应用更新 - PetalLink v2 原型</title>
+<link rel="stylesheet" href="assets/v2.css">
+<script src="assets/sprite.js"></script>
+<style>
+  /* 本页专属：独立展示的对话框 / 侧栏特写容器 */
+  .demo-dialogs { display: flex; gap: 32px; flex-wrap: wrap; justify-content: center; }
+  .demo-dialogs .dialog { box-shadow: var(--sh-pop); }
+  .demo-sidebars { display: flex; gap: 32px; }
+  .demo-sidebars .sidebar {
+    height: 380px; border-right: none;
+    border-radius: var(--r-lg); overflow: hidden;
+    box-shadow: var(--sh-lg), 0 0 0 0.5px var(--line);
+  }
+  /* 侧栏渐变更新卡片内的进度条（白色叠于渐变之上） */
+  .sidebar__update .progress { background: rgba(255, 255, 255, 0.28); }
+  .sidebar__update .progress__fill { background: #fff; }
+  /* 更新日志面板 */
+  .changelog {
+    margin-top: 6px; max-height: 180px; overflow: hidden;
+    background: var(--bg-fill); border-radius: var(--r-md);
+    padding: 12px 14px;
+    font-size: 12.5px; color: var(--ink-600); line-height: 1.8;
+  }
+</style>
+</head>
+<body>
+<div class="canvas">
+
+  <!-- ============ 场景 1：发现新版本（AVAILABLE，完整窗口） ============ -->
+  <div class="scene">
+    <div class="scene__label"><b>更新对话框 · 发现新版本</b>　版本号 + 更新日志 + 稍后提醒 / 立即更新（F-UPDATE-05）</div>
+    <div class="mac-window">
+      <div class="mac-titlebar">
+        <div class="traffic"><i></i><i></i><i></i></div>
+        <div class="mac-titlebar__title">PetalLink - 华为云盘客户端开源版</div>
+      </div>
+      <div class="mac-body">
+        <!-- 毛玻璃侧栏 -->
+        <aside class="sidebar">
+          <div class="sidebar__logo">
+            <span class="logo-tile logo-tile--28"><span class="icon icon--16"><svg><use href="#i-cloud"/></svg></span></span>
+            <span style="font-size:15px;font-weight:600;">PetalLink</span>
+          </div>
+          <div class="sidebar__section">位置</div>
+          <div class="sidebar__tree">
+            <div class="tree-node is-active">
+              <span class="tree-node__chevron is-open"><span class="icon icon--12"><svg><use href="#i-arrow"/></svg></span></span>
+              <span class="icon icon--16 icon--folder"><svg><use href="#i-folder"/></svg></span>
+              <span class="tree-node__name">全部文件</span>
+            </div>
+            <div class="tree-node" style="padding-left:24px;">
+              <span class="tree-node__chevron"><span class="icon icon--12"><svg><use href="#i-arrow"/></svg></span></span>
+              <span class="icon icon--16 icon--folder"><svg><use href="#i-folder"/></svg></span>
+              <span class="tree-node__name">文档</span>
+            </div>
+          </div>
+          <!-- 账号卡 -->
+          <div class="sidebar__account">
+            <div class="avatar avatar--32">华</div>
+            <div style="flex:1;min-width:0;">
+              <div style="font-size:13px;font-weight:600;">华小为</div>
+              <div style="font-size:11.5px;color:var(--ink-400);margin-top:1px;">36.5 GB / 200 GB</div>
+              <div class="progress" style="height:4px;margin-top:6px;"><div class="progress__fill" style="width:18%;"></div></div>
+            </div>
+          </div>
+          <!-- 侧栏渐变更新卡片 -->
+          <div class="sidebar__update">
+            <div class="sidebar__update-title">
+              <span>新版本 1.1.0</span>
+              <span class="sidebar__update-close">×</span>
+            </div>
+            <button class="sidebar__update-btn"><span class="icon icon--14"><svg><use href="#i-download"/></svg></span>立即更新</button>
+          </div>
+        </aside>
+
+        <!-- 右侧主区 -->
+        <div style="flex:1;display:flex;flex-direction:column;min-width:0;background:var(--bg-card);">
+          <div class="toolbar">
+            <div class="search-field" style="flex:1;max-width:420px;">
+              <span class="icon icon--16"><svg><use href="#i-search"/></svg></span>
+              <input placeholder="搜索文件和文件夹...">
+            </div>
+            <span style="flex:1;"></span>
+            <button class="btn btn--sm" style="height:34px;"><span class="icon icon--16"><svg><use href="#i-refresh"/></svg></span>同步索引</button>
+            <button class="btn-soft"><span class="icon icon--16"><svg><use href="#i-transfer"/></svg></span>传输队列</button>
+            <button class="btn-ghost"><span class="icon icon--16"><svg><use href="#i-folder-open"/></svg></span>Finder</button>
+            <button class="btn-circle"><span class="icon icon--18"><svg><use href="#i-settings"/></svg></span></button>
+          </div>
+          <div class="sync-bar">
+            <div class="sync-bar__left">
+              <span class="dot dot--ok"></span>
+              <span style="font-weight:500;">同步完成</span>
+              <span class="sync-bar__time">上次同步 14:32</span>
+            </div>
+            <div class="sync-bar__tags"></div>
+          </div>
+          <div class="breadcrumb">
+            <span class="breadcrumb__item--current">全部文件</span>
+          </div>
+          <div style="flex:1;"></div>
+        </div>
+
+        <!-- 更新对话框 overlay -->
+        <div class="overlay">
+          <div class="dialog">
+            <div class="dialog__header">
+              <span class="dialog__icon-badge"><span class="icon icon--20"><svg><use href="#i-download"/></svg></span></span>
+              <div>
+                <div class="dialog__title">发现新版本</div>
+                <div style="font-size:13px;font-weight:700;color:var(--brand-600);margin-top:3px;">v1.1.0</div>
+              </div>
+            </div>
+            <div class="dialog__body">
+              <div style="font-size:12px;font-weight:600;color:var(--ink-400);">更新内容</div>
+              <div class="changelog">
+                · 新增释放空间目录级递归支持，二次确认弹窗列出全部可释放项<br>
+                · 修复大文件（&gt;20MB）断点续传在弱网下的 session 过期问题<br>
+                · 优化同步索引速度，全量 BFS 内存占用降低 40%<br>
+                · 修复菜单栏托盘传输进度偶现不刷新
+              </div>
+            </div>
+            <div class="dialog__footer">
+              <button class="btn-ghost">稍后提醒</button>
+              <button class="btn"><span class="icon icon--16"><svg><use href="#i-download"/></svg></span>立即更新</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 场景 2：下载中 / 等待传输 / 更新就绪 / 更新失败 ============ -->
+  <div class="scene">
+    <div class="scene__label"><b>更新对话框 · 其余四态</b>　下载中（可后台）/ 等待传输（禁用重启）/ 更新就绪 / 更新失败</div>
+    <div class="demo-dialogs">
+
+      <!-- DOWNLOADING -->
+      <div class="dialog">
+        <div class="dialog__header">
+          <span class="dialog__icon-badge"><span class="icon icon--20"><svg><use href="#i-download"/></svg></span></span>
+          <div class="dialog__title">正在下载更新…</div>
+        </div>
+        <div class="dialog__body" style="padding-top:16px;">
+          <div style="display:flex;align-items:center;gap:12px;">
+            <div class="progress" style="flex:1;height:8px;"><div class="progress__fill" style="width:45%;"></div></div>
+            <span class="num" style="font-size:12.5px;font-weight:700;color:var(--brand-600);">45%</span>
+          </div>
+        </div>
+        <div class="dialog__footer">
+          <button class="btn-ghost">后台下载</button>
+        </div>
+      </div>
+
+      <!-- WAITING_TRANSFERS -->
+      <div class="dialog">
+        <div class="dialog__header">
+          <span class="dialog__icon-badge"><span class="icon icon--20"><svg><use href="#i-download"/></svg></span></span>
+          <div class="dialog__title">下载完成</div>
+        </div>
+        <div class="dialog__body" style="padding-top:16px;">
+          <div style="display:flex;gap:12px;align-items:flex-start;">
+            <div class="spinner"></div>
+            <span style="font-size:14px;color:var(--ink-600);">下载完成。等待所有文档上传/下载完成后自动重启…</span>
+          </div>
+        </div>
+        <div class="dialog__footer">
+          <button class="btn-ghost">后台等待</button>
+          <button class="btn is-disabled"><span class="icon icon--16"><svg><use href="#i-check"/></svg></span>等待传输完成…</button>
+        </div>
+      </div>
+
+      <!-- READY -->
+      <div class="dialog">
+        <div class="dialog__header">
+          <span class="dialog__icon-badge dialog__icon-badge--ok"><span class="icon icon--20"><svg><use href="#i-check"/></svg></span></span>
+          <div class="dialog__title">更新就绪</div>
+        </div>
+        <div class="dialog__body" style="padding-top:16px;">
+          <div style="display:flex;gap:12px;align-items:flex-start;">
+            <div class="spinner"></div>
+            <span style="font-size:14px;color:var(--ink-600);">更新已准备就绪，重启即可生效。</span>
+          </div>
+        </div>
+        <div class="dialog__footer">
+          <button class="btn-ghost">稍后</button>
+          <button class="btn"><span class="icon icon--16"><svg><use href="#i-check"/></svg></span>立即重启</button>
+        </div>
+      </div>
+
+      <!-- FAILED -->
+      <div class="dialog">
+        <div class="dialog__header">
+          <span class="dialog__icon-badge dialog__icon-badge--err"><span class="icon icon--20"><svg><use href="#i-alert"/></svg></span></span>
+          <div class="dialog__title">更新失败</div>
+        </div>
+        <div class="dialog__body" style="padding-top:16px;">
+          <span style="font-size:14px;color:var(--err);">更新包签名校验失败：Developer ID 不匹配，已中止安装并回滚。</span>
+        </div>
+        <div class="dialog__footer">
+          <button class="btn-ghost">关闭</button>
+          <button class="btn"><span class="icon icon--16"><svg><use href="#i-refresh"/></svg></span>重试</button>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ============ 场景 3：侧边栏更新提示（组件特写） ============ -->
+  <div class="scene">
+    <div class="scene__label"><b>侧边栏 · 更新提示</b>　静默检查命中仅更新侧边栏：新版本横幅（可关闭）/ 下载进度条</div>
+    <div class="demo-sidebars">
+      <!-- 横幅态 -->
+      <aside class="sidebar">
+        <div class="sidebar__logo">
+          <span class="logo-tile logo-tile--28"><span class="icon icon--16"><svg><use href="#i-cloud"/></svg></span></span>
+          <span style="font-size:15px;font-weight:600;">PetalLink</span>
+        </div>
+        <div class="sidebar__tree"></div>
+        <div class="sidebar__account">
+          <div class="avatar avatar--32">华</div>
+          <div style="flex:1;min-width:0;">
+            <div style="font-size:13px;font-weight:600;">华小为</div>
+            <div style="font-size:11.5px;color:var(--ink-400);margin-top:1px;">36.5 GB / 200 GB</div>
+          </div>
+        </div>
+        <div class="sidebar__update">
+          <div class="sidebar__update-title">
+            <span>新版本 1.1.0</span>
+            <span class="sidebar__update-close">×</span>
+          </div>
+          <button class="sidebar__update-btn"><span class="icon icon--14"><svg><use href="#i-download"/></svg></span>立即更新</button>
+        </div>
+      </aside>
+      <!-- 下载进度态 -->
+      <aside class="sidebar">
+        <div class="sidebar__logo">
+          <span class="logo-tile logo-tile--28"><span class="icon icon--16"><svg><use href="#i-cloud"/></svg></span></span>
+          <span style="font-size:15px;font-weight:600;">PetalLink</span>
+        </div>
+        <div class="sidebar__tree"></div>
+        <div class="sidebar__account">
+          <div class="avatar avatar--32">华</div>
+          <div style="flex:1;min-width:0;">
+            <div style="font-size:13px;font-weight:600;">华小为</div>
+            <div style="font-size:11.5px;color:var(--ink-400);margin-top:1px;">36.5 GB / 200 GB</div>
+          </div>
+        </div>
+        <div class="sidebar__update">
+          <div class="sidebar__update-title">
+            <span>正在下载更新</span>
+            <span class="num" style="font-weight:700;">45%</span>
+          </div>
+          <div class="progress"><div class="progress__fill" style="width:45%;"></div></div>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+  <a class="back-link" href="index.html">← 返回 v2 原型导航</a>
+</div>
+</body>
+</html>

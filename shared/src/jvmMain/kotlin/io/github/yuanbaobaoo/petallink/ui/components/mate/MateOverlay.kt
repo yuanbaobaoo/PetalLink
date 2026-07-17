@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -35,8 +36,11 @@ import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import io.github.yuanbaobaoo.petallink.ui.components.MateIcon
 import io.github.yuanbaobaoo.petallink.ui.theme.BrandColor
+import io.github.yuanbaobaoo.petallink.ui.theme.BrandLighter
+import io.github.yuanbaobaoo.petallink.ui.theme.ErrorBg
 import io.github.yuanbaobaoo.petallink.ui.theme.ErrorColor
 import io.github.yuanbaobaoo.petallink.ui.theme.LocalSemanticColors
+import io.github.yuanbaobaoo.petallink.ui.theme.WarningColor
 import kotlinx.coroutines.delay
 
 /** 弹出菜单项（对标原 Vue PopupItem）。 */
@@ -49,13 +53,11 @@ data class MatePopupItem(
 )
 
 /**
- * 弹出菜单（对标原 Vue `<MatePopupMenu items menuWidth>`）。
+ * 弹出菜单（v2：radius-lg(10) 浮层 + radius-md(8) 菜单项）。
  *
- * trigger + 全屏 capture + menu；menu min-width=menuWidth(默认 168)，radius-md，shadow-dropdown；
- * 边界自动翻转（8px margin，溢出右/下时翻转方向）；
- * item row gap sm，padding 10/md，body，hover bg-hover；danger color error；divider 0.5px。
- *
- * Compose 的 [Popup] 自带窗口边界钳制，这里用 PopupPositionProvider 贴 trigger 左下。
+ * trigger + Popup + menu；menu min-width=menuWidth(默认 168)，radius-lg，shadow-dropdown；
+ * 边界自动翻转（Popup 自带窗口边界钳制，贴 trigger 左下）；
+ * item row gap sm，h36，radius-md，hover bg-fill；danger color error；divider 0.5px。
  *
  * @param items 菜单项列表
  * @param menuWidth 菜单宽度（默认 168）
@@ -86,7 +88,6 @@ fun MatePopupMenu(
             trigger()
         }
         if (expanded && !disabled) {
-            // 全屏捕获层（点击关闭）—— 用 Popup 的 onDismissRequest 代替，这里不额外加
             Popup(
                 onDismissRequest = {
                     expanded = false
@@ -94,14 +95,13 @@ fun MatePopupMenu(
                 },
                 properties = PopupProperties(focusable = true),
             ) {
-                val menuInteraction = remember { MutableInteractionSource() }
                 Column(
                     modifier = Modifier
                         .width(menuWidth.dp)
-                        .clip(RoundedCornerShape(6.dp))
+                        .clip(RoundedCornerShape(10.dp))
                         .background(semantic.bgContainer)
-                        .border(0.5.dp, semantic.border, RoundedCornerShape(6.dp))
-                        .padding(vertical = 4.dp),
+                        .border(0.5.dp, semantic.border, RoundedCornerShape(10.dp))
+                        .padding(6.dp),
                 ) {
                     items.forEach { item ->
                         if (item.divider) {
@@ -109,7 +109,7 @@ fun MatePopupMenu(
                             Box(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(horizontal = 4.dp)
+                                    .padding(horizontal = 8.dp, vertical = 4.dp)
                                     .height(0.5.dp)
                                     .background(semantic.border),
                             )
@@ -119,27 +119,29 @@ fun MatePopupMenu(
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
+                                    .height(36.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(if (itemHovered) semantic.bgFill else Color.Transparent)
                                     .mateClickable(itemInteraction) {
                                         expanded = false
                                         onSelect(item.value)
                                         onDismiss()
                                     }
-                                    .background(if (itemHovered) semantic.bgHover else Color.Transparent)
-                                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                                    .padding(horizontal = 12.dp),
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
                             ) {
                                 if (item.icon != null) {
                                     MateIcon(
                                         name = item.icon,
                                         size = 16.dp,
-                                        tint = if (item.danger) ErrorColor else semantic.textPrimary,
+                                        tint = if (item.danger) ErrorColor else semantic.textSecondary,
                                     )
                                 }
                                 Text(
                                     item.label,
                                     color = if (item.danger) ErrorColor else semantic.textPrimary,
-                                    fontSize = 14.sp,
+                                    fontSize = 15.sp,
                                 )
                             }
                         }
@@ -151,7 +153,7 @@ fun MatePopupMenu(
 }
 
 // ============================================================
-// Dialog（对标原 Vue MateDialog + useDialog + MateDialogHost）
+// Dialog（v2：radius-xl(12) + 图标徽章标题）
 // ============================================================
 
 /** 对话框配置（对标原 Vue DialogOptions / ConfirmOptions）。 */
@@ -161,7 +163,7 @@ data class MateDialogOptions(
     val danger: Boolean = false,
     val content: String = "",
     val closeOnOverlay: Boolean = true,
-    val width: Int = 420,
+    val width: Int = 460,
     val cancelText: String = "取消",
     val confirmText: String = "确定",
 )
@@ -186,10 +188,11 @@ fun closeDialog(value: Boolean = false) {
 }
 
 /**
- * 对话框宿主（对标原 Vue `<MateDialogHost>`）。
+ * 对话框宿主（v2）。
  *
- * 绑定 [globalDialogState]；confirm 时 footer 为「取消 + 确认」两按钮。
- * overlay fixed inset 0，bg rgba(0,0,0,0.3)；dialog width/radius-lg/shadow-modal，fade-in。
+ * 绑定 [globalDialogState]；confirm 时 footer 为「取消(ghost) + 确认(渐变)」两按钮。
+ * overlay fixed inset 0，bg rgba(0,0,0,0.36)；dialog radius-xl(12)/shadow-modal；
+ * header 带 40×40 radius-lg 图标徽章（danger→err-bg/err，默认 brand-lighter/brand）。
  */
 @Composable
 fun MateDialogHost() {
@@ -199,29 +202,40 @@ fun MateDialogHost() {
     val semantic = LocalSemanticColors.current
 
     Box(
-        modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.3f)),
+        modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.36f)),
         contentAlignment = Alignment.Center,
     ) {
         Column(
             modifier = Modifier
                 .width(options.width.dp)
-                .clip(RoundedCornerShape(9.dp))
-                .background(semantic.bgContainer)
-                .border(0.5.dp, semantic.border.copy(alpha = 0.25f), RoundedCornerShape(9.dp)),
+                .clip(RoundedCornerShape(12.dp))
+                .background(semantic.bgContainer),
         ) {
-            // header
+            // header：图标徽章 + 标题
             Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 32.dp, vertical = 4.dp).padding(top = 28.dp, bottom = 8.dp),
+                modifier = Modifier.fillMaxWidth().padding(start = 24.dp, end = 24.dp, top = 24.dp, bottom = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                options.titleIcon?.let { icon ->
-                    MateIcon(name = icon, size = 20.dp, tint = if (options.danger) ErrorColor else BrandColor)
+                if (options.titleIcon != null) {
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(if (options.danger) ErrorBg else BrandLighter),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        MateIcon(
+                            name = options.titleIcon,
+                            size = 20.dp,
+                            tint = if (options.danger) ErrorColor else BrandColor,
+                        )
+                    }
                 }
                 Text(
                     options.title,
                     color = semantic.textPrimary,
-                    fontSize = 16.sp,
+                    fontSize = 18.sp,
                     fontWeight = FontWeight.SemiBold,
                 )
             }
@@ -229,22 +243,23 @@ fun MateDialogHost() {
             Text(
                 options.content,
                 color = semantic.textSecondary,
-                fontSize = 14.sp,
-                modifier = Modifier.fillMaxWidth().padding(start = 32.dp, end = 32.dp, top = 4.dp, bottom = 32.dp),
-                lineHeight = (14 * 1.5f).sp,
+                fontSize = 15.sp,
+                modifier = Modifier.fillMaxWidth().padding(start = 24.dp, end = 24.dp, top = 8.dp, bottom = 20.dp),
+                lineHeight = (15 * 1.65f).sp,
             )
             // footer
             Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 16.dp),
+                modifier = Modifier.fillMaxWidth().padding(start = 24.dp, end = 24.dp, bottom = 20.dp),
                 horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically,
             ) {
                 if (resolver != null) {
                     MateButton(
                         label = options.cancelText,
-                        variant = MateButtonVariant.TEXT,
+                        variant = MateButtonVariant.ICON_TEXT,
                         onClick = { closeDialog(false) },
                     )
-                    Spacer(Modifier.width(8.dp))
+                    Spacer(Modifier.width(10.dp))
                     MateButton(
                         label = options.confirmText,
                         variant = MateButtonVariant.PRIMARY,
@@ -260,7 +275,7 @@ fun MateDialogHost() {
 }
 
 // ============================================================
-// Toast（对标原 Vue useToast + MateToastHost）
+// Toast（v2：深色浮条 + 状态图标）
 // ============================================================
 
 /** Toast 变体（对标原 Vue ToastVariant）。 */
@@ -286,19 +301,20 @@ fun showToast(
 }
 
 /**
- * Toast 宿主（对标原 Vue `<MateToastHost>`）。
+ * Toast 宿主（v2：深色浮条）。
  *
- * 底部居中，max-w 480，padding 10/lg，radius-sm，shadow；背景色按 variant 映射。
+ * 底部居中，max-w 480，padding 10/18，radius-lg(10)，bg rgba(28,28,30,0.92)；
+ * 图标按 variant 着色（success 绿 / warning 橙 / error 粉红 / default 白）。
  * 自动 2 秒后清除（单条语义）。
  */
 @Composable
 fun MateToastHost() {
     val entry = globalToastState.value ?: return
-    val bgColor = when (entry.variant) {
-        MateToastVariant.DEFAULT -> Color(0xFF333333)
-        MateToastVariant.SUCCESS -> Color(0xFF2BA471)
-        MateToastVariant.WARNING -> Color(0xFFE37318)
-        MateToastVariant.ERROR -> Color(0xFFD54941)
+    val (iconName, iconColor) = when (entry.variant) {
+        MateToastVariant.DEFAULT -> "info" to Color.White
+        MateToastVariant.SUCCESS -> "check" to Color(0xFF4ADE80)
+        MateToastVariant.WARNING -> "alert" to WarningColor
+        MateToastVariant.ERROR -> "alert" to Color(0xFFFB7185)
     }
     LaunchedEffect(entry) {
         delay(2000L)
@@ -308,14 +324,17 @@ fun MateToastHost() {
         modifier = Modifier.fillMaxSize(),
         contentAlignment = Alignment.BottomCenter,
     ) {
-        Box(
+        Row(
             modifier = Modifier
                 .padding(48.dp)
-                .clip(RoundedCornerShape(3.dp))
-                .background(bgColor)
-                .padding(horizontal = 16.dp, vertical = 10.dp),
+                .clip(RoundedCornerShape(10.dp))
+                .background(Color(0xEB1C1C1E))
+                .padding(horizontal = 18.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text(entry.message, color = Color.White, fontSize = 14.sp)
+            MateIcon(name = iconName, size = 16.dp, tint = iconColor)
+            Text(entry.message, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
         }
     }
 }

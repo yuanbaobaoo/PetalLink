@@ -3,6 +3,7 @@
 package io.github.yuanbaobaoo.petallink.ui.pages.main
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -11,7 +12,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -34,7 +34,6 @@ import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -42,20 +41,24 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.yuanbaobaoo.petallink.ui.components.MateIcon
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateAppLogo
-import io.github.yuanbaobaoo.petallink.ui.components.mate.MateHDivider
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateLinearProgress
 import io.github.yuanbaobaoo.petallink.ui.theme.BrandColor
-import io.github.yuanbaobaoo.petallink.ui.theme.BrandHover
+import io.github.yuanbaobaoo.petallink.ui.theme.BrandGradient
+import io.github.yuanbaobaoo.petallink.ui.theme.BrandLighter
+import io.github.yuanbaobaoo.petallink.ui.theme.FolderAmber
 import io.github.yuanbaobaoo.petallink.ui.theme.LocalSemanticColors
 import io.github.yuanbaobaoo.petallink.drive.DriveFile
 
 /**
- * 侧边栏（对标原 Vue Sidebar.vue）。
+ * 侧边栏（v2：design/v2/02-main.html .sidebar）。
  *
- * 宽 220px，bg-page，右 0.5px border。三段式纵向 flex：
- * 1. Logo 区（56px 高，padding 0/16）
- * 2. 目录树（flex:1 scroll，padding 4/8）
- * 3. 账号栏（顶 0.5px border，padding 16，gap 12；28×28 圆形渐变头像 + 用户名 + 配额）
+ * 宽 248px，bg-page，右 0.5px border。纵向三段：
+ * 1. Logo 区（60px 高，padding 0/18）
+ * 2. section 标签「位置」（12sp semibold textPlaceholder，padding 12/18/6）
+ * 3. 目录树（flex:1 scroll，padding 4/8）
+ * 底部：悬浮账号卡（margin 10，bg-container radius 10 + 0.5px border，padding 12；
+ * 32×32 圆形 BrandGradient 渐变头像 + 用户名 14sp semibold + 配额 12.5sp secondary + 4px 配额进度条），
+ * 以及更新卡片（渐变底，见 [SidebarUpdateProgress] / [SidebarUpdateBanner]）。
  *
  * @param rootChildren 根目录子文件夹列表
  * @param directoryChildren 各文件夹 ID → 子文件夹列表
@@ -75,23 +78,34 @@ fun Sidebar(
     updateDownloadProgress: Float,
     updateAvailableVersion: String?,
     onDismissUpdate: () -> Unit,
+    onInstallUpdate: () -> Unit = {},
     onNavigate: (DriveFile) -> Unit,
 ) {
     val semantic = LocalSemanticColors.current
     Column(
         modifier = Modifier
-            .width(220.dp)
+            .width(248.dp)
             .fillMaxHeight()
             .background(semantic.bgPage)
             .then(Modifier.drawBehindBorder(semantic.border, isRight = true)),
     ) {
-        // 1. Logo 区（56px）
+        // 1. Logo 区（60px，padding 0/18）
         Box(
-            modifier = Modifier.height(56.dp).padding(horizontal = 16.dp),
+            modifier = Modifier.height(60.dp).padding(horizontal = 18.dp),
             contentAlignment = Alignment.CenterStart,
         ) { MateAppLogo(size = 26.dp) }
 
-        // 2. 目录树（flex:1 scroll）
+        // 2. section 标签「位置」（12sp semibold textPlaceholder，padding 12/18/6）
+        Text(
+            "位置",
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = semantic.textPlaceholder,
+            letterSpacing = 0.4.sp,
+            modifier = Modifier.padding(start = 18.dp, top = 12.dp, bottom = 6.dp),
+        )
+
+        // 3. 目录树（flex:1 scroll）
         Column(
             modifier = Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 8.dp, vertical = 4.dp),
         ) {
@@ -105,33 +119,35 @@ fun Sidebar(
             )
         }
 
-        // 账号栏顶分隔线
-        MateHDivider()
-
-        // 3. 账号栏（padding 16，gap 12）
+        // 4. 悬浮账号卡（margin 10，bg-container radius 10 + 0.5px border，padding 12，gap 10）
         Row(
-            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(10.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(semantic.bgContainer)
+                .border(0.5.dp, semantic.border, RoundedCornerShape(10.dp))
+                .padding(12.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            // 28×28 圆形渐变头像（品牌色，白色 initial 占位字，无 padding）
+            // 32×32 圆形 BrandGradient 渐变头像（白色 initial 占位字）
             Box(
-                modifier = Modifier.size(28.dp).clip(CircleShape)
-                    .background(Brush.linearGradient(listOf(BrandColor, BrandHover))),
+                modifier = Modifier.size(32.dp).clip(CircleShape).background(BrandGradient),
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
                     userName?.firstOrNull()?.toString() ?: "华",
                     color = Color.White,
-                    fontSize = 13.sp,
+                    fontSize = 15.sp,
                     fontWeight = FontWeight.SemiBold,
                 )
             }
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     userName ?: "加载账号中…",
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Medium,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
                     color = semantic.textPrimary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -139,75 +155,105 @@ fun Sidebar(
                 if (quotaText != null) {
                     Text(
                         quotaText,
-                        fontSize = 12.sp,
+                        fontSize = 12.5.sp,
                         color = semantic.textSecondary,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(top = 1.dp),
                     )
+                    // 配额进度条（4px，品牌渐变自动；比例从 quotaText 解析，失败则不显示）
+                    val quotaRatio = remember(quotaText) { parseQuotaRatio(quotaText) }
+                    if (quotaRatio != null) {
+                        Spacer(Modifier.height(6.dp))
+                        MateLinearProgress(value = quotaRatio, height = 4.dp)
+                    }
                 }
             }
         }
 
-        // 更新下载进度条（对标原 Vue .sidebar__update-progress）
+        // 更新下载进度卡（v2 .sidebar__update 渐变卡片）
         if (updateDownloading) {
             SidebarUpdateProgress(updateDownloadProgress)
         }
-        // 更新提示横幅（对标原 Vue .sidebar__update-banner）
+        // 更新提示卡（v2 .sidebar__update 渐变卡片）
         if (updateAvailableVersion != null) {
-            SidebarUpdateBanner(updateAvailableVersion, onDismissUpdate)
+            SidebarUpdateBanner(updateAvailableVersion, onDismissUpdate, onInstallUpdate)
         }
     }
 }
 
-/** 更新下载进度条（账号栏下方，4px 渐变，点击重开 dialog）。 */
+/** 更新下载进度卡（v2：margin 0/10/10，BrandGradient 底 radius 10 padding 12，白字 + 白色进度条）。 */
 @Composable
 private fun SidebarUpdateProgress(progress: Float) {
-    val semantic = LocalSemanticColors.current
-    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 10.dp, end = 10.dp, bottom = 10.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(BrandGradient)
+            .padding(12.dp),
+    ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text("正在下载更新", fontSize = 12.sp, color = semantic.textSecondary)
-            Text("${(progress * 100).toInt()}%", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = BrandColor)
+            Text("正在下载更新", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
+            Text("${(progress * 100).toInt()}%", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color.White)
         }
-        Spacer(Modifier.height(6.dp))
-        MateLinearProgress(value = progress)
+        Spacer(Modifier.height(8.dp))
+        MateLinearProgress(value = progress, color = Color.White)
     }
 }
 
-/** 更新提示横幅（135° 品牌渐变，日志/× 按钮）。 */
+/** 更新提示卡（v2：margin 0/10/10，BrandGradient 底 radius 10 padding 12，白字标题 + 圆形半透明 × + 白底「立即更新」按钮）。 */
 @Composable
-private fun SidebarUpdateBanner(version: String, onDismiss: () -> Unit) {
-    Row(
+private fun SidebarUpdateBanner(version: String, onDismiss: () -> Unit, onInstall: () -> Unit) {
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 8.dp, vertical = 4.dp)
-            .clip(RoundedCornerShape(6.dp))
-            .background(Brush.linearGradient(listOf(BrandColor, BrandHover)))
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+            .padding(start = 10.dp, end = 10.dp, bottom = 10.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(BrandGradient)
+            .padding(12.dp),
     ) {
-        Text("新版本 $version", fontSize = 12.sp, fontWeight = FontWeight.Medium, color = Color.White, modifier = Modifier.weight(1f))
-        // × 关闭按钮（18×18 圆形半透明白）
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("新版本 $version", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
+            // × 关闭按钮（20×20 圆形半透明白）
+            Box(
+                modifier = Modifier.size(20.dp).clip(CircleShape).background(Color.White.copy(alpha = 0.25f))
+                    .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onDismiss),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text("×", color = Color.White, fontSize = 14.sp)
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        // 「立即更新」按钮（白底 h28 radius 5，BrandColor 字，点击触发安装更新）
         Box(
-            modifier = Modifier.size(18.dp).clip(CircleShape).background(Color.White.copy(alpha = 0.25f))
-                .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onDismiss),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(28.dp)
+                .clip(RoundedCornerShape(5.dp))
+                .background(Color.White.copy(alpha = 0.95f))
+                .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onInstall),
             contentAlignment = Alignment.Center,
         ) {
-            Text("×", color = Color.White, fontSize = 14.sp)
+            Text("立即更新", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = BrandColor)
         }
     }
 }
 
 /**
- * 递归目录树节点（对标原 Vue SidebarTreeNode.vue）。
+ * 递归目录树节点（v2：design/v2/02-main.html .tree-node）。
  *
- * 行高 28px，缩进 depth*14+8，gap 8，radius 3；
- * chevron(16px 宽，arrow 图标展开 rotate 90°)；文件夹图标 16px brand；名称 13px；
- * 三态：默认 secondary / hover bg-hover / 选中 brand-lighter+brand+medium。
+ * 行高 32px，缩进 depth*14+8，gap 8，radius 6；
+ * chevron(16px 宽，arrow 图标展开 rotate 90°)；文件夹图标 16px FolderAmber；名称 14px；
+ * 三态：默认 secondary / hover bg-hover / 选中 BrandLighter 底 + BrandColor 字 + medium。
  */
 @Composable
 private fun SidebarTreeNode(
@@ -227,10 +273,10 @@ private fun SidebarTreeNode(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(28.dp)
+                .height(32.dp)
                 .padding(start = (depth * 14 + 8).dp, end = 8.dp)
-                .clip(RoundedCornerShape(3.dp))
-                .background(if (isSelected) Color(0xFFF2F3FF) else Color.Transparent)
+                .clip(RoundedCornerShape(6.dp))
+                .background(if (isSelected) BrandLighter else Color.Transparent)
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null,
@@ -254,12 +300,12 @@ private fun SidebarTreeNode(
                     modifier = Modifier.rotate(if (expanded) 90f else 0f),
                 )
             }
-            // 文件夹图标（16px brand）
-            MateIcon(name = "folder", size = 16.dp, tint = BrandColor)
-            // 名称（13px，选中 brand+medium，默认 secondary）
+            // 文件夹图标（16px FolderAmber）
+            MateIcon(name = "folder", size = 16.dp, tint = FolderAmber)
+            // 名称（14px，选中 brand+medium，默认 secondary）
             Text(
                 name,
-                fontSize = 13.sp,
+                fontSize = 14.sp,
                 fontWeight = if (isSelected) FontWeight.Medium else FontWeight.Normal,
                 color = if (isSelected) BrandColor else semantic.textSecondary,
                 maxLines = 1,
@@ -281,6 +327,34 @@ private fun SidebarTreeNode(
             }
         }
     }
+}
+
+/**
+ * 从配额文本（"36.5 GB / 200 GB"，ApplicationRoot.formatBytes 的产出格式）解析已用比例，
+ * 仅用于账号卡配额进度条的显示；解析失败返回 null（调用方不显示进度条）。
+ */
+private fun parseQuotaRatio(quotaText: String): Float? {
+    val parts = quotaText.split(" / ")
+    if (parts.size != 2) return null
+    val used = parseSizeBytes(parts[0]) ?: return null
+    val total = parseSizeBytes(parts[1]) ?: return null
+    if (total <= 0L) return null
+    return (used.toDouble() / total.toDouble()).toFloat().coerceIn(0f, 1f)
+}
+
+/** 解析 "X.X GB/MB/KB" 或 "N B" 为字节数；格式不符返回 null。 */
+private fun parseSizeBytes(text: String): Long? {
+    val tokens = text.trim().split(' ')
+    if (tokens.size != 2) return null
+    val value = tokens[0].toDoubleOrNull() ?: return null
+    val multiplier = when (tokens[1]) {
+        "B" -> 1L
+        "KB" -> 1024L
+        "MB" -> 1024L * 1024
+        "GB" -> 1024L * 1024 * 1024
+        else -> return null
+    }
+    return (value * multiplier).toLong()
 }
 
 /** 在 Modifier 上绘制 0.5px 边框线（右边或底边），对标 CSS border-right/bottom。 */

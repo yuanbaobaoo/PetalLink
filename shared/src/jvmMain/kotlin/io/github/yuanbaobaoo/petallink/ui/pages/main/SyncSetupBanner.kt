@@ -24,7 +24,8 @@ import io.github.yuanbaobaoo.petallink.ui.viewmodel.SetupPhase
  * - needsSetup：MateInfoBanner info + 选择目录按钮
  * - needsFirstSync：MateInfoBanner warning + 同步索引按钮
  *
- * padding 4/16，底 0.5px border，白底。
+ * 视觉来源 v2（design/v2/03-sync-states.html 引导条）：容器 padding 8/20，底部分隔线保留；
+ * banner 本体为 MateInfoBanner v2 新样式（radius 10 无描边、墨色正文 + 着色图标），action 为 MateButton TEXT（link 样式）。
  *
  * @param setupPhase 同步目录配置阶段
  * @param mountDir 当前挂载目录（needsFirstSync 文案展示）
@@ -75,16 +76,16 @@ fun SyncSetupBanner(
     }
 }
 
-/** 引导条容器：padding 4/16，白底，底 0.5px 分隔线（与原 .setup-banner 一致）。 */
+/** 引导条容器：padding 8/20（v2），底部分隔线保留。 */
 @Composable
 private fun BannerWrapper(bg: androidx.compose.ui.graphics.Color, content: @Composable () -> Unit) {
     androidx.compose.foundation.layout.Column(
         modifier = Modifier.fillMaxWidth(),
     ) {
         androidx.compose.foundation.layout.Column(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp).background(bg),
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp).background(bg),
         ) { content() }
-        // 底分隔线（对标 .setup-banner border-bottom: 0.5px）
+        // 底分隔线（v2 保留 banner 区与下方内容的分隔）
         MateHDivider()
     }
 }

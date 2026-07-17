@@ -9,7 +9,6 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -21,7 +20,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.Text
@@ -31,17 +29,18 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.yuanbaobaoo.petallink.ui.components.MateIcon
 import io.github.yuanbaobaoo.petallink.ui.theme.BrandColor
-import io.github.yuanbaobaoo.petallink.ui.theme.BrandLight
+import io.github.yuanbaobaoo.petallink.ui.theme.BrandGradient
+import io.github.yuanbaobaoo.petallink.ui.theme.BrandGradientSoft
+import io.github.yuanbaobaoo.petallink.ui.theme.BrandHover
 import io.github.yuanbaobaoo.petallink.ui.theme.BrandLighter
 import io.github.yuanbaobaoo.petallink.ui.theme.ErrorBg
 import io.github.yuanbaobaoo.petallink.ui.theme.ErrorColor
@@ -53,32 +52,33 @@ import io.github.yuanbaobaoo.petallink.ui.theme.WarningBg
 import io.github.yuanbaobaoo.petallink.ui.theme.WarningColor
 
 /**
- * 线性进度条（对标原 Vue `<MateLinearProgress>`）。
+ * 线性进度条（v2：h6 圆角条，brand 为渐变填充）。
  *
- * h=[height]（默认 4），bg=bg-active，overflow hidden；
- * fill 高 100%，过渡 width 0.3s；
+ * h=[height]（默认 6），bg=bg-fill，overflow hidden；
+ * fill 高 100%，过渡 width 0.3s；color=brand 时用品牌渐变，其余纯色；
  * value=null 不确定态（30% 宽指示器 1.2s 循环移动）。
  *
  * @param value 进度 0..1；null=不确定态
- * @param height 条高（默认 4dp）
- * @param color fill 颜色（默认 brand）
+ * @param height 条高（默认 6dp）
+ * @param color fill 颜色（默认 brand=品牌渐变）
  */
 @Composable
 fun MateLinearProgress(
     value: Float? = null,
     modifier: Modifier = Modifier,
-    height: Dp = 4.dp,
+    height: Dp = 6.dp,
     color: Color = BrandColor,
 ) {
     val semantic = LocalSemanticColors.current
     val reducedMotion = LocalReducedMotion.current
+    val fillBrush: Brush = if (color == BrandColor) BrandGradient else Brush.linearGradient(listOf(color, color))
 
     Box(
         modifier = modifier
             .fillMaxWidth()
             .height(height)
             .clip(RoundedCornerShape(height / 2))
-            .background(semantic.bgActive),
+            .background(semantic.bgFill),
     ) {
         if (value != null) {
             // 确定态：fill 宽度 = value * 100%
@@ -87,7 +87,7 @@ fun MateLinearProgress(
                 modifier = Modifier
                     .fillMaxWidth(clamped)
                     .height(height)
-                    .background(color),
+                    .background(fillBrush),
             )
         } else if (!reducedMotion) {
             // 不确定态：30% 宽指示器循环移动
@@ -105,7 +105,7 @@ fun MateLinearProgress(
                 modifier = Modifier
                     .fillMaxWidth(0.3f)
                     .height(height)
-                    .background(color),
+                    .background(fillBrush),
             )
             // offset 驱动水平位移（0 → 容器宽度 - 30% 宽度）
         }
@@ -115,7 +115,7 @@ fun MateLinearProgress(
 /**
  * 环形进度条（对标原 Vue `<MateCircularProgress>`）。
  *
- * SVG viewBox 24×24；轨道 bg-active；填充 color，linecap round，从顶部起笔（rotate -90）；
+ * SVG viewBox 24×24；轨道 bg-fill；填充 color，linecap round，从顶部起笔（rotate -90）；
  * value=null 不确定态画约 86° 弧。
  *
  * @param size 直径（默认 24）
@@ -132,7 +132,7 @@ fun MateCircularProgress(
 ) {
     val semantic = LocalSemanticColors.current
     val reducedMotion = LocalReducedMotion.current
-    val track = semantic.bgActive
+    val track = semantic.bgFill
 
     // 用 Canvas + drawArc 绘制环形（比 SVG 更可控）
     androidx.compose.foundation.Canvas(modifier = Modifier.size(size)) {
@@ -176,21 +176,29 @@ fun MateCircularProgress(
 /** 横幅变体（对标原 Vue MateInfoBanner variant）。 */
 enum class MateBannerVariant { INFO, SUCCESS, WARNING, ERROR }
 
-private fun bannerVisual(variant: MateBannerVariant): Triple<Color, Color, String> {
-    // 返回 (背景色, 文字/图标色, 默认图标 name)
+private fun bannerVisual(variant: MateBannerVariant): Pair<Color, Color> {
+    // 返回 (背景色, 图标色)
     return when (variant) {
-        MateBannerVariant.INFO -> Triple(BrandLighter, BrandColor, "info")
-        MateBannerVariant.SUCCESS -> Triple(SuccessBg, SuccessColor, "check")
-        MateBannerVariant.WARNING -> Triple(WarningBg, WarningColor, "alert")
-        MateBannerVariant.ERROR -> Triple(ErrorBg, ErrorColor, "x")
+        MateBannerVariant.INFO -> BrandLighter to BrandColor
+        MateBannerVariant.SUCCESS -> SuccessBg to SuccessColor
+        MateBannerVariant.WARNING -> WarningBg to WarningColor
+        MateBannerVariant.ERROR -> ErrorBg to ErrorColor
     }
 }
 
+private fun bannerIcon(variant: MateBannerVariant): String = when (variant) {
+    MateBannerVariant.INFO -> "info"
+    MateBannerVariant.SUCCESS -> "check"
+    MateBannerVariant.WARNING -> "alert"
+    MateBannerVariant.ERROR -> "x"
+}
+
 /**
- * 信息横幅（对标原 Vue `<MateInfoBanner variant title closable>`）。
+ * 信息横幅（v2：radius-lg(10) 无描边，图标与文字、右侧 action 统一垂直居中）。
  *
- * row，gap sm，padding 10/md，1px border，radius-sm，body-sm，line-height 1.5；
- * 四变体 info/success/warning/error 各自浅底深字 + 边框；图标 18；title semibold；message pre-line。
+ * row，gap sm，padding 12/14，radius-lg，body-sm+1，line-height 1.55；
+ * 四变体 info/success/warning/error 各自浅底 + 着色图标；正文 text-primary；title semibold；message pre-line。
+ * 整体 verticalAlignment = Center（v2 .banner align-items:center）：单行时图标/文字与 action 按钮同线居中。
  *
  * @param variant 变体
  * @param message 消息正文
@@ -209,31 +217,30 @@ fun MateInfoBanner(
     onClose: () -> Unit = {},
     action: @Composable (() -> Unit)? = null,
 ) {
-    val (bg, fg, iconName) = bannerVisual(variant)
-    val borderColor = fg.copy(alpha = 0.2f)
+    val (bg, iconColor) = bannerVisual(variant)
+    val semantic = LocalSemanticColors.current
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(3.dp))
+            .clip(RoundedCornerShape(10.dp))
             .background(bg)
-            .border(1.dp, borderColor, RoundedCornerShape(3.dp))
-            .padding(horizontal = 16.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.Top,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        MateIcon(name = iconName, size = 18.dp, tint = fg)
+        MateIcon(name = bannerIcon(variant), size = 18.dp, tint = iconColor)
         Column(modifier = Modifier.weight(1f)) {
             if (title != null) {
-                Text(title, color = fg, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                Text(title, color = semantic.textPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
             }
-            Text(message, color = fg, fontSize = 13.sp, lineHeight = (13 * 1.5f).sp)
+            Text(message, color = semantic.textPrimary, fontSize = 14.sp, lineHeight = (14 * 1.55f).sp)
         }
         action?.invoke()
         if (closable) {
             MateIcon(
                 name = "x",
                 size = 14.dp,
-                tint = fg.copy(alpha = 0.7f),
+                tint = iconColor.copy(alpha = 0.7f),
                 modifier = Modifier.clip(CircleShape),
             )
             // 关闭按钮：简单实现，点击由调用方 onClose 绑定（这里不直接 clickable，保持纯展示）
@@ -247,11 +254,11 @@ enum class MateTagTheme { DEFAULT, PRIMARY, SUCCESS, WARNING, ERROR }
 enum class MateTagSize { SMALL, MEDIUM }
 
 /**
- * 标签（对标原 Vue `<MateTag label theme size icon>`）。
+ * 标签 chip（v2：radius-sm(5) 纯底色无描边）。
  *
- * inline-flex，gap xs，1px border，radius-sm，nowrap；
- * small: padding 2/sm, caption；medium: padding xs/md, body-sm；
- * 五主题各自浅底深字 + 同色边框。
+ * inline-flex，gap xs，radius-sm，nowrap；
+ * small: padding 2/sm, caption+1；medium: padding xs/md, body-sm+1；
+ * 五主题各自浅底深字（无描边）。
  */
 @Composable
 fun MateTag(
@@ -263,24 +270,22 @@ fun MateTag(
     onClick: (() -> Unit)? = null,
 ) {
     val semantic = LocalSemanticColors.current
-    val (bg, fg, borderColor) = when (theme) {
-        MateTagTheme.DEFAULT -> Triple(semantic.bgHover, BrandColor, semantic.border)
-        MateTagTheme.PRIMARY -> Triple(BrandLight, BrandColor, BrandColor)
-        MateTagTheme.SUCCESS -> Triple(SuccessBg, SuccessColor, SuccessColor)
-        MateTagTheme.WARNING -> Triple(WarningBg, WarningColor, WarningColor)
-        MateTagTheme.ERROR -> Triple(ErrorBg, ErrorColor, ErrorColor)
+    val (bg, fg) = when (theme) {
+        MateTagTheme.DEFAULT -> semantic.bgFill to semantic.textSecondary
+        MateTagTheme.PRIMARY -> BrandLighter to BrandColor
+        MateTagTheme.SUCCESS -> SuccessBg to SuccessColor
+        MateTagTheme.WARNING -> WarningBg to WarningColor
+        MateTagTheme.ERROR -> ErrorBg to ErrorColor
     }
-    val padding = if (size == MateTagSize.SMALL) 4.dp else 8.dp
-    val verticalPadding = if (size == MateTagSize.SMALL) 2.dp else 4.dp
-    val fontSize = if (size == MateTagSize.SMALL) 12.sp else 13.sp
+    val padding = if (size == MateTagSize.SMALL) 6.dp else 10.dp
+    val verticalPadding = if (size == MateTagSize.SMALL) 2.dp else 3.dp
+    val fontSize = if (size == MateTagSize.SMALL) 13.sp else 14.sp
     val iconSize = if (size == MateTagSize.SMALL) 12.dp else 14.dp
 
-    val shape = RoundedCornerShape(3.dp)
     val tagInteraction = remember { MutableInteractionSource() }
     val visualModifier = modifier
-        .clip(shape)
+        .clip(RoundedCornerShape(5.dp))
         .background(bg)
-        .border(1.dp, borderColor, shape)
         .padding(horizontal = padding, vertical = verticalPadding)
         .then(if (onClick != null) Modifier.mateClickable(tagInteraction, onClick) else Modifier)
     Row(
@@ -294,12 +299,11 @@ fun MateTag(
 }
 
 /**
- * 空状态占位（对标原 Vue `<MateEmpty icon title description>`）。
+ * 空状态占位（v2：品牌浅底渐变徽章 + 大号图标）。
  *
  * column center，padding xxl；
- * icon-wrap 64×64 radius 50% bg-hover center；
- * icon text-placeholder size 32；
- * title body medium primary；desc caption secondary line-height 1.5；
+ * badge 72×72 radius 14，品牌浅底渐变，图标 36 brand-hover；
+ * title 16 semibold text-primary；desc 14 text-secondary line-height 1.5；
  * action margin-top xl。
  */
 @Composable
@@ -317,18 +321,18 @@ fun MateEmpty(
     ) {
         Box(
             modifier = Modifier
-                .size(64.dp)
-                .clip(CircleShape)
-                .background(semantic.bgHover),
+                .size(72.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(BrandGradientSoft),
             contentAlignment = Alignment.Center,
         ) {
-            MateIcon(name = icon, size = 32.dp, tint = semantic.textPlaceholder)
+            MateIcon(name = icon, size = 36.dp, tint = BrandHover)
         }
         Spacer(Modifier.height(16.dp))
-        Text(title, color = semantic.textPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+        Text(title, color = semantic.textPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
         if (description != null) {
-            Spacer(Modifier.height(8.dp))
-            Text(description, color = semantic.textSecondary, fontSize = 12.sp, lineHeight = (12 * 1.5f).sp)
+            Spacer(Modifier.height(6.dp))
+            Text(description, color = semantic.textSecondary, fontSize = 14.sp, lineHeight = (14 * 1.5f).sp)
         }
         if (action != null) {
             Spacer(Modifier.height(24.dp))
@@ -340,7 +344,7 @@ fun MateEmpty(
 /**
  * 统计芯片（对标原 Vue `<MateStatChip icon count label>`）。
  *
- * inline-flex，gap xs，padding xs/sm，radius-sm，bg-hover，caption medium secondary，nowrap。
+ * inline-flex，gap xs，padding xs/sm，radius-md(8)，bg-fill，caption+1 medium secondary，nowrap。
  * 模板：{icon} {count} {label}
  */
 @Composable
@@ -353,23 +357,22 @@ fun MateStatChip(
     val semantic = LocalSemanticColors.current
     Row(
         modifier = modifier
-            .clip(RoundedCornerShape(3.dp))
-            .background(semantic.bgHover)
+            .clip(RoundedCornerShape(8.dp))
+            .background(semantic.bgFill)
             .padding(horizontal = 8.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         MateIcon(name = icon, size = 12.dp, tint = semantic.textSecondary)
-        Text(count.toString(), color = semantic.textSecondary, fontSize = 12.sp, fontWeight = FontWeight.Medium)
-        Text(label, color = semantic.textSecondary, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+        Text(count.toString(), color = semantic.textSecondary, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+        Text(label, color = semantic.textSecondary, fontSize = 13.sp, fontWeight = FontWeight.Medium)
     }
 }
 
 /**
- * 分区标题（对标原 Vue `<MateSectionHeader text icon trailing>`）。
+ * 分区标题（v2：19px semibold，无分割线）。
  *
- * row center gap sm，padding-bottom md，border-bottom 1px border，margin-bottom xxl；
- * icon brand size 18；text title-sm semibold primary；trailing margin-left auto。
+ * row center gap sm，padding-bottom md；icon brand size 18；text 19 semibold primary；trailing margin-left auto。
  */
 @Composable
 fun MateSectionHeader(
@@ -379,29 +382,26 @@ fun MateSectionHeader(
     trailing: @Composable (() -> Unit)? = null,
 ) {
     val semantic = LocalSemanticColors.current
-    Column(modifier = modifier) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            if (icon != null) MateIcon(name = icon, size = 18.dp, tint = BrandColor)
-            Text(text, color = semantic.textPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-            trailing?.let {
-                Spacer(Modifier.width(0.dp))
-                Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) { it() }
-            }
+    Row(
+        modifier = modifier.fillMaxWidth().padding(bottom = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        if (icon != null) MateIcon(name = icon, size = 18.dp, tint = BrandColor)
+        Text(text, color = semantic.textPrimary, fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
+        trailing?.let {
+            Spacer(Modifier.width(0.dp))
+            Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) { it() }
         }
-        Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(semantic.border))
     }
 }
 
 /**
- * 侧栏导航项（对标原 Vue `<MateNavItem label icon active indent height>`）。
+ * 侧栏导航项（v2 放松版：46px 行高 + radius-md + 18px 图标）。
  *
- * row center gap sm，padding-left indent+8 padding-right sm，radius-sm；
- * hover bg-hover；active bg=brand-lighter color=brand medium；
- * icon size 16 secondary（active 时 brand）；label ellipsis。
+ * row center gap md，padding 0/14，radius-md(8)；
+ * hover bg-fill；active bg=brand-lighter color=brand medium；
+ * icon size 18 secondary（active 时 brand）；label 15px ellipsis。
  */
 @Composable
 fun MateNavItem(
@@ -411,7 +411,7 @@ fun MateNavItem(
     icon: String? = null,
     active: Boolean = false,
     indent: Int = 0,
-    height: Dp = 32.dp,
+    height: Dp = 46.dp,
 ) {
     val semantic = LocalSemanticColors.current
     val textColor = if (active) BrandColor else semantic.textPrimary
@@ -421,20 +421,36 @@ fun MateNavItem(
         modifier = modifier
             .fillMaxWidth()
             .height(height)
+            .clip(RoundedCornerShape(8.dp))
+            .background(if (active) BrandLighter else Color.Transparent)
             .mateClickable(navInteraction, onClick)
-            .then(Modifier.background(if (active) BrandLighter else Color.Transparent))
-            .clip(RoundedCornerShape(3.dp))
-            .padding(start = (indent + 8).dp, end = 8.dp),
+            .padding(start = (indent + 14).dp, end = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        if (icon != null) MateIcon(name = icon, size = 16.dp, tint = iconColor)
+        if (icon != null) MateIcon(name = icon, size = 18.dp, tint = iconColor)
         Text(
             label,
             color = textColor,
-            fontSize = 14.sp,
+            fontSize = 15.sp,
             fontWeight = if (active) FontWeight.Medium else FontWeight.Normal,
             maxLines = 1,
         )
     }
+}
+
+/** 导航分组标签（v2 设置页：12px semibold placeholder，上 20 下 6）。 */
+@Composable
+fun MateNavGroupLabel(
+    label: String,
+    modifier: Modifier = Modifier,
+) {
+    val semantic = LocalSemanticColors.current
+    Text(
+        label,
+        color = semantic.textPlaceholder,
+        fontSize = 12.sp,
+        fontWeight = FontWeight.SemiBold,
+        modifier = modifier.padding(start = 14.dp, top = 20.dp, bottom = 6.dp),
+    )
 }
