@@ -62,38 +62,55 @@ package io.github.yuanbaobaoo.petallink.data
 data class SyncItem(...)
 ```
 
-### 2.2 注释写在"契约"上，实现不重复
+### 2.2 注释规范（强制）
 
-借鉴 xe-cloud 的"接口写文档、实现不重复"原则，适配到 Kotlin：
+**一句话原则：文档写在"对外定义"上，实现不重复写。**
 
-- `expect` / 接口 / 抽象类 / 公开 `class` 的公开成员 → **必须有 KDoc**（含 `@param`/`@return`）。
-- `actual` / 实现类 / `override` 成员 → 契约已有说明时**不重复写** KDoc；只在行为有额外约束时补充 `//` 行注释。
+> "对外定义"指会被别的代码或别的人调用的地方——`expect` 声明、接口方法、抽象方法、公开 `class` 的公开成员。这些是别人理解你代码的入口，必须写清楚。反过来，`actual` 实现、`override` 的方法、内部 helper，入口处已经说明过了，不要再抄一遍。
+
+- **对外定义必须有 KDoc**（含 `@param`/`@return`）；**实现处不重复**，只有当实现的行为比定义多了一些约束或坑时，才用 `//` 在方法体内补充。
 - 私有 helper、简单赋值、显而易见的分支 → 不机械补注释；复杂协议分支、状态机转换、锁边界、重试/恢复逻辑必须用 `//` 说明"为什么"。
+- 注释重点回答"为什么存在、保证什么、失败时怎样、有什么副作用"，不要复述函数名或逐行翻译代码。
+- 复杂协议背景用文件级 KDoc 集中讲一次，避免在每个方法里重复。
+- 踩坑/对标备忘直接写进对应声明的 KDoc（如 `踩坑：parentFolder 用 queryParam 语法`）。
+- 注释必须与代码同步。移动或拆分实现时，同步更新路径、职责和术语，禁止保留失效说明。
 
-### 2.3 字段与局部变量注释
+**字段注释 + 空行规则**（沿用 Java 既有习惯）：
 
-- 公开 `val`/`const val` 常量、枚举值、数据类字段：含义不直观时用 `//` 行注释或 KDoc 说明；显而易见的私有数据容器字段不强求。
-- 局部变量一般不加注释；若承载关键不变量（如代际 `gen`、乱序保护 `revision`），用 `//` 说明用途。
-- 枚举值允许列对齐后跟 `//` 中文说明（本项目既有风格）：
+- 用 `/** */` 注释的字段之间**必须空一行**；用 `//` 注释的字段之间**不空行**。
+- 常量、枚举值、数据类字段含义不直观时加注释；显而易见的私有数据容器字段不强求。
+- 局部变量一般不加注释；承载关键不变量（如代际 `gen`、乱序保护 `revision`）时用 `//` 说明用途。
+
+**枚举注释（强制）**：枚举类本身必须有块级 KDoc，说明这个枚举是干什么的、按什么维度划分；**每个枚举值也必须用 `/** */` 块级注释**，`/**` 后换行；**禁止**用 `//` 行注释标注枚举值：
 
 ```kotlin
+/**
+ * 应用错误分类（按错误来源与处理方式划分）。
+ */
 enum class ErrorKind {
-    NETWORK,        // 网络层（DNS/连接/超时/打断）→ 可重试
-    AUTH,           // 401 / token 失效 → 触发刷新或要求重新登录
-    REMOTE,         // 远端业务错误（非 2xx，含配额、文件不存在等）
-    INTERNAL,       // 其他未分类（不应出现，出现即视为 bug）
+    /**
+     * 网络层（DNS/连接/超时/打断）→ 可重试
+     */
+    NETWORK,
+
+    /**
+     * 401 / token 失效 → 触发刷新或要求重新登录
+     */
+    AUTH,
+
+    /**
+     * 远端业务错误（非 2xx，含配额、文件不存在等）
+     */
+    REMOTE,
+
+    /**
+     * 其他未分类（不应出现，出现即视为 bug）
+     */
+    INTERNAL,
 }
 ```
 
-### 2.4 注释内容
-
-- 注释重点回答"为什么存在、保证什么、失败时怎样、有什么副作用"，不要复述函数名或逐行翻译代码。
-- 注释短小精干。能用一句话说明时不要写成一段；复杂协议可用文件级 KDoc 集中说明，避免在每个方法重复背景。
-- 对 HTTP 写操作、状态机转换、锁边界、重试、恢复、数据提交等高风险逻辑，必须说明成功判定和禁止事项。
-- 踩坑/对标备忘写进对应声明的 KDoc（如 `踩坑：parentFolder 用 queryParam 语法`）。
-- 注释必须与代码同步。移动或拆分实现时，同时更新路径、职责和术语，禁止保留失效说明。
-
-### 2.5 命名规范
+### 2.3 命名规范
 
 | 类别 | 约定 | 示例 |
 |------|------|------|
@@ -119,7 +136,7 @@ enum class ErrorKind {
 | `open` / `close` | 打开/关闭弹窗或页面 | `openEditRow()`、`closeModal()` |
 | `refresh` | 刷新当前视图 | `refresh()` |
 
-### 2.6 常量与单例
+### 2.4 常量与单例
 
 - 模块级/类级常量使用 `UPPER_SNAKE_CASE`，集中放在 `companion object` 内用 `const val` 声明；禁止魔法字符串/数字硬编码。
 - 真正的全局无状态单例（常量容器、纯配置）用 `object`（如 `DesignTokens`、`DriveClientConfig`）。
@@ -127,24 +144,24 @@ enum class ErrorKind {
 - 工厂方法放 `companion object`（如 `production()` / `development()` / `fromEnvironment()`、`create(...)`）。
 - 单例若需支持测试覆盖，提供 `configureForTest(...)` 入口，避免暴露可变全局字段。
 
-### 2.7 函数声明风格
+### 2.5 函数声明风格
 
 - 普通函数用 `fun name(...) { ... }`；短函数用表达式体 `fun x() = ...`。
 - 耗时/IO 操作用 `suspend fun`；UI 回调、集合变换、`launch`/`forEach`/`map` 内部一律用 lambda（不在公共 API 暴露不必要的 `suspend`）。
 - 默认参数优先于函数重载；命名参数调用提升可读性（如 `refreshInternal(triggerSync = true)`）。
 - 需要回调值的场景优先用函数类型（如 `onResult: (Boolean) -> Unit`）而非定义一次性接口。
 
-### 2.8 协程与 Flow（强制）
+### 2.6 协程与 Flow（强制）
 
 - **状态对外只暴露 `StateFlow`**：私有 `MutableStateFlow` + 公开 `asStateFlow()`，禁止把 `MutableStateFlow` 直接暴露给其他模块。
 - **事件流用 `SharedFlow`**（如 `uploadFailures`）；事件需去重/乱序保护时，在产生侧用递增 `revision`/`requestId` 丢弃过期项。
 - 作用域：应用级用 `CoroutineScope(SupervisorJob() + Dispatchers.Default)`，子操作在其内 `launch`；长生命周期对象在 `close()` 中取消 scope。
 - 互斥优先用 `Mutex.withLock { }`，不要用 `synchronized` 阻塞协程。
 - 周期任务用 `while (isActive) { ...; delay(...) }`，不要裸 `Thread.sleep`。
-- 简单容错取值用 `runCatching { }`，但**写操作、状态机变更不得吞异常**（见 2.9）。
+- 简单容错取值用 `runCatching { }`，但**写操作、状态机变更不得吞异常**（见 2.7）。
 - JVM 跨线程共享的可变状态用 `AtomicReference`/`AtomicInteger`/`AtomicBoolean`。
 
-### 2.9 错误处理：`AppError` + `AppResult` 双层（强制）
+### 2.7 错误处理：`AppError` + `AppResult` 双层（强制）
 
 本项目沿用既有错误模型，思路对标 xe-cloud "一种业务异常 + 统一结果体"，但用 Kotlin 密封类实现：
 
@@ -164,24 +181,25 @@ private suspend fun <T> drive(block: suspend () -> T): AppResult<T> = try {
 - 前置条件校验用 `require(...)` 并给出中文失败信息（如 `require(pageSize in 1..100)`、路径越界 `require(it.startsWith(root)) { "文件路径越界" }`）。
 - **禁止**：吞掉异常只返回默认值（除非是 UI 展示用的退化值，且必须留日志）；用 `Throwable.message` 直接当作用户文案（文案在 UI 层按 `ErrorKind` 本地化）。
 
-### 2.10 可见性
+### 2.8 可见性
 
 - 默认 `public`（不显式写）；需要对外暴露的类型/函数直接省略修饰符。
 - 构造参数、内部状态、helper 一律 `private`；跨 source set 但非公开的工厂方法用 `internal`（便于确定性测试）。
 - `companion object` 的常量可按可见性分组：公开常量默认 public，私有伴生用 `private companion object`。
 - 拆分模块时使用满足实现所需的最小可见性，避免因拆分扩大公共接口。
 
-### 2.11 数据类、密封类、枚举
+### 2.9 数据类、密封类、枚举
 
 - 数据模型首选 `data class`；不可变值用 `val`，需修改时用 `.copy(...)`，避免可变 `var`。
 - 错误分层、结果类型、有限状态机用 `sealed class`/`sealed interface`（如 `AppError`、`AppResult`、`SetupPhase`）。
 - 分类、状态用 `enum class`；带额外数据的多形态状态用 `sealed class`。
+- **枚举类必须有块级 KDoc，每个枚举值也必须有块级 KDoc**（见 2.2 枚举示例），不得用 `//` 行注释标注枚举值。
 - 集合返回值优先返回只读类型（`List`/`Map`/`Set`），内部可变集合不外泄。
 
-### 2.12 `expect` / `actual`（KMP 专属）
+### 2.10 `expect` / `actual`（KMP 专属）
 
 - 平台差异声明放 `commonMain` 用 `expect`，实现放 `jvmMain` 用 `actual`；目前**只存在 JVM 源集**，暂无 `macosMain`/`iosMain`。
-- `expect` 声明必须有 KDoc 说明契约；`actual` 不重复文档。
+- `expect` 声明必须有 KDoc 说明它的用途与约定；`actual` 不重复文档。
 - `expect` 与 `actual` 的包名必须一致；文件名不强求一致（既有 `Database.kt` ↔ `PetalLinkDb.kt` 的先例允许保留，但新建文件建议同名以便审阅）。
 - 不要为"以后可能多平台"而过度抽象；当前只在 macOS/JVM 有差异处才用 `expect`。
 
@@ -362,7 +380,7 @@ fun 跨日期写不同文件并清理30天以前日志() { ... }
 ## 十、修改代码约束
 
 1. 优先"最小改动"，不影响已有功能，不修改无关文件。
-2. 修改前必须说明影响范围（涉及哪些模块、对外契约是否变化）。
+2. 修改前必须说明影响范围（涉及哪些模块、对外接口是否变化）。
 3. 拆分文件不得夹带业务修复或行为优化；行为变更单独成提交。
 4. 使用已有工具类/公共库，禁止重复造轮子（如时间格式化、路径校验、日志脱敏等优先复用 `core/` 内既有实现）。
 5. 生成代码必须遵守本规范，符合当前模块架构，保持风格一致。
