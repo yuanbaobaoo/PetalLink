@@ -5,7 +5,7 @@ import io.github.yuanbaobaoo.petallink.sync.identity.InodeRecord
 /**
  * inode 身份映射仓库接口（docs/11 §4.1）
  *
- * 实现由 macosMain 的 SQLDelight 提供。所有身份查询走此接口——只读 DB 操作。
+ * 实现由 `commonMain` 的 Room DAO 提供。所有身份查询走此接口。
  */
 interface InodeMapRepository {
     /**

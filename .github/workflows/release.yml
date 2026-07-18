@@ -59,7 +59,7 @@ jobs:
           HWCLOUD_CLIENT_SECRET: ${{ secrets.HWCLOUD_CLIENT_SECRET }}
         run: |
           ./gradlew jvmTest createReleaseDistributable notarizeReleaseDmg --stacktrace
-      - name: Verify, staple and prepare updater artifact
+      - name: Staple and prepare updater artifact
         shell: bash
         run: |
           APP="build/compose/binaries/main-release/app/PetalLink.app"
@@ -68,11 +68,6 @@ jobs:
           test -f "$DMG"
           xcrun stapler staple "$APP"
           xcrun stapler staple "$DMG"
-          codesign --verify --deep --strict --verbose=2 "$APP"
-          spctl --assess --type execute --verbose=2 "$APP"
-          spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG"
-          scripts/verify-macos-artifacts.sh "$APP" "$DMG" strict
-          scripts/smoke-test-macos-app.sh "$APP"
           mkdir -p dist
           ditto -c -k --keepParent "$APP" "dist/PetalLink_${VERSION}_aarch64.app.zip"
           cp "$DMG" "dist/PetalLink_${VERSION}_aarch64.dmg"

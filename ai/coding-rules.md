@@ -233,30 +233,31 @@ private suspend fun <T> drive(block: suspend () -> T): AppResult<T> = try {
 
 ---
 
-## 四、SQLDelight / 持久化规范
+## 四、Room KMP / 持久化规范
 
-### 4.1 `.sq` 文件组织
+### 4.1 common-first 组织
 
-- `.sq` 文件放 `src/commonMain/sqldelight/io/github/yuanbaobaoo/petallink/data/`，一张表一个文件，文件名为 `表名.sq`；建表 DDL 集中在 `schema.sq`。
-- 每个文件顶部用 `--` 注释说明该表的职责与对标文档（如 `-- inode 身份映射，docs/11 §3.1`）。
-- 查询命名以 `:` 结尾分节，采用动词开头：`upsert:` / `insertRow:` / `lookupByInode:` / `selectAll:` / `deleteByInode:`。
+- `@Entity`、`@Dao`、`RoomDatabase`、类型转换器和 Repository 实现统一放在 `commonMain`，上层业务只能依赖 common 类型。
+- 平台 source set 只允许提供 `RoomDatabase.Builder`、数据库路径和平台时钟等系统能力；禁止复制 Entity、DTO、DAO 或 Repository 业务逻辑。
+- 实体必须使用单列主键；业务唯一约束用唯一索引表达，禁止复合主键。
+- schema 导出到根目录 `schemas/` 并纳入版本控制。当前不兼容旧 SQLDelight 数据库，不维护旧库迁移链。
 
 ### 4.2 SQL 编写约定
 
 - SQL 类型映射：Kotlin `Long`/时间戳 → `INTEGER`（8 字节），`String` → `TEXT`，`Boolean` → `INTEGER`（0/1），浮点 → `REAL`。
 - **所有时间字段统一存毫秒时间戳（`Long` / `INTEGER`）**，禁止存字符串时间；命名 `createTime`/`updateTime`/`lastSyncTime`（SQL 列对应 `create_time` 等下划线命名）。
-- DDL 必须**幂等**：`CREATE TABLE IF NOT EXISTS`、`CREATE INDEX IF NOT EXISTS`、`INSERT OR REPLACE`。
-- schema 演进需在 `schema.sq` 维护完整定义；如未来引入迁移脚本，遵循"建表文件保完整定义、迁移文件保增量、二者最终态一致"的双轨原则（参考 xe-cloud tables.sql / update.sql 机制）。
-- 复杂查询、多表 JOIN 统一在 `.sq` 中定义命名查询，禁止在 Kotlin 里拼裸 SQL 字符串。
+- 查询 SQL 统一写在 DAO 的 `@Query` 中；复杂 SQL 应拆分为语义明确的 DAO 方法，禁止在 Repository 或业务层拼接裸 SQL。
+- 多步写操作使用 `@Transaction`，CAS 更新必须同时检查主键和 revision/源快照，并以受影响行数判断是否成功。
+- schema 演进通过 Room `Migration` 和导出的 schema 管理；任何版本升级必须补迁移测试，禁止使用 destructive migration 掩盖缺失迁移。
 
 ### 4.3 Repository 封装（强制，借鉴 xe-cloud 三层思想）
 
-本项目简化为两层（`Repository` + SQLDelight 自动生成的 `Queries`），但核心边界一致：
+本项目采用两层（`Repository` + Room `Dao`），核心边界如下：
 
-- 对外只暴露 `Repository`（`data/repository/`），内部持有 SQLDelight `Queries`。
-- **外部模块禁止直接访问 `Queries`/`Transaction`**，必须通过 `Repository`；即便是同一模块的其他 Repository，也不得互相调用对方的 `Queries`。
-- 事务用 `transaction { ... }` 包裹多步写操作，保证原子性。
-- 查询返回的数据库行映射为 `data class` 后再交给上层，不要把生成的 `Cursor`/`Query` 类型外泄。
+- 对外只暴露 `Repository`（`data/repository/`），内部持有 Room `Dao`。
+- **外部模块禁止直接访问 `Dao`/`RoomDatabase`**，必须通过 `Repository`；即便是同一模块的其他 Repository，也不得互相调用对方的 DAO。
+- Room Entity 可直接复用现有 common 业务数据类，禁止为 JVM/Native 各建一套同义类型。
+- 查询结果交给上层时不得外泄 Room 内部类型、Cursor 或数据库连接。
 
 ---
 
@@ -345,14 +346,14 @@ fun 跨日期写不同文件并清理30天以前日志() { ... }
 3. **递归删除前先扫描目录内是否存在符号链接，发现则报错中止或显式跳过符号链接**，绝不允许带着符号链接直接递归删除。
 4. **临时目录命名必须唯一且路径可控**（如 `build/.../tmp/<task>-<timestamp>`），不得复用固定路径或越界到项目外。
 
-### 8.4 脚本规范（`scripts/`）
+### 8.4 Shell 安全规范
 
 - 所有 bash 脚本头部必须 `set -euo pipefail`，参数化、路径限定，禁止 `cd` 到绝对系统目录后执行删除。
-- 临时目录用 `mktemp -d`，清理用 `trap cleanup EXIT` 且仅 `kill` 进程或删除自己创建的文件，不递归删除系统目录（参考 `scripts/smoke-test-macos-app.sh`、`scripts/verify-macos-artifacts.sh`）。
+- 临时目录用 `mktemp -d`，清理用 `trap cleanup EXIT` 且仅 `kill` 进程或删除自己创建的文件，不递归删除系统目录。
 
 ### 8.5 自查清单（提交前必检）
 
-任何对 `build.gradle.kts`、`settings.gradle.kts`、`scripts/`、自定义 Gradle 任务的修改，提交前必须逐条对照：
+任何对 `build.gradle.kts`、`settings.gradle.kts`、Shell 命令或自定义 Gradle 任务的修改，提交前必须逐条对照：
 
 - [ ] 是否引入了指向项目目录之外（尤其系统目录）的符号链接？如有 → 禁止。
 - [ ] 是否存在对含符号链接目录的递归删除？如有 → 禁止。

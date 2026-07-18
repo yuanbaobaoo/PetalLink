@@ -20,7 +20,8 @@ import java.nio.file.Paths
  */
 data class AppPaths(val dataDir: Path) {
     val configFile: Path get() = dataDir.resolve("config.json")
-    val databaseFile: Path get() = dataDir.resolve("petal_link.db")
+    /** Room KMP 数据库文件；使用独立文件名避免误读旧 SQLDelight schema。 */
+    val databaseFile: Path get() = dataDir.resolve("petal_link_room.db")
     val tokenFile: Path get() = dataDir.resolve("token.bin")
     val logsDir: Path get() = dataDir.resolve("logs")
 

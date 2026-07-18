@@ -1,5 +1,10 @@
 package io.github.yuanbaobaoo.petallink.sync.identity
 
+import androidx.room.ColumnInfo
+import androidx.room.Entity
+import androidx.room.Index
+import androidx.room.PrimaryKey
+
 /**
  * 基于 inode 的文件身份识别（对标原项目 inode 方案，docs/11 §4.1）
  *
@@ -15,11 +20,25 @@ package io.github.yuanbaobaoo.petallink.sync.identity
  * inode 映射记录：一个本地 inode ↔ 云端身份的对应关系。
  * 对应数据库表 local_inode_map（docs/11 §3.1）。
  */
+@Entity(
+    tableName = "local_inode_map",
+    indices = [
+        Index(value = ["relative_path"]),
+        Index(value = ["file_id"]),
+    ],
+)
 data class InodeRecord(
-    val inode: ULong,           // 文件系统 inode（macOS meta.ino() 为 u64）
-    val relativePath: String,   // 相对挂载目录的路径
-    val fileId: String,         // 云端文件 ID
-    val scannedAt: Long,        // 上次扫描到该 inode 的时间戳（ms）
+    @PrimaryKey
+    val inode: ULong,
+
+    @ColumnInfo(name = "relative_path")
+    val relativePath: String,
+
+    @ColumnInfo(name = "file_id")
+    val fileId: String,
+
+    @ColumnInfo(name = "scanned_at")
+    val scannedAt: Long,
 )
 
 /**

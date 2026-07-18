@@ -1,0 +1,433 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 1,
+    "identityHash": "abfd025cdf7a2c295a36c473889e1258",
+    "entities": [
+      {
+        "tableName": "sync_items",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`file_id` TEXT NOT NULL, `local_path` TEXT NOT NULL, `parent_folder_id` TEXT, `name` TEXT NOT NULL, `is_folder` INTEGER NOT NULL DEFAULT 0, `size` INTEGER NOT NULL DEFAULT 0, `local_size` INTEGER, `sha256` TEXT, `local_mtime` INTEGER, `cloud_edited_time` INTEGER, `last_sync_time` INTEGER, `status` INTEGER NOT NULL DEFAULT 0, `error_message` TEXT, PRIMARY KEY(`file_id`))",
+        "fields": [
+          {
+            "fieldPath": "fileId",
+            "columnName": "file_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "localPath",
+            "columnName": "local_path",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "parentFolderId",
+            "columnName": "parent_folder_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "name",
+            "columnName": "name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isFolder",
+            "columnName": "is_folder",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "size",
+            "columnName": "size",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "localSize",
+            "columnName": "local_size",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "sha256",
+            "columnName": "sha256",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "localMtime",
+            "columnName": "local_mtime",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "cloudEditedTime",
+            "columnName": "cloud_edited_time",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "lastSyncTime",
+            "columnName": "last_sync_time",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "errorMessage",
+            "columnName": "error_message",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "file_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_sync_items_local_path",
+            "unique": true,
+            "columnNames": [
+              "local_path"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_sync_items_local_path` ON `${TABLE_NAME}` (`local_path`)"
+          },
+          {
+            "name": "index_sync_items_parent_folder_id",
+            "unique": false,
+            "columnNames": [
+              "parent_folder_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_sync_items_parent_folder_id` ON `${TABLE_NAME}` (`parent_folder_id`)"
+          },
+          {
+            "name": "index_sync_items_status",
+            "unique": false,
+            "columnNames": [
+              "status"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_sync_items_status` ON `${TABLE_NAME}` (`status`)"
+          }
+        ]
+      },
+      {
+        "tableName": "transfer_queue",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT, `direction` INTEGER NOT NULL, `file_id` TEXT, `local_path` TEXT, `name` TEXT NOT NULL, `total_size` INTEGER NOT NULL DEFAULT 0, `transferred` INTEGER NOT NULL DEFAULT 0, `state` INTEGER NOT NULL, `error_message` TEXT, `created_at` INTEGER NOT NULL, `finished_at` INTEGER, `server_id` TEXT, `upload_id` TEXT, `resume_offset` INTEGER NOT NULL DEFAULT 0, `session_url` TEXT, `relative_path` TEXT, `parent_file_id` TEXT, `operation` INTEGER, `source_mtime` INTEGER, `source_size` INTEGER, `expected_cloud_edited_time` INTEGER, `attempt_count` INTEGER NOT NULL DEFAULT 0, `next_retry_at` INTEGER, `error_kind` INTEGER, `remote_result_file_id` TEXT, `state_revision` INTEGER NOT NULL DEFAULT 0)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "direction",
+            "columnName": "direction",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "fileId",
+            "columnName": "file_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "localPath",
+            "columnName": "local_path",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "name",
+            "columnName": "name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "totalSize",
+            "columnName": "total_size",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "transferred",
+            "columnName": "transferred",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "state",
+            "columnName": "state",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "errorMessage",
+            "columnName": "error_message",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "finishedAt",
+            "columnName": "finished_at",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "serverId",
+            "columnName": "server_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "uploadId",
+            "columnName": "upload_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "resumeOffset",
+            "columnName": "resume_offset",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "sessionUrl",
+            "columnName": "session_url",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "relativePath",
+            "columnName": "relative_path",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "parentFileId",
+            "columnName": "parent_file_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "operation",
+            "columnName": "operation",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "sourceMtime",
+            "columnName": "source_mtime",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "sourceSize",
+            "columnName": "source_size",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "expectedCloudEditedTime",
+            "columnName": "expected_cloud_edited_time",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "attemptCount",
+            "columnName": "attempt_count",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "nextRetryAt",
+            "columnName": "next_retry_at",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "errorKind",
+            "columnName": "error_kind",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "remoteResultFileId",
+            "columnName": "remote_result_file_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "stateRevision",
+            "columnName": "state_revision",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_transfer_queue_state",
+            "unique": false,
+            "columnNames": [
+              "state"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_transfer_queue_state` ON `${TABLE_NAME}` (`state`)"
+          },
+          {
+            "name": "index_transfer_queue_direction",
+            "unique": false,
+            "columnNames": [
+              "direction"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_transfer_queue_direction` ON `${TABLE_NAME}` (`direction`)"
+          },
+          {
+            "name": "index_transfer_queue_file_id",
+            "unique": false,
+            "columnNames": [
+              "file_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_transfer_queue_file_id` ON `${TABLE_NAME}` (`file_id`)"
+          },
+          {
+            "name": "index_transfer_queue_relative_path",
+            "unique": false,
+            "columnNames": [
+              "relative_path"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_transfer_queue_relative_path` ON `${TABLE_NAME}` (`relative_path`)"
+          },
+          {
+            "name": "index_transfer_queue_next_retry_at",
+            "unique": false,
+            "columnNames": [
+              "next_retry_at"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_transfer_queue_next_retry_at` ON `${TABLE_NAME}` (`next_retry_at`)"
+          }
+        ]
+      },
+      {
+        "tableName": "local_inode_map",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`inode` INTEGER NOT NULL, `relative_path` TEXT NOT NULL, `file_id` TEXT NOT NULL, `scanned_at` INTEGER NOT NULL, PRIMARY KEY(`inode`))",
+        "fields": [
+          {
+            "fieldPath": "inode",
+            "columnName": "inode",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "relativePath",
+            "columnName": "relative_path",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "fileId",
+            "columnName": "file_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "scannedAt",
+            "columnName": "scanned_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "inode"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_local_inode_map_relative_path",
+            "unique": false,
+            "columnNames": [
+              "relative_path"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_local_inode_map_relative_path` ON `${TABLE_NAME}` (`relative_path`)"
+          },
+          {
+            "name": "index_local_inode_map_file_id",
+            "unique": false,
+            "columnNames": [
+              "file_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_local_inode_map_file_id` ON `${TABLE_NAME}` (`file_id`)"
+          }
+        ]
+      },
+      {
+        "tableName": "free_up_staging",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`staging_name` TEXT NOT NULL, `relative_path` TEXT NOT NULL, `file_id` TEXT NOT NULL, `source_mtime` INTEGER, `source_size` INTEGER, `created_at` INTEGER NOT NULL, PRIMARY KEY(`staging_name`))",
+        "fields": [
+          {
+            "fieldPath": "stagingName",
+            "columnName": "staging_name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "relativePath",
+            "columnName": "relative_path",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "fileId",
+            "columnName": "file_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceMtime",
+            "columnName": "source_mtime",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "sourceSize",
+            "columnName": "source_size",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "staging_name"
+          ]
+        }
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'abfd025cdf7a2c295a36c473889e1258')"
+    ]
+  }
+}

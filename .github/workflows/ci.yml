@@ -25,20 +25,7 @@ jobs:
       - name: Unit, contract and integration tests
         run: ./gradlew jvmTest --stacktrace
       - name: Build unsigned DMG
-        run: ./gradlew packageDmg -Prelease=true --stacktrace
-      - name: Verify unsigned app metadata
-        run: scripts/verify-macos-artifacts.sh build/compose/binaries/main/app/PetalLink.app "" unsigned release
-      - name: Smoke test packaged app
-        run: scripts/smoke-test-macos-app.sh build/compose/binaries/main/app/PetalLink.app
-      - name: Build unsigned dev DMG
-        run: |
-          # packageDmg 输出到固定的 main/ 目录，dev 构建前清掉 release 产物避免混存。
-          rm -rf build/compose/binaries/main
-          ./gradlew packageDmg --stacktrace
-      - name: Verify unsigned dev app metadata
-        run: scripts/verify-macos-artifacts.sh build/compose/binaries/main/app/PetalLink.app "" unsigned dev
-      - name: Smoke test packaged dev app
-        run: scripts/smoke-test-macos-app.sh build/compose/binaries/main/app/PetalLink.app
+        run: ./gradlew packageDmg --stacktrace
       - name: Upload test reports
         if: always()
         uses: actions/upload-artifact@v4

@@ -3,8 +3,6 @@ package io.github.yuanbaobaoo.petallink.data
 import io.github.yuanbaobaoo.petallink.sync.TransferState
 import io.github.yuanbaobaoo.petallink.data.repository.StaleRevisionException
 import java.nio.file.Files
-import java.sql.Connection
-import java.sql.DriverManager
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -15,7 +13,7 @@ import kotlin.test.assertTrue
 
 class PetalLinkDbTest {
     @Test
-    fun 首次打开创建v6终态表且二次打开可读取() = runBlocking {
+    fun 首次打开Room数据库且二次打开可读取() = runBlocking {
         val path = Files.createTempDirectory("petallink-db-test-").resolve("petal_link.db")
         PetalLinkDb(path.toString()).useDb { db ->
             db.syncItems.upsert(sampleSyncItem())
@@ -23,25 +21,16 @@ class PetalLinkDbTest {
         PetalLinkDb(path.toString()).useDb { db ->
             assertEquals("docs/a.txt", db.syncItems.findByFileId("cloud-1")?.localPath)
         }
-        inspect(path.toString()) { connection ->
-            assertEquals(6, userVersion(connection))
-            assertTrue(tableExists(connection, "local_inode_map"))
-            assertTrue(columnExists(connection, "transfer_queue", "remote_result_file_id"))
-        }
     }
 
     @Test
-    fun v2到v5数据库都能逐级升级到v6() {
-        for (version in 2..5) {
-            val path = Files.createTempDirectory("petallink-v$version-").resolve("fixture.db")
-            createLegacyFixture(path.toString(), version)
-            PetalLinkDb(path.toString()).close()
-            inspect(path.toString()) { connection ->
-                assertEquals(6, userVersion(connection), "v$version fixture")
-                assertTrue(columnExists(connection, "sync_items", "local_size"))
-                assertTrue(columnExists(connection, "transfer_queue", "state_revision"))
-                assertTrue(tableExists(connection, "free_up_staging"))
-            }
+    fun syncItem使用fileId单主键() = runBlocking {
+        val path = Files.createTempDirectory("petallink-single-pk-").resolve("petal_link.db")
+        PetalLinkDb(path.toString()).useDb { db ->
+            db.syncItems.upsert(sampleSyncItem())
+            db.syncItems.upsert(sampleSyncItem().copy(localPath = "docs/renamed.txt"))
+            assertEquals(1, db.syncItems.countAll())
+            assertEquals("docs/renamed.txt", db.syncItems.findByFileId("cloud-1")?.localPath)
         }
     }
 
@@ -153,68 +142,4 @@ class PetalLinkDbTest {
         try { block(this) } finally { close() }
     }
 
-    private fun createLegacyFixture(path: String, version: Int) {
-        inspect(path) { connection ->
-            connection.createStatement().use { statement ->
-                statement.execute(
-                    """CREATE TABLE sync_items (
-                        file_id TEXT NOT NULL, local_path TEXT NOT NULL, parent_folder_id TEXT,
-                        name TEXT NOT NULL, is_folder INTEGER NOT NULL DEFAULT 0,
-                        size INTEGER NOT NULL DEFAULT 0, sha256 TEXT, local_mtime INTEGER,
-                        cloud_edited_time INTEGER, last_sync_time INTEGER,
-                        status INTEGER NOT NULL DEFAULT 0, error_message TEXT,
-                        PRIMARY KEY(file_id, local_path)
-                    )""".trimIndent(),
-                )
-                statement.execute(
-                    """CREATE TABLE transfer_queue (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT, direction INTEGER NOT NULL,
-                        file_id TEXT, local_path TEXT, name TEXT NOT NULL,
-                        total_size INTEGER NOT NULL DEFAULT 0, transferred INTEGER NOT NULL DEFAULT 0,
-                        state INTEGER NOT NULL DEFAULT 0, error_message TEXT,
-                        created_at INTEGER NOT NULL, finished_at INTEGER
-                    )""".trimIndent(),
-                )
-                if (version >= 2) {
-                    statement.execute("ALTER TABLE transfer_queue ADD COLUMN server_id TEXT")
-                    statement.execute("ALTER TABLE transfer_queue ADD COLUMN upload_id TEXT")
-                    statement.execute("ALTER TABLE transfer_queue ADD COLUMN resume_offset INTEGER NOT NULL DEFAULT 0")
-                }
-                if (version >= 3) statement.execute("ALTER TABLE sync_items ADD COLUMN local_size INTEGER")
-                if (version >= 4) statement.execute("ALTER TABLE transfer_queue ADD COLUMN session_url TEXT")
-                if (version >= 5) {
-                    listOf(
-                        "relative_path TEXT", "parent_file_id TEXT", "operation INTEGER",
-                        "source_mtime INTEGER", "source_size INTEGER", "expected_cloud_edited_time INTEGER",
-                        "attempt_count INTEGER NOT NULL DEFAULT 0", "next_retry_at INTEGER",
-                        "error_kind INTEGER", "remote_result_file_id TEXT",
-                        "state_revision INTEGER NOT NULL DEFAULT 0",
-                    ).forEach { statement.execute("ALTER TABLE transfer_queue ADD COLUMN $it") }
-                }
-                statement.execute("PRAGMA user_version = $version")
-            }
-        }
-    }
-
-    private inline fun inspect(path: String, block: (Connection) -> Unit) {
-        DriverManager.getConnection("jdbc:sqlite:$path").use(block)
-    }
-
-    private fun userVersion(connection: Connection): Int = connection.createStatement().use { statement ->
-        statement.executeQuery("PRAGMA user_version").use { it.getInt(1) }
-    }
-
-    private fun tableExists(connection: Connection, table: String): Boolean =
-        connection.prepareStatement("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").use { query ->
-            query.setString(1, table)
-            query.executeQuery().use { it.next() }
-        }
-
-    private fun columnExists(connection: Connection, table: String, column: String): Boolean =
-        connection.createStatement().use { statement ->
-            statement.executeQuery("PRAGMA table_info($table)").use { rows ->
-                while (rows.next()) if (rows.getString("name") == column) return@use true
-                false
-            }
-        }
 }

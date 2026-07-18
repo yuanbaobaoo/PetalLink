@@ -4,7 +4,7 @@ import io.github.yuanbaobaoo.petallink.data.repository.InodeMapRepository
 import io.github.yuanbaobaoo.petallink.drive.PlatformTime
 
 /**
- * SQLDelight repository 到同步 identity 端口的唯一适配器。
+ * 持久化 repository 到同步 identity 端口的唯一适配器。
  */
 class RepositoryInodeIdentityStore(
     private val repository: InodeMapRepository,

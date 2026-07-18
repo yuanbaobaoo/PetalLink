@@ -1,17 +1,34 @@
 package io.github.yuanbaobaoo.petallink.data.repository
 
+import androidx.room.ColumnInfo
+import androidx.room.Entity
+import androidx.room.PrimaryKey
+
 /**
  * 释放空间暂存记录（对标 docs/11 §3.2 free_up_staging 表）
  *
  * 替代 XATTR_FREE_UP_RELATIVE_PATH，恢复记录走 DB 事务。
  */
+@Entity(tableName = "free_up_staging")
 data class FreeUpStagingRecord(
-    val stagingName: String,   // 暂存文件名（如 .hwcloud_freeup-xxxx）
-    val relativePath: String,  // 原始相对路径
-    val fileId: String,        // 云端文件 ID
-    val sourceMtime: Long?,    // 原文件 mtime（回滚恢复用）
-    val sourceSize: Long?,     // 原文件大小（回滚恢复用）
-    val createdAt: Long,       // 创建时间戳（ms）
+    @PrimaryKey
+    @ColumnInfo(name = "staging_name")
+    val stagingName: String,
+
+    @ColumnInfo(name = "relative_path")
+    val relativePath: String,
+
+    @ColumnInfo(name = "file_id")
+    val fileId: String,
+
+    @ColumnInfo(name = "source_mtime")
+    val sourceMtime: Long?,
+
+    @ColumnInfo(name = "source_size")
+    val sourceSize: Long?,
+
+    @ColumnInfo(name = "created_at")
+    val createdAt: Long,
 )
 
 /**

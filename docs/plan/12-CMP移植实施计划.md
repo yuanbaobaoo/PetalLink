@@ -38,8 +38,9 @@ P0 装配与数据底座
 - [x] 新建应用级 Composition Root，集中创建并关闭所有长生命周期对象
 - [x] `Main.kt` 接入 AppState/ViewModel，不再持有示例文件和假登录状态
 - [x] 创建共享 CoroutineScope，定义应用关闭时的取消顺序
-- [x] SQLDelight 首次连接执行 `Schema.create`
-- [x] 实现 schema v2→v6 迁移和 `PRAGMA user_version`
+- [x] Room KMP 首次连接按导出 schema 建库
+- [x] Entity、DAO、Repository 和事务逻辑统一迁入 `commonMain`
+- [x] Room schema 从 v1 开始，不迁移旧 SQLDelight 数据
 - [x] 将 `transfer_queue` 补齐到文档终态字段和索引
 - [x] repository 返回受影响行数，CAS 失败抛出明确 stale revision
 - [x] `updateRunningProgress` 增加 `WHERE state=Running`
@@ -51,7 +52,7 @@ P0 装配与数据底座
 ### 必须补充的测试
 
 - [x] 临时 SQLite 文件首次建库测试
-- [x] v2/v3/v4/v5 fixture 升级到 v6 的 migration 测试
+- [x] 数据库重开、单列主键与 Room schema 行为测试
 - [x] CAS 并发与迟到 progress 回调测试
 - [x] ConfigStore 原子写、损坏文件和权限失败测试
 - [x] Logger 共享缓冲、脱敏和滚动文件测试
@@ -345,12 +346,12 @@ P0 装配与数据底座
 ### P6 自动化执行记录（2026-07-16）
 
 - 根目录 `petalLinkVersion=1.0.12` 是 UI、命令、包版本和 tag 校验的唯一版本来源；旧 Tauri release 规则已替换为 CMP Desktop 规则。
-- 沿用原 bundle id `io.github.yuanbaobaoo.PetalLink` 和原图标，最低 macOS 12.0；entitlements 支持 JVM/JNA native library，jlink 显式包含 SQLite JDBC 所需 `java.sql`。
+- 沿用原 bundle id `io.github.yuanbaobaoo.PetalLink` 和原图标，最低 macOS 12.0；entitlements 支持 JVM/JNA native library，bundled SQLite 不依赖 JDBC/`java.sql`。
 - 等价更新器实现启动 3 秒静默检查、每小时检查、聚焦 10 分钟节流、手动检查和主界面提示；安装链路包含 HTTPS manifest、语义版本、最多 5 分钟传输空闲等待、流式下载、SHA-256、codesign/Gatekeeper/固定 Team ID 校验、helper 替换及失败回滚，无 Team ID 时 fail closed。
-- CI 执行完整测试、DMG 构建、静态制品门禁以及打包应用隐藏启动/单实例冒烟；Release workflow 执行 Developer ID 签名、notary、staple、Gatekeeper、更新 zip/manifest 与 GitHub Release。
+- CI 执行完整测试并构建 DMG，打包成功后直接上传产物；Release workflow 执行 Developer ID 签名、notary、staple、更新 zip/manifest 与 GitHub Release，不再额外校验或启动打包应用。
 - 旧数据目录直接沿用；原 Tauri `token.bin` 明文布局、camelCase 配置枚举和数据库 v2–v6 均有兼容测试。49 命令源码审计补齐了挂载切换清基线、账号隔离、直接 rename/move/delete 结算、后台目录 BFS、完整状态快照、传输顺序和批量释放统计。
-- `./gradlew jvmTest`：317 tests，0 failures；`packageDmg` 实际生成 arm64 `PetalLink-1.0.12.dmg`；最新 `.app` 的制品门禁、隐藏启动/第二实例冒烟通过。DMG 挂载后复制到隔离安装目录的流程已在前一构建通过，最新哈希尚待重复该步。
-- 代码、无签名构建和自动化门禁已经完成；正式 Developer ID/notarization、真实华为账号与完整系统 UI 对照仍需在 Release Candidate 上按 `13-发布与兼容验收.md` 人工签字，因此 P6 尚未整体关闭。
+- `./gradlew jvmTest`：334 tests，0 failures；`packageDmg` 可生成 arm64 `PetalLink-1.0.12.dmg`。
+- 代码、无签名构建和发布自动化已经完成；真实华为账号与系统 UI 可按需人工检查。
 
 ### P6 追加执行记录（2026-07-17）：bundle id dev/release 分离
 

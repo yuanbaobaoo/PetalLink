@@ -4,7 +4,7 @@
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
     alias(libs.plugins.kotlinSerialization)
-    alias(libs.plugins.sqldelight)
+    alias(libs.plugins.ksp)
     alias(libs.plugins.composeMultiplatform)
     alias(libs.plugins.composeCompiler)
 }
@@ -62,15 +62,14 @@ kotlin {
                 implementation(libs.ktor.core)
                 implementation(libs.ktor.content.negotiation)
                 implementation(libs.ktor.serialization.json)
-                implementation(libs.sqldelight.coroutines)
+                implementation(libs.room.runtime)
+                implementation(libs.sqlite.bundled)
             }
         }
         jvmMain {
             dependencies {
                 implementation(compose.desktop.currentOs)
                 implementation(libs.ktor.cio)
-                implementation(libs.sqldelight.jvm)
-                implementation(libs.sqlite.jdbc)
                 implementation(libs.jna)
                 implementation(libs.jna.platform)
             }
@@ -86,15 +85,15 @@ kotlin {
     }
 }
 
-tasks.named("compileKotlinJvm").configure { dependsOn(generatePetalLinkBuildInfo) }
+dependencies {
+    add("kspJvm", libs.room.compiler)
+}
 
-// SQLDelight 数据库配置
-sqldelight {
-    databases {
-        create("PetalLinkDatabase") {
-            packageName.set("io.github.yuanbaobaoo.petallink.data")
-        }
-    }
+tasks.named("compileKotlinJvm").configure { dependsOn(generatePetalLinkBuildInfo) }
+tasks.matching { it.name.startsWith("ksp") }.configureEach { dependsOn(generatePetalLinkBuildInfo) }
+
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
 }
 
 // Compose Desktop 可运行分发
@@ -102,8 +101,6 @@ compose.desktop {
     application {
         mainClass = "io.github.yuanbaobaoo.petallink.MainKt"
         nativeDistributions {
-            // SQLite JDBC 通过反射使用 JDBC；jlink 的静态分析无法自动发现该模块。
-            modules("java.sql")
             targetFormats(org.jetbrains.compose.desktop.application.dsl.TargetFormat.Dmg)
             packageName = "PetalLink"
             packageVersion = petalLinkVersion

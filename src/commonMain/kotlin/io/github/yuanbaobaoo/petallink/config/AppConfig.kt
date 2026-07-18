@@ -119,11 +119,6 @@ object AppConfig {
     // ------------------------------------------------------------------
 
     /**
-     * 数据库 schema 版本（inode 方案后 = 6）
-     */
-    const val SCHEMA_VERSION = 6
-
-    /**
      * 传输历史保留条数（prune_transfer_history）
      */
     const val TRANSFER_HISTORY_RETENTION = 100
