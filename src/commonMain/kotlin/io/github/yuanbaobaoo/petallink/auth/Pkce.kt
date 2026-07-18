@@ -51,6 +51,7 @@ object Pkce {
         pkce: PkcePair,
         clientId: String,
     ): String {
+        require(clientId.isNotBlank()) { "华为 OAuth client_id 不能为空" }
         val scopeRaw = AuthConstants.SCOPES.joinToString(" ").replace(" ", "%20")
         // 注意顺序固定且 load-bearing
         return buildString {

@@ -36,22 +36,30 @@ object EnvLoader {
      *
      * 对标原 Rust `env_loader.rs`：当前目录 → exe 目录 → exe 父目录。
      * CMP `./gradlew run` 时工作目录是项目根，直接读取 `.env`。
+     *
+     * @param workingDirectory 当前进程用于搜索 `.env` 的起始目录
      */
-    fun loadEnvFile() {
+    fun loadEnvFile(
+        workingDirectory: java.nio.file.Path = java.nio.file.Paths.get(".").toAbsolutePath().normalize(),
+    ) {
         val candidates = mutableListOf<java.nio.file.Path>()
         // 当前工作目录及其逐级父目录（最多向上 4 级）
-        var current: java.nio.file.Path? = java.nio.file.Paths.get(".").toAbsolutePath().normalize().parent
+        var current: java.nio.file.Path? = workingDirectory
         var levels = 0
         while (current != null && levels <= 4) {
             candidates.add(current.resolve(".env"))
             current = current.parent
             levels++
         }
-        // classpath 目录（打包后从可执行文件目录查找）
-        java.nio.file.Paths.get(System.getProperty("java.class.path", ""))
-            .parent?.resolve(".env")?.let { candidates.add(it.normalize()) }
+        // classpath 各条目目录（打包后从应用 JAR 所在目录查找）
+        System.getProperty("java.class.path", "")
+            .split(java.io.File.pathSeparator)
+            .filter(String::isNotBlank)
+            .map(java.nio.file.Paths::get)
+            .mapNotNull { path -> if (java.nio.file.Files.isDirectory(path)) path else path.parent }
+            .mapTo(candidates) { it.resolve(".env").normalize() }
 
-        for (path in candidates) {
+        for (path in candidates.distinct()) {
             if (!java.nio.file.Files.exists(path)) continue
             try {
                 for (line in java.nio.file.Files.readAllLines(path)) {

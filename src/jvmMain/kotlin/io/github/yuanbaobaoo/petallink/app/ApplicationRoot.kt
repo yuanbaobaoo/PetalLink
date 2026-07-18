@@ -260,7 +260,7 @@ class DesktopAppViewModel(
      */
     fun login() {
         if (!mutableState.value.secretConfigured) {
-            mutableState.value = mutableState.value.copy(errorMessage = "缺少华为 OAuth client secret")
+            mutableState.value = mutableState.value.copy(errorMessage = "缺少华为 OAuth client_id 或 client_secret")
             return
         }
         if (mutableState.value.loggingIn) return

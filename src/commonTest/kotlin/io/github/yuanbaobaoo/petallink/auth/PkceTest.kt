@@ -2,6 +2,7 @@ package io.github.yuanbaobaoo.petallink.auth
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 /**
@@ -64,6 +65,19 @@ class PkceTest {
         assertTrue(url.contains("code_challenge_method=S256"))
         // access_type=offline
         assertTrue(url.contains("access_type=offline"))
+    }
+
+    @Test
+    fun buildAuthorizeUrl_clientId为空时拒绝生成() {
+        val error = assertFailsWith<IllegalArgumentException> {
+            Pkce.buildAuthorizeUrl(
+                redirectUri = "http://127.0.0.1:9999/oauth/callback",
+                state = "state",
+                pkce = PkcePair(codeVerifier = "verifier", codeChallenge = "challenge"),
+                clientId = "",
+            )
+        }
+        assertEquals("华为 OAuth client_id 不能为空", error.message)
     }
 
     @Test

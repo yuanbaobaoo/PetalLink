@@ -47,6 +47,7 @@ import io.github.yuanbaobaoo.petallink.ui.theme.BrandColor
 import io.github.yuanbaobaoo.petallink.ui.theme.BrandGradient
 import io.github.yuanbaobaoo.petallink.ui.theme.Brand100
 import io.github.yuanbaobaoo.petallink.ui.theme.BrandLighter
+import io.github.yuanbaobaoo.petallink.ui.theme.DesignTokens
 import io.github.yuanbaobaoo.petallink.ui.theme.ErrorColor
 import io.github.yuanbaobaoo.petallink.ui.theme.LocalSemanticColors
 import io.github.yuanbaobaoo.petallink.ui.theme.LocalReducedMotion
@@ -208,7 +209,11 @@ fun MateButton(
             if (label != null) Spacer(Modifier.width(6.dp))
         }
         if (label != null) {
-            val fontSize = if (variant == MateButtonVariant.TEXT) 14.sp else 15.sp
+            val fontSize = if (variant == MateButtonVariant.TEXT) {
+                DesignTokens.FONT_BODY_SM.sp
+            } else {
+                DesignTokens.FONT_BODY.sp
+            }
             Text(text = label, color = contentColor, fontSize = fontSize, fontWeight = FontWeight.Medium)
         }
         if (badge > 0 && (variant == MateButtonVariant.ICON || variant == MateButtonVariant.ICON_TEXT)) {

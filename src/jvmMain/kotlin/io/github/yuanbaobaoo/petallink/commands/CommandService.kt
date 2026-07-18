@@ -95,6 +95,9 @@ class CommandService private constructor(
      */
     suspend fun authLogin(port: Int): AppResult<TokenPair> {
         return try {
+            val clientId = envLoader.resolvedClientId()
+            if (clientId.isBlank()) throw AppError.Auth("缺少华为 OAuth client_id")
+            if (!envLoader.clientSecretConfigured()) throw AppError.Auth("缺少华为 OAuth client_secret")
             val redirectUri = Pkce.buildRedirectUri(port)
             val pkce = Pkce.generate()
             val expectedState = Pkce.generateState()
@@ -104,7 +107,7 @@ class CommandService private constructor(
             try {
                 oauth.bind()
                 val authorizeUrl = Pkce.buildAuthorizeUrl(
-                    redirectUri, expectedState, pkce, envLoader.resolvedClientId(),
+                    redirectUri, expectedState, pkce, clientId,
                 )
                 ProcessBuilder("open", authorizeUrl).start()
                 val result = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
@@ -320,7 +323,6 @@ class CommandService private constructor(
         syncPlan?.remoteMutationCommitted()
         file
     }
-
     // ============ sync_control (2) ============
     /**
      * 触发一次完整的本地+云端手动刷新同步周期。

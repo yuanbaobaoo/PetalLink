@@ -39,6 +39,7 @@ import io.github.yuanbaobaoo.petallink.ui.theme.BrandColor
 import io.github.yuanbaobaoo.petallink.ui.theme.BrandLighter
 import io.github.yuanbaobaoo.petallink.ui.theme.ErrorBg
 import io.github.yuanbaobaoo.petallink.ui.theme.ErrorColor
+import io.github.yuanbaobaoo.petallink.ui.theme.DesignTokens
 import io.github.yuanbaobaoo.petallink.ui.theme.LocalSemanticColors
 import io.github.yuanbaobaoo.petallink.ui.theme.WarningColor
 import kotlinx.coroutines.delay
@@ -143,7 +144,7 @@ fun MatePopupMenu(
                                 Text(
                                     item.label,
                                     color = if (item.danger) ErrorColor else semantic.textPrimary,
-                                    fontSize = 15.sp,
+                                    fontSize = DesignTokens.FONT_BODY.sp,
                                 )
                             }
                         }

@@ -47,6 +47,7 @@ import androidx.compose.ui.unit.sp
 import io.github.yuanbaobaoo.petallink.ui.components.MateIcon
 import io.github.yuanbaobaoo.petallink.ui.theme.BrandColor
 import io.github.yuanbaobaoo.petallink.ui.theme.BrandLight
+import io.github.yuanbaobaoo.petallink.ui.theme.DesignTokens
 import io.github.yuanbaobaoo.petallink.ui.theme.ErrorColor
 import io.github.yuanbaobaoo.petallink.ui.theme.LocalSemanticColors
 import io.github.yuanbaobaoo.petallink.ui.theme.SwitchOffTrack
@@ -65,7 +66,7 @@ import io.github.yuanbaobaoo.petallink.ui.theme.SwitchOffTrack
  * @param prefixIcon 前缀图标 name（可选）
  * @param error 错误态（红色边框）
  * @param singleLine 单行（默认 true）
- * @param fontSize 字号 sp（默认 15）
+ * @param fontSize 字号 sp（默认使用正文 Token）
  * @param suffix 右侧自定义内容（如清除按钮）
  */
 @Composable
@@ -78,7 +79,7 @@ fun MateTextField(
     prefixIcon: String? = null,
     error: Boolean = false,
     singleLine: Boolean = true,
-    fontSize: Int = 15,
+    fontSize: Int = DesignTokens.FONT_BODY,
     keyboardOptions: KeyboardOptions = KeyboardOptions.Default,
     visualTransformation: VisualTransformation = VisualTransformation.None,
     suffix: @Composable (() -> Unit)? = null,
@@ -192,7 +193,7 @@ fun MateNumberField(
                 singleLine = true,
                 textStyle = TextStyle(
                     color = semantic.textPrimary,
-                    fontSize = 15.sp,
+                    fontSize = DesignTokens.FONT_BODY.sp,
                     textAlign = TextAlign.Center,
                 ),
                 cursorBrush = SolidColor(BrandColor),
@@ -201,7 +202,7 @@ fun MateNumberField(
             )
         }
         if (suffix.isNotEmpty()) {
-            Text(suffix, color = semantic.textSecondary, fontSize = 14.sp)
+            Text(suffix, color = semantic.textSecondary, fontSize = DesignTokens.FONT_BODY_SM.sp)
         }
     }
 }
@@ -251,12 +252,12 @@ fun MateStepper(
             Text(
                 value.toString(),
                 color = semantic.textPrimary,
-                fontSize = 15.sp,
+                fontSize = DesignTokens.FONT_BODY.sp,
                 fontWeight = FontWeight.Medium,
             )
         }
         StepperButton(enabled = plusEnabled, onClick = { onValueChange((value + step).coerceIn(min, max)) }) { color ->
-            Text("+", color = color, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+            Text("+", color = color, fontSize = DesignTokens.FONT_TITLE_SM.sp, fontWeight = FontWeight.Medium)
         }
     }
 }
@@ -321,7 +322,7 @@ fun MateSearchField(
             placeholder = placeholder,
             modifier = Modifier.fillMaxWidth(),
             prefixIcon = "search",
-            fontSize = 15,
+            fontSize = DesignTokens.FONT_BODY,
             keyboardOptions = KeyboardOptions.Default.copy(
                 imeAction = androidx.compose.ui.text.input.ImeAction.Search,
             ),

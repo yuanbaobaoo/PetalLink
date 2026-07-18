@@ -56,6 +56,12 @@ APP_BASE_NAME=${0##*/}
 APP_HOME=$( cd -P "${APP_HOME:-./}" > /dev/null && printf '%s
 ' "$PWD" ) || exit
 
+# 本项目默认隔离 Gradle 用户目录，避免加载用户级 init.gradle.kts；显式设置时仍以外部值为准。
+if [ -z "${GRADLE_USER_HOME:-}" ]; then
+    GRADLE_USER_HOME=$APP_HOME/.gradle/home
+    export GRADLE_USER_HOME
+fi
+
 # Use the maximum available, or set MAX_FD != -1 to use that value.
 MAX_FD=maximum
 
@@ -173,7 +179,7 @@ fi
 
 
 # Add default JVM options here. You can also use JAVA_OPTS and GRADLE_OPTS to pass JVM options to this script.
-DEFAULT_JVM_OPTS='"-Xmx64m" "-Xms64m"'
+DEFAULT_JVM_OPTS='"-Xmx64m" "-Xms64m" "--enable-native-access=ALL-UNNAMED"'
 
 # Collect all arguments for the java command:
 #   * DEFAULT_JVM_OPTS, JAVA_OPTS, JAVA_OPTS, and optsEnvironmentVar are not allowed to contain shell fragments,

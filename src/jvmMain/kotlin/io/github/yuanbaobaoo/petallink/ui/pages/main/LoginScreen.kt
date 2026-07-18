@@ -41,7 +41,8 @@ import io.github.yuanbaobaoo.petallink.ui.theme.LocalSemanticColors
 
 private const val APP_TITLE = "PetalLink - 华为云盘客户端开源版"
 private const val SECRET_WARNING =
-    "尚未配置 client_secret。请在项目根目录创建 .env 文件，写入：\nHWCLOUD_CLIENT_SECRET=<你的 64 位 hex>\n（参考 .env.example）"
+    "尚未配置 OAuth 凭据。请在项目根目录的 .env 中同时配置：\n" +
+        "HWCLOUD_CLIENT_ID=<你的 client_id>\nHWCLOUD_CLIENT_SECRET=<你的 client_secret>"
 private const val HINT = "点击后将打开浏览器，支持账号密码或手机扫码登录"
 
 /**
@@ -54,7 +55,7 @@ private const val HINT = "点击后将打开浏览器，支持账号密码或手
  * 授权中：BrandLighter 面板(radius 8, h40) + spinner + 提示 + 取消按钮。
  *
  * @param loggingIn 是否正在授权
- * @param secretConfigured client_secret 是否已配置
+ * @param secretConfigured client_id 与 client_secret 是否均已配置
  * @param errorMessage 错误消息（null 时无 error banner）
  * @param onLogin 登录回调
  * @param onCancel 取消授权回调
@@ -78,8 +79,6 @@ fun LoginScreen(
             .background(
                 Brush.linearGradient(
                     colors = listOf(BrandLighter, semantic.bgPage, semantic.bgContainer),
-                    start = androidx.compose.ui.geometry.Offset(0f, 0f),
-                    end = androidx.compose.ui.geometry.Offset(Float.MAX_VALUE, Float.MAX_VALUE),
                 ),
             ),
         contentAlignment = Alignment.Center,

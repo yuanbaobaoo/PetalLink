@@ -1,14 +1,15 @@
 # 版本目录：集中管理依赖与插件版本
 [versions]
-kotlin = "2.1.21"
+kotlin = "2.3.20"
 coroutines = "1.9.0"
 serialization = "1.7.3"
 ktor = "3.0.3"
 room = "2.8.4"
 sqlite = "2.7.0"
-ksp = "2.1.21-2.0.1"
-compose-multiplatform = "1.7.0"
+ksp = "2.3.9"
+compose-multiplatform = "1.11.1"
 jna = "5.15.0"
+slf4j = "2.0.16"
 
 [libraries]
 kotlin-coroutines = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-core", version.ref = "coroutines" }
@@ -24,6 +25,7 @@ room-compiler = { group = "androidx.room", name = "room-compiler", version.ref =
 sqlite-bundled = { group = "androidx.sqlite", name = "sqlite-bundled", version.ref = "sqlite" }
 jna = { group = "net.java.dev.jna", name = "jna", version.ref = "jna" }
 jna-platform = { group = "net.java.dev.jna", name = "jna-platform", version.ref = "jna" }
+slf4j-nop = { group = "org.slf4j", name = "slf4j-nop", version.ref = "slf4j" }
 
 [plugins]
 kotlinMultiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref = "kotlin" }

@@ -395,7 +395,7 @@ private fun BulkBarButton(
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         MateIcon(name = icon, size = 16.dp, tint = iconColor)
-        Text(label, fontSize = 15.sp, fontWeight = FontWeight.Medium, color = contentColor)
+        Text(label, fontSize = DesignTokens.FONT_BODY.sp, fontWeight = FontWeight.Medium, color = contentColor)
     }
 }
 
@@ -669,7 +669,7 @@ private fun CtxItem(label: String, icon: String, danger: Boolean = false, enable
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         MateIcon(name = icon, size = 16.dp, tint = iconColor)
-        Text(label, color = contentColor, fontSize = 15.sp)
+        Text(label, color = contentColor, fontSize = DesignTokens.FONT_BODY.sp)
     }
 }
 

@@ -3,9 +3,6 @@ package io.github.yuanbaobaoo.petallink
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material.CircularProgressIndicator
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Menu
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.painter.BitmapPainter
 import androidx.compose.ui.graphics.painter.Painter
@@ -260,8 +257,6 @@ fun main(args: Array<String>) {
                                 onRefresh = root.viewModel::refresh,
                                 onOpenFinder = root.viewModel::openMountInFinder,
                                 onOpenSettings = root.viewModel::openSettings,
-                                onUpload = root.viewModel::chooseAndUpload,
-                                onCreateFolder = root.viewModel::createFolder,
                                 onRetryTransfer = root.viewModel::retryTransfer,
                                 onClearFinishedTransfers = root.viewModel::clearFinishedTransfers,
                                 onClearCompletedTransfers = root.viewModel::clearCompletedTransfers,

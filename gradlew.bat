@@ -33,8 +33,11 @@ set APP_HOME=%DIRNAME%
 @rem Resolve any "." and ".." in APP_HOME to make it shorter.
 for %%i in ("%APP_HOME%") do set APP_HOME=%%~fi
 
+@rem 本项目默认隔离 Gradle 用户目录；显式设置时仍以外部值为准。
+if not defined GRADLE_USER_HOME set GRADLE_USER_HOME=%APP_HOME%\.gradle\home
+
 @rem Add default JVM options here. You can also use JAVA_OPTS and GRADLE_OPTS to pass JVM options to this script.
-set DEFAULT_JVM_OPTS="-Xmx64m" "-Xms64m"
+set DEFAULT_JVM_OPTS="-Xmx64m" "-Xms64m" "--enable-native-access=ALL-UNNAMED"
 
 @rem Find java.exe
 if defined JAVA_HOME goto findJavaFromJavaHome

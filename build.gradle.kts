@@ -1,3 +1,6 @@
+import org.gradle.api.tasks.testing.Test
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
 // PetalLink：JVM + Compose Multiplatform Desktop（单模块，无 shared 外壳）
 // 产出可执行 JAR / macOS .app，通过 Compose Desktop Window 运行
 
@@ -23,7 +26,7 @@ val updateEndpoint = providers.environmentVariable("PETALLINK_UPDATE_ENDPOINT")
     .orElse("https://github.com/yuanbaobaoo/PetalLink/releases/latest/download/PetalLink-update.json")
 val updateTeamId = providers.environmentVariable("PETALLINK_UPDATE_TEAM_ID").orElse("")
 val generatedBuildInfo = layout.buildDirectory.dir("generated/petallink-build-info/kotlin")
-val generatePetalLinkBuildInfo by tasks.registering {
+val generatePetalLinkBuildInfo = tasks.register("generatePetalLinkBuildInfo") {
     inputs.property("version", petalLinkVersion)
     inputs.property("buildProfile", buildProfile)
     inputs.property("bundleId", bundleId)
@@ -51,7 +54,12 @@ object BuildInfo {
 }
 
 kotlin {
-    jvm()
+    jvmToolchain(25)
+    jvm {
+        compilerOptions {
+            jvmTarget.set(JvmTarget.fromTarget("25"))
+        }
+    }
 
     sourceSets {
         jvmMain { kotlin.srcDir(generatedBuildInfo) }
@@ -72,6 +80,7 @@ kotlin {
                 implementation(libs.ktor.cio)
                 implementation(libs.jna)
                 implementation(libs.jna.platform)
+                runtimeOnly(libs.slf4j.nop)
             }
         }
         commonTest {
@@ -91,6 +100,10 @@ dependencies {
 
 tasks.named("compileKotlinJvm").configure { dependsOn(generatePetalLinkBuildInfo) }
 tasks.matching { it.name.startsWith("ksp") }.configureEach { dependsOn(generatePetalLinkBuildInfo) }
+tasks.withType<Test>().configureEach {
+    // Room bundled SQLite 在测试 JVM 中通过 JNI 加载本地库，JDK 25 要求显式开放原生访问。
+    jvmArgs("--enable-native-access=ALL-UNNAMED")
+}
 
 ksp {
     arg("room.schemaLocation", "$projectDir/schemas")
@@ -100,6 +113,8 @@ ksp {
 compose.desktop {
     application {
         mainClass = "io.github.yuanbaobaoo.petallink.MainKt"
+        // Skiko 通过 JNI 加载平台渲染库。JDK 25 下运行任务与打包后的启动器都必须显式开放原生访问。
+        jvmArgs("--enable-native-access=ALL-UNNAMED")
         nativeDistributions {
             targetFormats(org.jetbrains.compose.desktop.application.dsl.TargetFormat.Dmg)
             packageName = "PetalLink"

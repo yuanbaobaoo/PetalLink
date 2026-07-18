@@ -91,15 +91,15 @@ object DesignTokens {
     const val RADIUS_XL = 12
 
     // ------------------------------------------------------------------
-    // 字号阶梯（px，整体 +1，避免桌面端文字发虚）
+    // 字号阶梯（px）
     // ------------------------------------------------------------------
     const val FONT_DISPLAY = 37
     const val FONT_TITLE_LG = 25
     const val FONT_TITLE_MD = 21
     const val FONT_TITLE_SM = 17
-    const val FONT_BODY = 15
-    const val FONT_BODY_SM = 14
-    const val FONT_CAPTION = 13
+    const val FONT_BODY = 14
+    const val FONT_BODY_SM = 13
+    const val FONT_CAPTION = 12
 
     // ------------------------------------------------------------------
     // 字重
