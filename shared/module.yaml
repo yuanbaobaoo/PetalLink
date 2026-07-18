@@ -3,24 +3,24 @@ product:
   platforms: [jvm]
 
 dependencies:
-  - $libs.kotlin.coroutines
-  - $libs.kotlin.serialization.json
-  - $libs.ktor.core
-  - $libs.ktor.content.negotiation
-  - $libs.ktor.serialization.json
-  - $libs.room.runtime
-  - $libs.sqlite.bundled
+  - org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0
+  - org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3
+  - io.ktor:ktor-client-core:3.0.3
+  - io.ktor:ktor-client-content-negotiation:3.0.3
+  - io.ktor:ktor-serialization-kotlinx-json:3.0.3
+  - androidx.room:room-runtime:2.8.4
+  - androidx.sqlite:sqlite-bundled:2.7.0
 
 dependencies@jvm:
   - $compose.desktop.currentOs
-  - $libs.ktor.cio
-  - $libs.jna
-  - $libs.jna.platform
-  - $libs.slf4j.nop: runtime-only
+  - io.ktor:ktor-client-cio:3.0.3
+  - net.java.dev.jna:jna:5.15.0
+  - net.java.dev.jna:jna-platform:5.15.0
+  - org.slf4j:slf4j-nop:2.0.16: runtime-only
 
 test-dependencies:
-  - $libs.kotlin.coroutines.test
-  - $libs.ktor.mock
+  - org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0
+  - io.ktor:ktor-client-mock:3.0.3
 
 repositories:
   - https://maven.aliyun.com/repository/public
@@ -29,18 +29,20 @@ repositories:
   - https://repo.maven.apache.org/maven2
 
 plugins:
-  petallink-toolchain: enabled
+  build-plugin: enabled
 
 settings:
   kotlin:
     version: 2.3.20
+    freeCompilerArgs:
+      - -Xexpect-actual-classes
     serialization:
       format: json
       version: 1.7.3
     ksp:
       version: 2.3.9
       processors:
-        - $libs.room.compiler
+        - androidx.room:room-compiler:2.8.4
       processorOptions:
         room.schemaLocation: ../schemas
   jvm:

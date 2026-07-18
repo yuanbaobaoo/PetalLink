@@ -279,9 +279,9 @@ class FilesApi(
             val (files, next) = listFiles(parentId, nextCursor = cursor)
             all += files
             cursor = next
-            if (cursor == null) return all
-            if (!seen.add(cursor!!)) {
-                throw AppError.Remote(0, "listAllFiles cursor 循环: $cursor")
+            val nextCursor = cursor ?: return all
+            if (!seen.add(nextCursor)) {
+                throw AppError.Remote(0, "listAllFiles cursor 循环: $nextCursor")
             }
         }
         throw AppError.Remote(

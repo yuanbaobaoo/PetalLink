@@ -119,7 +119,7 @@ object Reconciliation {
                     val existingPath = idToPath[fileId]
                     if (existingPath != null && existingPath != desiredPath) {
                         require(existingPath.isNotEmpty()) { "不能移动根目录" }
-                        rekeySubtree(tree as MutableMap, pathToId as MutableMap, idToPath as MutableMap, existingPath, desiredPath)
+                        rekeySubtree(tree, pathToId, idToPath, existingPath, desiredPath)
                     } else if (pathToId[desiredPath] != null && pathToId[desiredPath] != fileId) {
                         throw AppError.Remote(0, "目标路径冲突: $desiredPath 已被 ${pathToId[desiredPath]} 占用")
                     }

@@ -26,10 +26,9 @@ secrets/
 .env
 .zcode
 
-# Gradle / Kotlin 构建产物
+# 构建产物与本地缓存
 .gradle/
 build/
-!gradle/wrapper/gradle-wrapper.jar
 *.kotlin/
 
 # Kotlin/Native 临时

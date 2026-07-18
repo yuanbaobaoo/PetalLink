@@ -1,7 +1,7 @@
 product: jvm/amper-plugin
 
 pluginInfo:
-  id: petallink-toolchain
+  id: build-plugin
 
 settings:
   jvm:

@@ -1,0 +1,33 @@
+tasks:
+  generateBuildInfo:
+    action: !io.github.yuanbaobaoo.petallink.build.generateBuildInfo
+      versionPropertiesFile: ${project.rootDir}/version.properties
+      generatedSourceDir: ${taskOutputDir}
+
+  packageDmg:
+    action: !io.github.yuanbaobaoo.petallink.build.runDesktopPackaging
+      unixWrapper: ${project.rootDir}/build-plugin/.desktop-packaging/gradlew
+      windowsWrapper: ${project.rootDir}/build-plugin/.desktop-packaging/gradlew.bat
+      arguments: [packageDmg, --quiet, --console=plain, --stacktrace]
+
+  releaseDmg:
+    action: !io.github.yuanbaobaoo.petallink.build.runDesktopPackaging
+      unixWrapper: ${project.rootDir}/build-plugin/.desktop-packaging/gradlew
+      windowsWrapper: ${project.rootDir}/build-plugin/.desktop-packaging/gradlew.bat
+      arguments:
+        - jvmTest
+        - createReleaseDistributable
+        - notarizeReleaseDmg
+        - --quiet
+        - --console=plain
+        - --stacktrace
+        - -Prelease=true
+
+generated:
+  sources:
+    - language: kotlin
+      directory: ${tasks.generateBuildInfo.action.generatedSourceDir}
+
+commands:
+  - packageDmg
+  - releaseDmg

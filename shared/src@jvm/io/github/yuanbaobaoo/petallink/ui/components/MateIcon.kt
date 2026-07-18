@@ -15,7 +15,7 @@ import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
-import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.skiaCanvas
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
@@ -163,7 +163,7 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawSvgPicture(
                 org.jetbrains.skia.BlendMode.SRC_IN,
             )
         }
-        canvas.nativeCanvas.drawPicture(picture, null, paint)
+        canvas.skiaCanvas.drawPicture(picture, null, paint)
     }
 }
 

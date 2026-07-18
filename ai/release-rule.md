@@ -1,6 +1,6 @@
 # PetalLink Compose Desktop 发布规则
 
-1. 版本只修改根目录 `gradle.properties` 的 `petalLinkVersion`。
+1. 版本只修改根目录 `version.properties` 的 `petalLinkVersion`。
 2. 构建档案是 bundle id、运行时数据目录、LaunchAgent label 的唯一真相源。`./kotlin run`、`./kotlin test` 与 `./kotlin do packageDmg` 默认使用 dev 档案，不污染正式数据；正式发布只允许使用 `./kotlin do releaseDmg`，该命令在内部固定启用 release 档案。不得用 dev 包发布。
 3. 本地先执行 `./kotlin test`，本地无签名预览执行 `./kotlin do packageDmg`，正式签名与公证执行 `./kotlin do releaseDmg`；CI 以 Toolchain 命令成功作为产物生成完成的标准，不再执行打包产物校验或启动冒烟。
 4. tag 必须严格为 `v<petalLinkVersion>`；`.github/workflows/release.yml` 会拒绝不一致的 tag。

@@ -61,7 +61,6 @@ object Planner {
         isStartupResume: Boolean,
     ): SyncAction? {
         val localExists = local != null
-        val localHasContent = local != null && local.hasContent
         val cloudExists = cloud != null
         val dbExists = db != null
 
@@ -74,8 +73,8 @@ object Planner {
         if (!localExists && !cloudExists && !dbExists) return null
 
         // --- C. 三方都存在（文件） ---
-        if (localHasContent && cloudExists && dbExists && db != null) {
-            return decideThreeWayPresent(relativePath, local!!, cloud!!, db)
+        if (local?.hasContent == true && cloud != null && db != null) {
+            return decideThreeWayPresent(relativePath, local, cloud, db)
         }
 
         // --- D. 双方都有但无 DB ---
@@ -85,13 +84,13 @@ object Planner {
         }
 
         // --- E. 本地有、云端无 ---
-        if (localExists && !cloudExists) {
-            return decideLocalOnly(relativePath, local!!, db, dbExists, isStartupResume)
+        if (local != null && !cloudExists) {
+            return decideLocalOnly(relativePath, local, db, dbExists, isStartupResume)
         }
 
         // --- F. 本地无、云端有 ---
-        if (!localExists && cloudExists) {
-            return decideCloudOnly(relativePath, cloud!!, db, dbExists, isStartupResume)
+        if (!localExists && cloud != null) {
+            return decideCloudOnly(relativePath, cloud, db, dbExists, isStartupResume)
         }
 
         // --- G. 双方都无、DB 残留 ---

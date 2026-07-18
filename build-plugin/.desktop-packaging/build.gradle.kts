@@ -1,8 +1,8 @@
 import org.gradle.api.tasks.testing.Test
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import java.util.Properties
 
-// PetalLink：JVM + Compose Multiplatform Desktop（单模块，无 shared 外壳）
-// 产出可执行 JAR / macOS .app，通过 Compose Desktop Window 运行
+// PetalLink 隐藏的 Compose Desktop 兼容发布工程，仅由根目录 ./kotlin 自定义命令调用。
 
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
@@ -12,7 +12,15 @@ plugins {
     alias(libs.plugins.composeCompiler)
 }
 
-val petalLinkVersion = providers.gradleProperty("petalLinkVersion").get()
+val repositoryRoot = rootDir.resolve("../..").canonicalFile
+layout.buildDirectory.set(repositoryRoot.resolve("build"))
+val versionPropertiesFile = repositoryRoot.resolve("version.properties")
+val versionProperties = Properties().apply {
+    versionPropertiesFile.inputStream().use { load(it) }
+}
+val petalLinkVersion = requireNotNull(versionProperties.getProperty("petalLinkVersion")?.trim()) {
+    "Missing petalLinkVersion in $versionPropertiesFile"
+}
 // 构建档案（dev/release）是 bundle id、运行时数据目录与 LaunchAgent label 的唯一真相源。
 // 用 -Prelease=true 切换：true → release（prod bundle id，沿用原 Tauri 老用户数据目录）；
 // 不带 / false / 任意非 true 值 → dev（附加 -dev 后缀，数据目录/单实例锁/开机自启与 release 完全隔离）。
@@ -63,12 +71,12 @@ kotlin {
 
     sourceSets {
         jvmMain {
-            kotlin.srcDir("shared/src@jvm")
+            kotlin.srcDir(repositoryRoot.resolve("shared/src@jvm"))
             kotlin.srcDir(generatedBuildInfo)
-            resources.srcDir("shared/resources@jvm")
+            resources.srcDir(repositoryRoot.resolve("shared/resources@jvm"))
         }
         commonMain {
-            kotlin.srcDir("shared/src")
+            kotlin.srcDir(repositoryRoot.resolve("shared/src"))
             dependencies {
                 implementation(libs.kotlin.coroutines)
                 implementation(libs.kotlin.serialization.json)
@@ -89,7 +97,7 @@ kotlin {
             }
         }
         commonTest {
-            kotlin.srcDir("shared/test")
+            kotlin.srcDir(repositoryRoot.resolve("shared/test"))
             dependencies {
                 implementation(kotlin("test"))
                 implementation(libs.kotlin.coroutines)
@@ -97,7 +105,7 @@ kotlin {
                 implementation(libs.ktor.mock)
             }
         }
-        jvmTest { kotlin.srcDir("shared/test@jvm") }
+        jvmTest { kotlin.srcDir(repositoryRoot.resolve("shared/test@jvm")) }
     }
 }
 
@@ -113,7 +121,7 @@ tasks.withType<Test>().configureEach {
 }
 
 ksp {
-    arg("room.schemaLocation", "$projectDir/schemas")
+    arg("room.schemaLocation", repositoryRoot.resolve("schemas").absolutePath)
 }
 
 // Compose Desktop 可运行分发
@@ -135,9 +143,9 @@ compose.desktop {
                 packageBuildVersion = petalLinkVersion
                 dmgPackageVersion = petalLinkVersion
                 dmgPackageBuildVersion = petalLinkVersion
-                iconFile.set(project.file("shared/resources@jvm/icon.icns"))
-                entitlementsFile.set(project.file("shared/resources@jvm/Entitlements.plist"))
-                runtimeEntitlementsFile.set(project.file("shared/resources@jvm/RuntimeEntitlements.plist"))
+                iconFile.set(repositoryRoot.resolve("shared/resources@jvm/icon.icns"))
+                entitlementsFile.set(repositoryRoot.resolve("shared/resources@jvm/Entitlements.plist"))
+                runtimeEntitlementsFile.set(repositoryRoot.resolve("shared/resources@jvm/RuntimeEntitlements.plist"))
                 signing {
                     sign.set(providers.environmentVariable("PETALLINK_MAC_SIGN").map { it.toBoolean() }.orElse(false))
                     identity.set(providers.environmentVariable("PETALLINK_MAC_SIGN_IDENTITY"))

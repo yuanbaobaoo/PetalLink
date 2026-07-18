@@ -17,10 +17,10 @@ jobs:
       - name: Validate tag and single version source
         shell: bash
         run: |
-          VERSION=$(sed -n 's/^petalLinkVersion=//p' gradle.properties)
+          VERSION=$(sed -n 's/^petalLinkVersion=//p' version.properties)
           TAG="${GITHUB_REF_NAME#v}"
           if [[ "${GITHUB_REF_TYPE}" == "tag" && "${VERSION}" != "${TAG}" ]]; then
-            echo "::error::tag v${TAG} 与 petalLinkVersion=${VERSION} 不一致"
+            echo "::error::tag v${TAG} 与 version.properties 中的 petalLinkVersion=${VERSION} 不一致"
             exit 1
           fi
           echo "VERSION=${VERSION}" >> "$GITHUB_ENV"

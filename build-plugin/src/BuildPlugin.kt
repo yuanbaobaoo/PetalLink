@@ -1,4 +1,4 @@
-package io.github.yuanbaobaoo.petallink.toolchain
+package io.github.yuanbaobaoo.petallink.build
 
 import org.jetbrains.amper.plugins.Input
 import org.jetbrains.amper.plugins.Output
@@ -17,7 +17,7 @@ private const val DEFAULT_UPDATE_ENDPOINT =
     "https://github.com/yuanbaobaoo/PetalLink/releases/latest/download/PetalLink-update.json"
 
 /**
- * 为 Kotlin Toolchain 构建生成与 Gradle 版本等价的 BuildInfo。
+ * 为 Kotlin Toolchain 构建生成统一的 BuildInfo。
  *
  * Toolchain 的日常 build/test/run 默认始终使用 dev 档案；如需检查 release 编译信息，可显式设置
  * PETALLINK_BUILD_PROFILE=release。正式 DMG 仍由 releaseDmg 命令委托既有发布链生成。
@@ -66,7 +66,7 @@ fun generateBuildInfo(
 
 /** 通过 Kotlin Toolchain 自定义命令调用暂未被原生支持的 Compose Desktop 分发任务。 */
 @TaskAction
-fun runGradle(
+fun runDesktopPackaging(
     @Input unixWrapper: Path,
     @Input windowsWrapper: Path,
     arguments: List<String>,

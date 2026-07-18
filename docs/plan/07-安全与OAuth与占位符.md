@@ -290,11 +290,11 @@ loop {
 - `build.rs` 缺失任一凭据 → **`panic` 阻断编译**（强制开发者补全 `.env`）。
 - `resolved_client_id()` / `resolved_client_secret()`：按上述优先级合并返回最终值。
 
-### 4.2 Kotlin 建议
+### 4.2 Kotlin 实现
 
-- 编译期：`build.gradle.kts` 的 `buildConfigField` 从 `local.properties` 或环境变量注入（`local.properties` 不入库）。
-- 运行期：从打包配置读取。
-- 不设硬编码默认值；缺失则阻断构建或前端禁用登录按钮。
+- 构建期：根目录 `build-plugin` 只生成不含账号凭据的 `BuildInfo`。
+- 运行期：从进程环境或仓库根目录 `.env` 读取 Client 凭据，`.env` 不入库。
+- 不设有效凭据的硬编码默认值；缺失时禁用登录流程并显式提示配置错误。
 
 ### 4.3 .env 模板
 

@@ -288,5 +288,13 @@ project_wrapper_dir=$(dirname "$(realpath "$0")")
 AMPER_BUILD_DIR="${AMPER_BUILD_DIR:-$project_wrapper_dir/.kotlin/build}"
 export AMPER_BUILD_DIR
 
+# Skiko loads its native library through System.load(). JDK 25 warns unless the
+# application explicitly opts in. Keep this implementation detail out of the
+# normal `./kotlin run` experience while preserving any user-provided arguments.
+if [ "${1:-}" = "run" ]; then
+  shift
+  set -- run "--jvm-args=--enable-native-access=ALL-UNNAMED" "$@"
+fi
+
 KOTLIN_CLI_WRAPPER_PATH="$(realpath "$0")" \
 exec /bin/sh "$launcher_script" "$@"

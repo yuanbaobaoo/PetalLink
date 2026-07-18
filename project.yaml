@@ -1,7 +1,7 @@
 modules:
-  - ./build-logic/petallink-toolchain
+  - ./build-plugin
   - ./jvm-app
   - ./shared
 
 plugins:
-  - ./build-logic/petallink-toolchain
+  - ./build-plugin

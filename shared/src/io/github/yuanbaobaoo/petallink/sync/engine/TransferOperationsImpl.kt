@@ -9,7 +9,7 @@ import io.github.yuanbaobaoo.petallink.drive.UploadProtocol
 import io.github.yuanbaobaoo.petallink.drive.validatedResponseOffset
 import io.github.yuanbaobaoo.petallink.mount.SkipFilter
 import io.ktor.client.statement.bodyAsChannel
-import io.ktor.client.statement.readBytes
+import io.ktor.client.statement.readRawBytes
 import io.ktor.http.HttpHeaders
 import io.ktor.utils.io.readAvailable
 import kotlinx.coroutines.delay
@@ -295,7 +295,7 @@ class TransferOperationsImpl(
             val response = downloadApi.buildContentRequest(task.fileId, offset = 0, etag = meta.etag)
 
             // 3. 读取完整响应体到字节（当前为完整下载；Range 续传在后续迭代接入）
-            val contentBytes: ByteArray = response.readBytes()
+            val contentBytes: ByteArray = response.readRawBytes()
 
             // 4. 长度校验
             if (contentBytes.size.toLong() != meta.size) {

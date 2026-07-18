@@ -87,9 +87,9 @@ class ActivityTrackerTest {
         assertNotNull(g1)
         assertNotNull(g2)
         assertEquals(2, tracker.activeCount())
-        g1?.close()
+        g1.close()
         assertEquals(1, tracker.activeCount())
-        g2?.close()
+        g2.close()
         assertEquals(0, tracker.activeCount())
     }
 

@@ -24,6 +24,8 @@ import io.github.yuanbaobaoo.petallink.core.net_guard.NetState
 import io.github.yuanbaobaoo.petallink.update.JvmUpdateService
 import io.github.yuanbaobaoo.petallink.update.UpdateManifest
 
+private val IMPORT_JSON = Json { ignoreUnknownKeys = true }
+
 /**
  * 命令服务实现（49 个命令，对标原项目 commands/ 9 个文件）。
  *
@@ -200,7 +202,7 @@ class CommandService private constructor(
     fun configImportJson(jsonStr: String): AppResult<UserConfig> {
         val config = try {
             (configStore as? JsonConfigStore)?.parseImport(jsonStr)
-                ?: Json { ignoreUnknownKeys = true }.decodeFromString(UserConfig.serializer(), jsonStr)
+                ?: IMPORT_JSON.decodeFromString(UserConfig.serializer(), jsonStr)
         } catch (error: Throwable) {
             return AppResult.Err(AppError.Internal(error.message ?: "配置解析失败"))
         }
