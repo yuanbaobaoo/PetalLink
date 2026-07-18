@@ -202,7 +202,7 @@ object DesignTokens {
             // 主按钮文字。
             primaryLabel = textStyle(14f, FontWeight.Medium),
             // 软色按钮文字。
-            softLabel = textStyle(14f, FontWeight.Medium),
+            softLabel = textStyle(12f, FontWeight.Medium),
             // 文字按钮文字。
             textLabel = textStyle(13f, FontWeight.Medium),
             // 图标文字按钮文字。
