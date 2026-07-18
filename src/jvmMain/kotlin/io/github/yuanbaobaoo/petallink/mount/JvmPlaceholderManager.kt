@@ -129,6 +129,43 @@ class JvmPlaceholderManager(
     }
 
     /**
+     * 将任意普通本地文件原子移动到指定冲突副本路径，并清除占位符与 Finder 灰标。
+     */
+    suspend fun moveToConflictCopy(absoluteSource: String, absoluteTarget: String) = io {
+        val source = safeAbsolute(absoluteSource)
+        val target = safeAbsolute(absoluteTarget)
+        rejectSymlink(source)
+        if (!Files.isRegularFile(source, LinkOption.NOFOLLOW_LINKS)) {
+            throw AppError.LocalIo("冲突源不是普通文件: $source")
+        }
+        if (Files.exists(target, LinkOption.NOFOLLOW_LINKS)) {
+            throw AppError.LocalIo("冲突副本已存在: $target")
+        }
+        ensureSafeParents(target.parent)
+        moveAtomicallyWhenPossible(source, target)
+        try {
+            xattrs.remove(target.toString(), AppConfig.XATTR_STATE)
+            setFinderGreyLabelSync(target, false)
+        } catch (error: Throwable) {
+            runCatching { moveAtomicallyWhenPossible(target, source) }
+            throw AppError.LocalIo("清理冲突副本标记失败: $target", error)
+        }
+    }
+
+    /**
+     * 下载失败时把冲突副本原子恢复到原路径；目标已被占用时拒绝覆盖。
+     */
+    suspend fun restoreConflictCopy(absoluteBackup: String, absoluteTarget: String) = io {
+        val backup = safeAbsolute(absoluteBackup)
+        val target = safeAbsolute(absoluteTarget)
+        rejectSymlink(backup)
+        if (Files.exists(target, LinkOption.NOFOLLOW_LINKS)) {
+            throw AppError.LocalIo("冲突原路径已被占用，拒绝覆盖: $target")
+        }
+        moveAtomicallyWhenPossible(backup, target)
+    }
+
+    /**
      * 创建 0 字节占位符文件，写入 state xattr 并打上 Finder 灰色标签；中途失败会回滚。
      */
     private fun createNewPlaceholder(path: Path) {

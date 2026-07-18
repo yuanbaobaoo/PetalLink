@@ -10,7 +10,12 @@ import io.github.yuanbaobaoo.petallink.data.repository.StaleRevisionException
 import io.github.yuanbaobaoo.petallink.sync.TransferState
 import io.github.yuanbaobaoo.petallink.sync.RetryPolicy
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import java.nio.file.Files
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -157,6 +162,34 @@ class TaskRunnerStateMachineTest {
         assertEquals(TaskDisposition.BLOCKED, runner.retryExplicit(rejected))
         assertEquals(1, executions)
         assertEquals(TransferState.Failed, db.transfers.findById(rejected)?.state)
+    }
+
+    @Test
+    fun 任务执行并发严格服从配置值() = withDb { db ->
+        val active = AtomicInteger(0)
+        val peak = AtomicInteger(0)
+        val operations = FakeOperations(execute = {
+            val current = active.incrementAndGet()
+            peak.updateAndGet { old -> maxOf(old, current) }
+            delay(30)
+            active.decrementAndGet()
+            TaskOutput(TaskDisposition.COMPLETED)
+        })
+        val runner = TaskRunner(
+            db.transfers,
+            operations,
+            { true },
+            { 1_000L },
+            { 0L },
+            maxConcurrentTransfers = 2,
+        )
+        val ids = List(5) { index -> db.transfers.insert(task(localPath = "file-$index")) }
+
+        coroutineScope {
+            ids.map { id -> async { runner.runExpected(context(db, id)) } }.awaitAll()
+        }
+
+        assertEquals(2, peak.get())
     }
 
     private fun task(

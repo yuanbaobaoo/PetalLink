@@ -188,6 +188,9 @@ class DesktopAppViewModel(
             }
         }
         scope.launch {
+            commands.transferUpdates.collect { reloadTransfers() }
+        }
+        scope.launch {
             netGuard.state.collect { net ->
                 if (lastNetState == NetState.OFFLINE && net == NetState.ONLINE) {
                     commands.syncNetworkRecovered()
@@ -213,6 +216,17 @@ class DesktopAppViewModel(
      * 恢复应用启动状态：加载配置、尝试恢复登录态，并按需触发刷新与用户信息加载。
      */
     private suspend fun restore() {
+        val authState = when (val result = commands.authRestore()) {
+            is AppResult.Ok -> result.value
+            is AppResult.Err -> {
+                mutableState.value = mutableState.value.copy(
+                    initialized = true,
+                    syncStatus = "登录状态恢复失败",
+                    errorMessage = result.error.message,
+                )
+                return
+            }
+        }
         val config = when (val result = commands.configLoad()) {
             is AppResult.Ok -> result.value
             is AppResult.Err -> {
@@ -224,8 +238,7 @@ class DesktopAppViewModel(
                 return
             }
         }
-        val authState = (commands.authRestore() as? AppResult.Ok)?.value
-        val loggedIn = authState?.loggedIn == true
+        val loggedIn = authState.loggedIn
         mutableState.value = mutableState.value.copy(
             initialized = true,
             loggedIn = loggedIn,
@@ -233,7 +246,7 @@ class DesktopAppViewModel(
             syncStatus = if (loggedIn) "空闲" else "等待登录",
             config = config,
             setupPhase = deriveSetupPhase(config.mountConfigured),
-            secretConfigured = authState?.secretConfigured ?: commands.authCheckSecret(),
+            secretConfigured = authState.secretConfigured,
             launchAtLogin = commands.platformLaunchAtLoginIsEnabled(),
             appVersion = commands.platformAppGetVersion(),
             errorMessage = null,
@@ -331,6 +344,30 @@ class DesktopAppViewModel(
                 errorMessage = error,
             )
         }
+    }
+
+    /**
+     * 从持久任务队列重载传输视图；请求序号保证较旧查询不会覆盖较新结果。
+     */
+    private suspend fun reloadTransfers() {
+        val requestId = transferRequest.incrementAndGet()
+        val tasks = (commands.transferListAll() as? AppResult.Ok)?.value ?: return
+        transferViewModel.loadAll(tasks.mapNotNull { task ->
+            TransferTaskUi(
+                id = task.id ?: return@mapNotNull null,
+                fileName = task.name,
+                state = task.state,
+                stateRevision = task.stateRevision,
+                bytesTotal = task.bytesTotal,
+                bytesDone = task.bytesDone,
+                direction = when (task.direction) {
+                    TransferDirection.UPLOAD -> "upload"
+                    TransferDirection.DOWNLOAD, TransferDirection.DOWNLOAD_UPDATE -> "download"
+                    TransferDirection.DELETE -> "delete"
+                },
+                errorMessage = task.errorMessage,
+            )
+        }, requestId)
     }
 
     /**
@@ -493,6 +530,23 @@ class DesktopAppViewModel(
     }
 
     /**
+     * 使用 macOS 原生目录选择器获取同步根目录，并把结果交给调用方决定何时保存配置。
+     */
+    fun chooseMountDirectory(onSelected: (String) -> Unit) {
+        val property = "apple.awt.fileDialogForDirectories"
+        val previous = System.getProperty(property)
+        try {
+            System.setProperty(property, "true")
+            val dialog = java.awt.FileDialog(null as java.awt.Frame?, "选择同步目录", java.awt.FileDialog.LOAD)
+            dialog.isMultipleMode = false
+            dialog.isVisible = true
+            dialog.files.firstOrNull()?.toPath()?.toAbsolutePath()?.normalize()?.toString()?.let(onSelected)
+        } finally {
+            if (previous == null) System.clearProperty(property) else System.setProperty(property, previous)
+        }
+    }
+
+    /**
      * 在系统资源管理器中打开同步挂载目录。
      */
     fun openMountInFinder() = scope.launch {
@@ -527,9 +581,12 @@ class DesktopAppViewModel(
     }
 
     /**
-     * 批量释放所选文件项的本地空间（文件夹递归收集可释放项），完成后刷新。
+     * 展开所选文件和目录，生成去重后的释放空间预览项。
      */
-    fun freeUpItems(files: List<DriveFile>) = scope.launch {
+    fun previewFreeUpItems(
+        files: List<DriveFile>,
+        onResult: (List<io.github.yuanbaobaoo.petallink.commands.FreeableItem>) -> Unit,
+    ) = scope.launch {
         val items = files.flatMap { file ->
             if (file.isFolder()) {
                 (commands.syncListFreeableInFolder(relativePathFor(file)) as? AppResult.Ok)?.value.orEmpty()
@@ -540,6 +597,13 @@ class DesktopAppViewModel(
                 ))
             }
         }.distinctBy { it.fileId }
+        onResult(items)
+    }
+
+    /**
+     * 执行用户已确认的释放空间预览项，完成后刷新同步状态。
+     */
+    fun freeUpItems(items: List<io.github.yuanbaobaoo.petallink.commands.FreeableItem>) = scope.launch {
         when (val result = commands.syncFreeUpBatch(items)) {
             is AppResult.Ok -> mutableState.value = mutableState.value.copy(
                 syncStatus = "已释放 ${result.value.freedCount} 项（${formatBytes(result.value.freedBytes)}）",
@@ -722,7 +786,12 @@ class DesktopAppViewModel(
                 updateDownloadProgress = 0f,
                 errorMessage = null,
             )
-            when (val result = commands.updaterDownloadAndInstall(manifest)) {
+            when (val result = commands.updaterDownloadAndInstall(manifest) { done, total ->
+                val progress = total?.takeIf { it > 0L }
+                    ?.let { (done.toDouble() / it.toDouble()).coerceIn(0.0, 1.0).toFloat() }
+                    ?: 0f
+                mutableState.value = mutableState.value.copy(updateDownloadProgress = progress)
+            }) {
                 is AppResult.Ok -> mutableState.value = mutableState.value.copy(
                     updateStatus = "更新已校验，正在重启安装",
                     updatePhase = UpdaterPhase.READY,
@@ -866,8 +935,8 @@ class ApplicationRoot(val paths: AppPaths = AppPaths.fromEnvironment()) : AutoCl
     private val closed = AtomicBoolean(false)
     private val logger = Logger()
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    val commands = CommandService.create(paths)
     val netGuard = NetGuard(scope)
+    val commands = CommandService.create(paths, netGuard)
     val viewModel = DesktopAppViewModel(scope, commands, netGuard)
 
     init {

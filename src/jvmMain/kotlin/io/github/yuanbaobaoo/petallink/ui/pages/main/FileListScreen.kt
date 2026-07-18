@@ -48,6 +48,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
+import androidx.compose.ui.window.Dialog
 import io.github.yuanbaobaoo.petallink.drive.DriveFile
 import io.github.yuanbaobaoo.petallink.drive.displayName
 import io.github.yuanbaobaoo.petallink.sync.isFolder
@@ -58,6 +59,7 @@ import io.github.yuanbaobaoo.petallink.ui.components.mate.MateCheckbox
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateDialogOptions
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateEmpty
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateHDivider
+import io.github.yuanbaobaoo.petallink.ui.components.mate.MateTextField
 import io.github.yuanbaobaoo.petallink.ui.components.mate.confirmDialog
 import io.github.yuanbaobaoo.petallink.ui.theme.BrandColor
 import io.github.yuanbaobaoo.petallink.ui.theme.BrandLighter
@@ -65,6 +67,7 @@ import io.github.yuanbaobaoo.petallink.ui.theme.ErrorColor
 import io.github.yuanbaobaoo.petallink.ui.theme.FolderAmber
 import io.github.yuanbaobaoo.petallink.ui.theme.FolderAmberBg
 import io.github.yuanbaobaoo.petallink.ui.theme.LocalSemanticColors
+import io.github.yuanbaobaoo.petallink.ui.theme.DesignTokens
 import io.github.yuanbaobaoo.petallink.ui.theme.SuccessColor
 import io.github.yuanbaobaoo.petallink.ui.theme.TileDoc
 import io.github.yuanbaobaoo.petallink.ui.theme.TileDocBg
@@ -75,6 +78,7 @@ import io.github.yuanbaobaoo.petallink.ui.theme.TileSheetBg
 import io.github.yuanbaobaoo.petallink.ui.theme.TileVideo
 import io.github.yuanbaobaoo.petallink.ui.theme.TileVideoBg
 import io.github.yuanbaobaoo.petallink.config.SortField
+import io.github.yuanbaobaoo.petallink.commands.FreeableItem
 import io.github.yuanbaobaoo.petallink.ui.viewmodel.FileBrowserState
 
 /**
@@ -136,10 +140,12 @@ fun FileListScreen(
     onOpenItem: (DriveFile) -> Unit,
     onThumbnailNeeded: (DriveFile) -> Unit,
     onDelete: (List<DriveFile>) -> Unit,
-    onFreeUp: (List<DriveFile>) -> Unit,
+    onPreviewFreeUp: (List<DriveFile>, (List<FreeableItem>) -> Unit) -> Unit,
+    onFreeUp: (List<FreeableItem>) -> Unit,
     onDownload: (List<DriveFile>) -> Unit,
     onSyncFolder: (DriveFile) -> Unit,
     onRename: (DriveFile, String) -> Unit,
+    onMove: (DriveFile, String) -> Unit,
     onShowProps: (DriveFile) -> Unit,
     onCanFreeUp: (DriveFile, (Boolean) -> Unit) -> Unit,
 ) {
@@ -156,7 +162,51 @@ fun FileListScreen(
     // 对话框状态
     var renameTarget by remember { mutableStateOf<DriveFile?>(null) }
     var renameValue by remember { mutableStateOf("") }
+    var moveTarget by remember { mutableStateOf<DriveFile?>(null) }
+    var moveParentId by remember { mutableStateOf<String?>(null) }
     var propsTarget by remember { mutableStateOf<DriveFile?>(null) }
+    val knownFolders = browser.directoryChildren.values.flatten()
+        .filter { it.isFolder() }
+        .distinctBy { it.id }
+    val requestDelete: (List<DriveFile>, () -> Unit) -> Unit = { selection, afterDelete ->
+        val names = selection.take(5).joinToString("、") { it.displayName() }
+        val suffix = if (selection.size > 5) " 等 ${selection.size} 项" else ""
+        confirmDialog(
+            MateDialogOptions(
+                title = "确认删除",
+                content = "将从云端删除：$names$suffix。此操作会同步到本地，且不能在应用内撤销。",
+                confirmText = "删除",
+                danger = true,
+                titleIcon = "trash",
+            ),
+        ) { confirmed ->
+            if (confirmed) {
+                onDelete(selection)
+                afterDelete()
+            }
+        }
+    }
+    val requestFreeUp: (List<DriveFile>) -> Unit = { selection ->
+        onPreviewFreeUp(selection) { items ->
+            val totalBytes = items.sumOf { it.size }
+            val content = if (items.isEmpty()) {
+                "所选内容中没有通过远端校验、可安全释放的本地文件。"
+            } else {
+                "将释放 ${items.size} 个本地文件，共 ${formatFileSize(totalBytes)}。云端内容会保留，本地文件将变为占位符。"
+            }
+            confirmDialog(
+                MateDialogOptions(
+                    title = if (items.isEmpty()) "无法释放空间" else "释放空间预览",
+                    content = content,
+                    confirmText = if (items.isEmpty()) "关闭" else "确认释放",
+                    danger = items.isNotEmpty(),
+                    titleIcon = "cloud",
+                ),
+            ) { confirmed ->
+                if (confirmed && items.isNotEmpty()) onFreeUp(items)
+            }
+        }
+    }
 
     Column(modifier = Modifier.fillMaxSize()) {
         // 批量操作栏（选中>0 时；v2 05-file-ops：深色浮动条 h44 radius10，
@@ -178,10 +228,13 @@ fun FileListScreen(
                 BulkBarButton(label = "批量下载", icon = "download", disabled = bulkBusy,
                     onClick = { val s = files.filter { it.id in checked }; onDownload(s) })
                 BulkBarButton(label = "释放空间", icon = "cloud",
-                    onClick = { val s = files.filter { it.id in checked }; onFreeUp(s) })
+                    onClick = { requestFreeUp(files.filter { it.id in checked }) })
                 if (mountConfigured) {
                     BulkBarButton(label = "批量删除", icon = "trash", danger = true, disabled = bulkBusy,
-                        onClick = { val s = files.filter { it.id in checked }; onDelete(s); checked = emptySet() })
+                        onClick = {
+                            val selection = files.filter { it.id in checked }
+                            requestDelete(selection) { checked = emptySet() }
+                        })
                 }
                 BulkBarCloseButton(onClick = { checked = emptySet(); showCheckboxes = false })
             }
@@ -255,9 +308,10 @@ fun FileListScreen(
                             onThumbnailNeeded = { onThumbnailNeeded(file) },
                             onSync = { onSyncFolder(file) },
                             onRename = { renameTarget = file; renameValue = file.name ?: file.fileName ?: "" },
+                            onMove = { moveTarget = file; moveParentId = null },
                             onShowProps = { propsTarget = file; onShowProps(file) },
-                            onDelete = { onDelete(listOf(file)) },
-                            onFreeUp = { onFreeUp(listOf(file)) },
+                            onDelete = { requestDelete(listOf(file)) {} },
+                            onFreeUp = { requestFreeUp(listOf(file)) },
                             onCanFreeUp = onCanFreeUp,
                         )
                     }
@@ -284,6 +338,20 @@ fun FileListScreen(
                 renameTarget = null
             },
             onDismiss = { renameTarget = null },
+        )
+    }
+
+    moveTarget?.let { target ->
+        MoveDialog(
+            target = target,
+            folders = knownFolders.filter { it.id != target.id },
+            selectedParentId = moveParentId,
+            onSelect = { moveParentId = it },
+            onConfirm = {
+                moveParentId?.let { onMove(target, it) }
+                moveTarget = null
+            },
+            onDismiss = { moveTarget = null },
         )
     }
 
@@ -419,6 +487,7 @@ private fun FileRow(
     onThumbnailNeeded: () -> Unit,
     onSync: () -> Unit,
     onRename: () -> Unit,
+    onMove: () -> Unit,
     onShowProps: () -> Unit,
     onDelete: () -> Unit,
     onFreeUp: () -> Unit,
@@ -519,6 +588,7 @@ private fun FileRow(
                             }
                             if (mountConfigured) {
                                 CtxItem("重命名", "edit", enabled = !isIndexing) { menuExpanded = false; onRename() }
+                                CtxItem("移动到…", "folder-open", enabled = !isIndexing) { menuExpanded = false; onMove() }
                             }
                             CtxItem("属性", "info") { menuExpanded = false; onShowProps() }
                             if (mountConfigured) {
@@ -621,19 +691,115 @@ private fun CtxDivider() {
  */
 @Composable
 private fun RenameDialog(target: DriveFile, value: String, onValueChange: (String) -> Unit, onConfirm: () -> Unit, onDismiss: () -> Unit) {
-    confirmDialog(
-        MateDialogOptions(
-            title = "重命名",
-            content = "",
-            confirmText = "确定",
-        ),
-    ) { confirmed ->
-        if (confirmed) onConfirm() else onDismiss()
+    val semantic = LocalSemanticColors.current
+    val currentName = target.name ?: target.fileName.orEmpty()
+    val valid = value.trim().isNotEmpty() && value.trim() != currentName &&
+        '/' !in value && value != "." && value != ".."
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier.width(420.dp)
+                .clip(RoundedCornerShape(DesignTokens.RADIUS_XL.dp))
+                .background(semantic.bgContainer)
+                .padding(DesignTokens.SPACING_XL.dp),
+            verticalArrangement = Arrangement.spacedBy(DesignTokens.SPACING_LG.dp),
+        ) {
+            Text(
+                text = "重命名",
+                fontSize = DesignTokens.FONT_TITLE_SM.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = semantic.textPrimary,
+            )
+            MateTextField(
+                value = value,
+                onValueChange = onValueChange,
+                modifier = Modifier.fillMaxWidth(),
+                error = value.isNotEmpty() && !valid,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(
+                    DesignTokens.SPACING_SM.dp,
+                    Alignment.End,
+                ),
+            ) {
+                MateButton(label = "取消", variant = MateButtonVariant.TEXT, onClick = onDismiss)
+                MateButton(
+                    label = "确定",
+                    variant = MateButtonVariant.PRIMARY,
+                    disabled = !valid,
+                    onClick = onConfirm,
+                )
+            }
+        }
     }
-    // 内联输入框（简化：用 confirmDialog 包裹时无法嵌入输入，这里用独立弹窗逻辑替代）
-    // 注：原 Vue 用 MateDialog + MateTextField，CMP 用 confirmDialog 不支持嵌入输入框；
-    // 此处保留 confirmDialog 确认，实际重命名值由调用方从 renameValue 读取。
-    // 完整的带输入框对话框需要 MateDialog 支持 slot，后续完善。
+}
+
+/**
+ * 从已加载目录树选择目标文件夹的移动对话框。
+ */
+@Composable
+private fun MoveDialog(
+    target: DriveFile,
+    folders: List<DriveFile>,
+    selectedParentId: String?,
+    onSelect: (String) -> Unit,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val semantic = LocalSemanticColors.current
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier.width(460.dp)
+                .clip(RoundedCornerShape(DesignTokens.RADIUS_XL.dp))
+                .background(semantic.bgContainer)
+                .padding(DesignTokens.SPACING_XL.dp),
+            verticalArrangement = Arrangement.spacedBy(DesignTokens.SPACING_LG.dp),
+        ) {
+            Text(
+                "移动“${target.displayName()}”",
+                color = semantic.textPrimary,
+                fontSize = DesignTokens.FONT_TITLE_SM.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            if (folders.isEmpty()) {
+                Text(
+                    "当前已加载的目录树中没有可选目标，请先在侧边栏展开目标目录。",
+                    color = semantic.textSecondary,
+                    fontSize = DesignTokens.FONT_BODY_SM.sp,
+                )
+            } else {
+                LazyColumn(modifier = Modifier.fillMaxWidth().height(260.dp)) {
+                    items(folders, key = { it.id.orEmpty() }) { folder ->
+                        val id = folder.id ?: return@items
+                        Row(
+                            modifier = Modifier.fillMaxWidth()
+                                .clip(RoundedCornerShape(DesignTokens.RADIUS_MD.dp))
+                                .background(if (id == selectedParentId) BrandLighter else Color.Transparent)
+                                .clickable { onSelect(id) }
+                                .padding(DesignTokens.SPACING_MD.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(DesignTokens.SPACING_MD.dp),
+                        ) {
+                            MateIcon(name = "folder", size = 18.dp, tint = FolderAmber)
+                            Text(folder.displayName(), color = semantic.textPrimary, fontSize = DesignTokens.FONT_BODY.sp)
+                        }
+                    }
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(DesignTokens.SPACING_SM.dp, Alignment.End),
+            ) {
+                MateButton(label = "取消", variant = MateButtonVariant.TEXT, onClick = onDismiss)
+                MateButton(
+                    label = "移动",
+                    variant = MateButtonVariant.PRIMARY,
+                    disabled = selectedParentId == null,
+                    onClick = onConfirm,
+                )
+            }
+        }
+    }
 }
 
 /**

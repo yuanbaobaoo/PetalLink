@@ -116,6 +116,7 @@ fun SettingsScreen(
     onClearCache: () -> Unit,
     onCheckUpdate: () -> Unit,
     onInstallUpdate: () -> Unit,
+    onSelectDir: ((String) -> Unit) -> Unit,
     onSave: (UserConfig) -> List<String>,
 ) {
     val semantic = LocalSemanticColors.current
@@ -169,7 +170,11 @@ fun SettingsScreen(
                         .padding(horizontal = 32.dp, vertical = 28.dp),
                 ) {
                     when (tab) {
-                        SettingsTab.SYNC_DIR -> SyncDirSection(mountDir, mountConfigured, onSelectDir = {})
+                        SettingsTab.SYNC_DIR -> SyncDirSection(
+                            mountDir,
+                            mountConfigured,
+                            onSelectDir = { onSelectDir { selected -> mountDir = selected } },
+                        )
                         SettingsTab.TRANSFER -> {
                             MateSectionHeader("传输设置", icon = "transfer")
                             SettingsPanel {

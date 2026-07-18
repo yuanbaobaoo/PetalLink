@@ -202,6 +202,7 @@ class TaskProgressReporter(
     private val taskId: Long,
     private val stateRevision: Long,
     private val throttleMs: Long = PROGRESS_THROTTLE_MS,
+    private val onProgress: suspend (Long) -> Unit = {},
 ) {
     private var lastReportMs: Long = 0L
 
@@ -211,14 +212,14 @@ class TaskProgressReporter(
     suspend fun report(bytesDone: Long, nowMs: Long) {
         if (nowMs - lastReportMs < throttleMs) return  // 节流
         lastReportMs = nowMs
-        repository.updateRunningProgress(taskId, stateRevision, bytesDone)
+        if (repository.updateRunningProgress(taskId, stateRevision, bytesDone)) onProgress(taskId)
     }
 
     /**
      * 会话轮换与服务端确认 offset 必须立即持久化，不受 UI 进度节流影响。
      */
-    suspend fun reportResume(session: ResumeSession, confirmedOffset: Long): Boolean =
-        repository.updateRunningTransfer(
+    suspend fun reportResume(session: ResumeSession, confirmedOffset: Long): Boolean {
+        val updated = repository.updateRunningTransfer(
             taskId,
             stateRevision,
             RunningTransferPatch(
@@ -229,6 +230,9 @@ class TaskProgressReporter(
                 sessionUrl = ColumnPatch.Set(session.sessionUrl),
             ),
         )
+        if (updated) onProgress(taskId)
+        return updated
+    }
 
     companion object {
         /**
@@ -255,9 +259,12 @@ class TaskRunner(
     private val isOnline: () -> Boolean,
     private val nowMs: () -> Long,
     private val jitterMs: () -> Long = { Random.nextLong(0L, 1_000L) },
+    maxConcurrentTransfers: Int = AppConfig.MAX_CONCURRENT_TRANSFERS,
+    private val onNetworkFailure: () -> Unit = {},
+    private val onTaskChanged: suspend (Long) -> Unit = {},
 ) {
     // CAS 并发控制：同一路径同时只允许一个任务 Running
-    private val runningSemaphore = Semaphore(AppConfig.MAX_CONCURRENT_TRANSFERS)
+    private val runningSemaphore = Semaphore(maxConcurrentTransfers.coerceIn(1, 20))
 
     /**
      * 执行单个任务（对标 run_expected 主链）。
@@ -303,7 +310,12 @@ class TaskRunner(
      */
     private suspend fun runAdmitted(task: TaskContext): TaskDisposition {
         // 4. 预检
-        when (val preflight = operations.preflight(task)) {
+        val preflight = try {
+            operations.preflight(task)
+        } catch (error: AppError) {
+            return settleError(task, error)
+        }
+        when (preflight) {
             is PreflightResult.Reject -> {
                 transitionFailure(task, preflight.targetState, task.attempt, preflight.reason, null)
                 return when (preflight.targetState) {
@@ -331,7 +343,12 @@ class TaskRunner(
         }
 
         // 6. 执行传输
-        val progress = TaskProgressReporter(repository, running.id, running.stateRevision)
+        val progress = TaskProgressReporter(
+            repository,
+            running.id,
+            running.stateRevision,
+            onProgress = onTaskChanged,
+        )
         return try {
             val output = operations.execute(running, progress)
             settle(running, output)
@@ -416,7 +433,7 @@ class TaskRunner(
         val output = when (error.kind) {
             AppError.ErrorKind.NETWORK -> TaskOutput(
                 TaskDisposition.WAITING_FOR_NETWORK, errorMessage = error.message
-            )
+            ).also { onNetworkFailure() }
             AppError.ErrorKind.AUTH -> TaskOutput(
                 TaskDisposition.FAILED, errorMessage = "鉴权失败: ${error.message}"
             )
@@ -463,7 +480,9 @@ class TaskRunner(
         check(TransferState.canTransition(task.state, newState)) {
             "非法状态迁移：${task.state} → $newState"
         }
-        return repository.transition(task.id, task.stateRevision, newState, patch).toContext()
+        val updated = repository.transition(task.id, task.stateRevision, newState, patch).toContext()
+        onTaskChanged(task.id)
+        return updated
     }
 
     /**

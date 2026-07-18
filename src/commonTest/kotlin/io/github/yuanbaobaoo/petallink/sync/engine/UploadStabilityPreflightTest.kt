@@ -14,6 +14,8 @@ import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
+import kotlin.test.assertFailsWith
+import io.github.yuanbaobaoo.petallink.AppError
 
 class UploadStabilityPreflightTest {
     @Test
@@ -42,9 +44,35 @@ class UploadStabilityPreflightTest {
         assertEquals(3, probes)
     }
 
+    @Test
+    fun 上传稳定性检查前必须通过云盘配额预检() = runBlocking {
+        var required = -1L
+        val operations = operations(
+            UploadStabilityProbe { UploadStability.STABLE },
+            fileSize = 42L,
+            ensureCapacity = { required = it },
+        )
+
+        assertEquals(PreflightResult.Ok, operations.preflight(task()))
+        assertEquals(42L, required)
+    }
+
+    @Test
+    fun 配额不足必须阻断上传预检() = runBlocking {
+        val operations = operations(
+            UploadStabilityProbe { UploadStability.STABLE },
+            ensureCapacity = { throw AppError.Data("空间不足") },
+        )
+
+        assertFailsWith<AppError.Data> { operations.preflight(task()) }
+        Unit
+    }
+
     private fun operations(
         probe: UploadStabilityProbe,
         pause: suspend (Long) -> Unit = {},
+        fileSize: Long = 0L,
+        ensureCapacity: suspend (Long) -> Unit = {},
     ): TransferOperationsImpl {
         val client = DriveClient(
             HttpClient(MockEngine { respondError(HttpStatusCode.InternalServerError) }),
@@ -54,8 +82,9 @@ class UploadStabilityPreflightTest {
         return TransferOperationsImpl(
             UploadApi(client), DownloadApi(client),
             readFileBytes = { byteArrayOf() }, writeFileBytes = { _, _ -> },
-            fileExists = { true }, fileSize = { 0 },
+            fileExists = { true }, fileSize = { fileSize },
             uploadStability = probe, stabilityPause = pause,
+            ensureUploadCapacity = ensureCapacity,
         )
     }
 

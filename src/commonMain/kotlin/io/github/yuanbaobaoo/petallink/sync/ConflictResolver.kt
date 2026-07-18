@@ -10,6 +10,25 @@ package io.github.yuanbaobaoo.petallink.sync
 object ConflictResolver {
 
     /**
+     * 冲突判定结果：保留胜方，并以败方的修改时间生成副本名称。
+     */
+    data class Resolution(
+        val winner: ConflictSide,
+        val loser: ConflictSide,
+        val loserTimestampMs: Long,
+    )
+
+    /**
+     * 按修改时间决定冲突胜方；本地仅在比云端新超过 60 秒时胜出，其余情况由云端胜出。
+     */
+    fun resolve(localMtimeMs: Long, cloudEditedTimeMs: Long): Resolution =
+        if (localMtimeMs - cloudEditedTimeMs > LOCAL_WIN_THRESHOLD_MS) {
+            Resolution(ConflictSide.LOCAL, ConflictSide.CLOUD, cloudEditedTimeMs)
+        } else {
+            Resolution(ConflictSide.CLOUD, ConflictSide.LOCAL, localMtimeMs)
+        }
+
+    /**
      * 副本命名（对标 copy format）
      */
     fun copyName(
@@ -19,10 +38,9 @@ object ConflictResolver {
         sequence: Int = 0,
     ): String {
         val (stem, ext) = splitNameExt(originalName)
-        val sideLabel = side.label
-        // 序号 > 0 时加后缀避免重名
-        val seqSuffix = if (sequence > 0) " $sequence" else ""
-        return "$stem ($sideLabel $timestampFormatted$seqSuffix)$ext"
+        require(sequence in 0..MAX_SEQUENCE) { "冲突副本序号超出范围: $sequence" }
+        val seqSuffix = if (sequence > 0) " ($sequence)" else ""
+        return "$stem (${side.label} $timestampFormatted)$seqSuffix$ext"
     }
 
     /**
@@ -41,12 +59,17 @@ object ConflictResolver {
      * 冲突侧（败方）
      */
     enum class ConflictSide(val label: String) {
-        LOCAL("本地"),
-        CLOUD("云端"),
+        LOCAL("本地副本"),
+        CLOUD("云端副本"),
     }
 
     /**
      * 副本序号上限（防无限重名）
      */
     const val MAX_SEQUENCE = 1000
+
+    /**
+     * 本地修改必须领先云端超过该阈值才胜出，用于吸收跨设备时钟误差。
+     */
+    const val LOCAL_WIN_THRESHOLD_MS = 60_000L
 }

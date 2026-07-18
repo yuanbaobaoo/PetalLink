@@ -32,6 +32,8 @@ class DriveAuxApiHttpTest {
         assertEquals(1000, quota.totalBytes())
         assertEquals(12, quota.usedBytes())
         assertEquals(3, tolerantLong(quota.recycled))
+        api.ensureUploadCapacity(988)
+        assertFailsWith<AppError.Data> { api.ensureUploadCapacity(989) }
     } }
 
     @Test

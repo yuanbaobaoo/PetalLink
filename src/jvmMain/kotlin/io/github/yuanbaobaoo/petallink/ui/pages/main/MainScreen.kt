@@ -35,6 +35,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
 import io.github.yuanbaobaoo.petallink.drive.DriveFile
 import io.github.yuanbaobaoo.petallink.drive.displayName
 import io.github.yuanbaobaoo.petallink.sync.isFolder
@@ -46,6 +47,8 @@ import io.github.yuanbaobaoo.petallink.ui.components.mate.MateEmpty
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateHDivider
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateInfoBanner
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateSearchField
+import io.github.yuanbaobaoo.petallink.ui.components.mate.MateTextField
+import io.github.yuanbaobaoo.petallink.ui.theme.DesignTokens
 import io.github.yuanbaobaoo.petallink.ui.theme.FolderAmber
 import io.github.yuanbaobaoo.petallink.ui.theme.FolderAmberBg
 import io.github.yuanbaobaoo.petallink.ui.theme.LocalSemanticColors
@@ -87,6 +90,8 @@ fun MainScreen(
     onRefresh: () -> Unit,
     onOpenFinder: () -> Unit,
     onOpenSettings: () -> Unit,
+    onUpload: () -> Unit,
+    onCreateFolder: (String) -> Unit,
     onRetryTransfer: (Long) -> Unit,
     onClearFinishedTransfers: () -> Unit,
     onClearCompletedTransfers: () -> Unit,
@@ -101,8 +106,9 @@ fun MainScreen(
     var showTransferPopover by remember { mutableStateOf(false) }
     // 搜索关键词：仅回车提交才触发远端搜索；输入过程只更新本地显示
     var searchKeyword by remember { mutableStateOf("") }
-    val isSearching = remember(searchKeyword) { mutableStateOf(false) }
-    val searchResults = remember { mutableStateOf<List<DriveFile>>(emptyList()) }
+    var submittedSearch by remember { mutableStateOf("") }
+    var showCreateFolder by remember { mutableStateOf(false) }
+    var createFolderName by remember { mutableStateOf("") }
 
     Row(modifier = Modifier.fillMaxSize()) {
         // 左栏 Sidebar
@@ -134,7 +140,7 @@ fun MainScreen(
                     onSubmit = {
                         // 仅回车提交才触发搜索（对标原 Vue @submit）
                         if (searchKeyword.isNotBlank()) {
-                            isSearching.value = true
+                            submittedSearch = searchKeyword
                             onSearch(searchKeyword)
                         }
                     },
@@ -147,12 +153,29 @@ fun MainScreen(
                         icon = "x",
                         onClick = {
                             searchKeyword = ""
-                            searchResults.value = emptyList()
+                            submittedSearch = ""
                             onSearch("")
                         },
                     )
                 }
                 Spacer(Modifier.weight(1f))
+                MateButton(
+                    label = "上传",
+                    variant = MateButtonVariant.SOFT,
+                    icon = "upload",
+                    onClick = onUpload,
+                )
+                Spacer(Modifier.width(DesignTokens.SPACING_SM.dp))
+                MateButton(
+                    label = "新建文件夹",
+                    variant = MateButtonVariant.SOFT,
+                    icon = "folder",
+                    onClick = {
+                        createFolderName = ""
+                        showCreateFolder = true
+                    },
+                )
+                Spacer(Modifier.width(DesignTokens.SPACING_SM.dp))
                 // 工具组（v2：无分隔线，按钮直接排，gap 8px；整体右对齐——weight(1f) 弹簧把按钮组推到右侧）
                 if (mountConfigured) {
                     // 「同步索引」：v2 主按钮（PRIMARY 品牌渐变）
@@ -200,16 +223,16 @@ fun MainScreen(
 
             // 文件区
             Box(modifier = Modifier.fillMaxSize()) {
-                if (searchKeyword.isNotEmpty()) {
+                if (submittedSearch.isNotEmpty()) {
                     // 搜索结果区（对标原 Vue .search-results）
                     SearchResults(
-                        keyword = searchKeyword,
-                        results = searchResults.value,
-                        searching = isSearching.value,
+                        keyword = submittedSearch,
+                        results = browser.visibleFiles,
+                        searching = browser.loading,
                         onEnterFolder = { file ->
                             onEnterFolder(file)
                             searchKeyword = ""
-                            searchResults.value = emptyList()
+                            submittedSearch = ""
                         },
                     )
                 } else {
@@ -240,6 +263,66 @@ fun MainScreen(
                         )
                     }
                 }
+            }
+        }
+    }
+    if (showCreateFolder) {
+        CreateFolderDialog(
+            value = createFolderName,
+            onValueChange = { createFolderName = it },
+            onConfirm = {
+                onCreateFolder(createFolderName.trim())
+                showCreateFolder = false
+            },
+            onDismiss = { showCreateFolder = false },
+        )
+    }
+}
+
+/**
+ * 新建文件夹名称输入对话框。
+ */
+@Composable
+private fun CreateFolderDialog(
+    value: String,
+    onValueChange: (String) -> Unit,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val semantic = LocalSemanticColors.current
+    val valid = value.trim().isNotEmpty() && '/' !in value && value != "." && value != ".."
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier.width(420.dp)
+                .clip(RoundedCornerShape(DesignTokens.RADIUS_XL.dp))
+                .background(semantic.bgContainer)
+                .padding(DesignTokens.SPACING_XL.dp),
+            verticalArrangement = Arrangement.spacedBy(DesignTokens.SPACING_LG.dp),
+        ) {
+            Text(
+                "新建文件夹",
+                color = semantic.textPrimary,
+                fontSize = DesignTokens.FONT_TITLE_SM.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            MateTextField(
+                value = value,
+                onValueChange = onValueChange,
+                placeholder = "文件夹名称",
+                modifier = Modifier.fillMaxWidth(),
+                error = value.isNotEmpty() && !valid,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(DesignTokens.SPACING_SM.dp, Alignment.End),
+            ) {
+                MateButton(label = "取消", variant = MateButtonVariant.TEXT, onClick = onDismiss)
+                MateButton(
+                    label = "创建",
+                    variant = MateButtonVariant.PRIMARY,
+                    disabled = !valid,
+                    onClick = onConfirm,
+                )
             }
         }
     }

@@ -207,6 +207,7 @@ fun main(args: Array<String>) {
                                 onClearCache = root.viewModel::clearApplicationCache,
                                 onCheckUpdate = root.viewModel::checkForUpdate,
                                 onInstallUpdate = root.viewModel::installUpdate,
+                                onSelectDir = root.viewModel::chooseMountDirectory,
                                 onSave = root.viewModel::saveConfig,
                             )
                             state.page == AppPage.LOGS -> LogViewerScreen(
@@ -241,10 +242,12 @@ fun main(args: Array<String>) {
                                         onOpenItem = root.viewModel::openItem,
                                         onThumbnailNeeded = root.viewModel::loadThumbnail,
                                         onDelete = root.viewModel::deleteItems,
+                                        onPreviewFreeUp = root.viewModel::previewFreeUpItems,
                                         onFreeUp = root.viewModel::freeUpItems,
                                         onDownload = { files -> files.forEach(root.viewModel::openItem) },
                                         onSyncFolder = root.viewModel::syncFolder,
                                         onRename = { file, newName -> root.viewModel.renameItem(file, newName) },
+                                        onMove = root.viewModel::moveItem,
                                         onShowProps = {},
                                         onCanFreeUp = root.viewModel::canFreeUp,
                                     )
@@ -257,11 +260,19 @@ fun main(args: Array<String>) {
                                 onRefresh = root.viewModel::refresh,
                                 onOpenFinder = root.viewModel::openMountInFinder,
                                 onOpenSettings = root.viewModel::openSettings,
+                                onUpload = root.viewModel::chooseAndUpload,
+                                onCreateFolder = root.viewModel::createFolder,
                                 onRetryTransfer = root.viewModel::retryTransfer,
                                 onClearFinishedTransfers = root.viewModel::clearFinishedTransfers,
                                 onClearCompletedTransfers = root.viewModel::clearCompletedTransfers,
                                 onClearFailedTransfers = root.viewModel::clearFailedTransfers,
-                                onSelectDir = {},
+                                onSelectDir = {
+                                    root.viewModel.chooseMountDirectory { selected ->
+                                        root.viewModel.saveConfig(
+                                            state.config.copy(mountDir = selected, mountConfigured = true),
+                                        )
+                                    }
+                                },
                                 onFirstSync = root.viewModel::refresh,
                                 onRetrySetup = root.viewModel::refresh,
                                 onInstallUpdate = root.viewModel::installUpdate,

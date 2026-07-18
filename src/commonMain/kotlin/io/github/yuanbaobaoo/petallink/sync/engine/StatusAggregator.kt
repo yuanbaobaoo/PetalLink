@@ -52,14 +52,18 @@ class StatusAggregator {
                 db.transfers.countByStateAndDirection(TransferState.Running, 3)
         val waitingNetwork = db.transfers.countByState(TransferState.WaitingForNetwork)
         val transferFailed = db.transfers.countByState(TransferState.Failed)
+        val editing = db.transfers.selectByState(TransferState.RestartRequired)
+            .count { it.errorMessage == EDITING_RESTART_MESSAGE }
+            .toLong()
         val failedItems = db.syncItems.selectByStatus(SyncStatus.FAILED).take(20)
             .map { FailedSyncItem(it.localPath, it.errorMessage) }
         val counts = StatusCounts(total, failed, conflict, uploading, downloading, waitingNetwork, transferFailed)
+        val effectiveRuntime = runtime.copy(editing = editing)
         val result = SyncStatusSnapshot(
             revision = nextRevision.incrementAndGet(),
-            global = computeGlobalState(counts, runtime),
+            global = computeGlobalState(counts, effectiveRuntime),
             counts = counts,
-            runtime = runtime,
+            runtime = effectiveRuntime,
             failedItems = failedItems,
         )
         mutableSnapshot.value = result

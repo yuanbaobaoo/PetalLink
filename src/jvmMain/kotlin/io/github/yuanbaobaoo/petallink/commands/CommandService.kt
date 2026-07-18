@@ -19,6 +19,8 @@ import java.nio.file.Paths
 import io.github.yuanbaobaoo.petallink.mount.JvmPlaceholderManager
 import io.github.yuanbaobaoo.petallink.mount.JvmUploadStabilityProbe
 import io.github.yuanbaobaoo.petallink.platform.LaunchAgentManager
+import io.github.yuanbaobaoo.petallink.core.net_guard.NetGuard
+import io.github.yuanbaobaoo.petallink.core.net_guard.NetState
 import io.github.yuanbaobaoo.petallink.update.JvmUpdateService
 import io.github.yuanbaobaoo.petallink.update.UpdateManifest
 
@@ -48,11 +50,14 @@ class CommandService private constructor(
     private val syncPlan: SyncCommandPlan?,
     private val paths: AppPaths,
     private val updateService: JvmUpdateService,
+    private val netGuard: NetGuard?,
+    private val eventHub: SyncEventHub,
 ) {
     @Volatile private var activeOauthServer: OauthServer? = null
     val syncStates: kotlinx.coroutines.flow.StateFlow<SyncStatusSnapshot> get() = statusAggregator.snapshots
     val folderSyncProgress: kotlinx.coroutines.flow.StateFlow<FolderSyncProgress?>? get() = syncPlan?.folderSyncProgress()
     val uploadFailures: kotlinx.coroutines.flow.SharedFlow<UploadFailedEvent>? get() = syncPlan?.uploadFailures()
+    val transferUpdates: kotlinx.coroutines.flow.SharedFlow<TransferUpdateEvent> get() = eventHub.transferUpdates
 
     // ============ auth (7) ============
     /**
@@ -70,6 +75,8 @@ class CommandService private constructor(
                 authService.ensureValidAccessToken()
                 val config = configStore.load() ?: UserConfig()
                 if (config.mountConfigured && config.mountDir.isNotBlank()) syncPlan?.start()
+            } else {
+                resetAccountRuntimeAndMount()
             }
             AppResult.Ok(AuthState(
                 loggedIn = tokenStore.load() != null,
@@ -376,7 +383,9 @@ class CommandService private constructor(
                 TransferState.BackingOff, TransferState.VerifyingRemote, TransferState.RestartRequired,
             ).any { db.transfers.selectByState(it).isNotEmpty() }
         }
-    } catch (e: Throwable) { false }
+    } catch (_: Throwable) {
+        true
+    }
     /**
      * 清除已完成（成功）的传输历史。
      */
@@ -539,8 +548,11 @@ class CommandService private constructor(
     /**
      * 下载并暂存更新包，随后启动安装器；活动传输存在时由 service 内部阻塞。
      */
-    suspend fun updaterDownloadAndInstall(manifest: UpdateManifest): AppResult<Boolean> = drive {
-        val staged = updateService.downloadAndStage(manifest, ::transferHasActive)
+    suspend fun updaterDownloadAndInstall(
+        manifest: UpdateManifest,
+        onProgress: (Long, Long?) -> Unit = { _, _ -> },
+    ): AppResult<Boolean> = drive {
+        val staged = updateService.downloadAndStage(manifest, ::transferHasActive, onProgress)
         updateService.launchInstaller(staged)
     }
 
@@ -730,8 +742,20 @@ class CommandService private constructor(
             fileStore = store,
             remoteVerification = JvmRemoteTransferVerifier(filesApi, store)::verify,
             deleteRemote = filesApi::deleteFile,
+            ensureUploadCapacity = aboutApi::ensureUploadCapacity,
         )
-        return TaskRunner(db.transfers, operations, { true }, System::currentTimeMillis)
+        val concurrency = (configStore.load() ?: UserConfig()).concurrency
+        return TaskRunner(
+            db.transfers,
+            operations,
+            { netGuard?.state?.value != NetState.OFFLINE },
+            System::currentTimeMillis,
+            maxConcurrentTransfers = concurrency,
+            onTaskChanged = { taskId ->
+                val revision = db.transfers.findById(taskId)?.stateRevision ?: 0L
+                eventHub.publishTransferUpdate(TransferUpdateEvent(taskId, revision))
+            },
+        )
     }
 
     // ============ helpers ============
@@ -756,7 +780,7 @@ class CommandService private constructor(
         /**
          * 工厂方法：创建完整的 CommandService 并自动布线 service 链。
          */
-        fun create(paths: AppPaths = AppPaths.fromEnvironment()): CommandService {
+        fun create(paths: AppPaths = AppPaths.fromEnvironment(), netGuard: NetGuard? = null): CommandService {
             io.github.yuanbaobaoo.petallink.core.logging.LoggerRuntime.configure(paths.logsDir)
             val httpClient = HttpClient(CIO) {
                 engine { requestTimeout = 60_000; endpoint.connectTimeout = 15_000 }
@@ -765,6 +789,7 @@ class CommandService private constructor(
             val configStore = JsonConfigStore(paths.configFile)
             val db = PetalLinkDb(paths.databaseFile.toString())
             val statusAgg = StatusAggregator()
+            val eventHub = SyncEventHub(statusAgg)
 
             val tokenStore = FileTokenStore(paths.tokenFile)
             val tokenRefresher = TokenRefresher(
@@ -777,7 +802,12 @@ class CommandService private constructor(
             )
             val userInfoApi = UserInfoApi(httpClient, authService::ensureValidAccessToken)
             val provider = suspend { authService.ensureValidAccessToken() }
-            val driveClient = DriveClient(httpClient, provider, { runBlocking { tokenRefresher.refresh() } })
+            val driveClient = DriveClient(
+                httpClient,
+                provider,
+                { runBlocking { tokenRefresher.refresh() } },
+                { netGuard?.reportRequestNetworkFailure() },
+            )
             val filesApi = FilesApi(driveClient)
             val changesApi = ChangesApi(driveClient)
             val downloadApi = DownloadApi(driveClient)
@@ -785,7 +815,20 @@ class CommandService private constructor(
             val thumbnailApi = ThumbnailApi(driveClient)
             val aboutApi = AboutApi(driveClient)
             val syncPlan = JvmSyncRuntime(
-                paths, configStore, db, filesApi, changesApi, uploadApi, downloadApi, statusAgg,
+                paths,
+                configStore,
+                db,
+                filesApi,
+                changesApi,
+                uploadApi,
+                downloadApi,
+                statusAgg,
+                aboutApi::ensureUploadCapacity,
+                { netGuard?.state?.value != NetState.OFFLINE },
+                { taskId ->
+                    val revision = db.transfers.findById(taskId)?.stateRevision ?: 0L
+                    eventHub.publishTransferUpdate(TransferUpdateEvent(taskId, revision))
+                },
             )
             val updateService = JvmUpdateService(
                 httpClient, paths, BuildInfo.VERSION, BuildInfo.UPDATE_ENDPOINT, BuildInfo.UPDATE_TEAM_ID,
@@ -794,7 +837,15 @@ class CommandService private constructor(
             return CommandService(
                 configStore, db, httpClient, tokenStore, authService, userInfoApi,
                 filesApi, changesApi, downloadApi, uploadApi, thumbnailApi, aboutApi,
-                driveClient, tokenRefresher, statusAgg, envLoader, syncPlan, paths, updateService,
+                driveClient,
+                tokenRefresher,
+                statusAgg,
+                envLoader,
+                syncPlan,
+                paths,
+                updateService,
+                netGuard,
+                eventHub,
             )
         }
     }

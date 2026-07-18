@@ -60,7 +60,7 @@ P0 装配与数据底座
 ### P0 执行记录（2026-07-16）
 
 - `ApplicationRoot` 成为桌面进程唯一装配入口；`Main.kt` 只消费 `DesktopUiState`
-- 新库直建 v6，旧库按 v2/v3/v4/v5 fixture 逐级迁移；`PRAGMA user_version=6`
+- Room schema 从版本 1 开始；不迁移旧 SQLDelight 数据，首次使用新数据库直接建表
 - 传输队列已对齐终态 26 列与 5 个索引，CAS/迟到 progress 测试覆盖
 - 配置、DB、token、日志统一从可注入 `AppPaths` 派生；支持 `PETALLINK_DATA_DIR` 与 `PETALLINK_ENV=dev`
 - `./gradlew jvmTest`：185 tests，0 failures，0 errors
@@ -349,7 +349,7 @@ P0 装配与数据底座
 - 沿用原 bundle id `io.github.yuanbaobaoo.PetalLink` 和原图标，最低 macOS 12.0；entitlements 支持 JVM/JNA native library，bundled SQLite 不依赖 JDBC/`java.sql`。
 - 等价更新器实现启动 3 秒静默检查、每小时检查、聚焦 10 分钟节流、手动检查和主界面提示；安装链路包含 HTTPS manifest、语义版本、最多 5 分钟传输空闲等待、流式下载、SHA-256、codesign/Gatekeeper/固定 Team ID 校验、helper 替换及失败回滚，无 Team ID 时 fail closed。
 - CI 执行完整测试并构建 DMG，打包成功后直接上传产物；Release workflow 执行 Developer ID 签名、notary、staple、更新 zip/manifest 与 GitHub Release，不再额外校验或启动打包应用。
-- 旧数据目录直接沿用；原 Tauri `token.bin` 明文布局、camelCase 配置枚举和数据库 v2–v6 均有兼容测试。49 命令源码审计补齐了挂载切换清基线、账号隔离、直接 rename/move/delete 结算、后台目录 BFS、完整状态快照、传输顺序和批量释放统计。
+- 数据目录沿用应用标识；旧 SQLDelight 数据库不迁移，Room 使用独立 schema。挂载切换、账号隔离、直接 rename/move/delete 结算、后台目录 BFS、完整状态快照、传输顺序和批量释放统计均由当前实现负责。
 - `./gradlew jvmTest`：334 tests，0 failures；`packageDmg` 可生成 arm64 `PetalLink-1.0.12.dmg`。
 - 代码、无签名构建和发布自动化已经完成；真实华为账号与系统 UI 可按需人工检查。
 
@@ -361,8 +361,7 @@ P0 装配与数据底座
 - **优先级**：`PETALLINK_DATA_DIR` > `PETALLINK_ENV=dev` > `BuildInfo.BUNDLE_ID`（默认 dev，因 `-Prelease` 默认 false） > prod 兜底（仅 BuildInfo 缺失时）；前两者保留为测试/本地覆盖。
 - **顺手清理**：全局修正包名拼写 `yuanbaobaao`→`yuanbaobaoo`（178 文件 + 5 目录）；删除零引用死代码 `core/Paths.kt`（其 `cacheBaseDir` 用了游离的 `Application Support/PetalLink` 路径，与 bundle id 体系冲突，运行时实际走 `AppPaths.cloudTreeCheckpoint`）。
 - **测试**：新增 `AppPathsTest`（优先级链、dev/prod 目录、大小写、空白覆盖，纯函数 `resolveFromEnvironment` 不污染全局）；`DesktopLifecycleTest` 补 dev/prod LaunchAgent 隔离测试；修复一个既有 flaky 时序测试（`JvmSyncRuntimeIntegrationTest` 文件落地后未等 `folderSyncProgress` 发布）。`./gradlew jvmTest --rerun-tasks`：330 tests，0 failures，连续两次稳定。
-- **双包验收**：release 包 `CFBundleIdentifier=io.github.yuanbaobaoo.PetalLink`、dev 包 `=...PetalLink-dev`，`BuildInfo` 一致；两包 verify+smoke 通过；release DMG ditto 隔离 verify+冒烟通过；release DMG SHA-256 `3187f02d5e04612dcdd3d6cf16a8e051499b9622f4a61d10522bdc089dfa2249`。
-- **已修复 jpackage DMG entitlements 丢失**：jpackage `--type dmg` 在 adhoc 签名下会丢主可执行 entitlements。新增 `repackDmgForEntitlements` 任务，`packageDmg` 后用 `ditto`+`hdiutil` 从 app-image 重封 DMG，dev/release 双包 entitlements 均完整保留。ditto 复制品的 verify 门禁（含 entitlements）现全通过。
+- release 与 dev 使用不同 bundle id、数据目录和 LaunchAgent label；CI 在 Gradle 打包完成后直接上传对应产物。
 
 ### 最终验收矩阵
 

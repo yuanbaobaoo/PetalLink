@@ -25,7 +25,6 @@ import io.github.yuanbaobaoo.petallink.sync.SyncAction
 import io.github.yuanbaobaoo.petallink.sync.SyncActionType
 import io.github.yuanbaobaoo.petallink.sync.SyncSnapshot
 import io.github.yuanbaobaoo.petallink.sync.SyncStatus
-import io.github.yuanbaobaoo.petallink.sync.ConflictResolver
 import io.github.yuanbaobaoo.petallink.sync.engine.ActionPlannerGuards
 import io.github.yuanbaobaoo.petallink.sync.engine.ActivityTracker
 import io.github.yuanbaobaoo.petallink.sync.engine.BfsCloudTreeRefresher
@@ -48,6 +47,7 @@ import io.github.yuanbaobaoo.petallink.sync.engine.toTaskContext
 import io.github.yuanbaobaoo.petallink.sync.engine.TaskContext
 import io.github.yuanbaobaoo.petallink.sync.engine.TaskDisposition
 import io.github.yuanbaobaoo.petallink.sync.engine.JvmRemoteTransferVerifier
+import io.github.yuanbaobaoo.petallink.sync.identity.LocalMoveActionReconciler
 import io.github.yuanbaobaoo.petallink.data.TransferDirection
 import io.github.yuanbaobaoo.petallink.data.TransferTask
 import io.github.yuanbaobaoo.petallink.sync.executor.ActionResult
@@ -55,10 +55,7 @@ import io.github.yuanbaobaoo.petallink.sync.executor.SyncExecutor
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
-import java.nio.file.StandardCopyOption
 import java.time.Instant
-import java.time.ZoneId
-import java.time.format.DateTimeFormatter
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.ConcurrentHashMap
@@ -92,12 +89,16 @@ class JvmSyncRuntime(
     private val uploadApi: UploadApi,
     private val downloadApi: DownloadApi,
     private val status: StatusAggregator,
+    private val ensureUploadCapacity: suspend (Long) -> Unit = {},
+    private val isOnline: () -> Boolean = { true },
+    private val onTransferChanged: suspend (Long) -> Unit = {},
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
     private val stabilityFactory: () -> (suspend (Path) -> UploadStability) = ::defaultStabilityProbe,
 ) : SyncCommandPlan {
     private val coordinator = CycleCoordinator()
     private val activity = ActivityTracker()
     private val dispatcher = CycleRequestDispatcher(scope, coordinator, ::runCycle)
+    private val inodeMoveCoordinator = JvmInodeMoveCoordinator(db)
     @Volatile private var closed = false
     private val started = AtomicBoolean(false)
     private val reconfiguring = AtomicBoolean(false)
@@ -109,6 +110,9 @@ class JvmSyncRuntime(
     private var watcher: JvmLocalWatcher? = null
     private var watcherJob: Job? = null
     private var timerJob: Job? = null
+    private var recoveryJob: Job? = null
+    private var cloudRefresherRoot: Path? = null
+    private var cloudRefresher: BfsCloudTreeRefresher? = null
     private val explicitRetries = ConcurrentHashMap.newKeySet<Long>()
     private val folderSyncRunning = AtomicBoolean(false)
     private val mutableFolderSyncProgress = MutableStateFlow<FolderSyncProgress?>(null)
@@ -173,6 +177,8 @@ class JvmSyncRuntime(
                         db.clearMountState()
                         deleteMountCheckpoint(previous)
                         deleteMountCheckpoint(current)
+                        cloudRefresherRoot = null
+                        cloudRefresher = null
                     }
                     if (started.get()) reconfigureSources()
                     ready = true
@@ -320,6 +326,8 @@ class JvmSyncRuntime(
         watcherJob = null
         timerJob?.cancel()
         timerJob = null
+        recoveryJob?.cancel()
+        recoveryJob = null
         watcher?.close()
         watcher = null
     }
@@ -368,7 +376,7 @@ class JvmSyncRuntime(
         }
         status.snapshot(db, RuntimeStatus(isRunning = true, isIndexing = true, syncPhase = "cloud-refresh"))
         val store = JvmCloudTreeCheckpointStore(paths.cloudTreeCheckpoint(root))
-        val refresher = BfsCloudTreeRefresher(filesApi, changesApi, store)
+        val refresher = cloudRefresher(root, store)
         val loaded = store.loadTrusted()
         val cloud = when {
             request.contains(CycleRequest.CLOUD_FULL) -> refresher.refreshFull()
@@ -397,8 +405,16 @@ class JvmSyncRuntime(
             fileStore = transferStore,
             remoteVerification = JvmRemoteTransferVerifier(filesApi, transferStore)::verify,
             deleteRemote = filesApi::deleteFile,
+            ensureUploadCapacity = ensureUploadCapacity,
         )
-        val taskRunner = TaskRunner(db.transfers, transferOperations, { true }, System::currentTimeMillis)
+        val taskRunner = TaskRunner(
+            db.transfers,
+            transferOperations,
+            isOnline,
+            System::currentTimeMillis,
+            maxConcurrentTransfers = config.concurrency,
+            onTaskChanged = onTransferChanged,
+        )
         if (request.contains(CycleRequest.STARTUP)) {
             taskRunner.performStartupRecovery { resumePendingTransfers(taskRunner) }
         }
@@ -428,7 +444,9 @@ class JvmSyncRuntime(
             )
         }
         val snapshot = SyncSnapshot(local, cloud.tree, baselines, cloudTreeTrusted = true, isStartupResume = request.contains(CycleRequest.STARTUP))
-        val actions = ActionPlannerGuards.prepare(snapshot, Planner.plan(snapshot))
+        val plannedActions = ActionPlannerGuards.prepare(snapshot, Planner.plan(snapshot))
+        val detectedMoves = inodeMoveCoordinator.detect(localEntries, baselines, cloud)
+        val actions = LocalMoveActionReconciler.reconcile(plannedActions, detectedMoves, cloud)
         val placeholder = JvmPlaceholderManager(root, MacXattrAccess)
         val executor = SyncExecutor(config.concurrency) { action ->
             executeAction(root, placeholder, taskRunner, transferStore, action)
@@ -438,6 +456,7 @@ class JvmSyncRuntime(
         // 远端写先合并进同一 checkpoint，再提交 DB 基线。
         val committedCloud = commitRemoteWrites(store, cloud, actions, results)
         settleBaselines(root, committedCloud, actions, results)
+        inodeMoveCoordinator.refresh(localEntries)
         val failed = results.withIndex().filter { !it.value.success && !it.value.deferred }
         status.snapshot(db, RuntimeStatus(lastSyncTime = System.currentTimeMillis(), contentChanged = actions.isNotEmpty()))
             if (failed.isNotEmpty()) throw AppError.Data("同步周期有 ${failed.size} 个动作失败")
@@ -447,9 +466,39 @@ class JvmSyncRuntime(
                 status.snapshot(db, RuntimeStatus(lastSyncTime = System.currentTimeMillis()))
             }
         }
+        runCatching { scheduleRecoveryDeadline() }
         return result
         } finally {
             guard.close()
+        }
+    }
+
+    /**
+     * 为最近的退避或远端核验截止时间安排一次恢复周期，不在计时器中直接执行传输。
+     */
+    private suspend fun scheduleRecoveryDeadline() {
+        recoveryJob?.cancel()
+        if (closed || !started.get() || reconfiguring.get()) return
+        val candidates = buildList {
+            addAll(db.transfers.selectByState(io.github.yuanbaobaoo.petallink.sync.TransferState.BackingOff))
+            addAll(db.transfers.selectByState(io.github.yuanbaobaoo.petallink.sync.TransferState.VerifyingRemote))
+        }
+        val deadline = candidates.mapNotNull { it.nextRetryAt }.minOrNull() ?: return
+        recoveryJob = scope.launch {
+            delay((deadline - System.currentTimeMillis()).coerceAtLeast(0L))
+            if (started.get() && !closed && !reconfiguring.get()) {
+                dispatcher.submit(CycleRequest.ONLINE_RECOVERY)
+            }
+        }
+    }
+
+    private fun cloudRefresher(root: Path, store: JvmCloudTreeCheckpointStore): BfsCloudTreeRefresher {
+        val normalized = root.toAbsolutePath().normalize()
+        val existing = cloudRefresher
+        if (cloudRefresherRoot == normalized && existing != null) return existing
+        return BfsCloudTreeRefresher(filesApi, changesApi, store).also {
+            cloudRefresherRoot = normalized
+            cloudRefresher = it
         }
     }
 
@@ -463,6 +512,16 @@ class JvmSyncRuntime(
         transferStore: JvmTransferFileStore,
         action: SyncAction,
     ): ActionResult {
+        val conflict = JvmConflictCoordinator(
+            root,
+            placeholder,
+            executeTransfer = { transferAction ->
+                executeTransferAction(root, placeholder, taskRunner, transferStore, transferAction)
+            },
+            hasActiveUpload = { relativePath ->
+                activeTransfer(relativePath, TransferDirection.UPLOAD) != null
+            },
+        )
         return try {
             when (action.type) {
             SyncActionType.CREATE_PLACEHOLDER -> {
@@ -480,7 +539,7 @@ class JvmSyncRuntime(
                 executeTransferAction(root, placeholder, taskRunner, transferStore, action)
             }
             SyncActionType.BACKUP_BEFORE_CLOUD_DELETE -> {
-                placeholder.backupModifiedPlaceholder(safeLocalPath(root, action.relativePath).toString())
+                conflict.backupBeforeCloudDelete(action.relativePath)
                 ActionResult(true)
             }
             SyncActionType.SKIP -> ActionResult(true)
@@ -508,10 +567,7 @@ class JvmSyncRuntime(
                 ActionResult(true, cloudFileId = id, cloudFile = remote)
             }
             SyncActionType.CREATE_CONFLICT_COPY -> {
-                val source = safeLocalPath(root, action.relativePath)
-                val backup = allocateConflictBackup(source)
-                Files.move(source, backup, StandardCopyOption.ATOMIC_MOVE)
-                executeTransferAction(root, placeholder, taskRunner, transferStore, action.copy(type = SyncActionType.DOWNLOAD))
+                conflict.execute(action)
             }
             }
         } catch (error: Throwable) {
@@ -667,8 +723,15 @@ class JvmSyncRuntime(
             fileStore = transferStore,
             remoteVerification = JvmRemoteTransferVerifier(filesApi, transferStore)::verify,
             deleteRemote = filesApi::deleteFile,
+            ensureUploadCapacity = ensureUploadCapacity,
         )
-        val runner = TaskRunner(db.transfers, operations, { true }, System::currentTimeMillis)
+        val runner = TaskRunner(
+            db.transfers,
+            operations,
+            isOnline,
+            System::currentTimeMillis,
+            maxConcurrentTransfers = config.concurrency,
+        )
         val placeholder = JvmPlaceholderManager(root, MacXattrAccess)
         val actions = mutableListOf<SyncAction>()
         val results = mutableListOf<ActionResult>()
@@ -722,27 +785,18 @@ class JvmSyncRuntime(
         if (failures.isNotEmpty()) throw AppError.Data("目录同步有 ${failures.size} 个任务失败")
     }
 
-    /**
-     * 拼接目录同步的相对路径（忽略空白片段，统一以 '/' 分隔）。
-     */
     private fun joinRelative(base: String, child: String): String = when {
         base.isBlank() -> child
         child.isBlank() -> base
         else -> "${base.trimEnd('/')}/$child"
     }
 
-    /**
-     * 恢复所有处于 Pending 状态的传输任务。
-     */
     private suspend fun resumePendingTransfers(taskRunner: TaskRunner) {
         for (task in db.transfers.selectByState(io.github.yuanbaobaoo.petallink.sync.TransferState.Pending)) {
             taskRunner.runExpected(task.toTaskContext())
         }
     }
 
-    /**
-     * 查找同一相对路径与方向下最近的活动传输任务，用于复用而非重复建任务。
-     */
     private suspend fun activeTransfer(relativePath: String, direction: TransferDirection): TransferTask? {
         val states = listOf(
             io.github.yuanbaobaoo.petallink.sync.TransferState.Pending,
@@ -761,9 +815,6 @@ class JvmSyncRuntime(
         return matches.maxWithOrNull(compareBy<TransferTask> { it.createdAt }.thenBy { it.id ?: 0L })
     }
 
-    /**
-     * 将 ISO-8601 时间字符串解析为毫秒时间戳。
-     */
     private fun parseEditedTimeMillis(raw: String): Long = Instant.parse(raw).toEpochMilli()
 
     /**
@@ -829,7 +880,8 @@ class JvmSyncRuntime(
                 return@forEach
             }
             if (action.type == SyncActionType.MOVE_IN_CLOUD) {
-                action.fileId?.let { db.syncItems.deleteByFileId(it) }
+                inodeMoveCoordinator.settleSubtree(root, cloud, action)
+                return@forEach
             }
             val remote: DriveFile = result.cloudFile ?: action.cloudFile ?: cloud.tree[action.relativePath] ?: return@forEach
             val fileId = remote.id ?: return@forEach
@@ -869,9 +921,6 @@ class JvmSyncRuntime(
         }
     }
 
-    /**
-     * 清理 DB 中已不在云树里的 DELETED 墓碑同步项。
-     */
     private suspend fun purgeDeletedTombstones(cloud: CloudTreeCache) {
         val liveIds = cloud.tree.values.mapNotNull(DriveFile::id).toHashSet()
         for (item in db.syncItems.selectByStatus(SyncStatus.DELETED)) {
@@ -893,26 +942,6 @@ class JvmSyncRuntime(
         return target
     }
 
-    /**
-     * 为冲突副本分配一个不冲突的本地路径（基于时间戳与序号）。
-     */
-    private fun allocateConflictBackup(source: Path): Path {
-        val timestamp = DateTimeFormatter.ofPattern("yyyy-MM-dd HH-mm-ss")
-            .withZone(ZoneId.systemDefault())
-            .format(Instant.now())
-        for (sequence in 0..ConflictResolver.MAX_SEQUENCE) {
-            val name = ConflictResolver.copyName(
-                source.fileName.toString(), ConflictResolver.ConflictSide.LOCAL, timestamp, sequence,
-            )
-            val candidate = source.resolveSibling(name)
-            if (!Files.exists(candidate, LinkOption.NOFOLLOW_LINKS)) return candidate
-        }
-        throw AppError.LocalIo("无法分配冲突副本路径")
-    }
-
-    /**
-     * 返回配置对应的挂载根路径；未配置或解析失败返回 null。
-     */
     private fun mountIdentity(config: UserConfig): Path? {
         if (!config.mountConfigured || config.mountDir.isBlank()) return null
         return runCatching { JvmMountPaths.resolve(config.mountDir) }.getOrNull()

@@ -31,5 +31,22 @@ class AboutApi(
         )
     }
 
+    /**
+     * 校验云盘剩余容量足以接收本次上传；配额缺失或不足时拒绝写入。
+     */
+    suspend fun ensureUploadCapacity(requiredBytes: Long) {
+        require(requiredBytes >= 0L) { "上传大小不能为负数" }
+        val quota = getQuota()
+        val total = quota.totalBytes()
+        val used = quota.usedBytes()
+        if (total <= 0L || used < 0L || used > total) {
+            throw AppError.Data("云盘配额响应无效，拒绝在容量未知时上传")
+        }
+        val available = total - used
+        if (requiredBytes > available) {
+            throw AppError.Data("云盘空间不足：需要 $requiredBytes 字节，剩余 $available 字节")
+        }
+    }
+
     private val Json = Json { ignoreUnknownKeys = true }
 }

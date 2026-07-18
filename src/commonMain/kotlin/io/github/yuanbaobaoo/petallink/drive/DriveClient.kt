@@ -1,11 +1,13 @@
 package io.github.yuanbaobaoo.petallink.drive
 
+import io.github.yuanbaobaoo.petallink.AppError
 import io.github.yuanbaobaoo.petallink.auth.TokenPair
 import io.ktor.client.*
 import io.ktor.client.plugins.*
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import io.ktor.http.*
+import kotlinx.coroutines.CancellationException
 
 /**
  * 华为 Drive HTTP 客户端配置（对标 src/drive/client.rs）。
@@ -54,6 +56,7 @@ class DriveClient(
     private val httpClient: HttpClient,
     private val tokenProvider: suspend () -> String,
     private val tokenRefresher: suspend () -> TokenPair,
+    private val onNetworkFailure: () -> Unit = {},
 ) {
     /**
      * 执行带 401 重放的请求（对标 execute_with_retry）。
@@ -91,12 +94,21 @@ class DriveClient(
         url: String,
         token: String?,
         configure: HttpRequestBuilder.() -> Unit,
-    ): HttpResponse = httpClient.request(url) {
-        this.method = method
-        if (token != null) {
-            header(HttpHeaders.Authorization, "Bearer $token")
+    ): HttpResponse = try {
+        httpClient.request(url) {
+            this.method = method
+            if (token != null) {
+                header(HttpHeaders.Authorization, "Bearer $token")
+            }
+            configure()
         }
-        configure()
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (error: AppError) {
+        throw error
+    } catch (error: Throwable) {
+        onNetworkFailure()
+        throw AppError.Network(error.message ?: "云盘网络请求失败", error)
     }
 
     companion object {

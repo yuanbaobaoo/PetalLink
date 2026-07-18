@@ -16,6 +16,11 @@ import kotlinx.coroutines.delay
 import kotlin.math.min
 
 /**
+ * 编辑中任务的稳定错误标识，供状态聚合器准确计数。
+ */
+const val EDITING_RESTART_MESSAGE = "用户正在编辑，等待重新规划"
+
+/**
  * 上传源文件稳定性判定结果：用于预检阶段决定是否允许上传
  */
 enum class UploadStability { STABLE, UNSTABLE, EDITING }
@@ -59,6 +64,8 @@ class TransferOperationsImpl(
     private val fileStore: TransferFileStore? = null,
     private val remoteVerification: (suspend (TaskContext) -> RemoteVerification)? = null,
     private val deleteRemote: suspend (String) -> Unit = { throw AppError.Internal("deleteRemote 未装配") },
+    private val ensureUploadCapacity: suspend (Long) -> Unit = {},
+    private val onNetworkFailure: () -> Unit = {},
 ) : TransferOperations {
 
     /**
@@ -75,13 +82,14 @@ class TransferOperationsImpl(
             if (!fileExists(task.localPath)) {
                 return PreflightResult.Reject("本地文件不存在", io.github.yuanbaobaoo.petallink.sync.TransferState.RestartRequired)
             }
+            ensureUploadCapacity(fileSize(task.localPath))
             uploadStability?.let { probe ->
                 for (seconds in listOf(0L, 2L, 3L, 5L)) {
                     if (seconds > 0) stabilityPause(seconds * 1_000)
                     when (probe.check(task.localPath)) {
                         UploadStability.STABLE -> return PreflightResult.Ok
                         UploadStability.EDITING -> return PreflightResult.Reject(
-                            "用户正在编辑，等待重新规划",
+                            EDITING_RESTART_MESSAGE,
                             io.github.yuanbaobaoo.petallink.sync.TransferState.RestartRequired,
                         )
                         UploadStability.UNSTABLE -> Unit
@@ -480,7 +488,7 @@ class TransferOperationsImpl(
         return when (e.kind) {
             AppError.ErrorKind.NETWORK -> TaskOutput(
                 TaskDisposition.WAITING_FOR_NETWORK, errorMessage = e.message
-            )
+            ).also { onNetworkFailure() }
             AppError.ErrorKind.AUTH -> TaskOutput(
                 TaskDisposition.FAILED, errorMessage = "鉴权失败: ${e.message}"
             )
