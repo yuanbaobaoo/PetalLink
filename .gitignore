@@ -28,7 +28,6 @@ secrets/
 
 # Gradle / Kotlin 构建产物
 .gradle/
-.gradle-user-home/
 build/
 !gradle/wrapper/gradle-wrapper.jar
 *.kotlin/
