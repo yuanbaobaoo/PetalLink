@@ -13,7 +13,8 @@ import io.github.yuanbaobaoo.petallink.ui.components.mate.MateButton
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateButtonVariant
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateHDivider
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateInfoBanner
-import io.github.yuanbaobaoo.petallink.ui.theme.LocalSemanticColors
+import io.github.yuanbaobaoo.petallink.ui.theme.LOCAL_SEMANTIC_COLORS
+import io.github.yuanbaobaoo.petallink.ui.theme.PetalTheme
 import io.github.yuanbaobaoo.petallink.ui.viewmodel.SetupPhase
 
 /**
@@ -43,7 +44,7 @@ fun SyncSetupBanner(
     onFirstSync: () -> Unit,
     onRetry: () -> Unit,
 ) {
-    val semantic = LocalSemanticColors.current
+    val semantic = LOCAL_SEMANTIC_COLORS.current
     when {
         errorMessage != null -> {
             BannerWrapper(semantic.bgContainer) {
@@ -85,7 +86,12 @@ private fun BannerWrapper(bg: androidx.compose.ui.graphics.Color, content: @Comp
         modifier = Modifier.fillMaxWidth(),
     ) {
         androidx.compose.foundation.layout.Column(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp).background(bg),
+            modifier = Modifier.fillMaxWidth()
+                .padding(
+                    horizontal = PetalTheme.metrics.syncSetup.horizontalPadding,
+                    vertical = PetalTheme.metrics.syncSetup.verticalPadding,
+                )
+                .background(bg),
         ) { content() }
         // 底分隔线（v2 保留 banner 区与下方内容的分隔）
         MateHDivider()

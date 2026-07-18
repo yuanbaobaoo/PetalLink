@@ -27,9 +27,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import io.github.yuanbaobaoo.petallink.core.logging.LogLevel
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateButton
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateButtonVariant
@@ -39,7 +37,8 @@ import io.github.yuanbaobaoo.petallink.ui.components.mate.MateEmpty
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateTag
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateTagSize
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateTagTheme
-import io.github.yuanbaobaoo.petallink.ui.theme.LocalSemanticColors
+import io.github.yuanbaobaoo.petallink.ui.theme.LOCAL_SEMANTIC_COLORS
+import io.github.yuanbaobaoo.petallink.ui.theme.PetalTheme
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -94,7 +93,7 @@ fun LogViewerScreen(
     onClear: () -> Unit = {},
     onBack: () -> Unit = {},
 ) {
-    val semantic = LocalSemanticColors.current
+    val semantic = LOCAL_SEMANTIC_COLORS.current
     var filter by remember { mutableStateOf(LevelFilter.ALL) }
     val filtered = if (filter == LevelFilter.ALL) records else records.filter { record ->
         when (filter) {
@@ -112,22 +111,26 @@ fun LogViewerScreen(
             // 独立 AppBar（56px + 底分隔线 + 返回箭头 rotate 180）
             Column {
                 Row(
-                    modifier = Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 16.dp),
+                    modifier = Modifier.fillMaxWidth().height(PetalTheme.metrics.logViewer.inlineHeaderHeight)
+                        .padding(horizontal = PetalTheme.metrics.logViewer.inlineHeaderHorizontalPadding),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(PetalTheme.metrics.logViewer.inlineHeaderContentSpacing),
                 ) {
                     MateButton(variant = MateButtonVariant.ICON, icon = "arrow", onClick = onBack,
                         modifier = Modifier.rotate(180f))
-                    Text("同步日志", fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+                    Text("同步日志", style = PetalTheme.typography.logViewer.pageTitle)
                 }
                 MateHDivider()
             }
         }
         // 工具栏（v2 log-toolbar：padding 14/20，级别过滤 chip + 右侧导出/清空）
         Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = if (inline) 0.dp else 20.dp, vertical = 14.dp),
+            modifier = Modifier.fillMaxWidth().padding(
+                horizontal = if (inline) PetalTheme.metrics.logViewer.inlineContentPadding else PetalTheme.metrics.logViewer.standaloneHeaderHorizontalPadding,
+                vertical = PetalTheme.metrics.logViewer.headerVerticalPadding,
+            ),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(PetalTheme.metrics.logViewer.headerContentSpacing),
         ) {
             LevelFilter.values().forEach { lv ->
                 val active = filter == lv
@@ -149,7 +152,9 @@ fun LogViewerScreen(
         }
         // 列表（v2 log-list：白色 panel，bgContainer radius-lg(10) + 0.5dp 细边，独立模式外边距 0/20/20）
         if (loading) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { MateCircularProgress(size = 24.dp) }
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                MateCircularProgress(size = PetalTheme.metrics.logViewer.loadingSize)
+            }
         } else if (filtered.isEmpty()) {
             MateEmpty(title = "暂无日志", icon = "list")
         } else {
@@ -157,35 +162,38 @@ fun LogViewerScreen(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(
-                        start = if (inline) 0.dp else 20.dp,
-                        end = if (inline) 0.dp else 20.dp,
-                        bottom = if (inline) 0.dp else 20.dp,
+                        start = if (inline) PetalTheme.metrics.logViewer.inlineContentPadding else PetalTheme.metrics.logViewer.standaloneContentPadding,
+                        end = if (inline) PetalTheme.metrics.logViewer.inlineContentPadding else PetalTheme.metrics.logViewer.standaloneContentPadding,
+                        bottom = if (inline) PetalTheme.metrics.logViewer.inlineContentPadding else PetalTheme.metrics.logViewer.standaloneContentPadding,
                     )
-                    .clip(RoundedCornerShape(10.dp))
+                    .clip(RoundedCornerShape(PetalTheme.metrics.logViewer.listRadius))
                     .background(semantic.bgContainer)
-                    .border(0.5.dp, semantic.border, RoundedCornerShape(10.dp)),
+                    .border(PetalTheme.metrics.logViewer.listBorderWidth, semantic.border, RoundedCornerShape(PetalTheme.metrics.logViewer.listRadius)),
             ) {
                 itemsIndexed(filtered) { index, record ->
                     Column {
                     // v2 log-item：padding 12/16
                     Row(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                        modifier = Modifier.fillMaxWidth().padding(
+                            horizontal = PetalTheme.metrics.logViewer.recordHorizontalPadding,
+                            vertical = PetalTheme.metrics.logViewer.recordVerticalPadding,
+                        ),
                         verticalAlignment = Alignment.Top,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(PetalTheme.metrics.logViewer.recordContentSpacing),
                     ) {
                         MateTag(label = record.level.name, theme = levelTheme(record.level), size = MateTagSize.SMALL)
                         Column {
-                            Text(record.message, fontSize = 14.5.sp, color = semantic.textPrimary)
+                            Text(record.message, style = PetalTheme.typography.logViewer.recordMessage, color = semantic.textPrimary)
                             // meta：时间 · logger（对标原 Vue fmtTime(time_ms) · logger_name，v2 等宽字体）
                             val timeStr = remember(record.timestampMs) {
                                 SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date(record.timestampMs))
                             }
                             Text(
                                 "$timeStr · ${record.target}",
-                                fontSize = 12.5.sp,
+                                style = PetalTheme.typography.logViewer.recordMetadata,
                                 fontFamily = FontFamily.Monospace,
                                 color = semantic.textSecondary,
-                                modifier = Modifier.padding(top = 3.dp),
+                                modifier = Modifier.padding(top = PetalTheme.metrics.logViewer.metadataTopPadding),
                             )
                         }
                     }

@@ -21,19 +21,17 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateHDivider
-import io.github.yuanbaobaoo.petallink.ui.theme.BrandColor
-import io.github.yuanbaobaoo.petallink.ui.theme.LocalSemanticColors
+import io.github.yuanbaobaoo.petallink.ui.theme.LOCAL_SEMANTIC_COLORS
+import io.github.yuanbaobaoo.petallink.ui.theme.PetalTheme
 import io.github.yuanbaobaoo.petallink.ui.viewmodel.BrowserBreadcrumb
 
 /**
  * 面包屑导航（视觉对标 design/v2/02-main.html 的 .breadcrumb）。
  *
  * v2：高 40px，横向 scroll（超宽不换行），padding 0/20，gap 6；底部 MateHDivider 分隔线保留。
- * 分隔符 `›`（13sp placeholder 灰）；普通段 14sp secondary 可点 hover→BrandColor；
+ * 分隔符 `›`（13sp placeholder 灰）；普通段 14sp secondary 可点 hover→PetalTheme.colors.brand；
  * 当前段 14sp primary + semibold + 不可点。
  *
  * @param crumbs 路径栈（最后一个为当前目录）
@@ -44,22 +42,22 @@ fun Breadcrumb(
     crumbs: List<BrowserBreadcrumb>,
     onNavigate: (BrowserBreadcrumb) -> Unit,
 ) {
-    val semantic = LocalSemanticColors.current
+    val semantic = LOCAL_SEMANTIC_COLORS.current
     val scroll = rememberScrollState()
     Column {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(40.dp)
+                .height(PetalTheme.metrics.navigation.breadcrumbHeight)
                 .background(semantic.bgContainer)
                 .horizontalScroll(scroll)
-                .padding(horizontal = 20.dp),
+                .padding(horizontal = PetalTheme.metrics.navigation.breadcrumbHorizontalPadding),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            horizontalArrangement = Arrangement.spacedBy(PetalTheme.metrics.navigation.breadcrumbItemSpacing),
         ) {
             crumbs.forEachIndexed { index, crumb ->
                 if (index > 0) {
-                    Text("›", fontSize = 13.sp, color = semantic.textPlaceholder)
+                    Text("›", style = PetalTheme.typography.breadcrumb.separator, color = semantic.textPlaceholder)
                 }
                 val isCurrent = index == crumbs.lastIndex
                 // hover 变 brand 色（对标 .breadcrumb__item:hover）
@@ -67,14 +65,13 @@ fun Breadcrumb(
                 val hovered by interactionSource.collectIsHoveredAsState()
                 val color = when {
                     isCurrent -> semantic.textPrimary
-                    hovered -> BrandColor
+                    hovered -> PetalTheme.colors.brand
                     else -> semantic.textSecondary
                 }
                 Text(
                     crumb.name,
-                    fontSize = 14.sp,
+                    style = if (isCurrent) PetalTheme.typography.breadcrumb.currentItem else PetalTheme.typography.breadcrumb.item,
                     color = color,
-                    fontWeight = if (isCurrent) FontWeight.SemiBold else FontWeight.Normal,
                     modifier = Modifier
                         .hoverable(interactionSource = interactionSource, enabled = !isCurrent)
                         .then(

@@ -23,9 +23,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import io.github.yuanbaobaoo.petallink.ui.components.MateIcon
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateDialogOptions
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateHDivider
@@ -33,10 +31,8 @@ import io.github.yuanbaobaoo.petallink.ui.components.mate.MateTag
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateTagSize
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateTagTheme
 import io.github.yuanbaobaoo.petallink.ui.components.mate.confirmDialog
-import io.github.yuanbaobaoo.petallink.ui.theme.BrandColor
-import io.github.yuanbaobaoo.petallink.ui.theme.ErrorColor
-import io.github.yuanbaobaoo.petallink.ui.theme.LocalSemanticColors
-import io.github.yuanbaobaoo.petallink.ui.theme.SuccessColor
+import io.github.yuanbaobaoo.petallink.ui.theme.LOCAL_SEMANTIC_COLORS
+import io.github.yuanbaobaoo.petallink.ui.theme.PetalTheme
 import io.github.yuanbaobaoo.petallink.ui.viewmodel.SyncSnapshotUi
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -46,7 +42,7 @@ import java.util.Locale
  * 同步状态条（v2 视觉：对标 design/v2/02-main.html、03-sync-states.html 的 .sync-bar）。
  *
  * minHeight 44、padding 6/20（内容超高可换行）；
- * 左：状态指示（活动态 spin sync 图标 BrandColor；空闲 failed>0 红色 8×8 圆点；空闲正常绿色 8×8 圆点）
+ * 左：状态指示（活动态 spin sync 图标 PetalTheme.colors.brand；空闲 failed>0 红色 8×8 圆点；空闲正常绿色 8×8 圆点）
  *   + statusText（14sp medium，9 种 syncPhase 文案）+ 上次同步时间（13.5sp text-secondary）；
  * 右：标签区右对齐换行（MateTag chip：上传/下载 PRIMARY、等待网络/编辑中/冲突 WARNING、同步失败 ERROR 可点）。
  * 失败弹窗：列出 failedItems(path+error)。底部 MateHDivider 分隔线。
@@ -58,7 +54,7 @@ import java.util.Locale
 fun SyncStatusBar(
     snap: SyncSnapshotUi,
 ) {
-    val semantic = LocalSemanticColors.current
+    val semantic = LOCAL_SEMANTIC_COLORS.current
     val isIdle = snap.isIdle
     val statusText = statusTextFor(snap)
     var showFailed by remember { mutableStateOf(false) }
@@ -82,39 +78,42 @@ fun SyncStatusBar(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .heightIn(min = 44.dp)
+            .heightIn(min = PetalTheme.metrics.statusBar.minimumHeight)
             .background(semantic.bgContainer)
-            .padding(horizontal = 20.dp, vertical = 6.dp),
+            .padding(
+                horizontal = PetalTheme.metrics.statusBar.horizontalPadding,
+                vertical = PetalTheme.metrics.statusBar.verticalPadding,
+            ),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         // 左侧：状态指示 + 文案 + 时间（v2 .sync-bar__left：flex:1，gap 10）
         Row(
             modifier = Modifier.weight(1f),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            horizontalArrangement = Arrangement.spacedBy(PetalTheme.metrics.statusBar.statusContentSpacing),
         ) {
             if (!isIdle) {
                 // 活动态：spin 的 sync 图标（v2 场景 4）
-                MateIcon(name = "sync", size = 16.dp, tint = BrandColor, spin = true)
+                MateIcon(name = "sync", size = PetalTheme.metrics.statusBar.syncingIconSize, tint = PetalTheme.colors.brand, spin = true)
             } else {
                 // 空闲态：8×8 状态圆点（v2 .dot：failed>0 红色，否则绿色）
                 Box(
                     Modifier
-                        .size(8.dp)
+                        .size(PetalTheme.metrics.statusBar.idleIndicatorSize)
                         .clip(CircleShape)
-                        .background(if (snap.failed > 0) ErrorColor else SuccessColor),
+                        .background(if (snap.failed > 0) PetalTheme.colors.error else PetalTheme.colors.success),
                 )
             }
-            Text(statusText, fontSize = 14.sp, fontWeight = FontWeight.Medium, color = semantic.textPrimary, maxLines = 1)
+            Text(statusText, style = PetalTheme.typography.statusBar.currentStatus, color = semantic.textPrimary, maxLines = 1)
             if (isIdle && snap.lastSyncTime != null && snap.lastSyncTime > 0) {
                 val time = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(snap.lastSyncTime))
-                Text("· 上次同步 $time", fontSize = 13.5.sp, color = semantic.textSecondary)
+                Text("· 上次同步 $time", style = PetalTheme.typography.statusBar.lastSyncTime, color = semantic.textSecondary)
             }
         }
         // 右侧标签区（v2 .sync-bar__tags：右对齐、flex-wrap 换行、gap 6，chip 用 MateTag SMALL）
         FlowRow(
-            horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.End),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
+            horizontalArrangement = Arrangement.spacedBy(PetalTheme.metrics.statusBar.actionHorizontalSpacing, Alignment.End),
+            verticalArrangement = Arrangement.spacedBy(PetalTheme.metrics.statusBar.actionVerticalSpacing),
         ) {
             if (snap.uploading > 0) MateTag("上传 ${snap.uploading}", theme = MateTagTheme.PRIMARY, size = MateTagSize.SMALL)
             if (snap.downloading > 0) MateTag("下载 ${snap.downloading}", theme = MateTagTheme.PRIMARY, size = MateTagSize.SMALL)

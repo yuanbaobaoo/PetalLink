@@ -13,7 +13,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import io.github.yuanbaobaoo.petallink.ui.theme.LocalSemanticColors
+import io.github.yuanbaobaoo.petallink.ui.theme.LOCAL_SEMANTIC_COLORS
+import io.github.yuanbaobaoo.petallink.ui.theme.PetalTheme
 
 /**
  * 水平 0.5px 分隔线（对标原 Vue `border-bottom/top: 0.5px solid var(--border)`）。
@@ -23,8 +24,12 @@ import io.github.yuanbaobaoo.petallink.ui.theme.LocalSemanticColors
  * @param thickness 线宽（默认 0.5dp）
  */
 @Composable
-fun MateHDivider(modifier: Modifier = Modifier, thickness: Dp = 0.5.dp, color: Color? = null) {
-    val border = color ?: LocalSemanticColors.current.border
+fun MateHDivider(
+    modifier: Modifier = Modifier,
+    thickness: Dp = PetalTheme.metrics.divider.horizontalThickness,
+    color: Color? = null,
+) {
+    val border = color ?: LOCAL_SEMANTIC_COLORS.current.border
     Box(modifier = modifier.fillMaxWidth().height(thickness).background(border))
 }
 
@@ -34,7 +39,11 @@ fun MateHDivider(modifier: Modifier = Modifier, thickness: Dp = 0.5.dp, color: C
  * @param height 线高（默认 24dp）
  */
 @Composable
-fun MateVDivider(modifier: Modifier = Modifier, height: Dp = 24.dp, color: Color? = null) {
-    val border = color ?: LocalSemanticColors.current.border
-    Box(modifier = modifier.width(1.dp).height(height).background(border))
+fun MateVDivider(
+    modifier: Modifier = Modifier,
+    height: Dp = PetalTheme.metrics.divider.verticalHeight,
+    color: Color? = null,
+) {
+    val border = color ?: LOCAL_SEMANTIC_COLORS.current.border
+    Box(modifier = modifier.width(PetalTheme.metrics.divider.verticalWidth).height(height).background(border))
 }

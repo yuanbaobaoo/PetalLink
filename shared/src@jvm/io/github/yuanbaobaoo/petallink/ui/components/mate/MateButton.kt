@@ -37,20 +37,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import io.github.yuanbaobaoo.petallink.ui.components.MateIcon
-import io.github.yuanbaobaoo.petallink.ui.theme.BrandActive
-import io.github.yuanbaobaoo.petallink.ui.theme.BrandColor
-import io.github.yuanbaobaoo.petallink.ui.theme.BrandGradient
-import io.github.yuanbaobaoo.petallink.ui.theme.Brand100
-import io.github.yuanbaobaoo.petallink.ui.theme.BrandLighter
-import io.github.yuanbaobaoo.petallink.ui.theme.DesignTokens
-import io.github.yuanbaobaoo.petallink.ui.theme.ErrorColor
-import io.github.yuanbaobaoo.petallink.ui.theme.LocalSemanticColors
-import io.github.yuanbaobaoo.petallink.ui.theme.LocalReducedMotion
+import io.github.yuanbaobaoo.petallink.ui.theme.LOCAL_SEMANTIC_COLORS
+import io.github.yuanbaobaoo.petallink.ui.theme.LOCAL_REDUCED_MOTION
+import io.github.yuanbaobaoo.petallink.ui.theme.PetalTheme
 
 /**
  * 按钮形态（v2：主按钮 / 文字 / 图标 / 图标文字 / 软色）。
@@ -92,45 +84,52 @@ fun MateButton(
     loading: Boolean = false,
     fullWidth: Boolean = false,
     badge: Int = 0,
-    height: Dp = 0.dp,
+    height: Dp? = null,
 ) {
     val interaction = remember { MutableInteractionSource() }
     val hovered by interaction.collectIsHoveredAsState()
     val pressed by interaction.collectIsPressedAsState()
     val effectiveDisabled = disabled || loading
-    val semantic = LocalSemanticColors.current
-    val reducedMotion = LocalReducedMotion.current
+    val semantic = LOCAL_SEMANTIC_COLORS.current
+    val reducedMotion = LOCAL_REDUCED_MOTION.current
+    val typography = PetalTheme.typography.button
+    val metrics = PetalTheme.metrics.button
 
     // 形状：icon 为正圆，text 为 radius-sm，其余 radius-md
     val shape = when (variant) {
         MateButtonVariant.ICON -> CircleShape
-        MateButtonVariant.TEXT -> RoundedCornerShape(5.dp)
-        else -> RoundedCornerShape(8.dp)
+        MateButtonVariant.TEXT -> RoundedCornerShape(metrics.textRadius)
+        MateButtonVariant.SOFT -> RoundedCornerShape(metrics.softRadius)
+        MateButtonVariant.ICON_TEXT -> RoundedCornerShape(metrics.iconTextRadius)
+        MateButtonVariant.PRIMARY -> RoundedCornerShape(metrics.primaryRadius)
     }
 
     // 背景与文字色按变体 × 状态组合计算（无 ripple，纯背景过渡）。
     // primary 返回的 bgColor 仅作 danger/disabled 兜底；正常态用渐变刷。
     val pair: Pair<Color, Color> = when (variant) {
         MateButtonVariant.PRIMARY -> when {
-            effectiveDisabled -> semantic.border to Color.White
-            danger -> (if (pressed) ErrorColor.copy(alpha = 0.85f) else ErrorColor) to Color.White
-            else -> BrandColor to Color.White
+            effectiveDisabled -> semantic.border to PetalTheme.colors.buttonDisabledPrimaryText
+            danger -> (
+                if (pressed) PetalTheme.colors.error.copy(alpha = metrics.dangerPressedAlpha)
+                else PetalTheme.colors.error
+            ) to PetalTheme.colors.buttonDangerText
+            else -> PetalTheme.colors.brand to PetalTheme.colors.buttonPrimaryText
         }
         MateButtonVariant.SOFT -> when {
             effectiveDisabled -> semantic.bgFill to semantic.textPlaceholder
-            hovered -> Brand100 to BrandColor
-            else -> BrandLighter to BrandColor
+            hovered -> PetalTheme.colors.brand100 to PetalTheme.colors.brand
+            else -> PetalTheme.colors.brandLighter to PetalTheme.colors.brand
         }
         MateButtonVariant.TEXT -> when {
             effectiveDisabled -> Color.Transparent to semantic.textPlaceholder
-            danger -> (if (hovered) BrandLighter else Color.Transparent) to ErrorColor
-            hovered -> BrandLighter to BrandColor
-            else -> Color.Transparent to if (danger) ErrorColor else BrandColor
+            danger -> (if (hovered) PetalTheme.colors.brandLighter else Color.Transparent) to PetalTheme.colors.error
+            hovered -> PetalTheme.colors.brandLighter to PetalTheme.colors.brand
+            else -> Color.Transparent to if (danger) PetalTheme.colors.error else PetalTheme.colors.brand
         }
         MateButtonVariant.ICON -> when {
             effectiveDisabled -> Color.Transparent to semantic.textPlaceholder
             hovered -> semantic.bgFill to semantic.textPrimary
-            else -> Color.Transparent to if (danger) ErrorColor else semantic.textSecondary
+            else -> Color.Transparent to if (danger) PetalTheme.colors.error else semantic.textSecondary
         }
         MateButtonVariant.ICON_TEXT -> when {
             effectiveDisabled -> Color.Transparent to semantic.textPlaceholder
@@ -141,22 +140,26 @@ fun MateButton(
     val bgColor = pair.first
     val contentColor = pair.second
 
-    val resolvedHeight = when {
-        height > 0.dp -> height
-        variant == MateButtonVariant.ICON -> 32.dp
-        else -> 36.dp
+    val resolvedHeight = height ?: when (variant) {
+        MateButtonVariant.ICON -> metrics.iconButtonSize
+        MateButtonVariant.TEXT -> metrics.textHeight
+        MateButtonVariant.SOFT -> metrics.softHeight
+        MateButtonVariant.ICON_TEXT -> metrics.iconTextHeight
+        MateButtonVariant.PRIMARY -> metrics.primaryHeight
     }
     val iconSize = when (variant) {
-        MateButtonVariant.ICON -> 18.dp
-        MateButtonVariant.ICON_TEXT, MateButtonVariant.SOFT -> 16.dp
-        else -> if (icon != null) 14.dp else 0.dp
+        MateButtonVariant.ICON -> metrics.iconVariantIconSize
+        MateButtonVariant.ICON_TEXT -> metrics.iconTextVariantIconSize
+        MateButtonVariant.SOFT -> metrics.softVariantIconSize
+        MateButtonVariant.PRIMARY -> if (icon != null) metrics.primaryVariantIconSize else metrics.primaryWithoutIconSize
+        MateButtonVariant.TEXT -> if (icon != null) metrics.textVariantIconSize else metrics.textWithoutIconSize
     }
     val horizontalPadding = when (variant) {
-        MateButtonVariant.ICON -> 0.dp
-        MateButtonVariant.ICON_TEXT -> 14.dp
-        MateButtonVariant.TEXT -> 8.dp
-        MateButtonVariant.SOFT -> 16.dp
-        MateButtonVariant.PRIMARY -> 18.dp
+        MateButtonVariant.ICON -> metrics.iconHorizontalPadding
+        MateButtonVariant.ICON_TEXT -> metrics.iconTextHorizontalPadding
+        MateButtonVariant.TEXT -> metrics.textHorizontalPadding
+        MateButtonVariant.SOFT -> metrics.softHorizontalPadding
+        MateButtonVariant.PRIMARY -> metrics.primaryHorizontalPadding
     }
 
     // primary 正常态（非 danger 非禁用）用品牌渐变 + 品牌色柔影，其余用纯色背景。
@@ -169,20 +172,20 @@ fun MateButton(
         .height(resolvedHeight)
         .then(
             if (useGradient) Modifier.shadow(
-                elevation = 6.dp,
+                elevation = metrics.primaryShadowElevation,
                 shape = shape,
                 clip = false,
-                ambientColor = BrandColor.copy(alpha = 0.35f),
-                spotColor = BrandColor.copy(alpha = 0.35f),
+                ambientColor = PetalTheme.colors.brand.copy(alpha = metrics.primaryShadowAlpha),
+                spotColor = PetalTheme.colors.brand.copy(alpha = metrics.primaryShadowAlpha),
             ) else Modifier,
         )
         .clip(shape)
         .then(
-            if (useGradient) Modifier.background(BrandGradient)
-            else if (variant == MateButtonVariant.PRIMARY && pressed && !danger && !effectiveDisabled) Modifier.background(BrandActive)
+            if (useGradient) Modifier.background(PetalTheme.colors.brandGradient)
+            else if (variant == MateButtonVariant.PRIMARY && pressed && !danger && !effectiveDisabled) Modifier.background(PetalTheme.colors.brandActive)
             else Modifier.background(bgColor),
         )
-        .alpha(if (effectiveDisabled) 0.5f else 1f)
+        .alpha(if (effectiveDisabled) metrics.disabledAlpha else 1f)
         .hoverable(interaction)
         .then(
             if (effectiveDisabled) Modifier
@@ -194,30 +197,32 @@ fun MateButton(
         )
 
     // icon 变体固定正方形（32×32 命中区）。
-    val sized = if (variant == MateButtonVariant.ICON) base.size(32.dp) else base
+    val sized = if (variant == MateButtonVariant.ICON) base.size(metrics.iconButtonSize) else base
     Row(
         modifier = sized.padding(horizontal = horizontalPadding),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.Center,
     ) {
         if (loading && variant == MateButtonVariant.PRIMARY) {
-            MateButtonSpinner(size = 16.dp, color = contentColor, reducedMotion = reducedMotion)
-            if (label != null) Spacer(Modifier.width(8.dp))
+            MateButtonSpinner(size = metrics.loadingSpinnerSize, color = contentColor, reducedMotion = reducedMotion)
+            if (label != null) Spacer(Modifier.width(metrics.loadingLabelSpacing))
         } else if (icon != null) {
             val spin = loading && variant != MateButtonVariant.PRIMARY && !reducedMotion
             MateIcon(name = icon, size = iconSize, tint = contentColor, spin = spin)
-            if (label != null) Spacer(Modifier.width(6.dp))
+            if (label != null) Spacer(Modifier.width(metrics.iconLabelSpacing))
         }
         if (label != null) {
-            val fontSize = if (variant == MateButtonVariant.TEXT) {
-                DesignTokens.FONT_BODY_SM.sp
-            } else {
-                DesignTokens.FONT_BODY.sp
+            val labelStyle = when (variant) {
+                MateButtonVariant.PRIMARY -> typography.primaryLabel
+                MateButtonVariant.SOFT -> typography.softLabel
+                MateButtonVariant.TEXT -> typography.textLabel
+                MateButtonVariant.ICON_TEXT -> typography.iconTextLabel
+                MateButtonVariant.ICON -> typography.iconTextLabel
             }
-            Text(text = label, color = contentColor, fontSize = fontSize, fontWeight = FontWeight.Medium)
+            Text(text = label, color = contentColor, style = labelStyle)
         }
         if (badge > 0 && (variant == MateButtonVariant.ICON || variant == MateButtonVariant.ICON_TEXT)) {
-            Box(modifier = Modifier.padding(start = 2.dp)) { MateBadge(count = badge) }
+            Box(modifier = Modifier.padding(start = metrics.badgeStartPadding)) { MateBadge(count = badge) }
         }
     }
 }
@@ -229,7 +234,10 @@ fun MateButton(
 private fun MateButtonSpinner(size: Dp, color: Color, reducedMotion: Boolean) {
     if (reducedMotion) {
         // 降级为静态半透明圆，提示「加载中」但不旋转。
-        Box(Modifier.size(size).clip(CircleShape).background(color.copy(alpha = 0.3f)))
+        Box(
+            Modifier.size(size).clip(CircleShape)
+                .background(color.copy(alpha = PetalTheme.metrics.button.spinnerTrackAlpha)),
+        )
         return
     }
     val transition = rememberInfiniteTransition(label = "mate-btn-spin")
@@ -237,14 +245,17 @@ private fun MateButtonSpinner(size: Dp, color: Color, reducedMotion: Boolean) {
         initialValue = 0f,
         targetValue = 360f,
         animationSpec = infiniteRepeatable(
-            animation = tween(800, easing = LinearEasing),
+            animation = tween(PetalTheme.metrics.button.spinnerRotationDurationMillis, easing = LinearEasing),
             repeatMode = RepeatMode.Restart,
         ),
         label = "mate-btn-spin-r",
     )
     // 简化 spinner：旋转的环（外圈淡色轨道 + 内圈高亮弧，用两段 Box 近似）。
     Box(modifier = Modifier.size(size).rotate(rotation)) {
-        Box(Modifier.size(size).clip(CircleShape).background(color.copy(alpha = 0.3f)))
+        Box(
+            Modifier.size(size).clip(CircleShape)
+                .background(color.copy(alpha = PetalTheme.metrics.button.spinnerTrackAlpha)),
+        )
     }
 }
 
@@ -259,11 +270,14 @@ private fun MateBadge(count: Int) {
     Box(
         modifier = Modifier
             .clip(CircleShape)
-            .background(BrandColor)
-            .padding(horizontal = 5.dp, vertical = 1.dp)
-            .height(16.dp),
+            .background(PetalTheme.colors.brand)
+            .padding(
+                horizontal = PetalTheme.metrics.button.badgeHorizontalPadding,
+                vertical = PetalTheme.metrics.button.badgeVerticalPadding,
+            )
+            .height(PetalTheme.metrics.button.badgeHeight),
         contentAlignment = Alignment.Center,
     ) {
-        Text(display, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+        Text(display, color = PetalTheme.colors.buttonBadgeText, style = PetalTheme.typography.button.badgeLabel)
     }
 }

@@ -35,18 +35,12 @@ import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import io.github.yuanbaobaoo.petallink.ui.components.MateIcon
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateAppLogo
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateLinearProgress
-import io.github.yuanbaobaoo.petallink.ui.theme.BrandColor
-import io.github.yuanbaobaoo.petallink.ui.theme.BrandGradient
-import io.github.yuanbaobaoo.petallink.ui.theme.BrandLighter
-import io.github.yuanbaobaoo.petallink.ui.theme.FolderAmber
-import io.github.yuanbaobaoo.petallink.ui.theme.LocalSemanticColors
+import io.github.yuanbaobaoo.petallink.ui.theme.LOCAL_SEMANTIC_COLORS
+import io.github.yuanbaobaoo.petallink.ui.theme.PetalTheme
 import io.github.yuanbaobaoo.petallink.drive.DriveFile
 import io.github.yuanbaobaoo.petallink.drive.displayName
 
@@ -58,7 +52,7 @@ import io.github.yuanbaobaoo.petallink.drive.displayName
  * 2. section 标签「位置」（12sp semibold textPlaceholder，padding 12/18/6）
  * 3. 目录树（flex:1 scroll，padding 4/8）
  * 底部：悬浮账号卡（margin 10，bg-container radius 10 + 0.5px border，padding 12；
- * 32×32 圆形 BrandGradient 渐变头像 + 用户名 14sp semibold + 配额 12.5sp secondary + 4px 配额进度条），
+ * 32×32 圆形 PetalTheme.colors.brandGradient 渐变头像 + 用户名 14sp semibold + 配额 12.5sp secondary + 4px 配额进度条），
  * 以及更新卡片（渐变底，见 [SidebarUpdateProgress] / [SidebarUpdateBanner]）。
  *
  * @param rootChildren 根目录子文件夹列表
@@ -82,33 +76,39 @@ fun Sidebar(
     onInstallUpdate: () -> Unit = {},
     onNavigate: (DriveFile) -> Unit,
 ) {
-    val semantic = LocalSemanticColors.current
+    val semantic = LOCAL_SEMANTIC_COLORS.current
+    val metrics = PetalTheme.metrics.sidebar
     Column(
         modifier = Modifier
-            .width(248.dp)
+            .width(metrics.width)
             .fillMaxHeight()
             .background(semantic.bgPage)
             .then(Modifier.drawBehindBorder(semantic.border, isRight = true)),
     ) {
         // 1. Logo 区（60px，padding 0/18）
         Box(
-            modifier = Modifier.height(60.dp).padding(horizontal = 18.dp),
+            modifier = Modifier.height(metrics.logoHeaderHeight).padding(horizontal = metrics.logoHeaderHorizontalPadding),
             contentAlignment = Alignment.CenterStart,
-        ) { MateAppLogo(size = 26.dp) }
+        ) { MateAppLogo(size = metrics.logoSize) }
 
         // 2. section 标签「位置」（12sp semibold textPlaceholder，padding 12/18/6）
         Text(
             "位置",
-            fontSize = 12.sp,
-            fontWeight = FontWeight.SemiBold,
+            style = PetalTheme.typography.sidebar.sectionLabel,
             color = semantic.textPlaceholder,
-            letterSpacing = 0.4.sp,
-            modifier = Modifier.padding(start = 18.dp, top = 12.dp, bottom = 6.dp),
+            modifier = Modifier.padding(
+                start = metrics.sectionLabelStartPadding,
+                top = metrics.sectionLabelTopPadding,
+                bottom = metrics.sectionLabelBottomPadding,
+            ),
         )
 
         // 3. 目录树（flex:1 scroll）
         Column(
-            modifier = Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 8.dp, vertical = 4.dp),
+            modifier = Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(
+                horizontal = metrics.treeHorizontalPadding,
+                vertical = metrics.treeVerticalPadding,
+            ),
         ) {
             SidebarTreeNode(
                 folder = DriveFile(id = null, name = "全部文件", category = "folder"),
@@ -124,31 +124,29 @@ fun Sidebar(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(10.dp)
-                .clip(RoundedCornerShape(10.dp))
+                .padding(metrics.accountOuterPadding)
+                .clip(RoundedCornerShape(metrics.accountRadius))
                 .background(semantic.bgContainer)
-                .border(0.5.dp, semantic.border, RoundedCornerShape(10.dp))
-                .padding(12.dp),
+                .border(metrics.accountBorderWidth, semantic.border, RoundedCornerShape(metrics.accountRadius))
+                .padding(metrics.accountInnerPadding),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            horizontalArrangement = Arrangement.spacedBy(metrics.accountContentSpacing),
         ) {
-            // 32×32 圆形 BrandGradient 渐变头像（白色 initial 占位字）
+            // 32×32 圆形 PetalTheme.colors.brandGradient 渐变头像（白色 initial 占位字）
             Box(
-                modifier = Modifier.size(32.dp).clip(CircleShape).background(BrandGradient),
+                modifier = Modifier.size(metrics.accountAvatarSize).clip(CircleShape).background(PetalTheme.colors.brandGradient),
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
                     userName?.firstOrNull()?.toString() ?: "华",
-                    color = Color.White,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.SemiBold,
+                    color = PetalTheme.colors.sidebarAccountAvatarText,
+                    style = PetalTheme.typography.sidebar.accountAvatar,
                 )
             }
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     userName ?: "加载账号中…",
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.SemiBold,
+                    style = PetalTheme.typography.sidebar.accountName,
                     color = semantic.textPrimary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -156,17 +154,17 @@ fun Sidebar(
                 if (quotaText != null) {
                     Text(
                         quotaText,
-                        fontSize = 12.5.sp,
+                        style = PetalTheme.typography.sidebar.quotaDescription,
                         color = semantic.textSecondary,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(top = 1.dp),
+                        modifier = Modifier.padding(top = metrics.accountQuotaTopPadding),
                     )
                     // 配额进度条（4px，品牌渐变自动；比例从 quotaText 解析，失败则不显示）
                     val quotaRatio = remember(quotaText) { parseQuotaRatio(quotaText) }
                     if (quotaRatio != null) {
-                        Spacer(Modifier.height(6.dp))
-                        MateLinearProgress(value = quotaRatio, height = 4.dp)
+                        Spacer(Modifier.height(metrics.accountQuotaProgressSpacing))
+                        MateLinearProgress(value = quotaRatio, height = metrics.accountQuotaProgressHeight)
                     }
                 }
             }
@@ -184,71 +182,82 @@ fun Sidebar(
 }
 
 /**
- * 更新下载进度卡（v2：margin 0/10/10，BrandGradient 底 radius 10 padding 12，白字 + 白色进度条）。
+ * 更新下载进度卡（v2：margin 0/10/10，PetalTheme.colors.brandGradient 底 radius 10 padding 12，白字 + 白色进度条）。
  */
 @Composable
 private fun SidebarUpdateProgress(progress: Float) {
+    val metrics = PetalTheme.metrics.sidebar
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = 10.dp, end = 10.dp, bottom = 10.dp)
-            .clip(RoundedCornerShape(10.dp))
-            .background(BrandGradient)
-            .padding(12.dp),
+            .padding(
+                start = metrics.updateCardHorizontalMargin,
+                end = metrics.updateCardHorizontalMargin,
+                bottom = metrics.updateCardBottomMargin,
+            )
+            .clip(RoundedCornerShape(metrics.updateCardRadius))
+            .background(PetalTheme.colors.brandGradient)
+            .padding(metrics.updateCardPadding),
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text("正在下载更新", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
-            Text("${(progress * 100).toInt()}%", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color.White)
+            Text("正在下载更新", style = PetalTheme.typography.sidebar.downloadUpdateLabel, color = PetalTheme.colors.sidebarUpdateText)
+            Text("${(progress * 100).toInt()}%", style = PetalTheme.typography.sidebar.downloadUpdateProgress, color = PetalTheme.colors.sidebarUpdateText)
         }
-        Spacer(Modifier.height(8.dp))
-        MateLinearProgress(value = progress, color = Color.White)
+        Spacer(Modifier.height(metrics.downloadProgressSpacing))
+        MateLinearProgress(value = progress, color = PetalTheme.colors.sidebarUpdateProgress)
     }
 }
 
 /**
- * 更新提示卡（v2：margin 0/10/10，BrandGradient 底 radius 10 padding 12，白字标题 + 圆形半透明 × + 白底「立即更新」按钮）。
+ * 更新提示卡（v2：margin 0/10/10，PetalTheme.colors.brandGradient 底 radius 10 padding 12，白字标题 + 圆形半透明 × + 白底「立即更新」按钮）。
  */
 @Composable
 private fun SidebarUpdateBanner(version: String, onDismiss: () -> Unit, onInstall: () -> Unit) {
+    val metrics = PetalTheme.metrics.sidebar
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = 10.dp, end = 10.dp, bottom = 10.dp)
-            .clip(RoundedCornerShape(10.dp))
-            .background(BrandGradient)
-            .padding(12.dp),
+            .padding(
+                start = metrics.updateCardHorizontalMargin,
+                end = metrics.updateCardHorizontalMargin,
+                bottom = metrics.updateCardBottomMargin,
+            )
+            .clip(RoundedCornerShape(metrics.updateCardRadius))
+            .background(PetalTheme.colors.brandGradient)
+            .padding(metrics.updateCardPadding),
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text("新版本 $version", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
+            Text("新版本 $version", style = PetalTheme.typography.sidebar.availableUpdateLabel, color = PetalTheme.colors.sidebarUpdateText)
             // × 关闭按钮（20×20 圆形半透明白）
             Box(
-                modifier = Modifier.size(20.dp).clip(CircleShape).background(Color.White.copy(alpha = 0.25f))
+                modifier = Modifier.size(metrics.dismissButtonSize).clip(CircleShape)
+                    .background(PetalTheme.colors.sidebarDismissBackground)
                     .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onDismiss),
                 contentAlignment = Alignment.Center,
             ) {
-                Text("×", color = Color.White, fontSize = 14.sp)
+                Text("×", color = PetalTheme.colors.sidebarDismissText, style = PetalTheme.typography.sidebar.dismissUpdateAction)
             }
         }
-        Spacer(Modifier.height(8.dp))
-        // 「立即更新」按钮（白底 h28 radius 5，BrandColor 字，点击触发安装更新）
+        Spacer(Modifier.height(metrics.availableActionSpacing))
+        // 「立即更新」按钮（白底 h28 radius 5，PetalTheme.colors.brand 字，点击触发安装更新）
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(28.dp)
-                .clip(RoundedCornerShape(5.dp))
-                .background(Color.White.copy(alpha = 0.95f))
+                .height(metrics.installButtonHeight)
+                .clip(RoundedCornerShape(metrics.installButtonRadius))
+                .background(PetalTheme.colors.sidebarInstallBackground)
                 .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onInstall),
             contentAlignment = Alignment.Center,
         ) {
-            Text("立即更新", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = BrandColor)
+            Text("立即更新", style = PetalTheme.typography.sidebar.installUpdateAction, color = PetalTheme.colors.brand)
         }
     }
 }
@@ -257,8 +266,8 @@ private fun SidebarUpdateBanner(version: String, onDismiss: () -> Unit, onInstal
  * 递归目录树节点（v2：design/v2/02-main.html .tree-node）。
  *
  * 行高 32px，缩进 depth*14+8，gap 8，radius 6；
- * chevron(16px 宽，arrow 图标展开 rotate 90°)；文件夹图标 16px FolderAmber；名称 14px；
- * 三态：默认 secondary / hover bg-hover / 选中 BrandLighter 底 + BrandColor 字 + medium。
+ * chevron(16px 宽，arrow 图标展开 rotate 90°)；文件夹图标 16px PetalTheme.colors.folder；名称 14px；
+ * 三态：默认 secondary / hover bg-hover / 选中 PetalTheme.colors.brandLighter 底 + PetalTheme.colors.brand 字 + medium。
  */
 @Composable
 private fun SidebarTreeNode(
@@ -269,7 +278,8 @@ private fun SidebarTreeNode(
     directoryChildren: Map<String, List<DriveFile>>,
     onSelect: (DriveFile) -> Unit,
 ) {
-    val semantic = LocalSemanticColors.current
+    val semantic = LOCAL_SEMANTIC_COLORS.current
+    val metrics = PetalTheme.metrics.sidebar
     val isSelected = folder.id == selectedId
     var expanded by remember(folder.id) { mutableStateOf(depth == 0) }
     val name = folder.displayName()
@@ -278,41 +288,42 @@ private fun SidebarTreeNode(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(32.dp)
-                .padding(start = (depth * 14 + 8).dp, end = 8.dp)
-                .clip(RoundedCornerShape(6.dp))
-                .background(if (isSelected) BrandLighter else Color.Transparent)
+                .height(metrics.treeNodeHeight)
+                .padding(
+                    start = metrics.treeNodeStartPadding + metrics.treeDepthIndent * depth,
+                    end = metrics.treeNodeEndPadding,
+                )
+                .clip(RoundedCornerShape(metrics.treeNodeRadius))
+                .background(if (isSelected) PetalTheme.colors.brandLighter else Color.Transparent)
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null,
                 ) {
                     expanded = true
                     onSelect(folder)
-                }
-                .padding(end = 0.dp),
+                },
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(metrics.treeNodeContentSpacing),
         ) {
             // chevron（16px 宽命中区，arrow 图标展开 rotate 90°）
             Box(
-                modifier = Modifier.size(16.dp),
+                modifier = Modifier.size(metrics.treeExpanderSize),
                 contentAlignment = Alignment.Center,
             ) {
                 MateIcon(
                     name = "arrow",
-                    size = 12.dp,
+                    size = metrics.treeArrowIconSize,
                     tint = semantic.textSecondary,
                     modifier = Modifier.rotate(if (expanded) 90f else 0f),
                 )
             }
-            // 文件夹图标（16px FolderAmber）
-            MateIcon(name = "folder", size = 16.dp, tint = FolderAmber)
+            // 文件夹图标（16px PetalTheme.colors.folder）
+            MateIcon(name = "folder", size = metrics.treeFolderIconSize, tint = PetalTheme.colors.folder)
             // 名称（14px，选中 brand+medium，默认 secondary）
             Text(
                 name,
-                fontSize = 14.sp,
-                fontWeight = if (isSelected) FontWeight.Medium else FontWeight.Normal,
-                color = if (isSelected) BrandColor else semantic.textSecondary,
+                style = if (isSelected) PetalTheme.typography.sidebar.selectedTreeNodeLabel else PetalTheme.typography.sidebar.treeNodeLabel,
+                color = if (isSelected) PetalTheme.colors.brand else semantic.textSecondary,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )

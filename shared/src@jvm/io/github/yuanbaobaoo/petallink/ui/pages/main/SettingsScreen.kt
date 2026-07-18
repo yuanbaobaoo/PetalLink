@@ -33,12 +33,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import io.github.yuanbaobaoo.petallink.auth.UserInfo
 import io.github.yuanbaobaoo.petallink.config.UserConfig
 import io.github.yuanbaobaoo.petallink.ui.components.MateIcon
@@ -56,14 +53,8 @@ import io.github.yuanbaobaoo.petallink.ui.components.mate.MateSwitch
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateTextField
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateToastVariant
 import io.github.yuanbaobaoo.petallink.ui.components.mate.showToast
-import io.github.yuanbaobaoo.petallink.ui.theme.BrandColor
-import io.github.yuanbaobaoo.petallink.ui.theme.BrandGradient
-import io.github.yuanbaobaoo.petallink.ui.theme.BrandGradientSoft
-import io.github.yuanbaobaoo.petallink.ui.theme.BrandHover
-import io.github.yuanbaobaoo.petallink.ui.theme.ErrorColor
-import io.github.yuanbaobaoo.petallink.ui.theme.LocalSemanticColors
-import io.github.yuanbaobaoo.petallink.ui.theme.SuccessBg
-import io.github.yuanbaobaoo.petallink.ui.theme.SuccessColor
+import io.github.yuanbaobaoo.petallink.ui.theme.LOCAL_SEMANTIC_COLORS
+import io.github.yuanbaobaoo.petallink.ui.theme.PetalTheme
 import io.github.yuanbaobaoo.petallink.update.UpdateManifest
 import java.awt.Desktop
 import java.net.URI
@@ -119,7 +110,7 @@ fun SettingsScreen(
     onSelectDir: ((String) -> Unit) -> Unit,
     onSave: (UserConfig) -> List<String>,
 ) {
-    val semantic = LocalSemanticColors.current
+    val semantic = LOCAL_SEMANTIC_COLORS.current
     var tab by remember { mutableStateOf(SettingsTab.SYNC_DIR) }
     var mountDir by remember(initialConfig) { mutableStateOf(initialConfig.mountDir) }
     var concurrency by remember(initialConfig) { mutableStateOf(initialConfig.concurrency) }
@@ -137,19 +128,23 @@ fun SettingsScreen(
     Column(modifier = Modifier.fillMaxSize().background(semantic.bgPage)) {
         // AppBar 56px
         Row(
-            modifier = Modifier.fillMaxWidth().height(56.dp).background(semantic.bgContainer).padding(horizontal = 16.dp),
+            modifier = Modifier.fillMaxWidth().height(PetalTheme.metrics.settings.headerHeight)
+                .background(semantic.bgContainer).padding(horizontal = PetalTheme.metrics.settings.headerHorizontalPadding),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(PetalTheme.metrics.settings.headerContentSpacing),
         ) {
             MateButton(variant = MateButtonVariant.ICON, icon = "arrow", onClick = onBack, modifier = Modifier.rotate(180f))
-            Text("设置", fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+            Text("设置", style = PetalTheme.typography.settings.pageTitle)
         }
         Row(modifier = Modifier.weight(1f)) {
             // 左导航 240px（v2 .settings-nav：padding 20/12，项间距 6）
             Column(
-                modifier = Modifier.width(240.dp).fillMaxHeight().background(semantic.bgPage)
-                    .padding(horizontal = 12.dp, vertical = 20.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier.width(PetalTheme.metrics.settings.navigationWidth).fillMaxHeight().background(semantic.bgPage)
+                    .padding(
+                        horizontal = PetalTheme.metrics.settings.navigationHorizontalPadding,
+                        vertical = PetalTheme.metrics.settings.navigationVerticalPadding,
+                    ),
+                verticalArrangement = Arrangement.spacedBy(PetalTheme.metrics.settings.navigationItemSpacing),
             ) {
                 // 导航分组（v2：无「设置」小字标题，直接分组）
                 MateNavGroupLabel("通用")
@@ -162,12 +157,15 @@ fun SettingsScreen(
                 }
             }
             // 导航与设置区间的 0.5px 细边（v2 .settings-nav border-right）
-            Box(Modifier.fillMaxHeight().width(0.5.dp).background(semantic.border))
+            Box(Modifier.fillMaxHeight().width(PetalTheme.metrics.settings.navigationBorderWidth).background(semantic.border))
             // 右设置区（v2 .settings-body：bgApp，padding 28/32；footer 只铺右侧底部）
             Column(modifier = Modifier.weight(1f).fillMaxHeight().background(semantic.bgPage)) {
                 Column(
                     modifier = Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())
-                        .padding(horizontal = 32.dp, vertical = 28.dp),
+                        .padding(
+                            horizontal = PetalTheme.metrics.settings.bodyHorizontalPadding,
+                            vertical = PetalTheme.metrics.settings.bodyVerticalPadding,
+                        ),
                 ) {
                     when (tab) {
                         SettingsTab.SYNC_DIR -> SyncDirSection(
@@ -180,9 +178,9 @@ fun SettingsScreen(
                             SettingsPanel {
                                 GroupHeader("传输参数", first = true)
                                 SettingRow("并发上传数", "同时进行的文件传输任务数量。较高值可提升大文件传输效率，但会占用更多网络带宽。") {
-                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(PetalTheme.metrics.settings.concurrencyContentSpacing)) {
                                         MateStepper(value = concurrency, onValueChange = { concurrency = it }, min = 1, max = 20)
-                                        Text("范围 1-20", fontSize = 14.sp, color = semantic.textSecondary)
+                                        Text("范围 1-20", style = PetalTheme.typography.settings.numberRangeHint, color = semantic.textSecondary)
                                     }
                                 }
                                 SettingRow("Debounce 时长", "文件变更后等待多少秒再触发同步上传，避免频繁修改导致重复传输。") {
@@ -193,7 +191,7 @@ fun SettingsScreen(
                                 }
                                 GroupHeader("同步过滤")
                                 SettingRow("跳过文件（逗号分隔）", "匹配名称的文件不会被同步，如 .DS_Store、临时文件。", showDivider = false) {
-                                    MateTextField(value = skipPatterns, onValueChange = { skipPatterns = it }, placeholder = ".DS_Store, .tmp, ~$*, .Trash", modifier = Modifier.width(280.dp))
+                                    MateTextField(value = skipPatterns, onValueChange = { skipPatterns = it }, placeholder = ".DS_Store, .tmp, ~$*, .Trash", modifier = Modifier.width(PetalTheme.metrics.settings.skipPatternFieldWidth))
                                 }
                             }
                         }
@@ -210,7 +208,10 @@ fun SettingsScreen(
                                 SettingRow("OAuth 回调端口", "本地 HTTP 回调服务器监听端口。修改后需与 AGC 后台 redirect_uri 保持一致。") {
                                     MateNumberField(value = oauthPort, onValueChange = { oauthPort = it }, min = 1, max = 65535)
                                 }
-                                Box(Modifier.padding(top = 4.dp, bottom = 8.dp)) {
+                                Box(Modifier.padding(
+                                    top = PetalTheme.metrics.settings.oauthBannerTopPadding,
+                                    bottom = PetalTheme.metrics.settings.oauthBannerBottomPadding,
+                                )) {
                                     MateInfoBanner(message = "回调地址固定为 http://127.0.0.1:<端口>/oauth/callback，修改端口后请同步更新 AGC 后台配置。", variant = MateBannerVariant.INFO)
                                 }
                                 GroupHeader("维护")
@@ -222,8 +223,11 @@ fun SettingsScreen(
                         SettingsTab.ACCOUNT -> AccountSection(userInfo, userLabel, quotaUsed, quotaTotal, onLogout)
                         SettingsTab.LOGS -> {
                             MateSectionHeader("日志查看", icon = "list")
-                            SettingsPanel(contentPadding = PaddingValues(24.dp), contentSpacing = 14.dp) {
-                                Text("运行日志使用共享 1000 条 ring buffer，并保留 30 天滚动文件。", fontSize = 15.sp, color = semantic.textPrimary, lineHeight = (15 * 1.6f).sp)
+                            SettingsPanel(
+                                contentPadding = PaddingValues(PetalTheme.metrics.settings.logPanelPadding),
+                                contentSpacing = PetalTheme.metrics.settings.logPanelContentSpacing,
+                            ) {
+                                Text("运行日志使用共享 1000 条 ring buffer，并保留 30 天滚动文件。", style = PetalTheme.typography.settings.logRetentionDescription, color = semantic.textPrimary)
                                 MateButton(label = "打开日志查看器", onClick = onOpenLogs)
                             }
                         }
@@ -232,11 +236,13 @@ fun SettingsScreen(
                 }
                 // footer（仅 syncDir/transfer/advanced；v2 .settings-footer：64px，padding 0/32，顶细边）
                 if (showFooter) {
-                    Box(Modifier.fillMaxWidth().height(0.5.dp).background(semantic.border))
+                    Box(Modifier.fillMaxWidth().height(PetalTheme.metrics.settings.footerBorderWidth).background(semantic.border))
                     Row(
-                        modifier = Modifier.fillMaxWidth().height(64.dp).background(semantic.bgContainer).padding(horizontal = 32.dp),
+                        modifier = Modifier.fillMaxWidth().height(PetalTheme.metrics.settings.footerHeight)
+                            .background(semantic.bgContainer)
+                            .padding(horizontal = PetalTheme.metrics.settings.footerHorizontalPadding),
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        horizontalArrangement = Arrangement.spacedBy(PetalTheme.metrics.settings.footerActionSpacing),
                     ) {
                         MateButton(label = if (saved) "已保存" else "保存设置", icon = "check", onClick = {
                             val config = UserConfig(
@@ -260,11 +266,11 @@ fun SettingsScreen(
                             saved = false; errors = emptyList()
                         })
                         Spacer(Modifier.weight(1f))
-                        errors.firstOrNull()?.let { Text("⚠️ $it", fontSize = 13.sp, color = ErrorColor) }
+                        errors.firstOrNull()?.let { Text("⚠️ $it", style = PetalTheme.typography.settings.validationError, color = PetalTheme.colors.error) }
                         if (saved && errors.isEmpty()) {
-                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Box(Modifier.size(6.dp).clip(CircleShape).background(SuccessColor))
-                                Text("配置已保存", fontSize = 13.sp, color = SuccessColor)
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(PetalTheme.metrics.settings.savedIndicatorSpacing)) {
+                                Box(Modifier.size(PetalTheme.metrics.settings.savedIndicatorSize).clip(CircleShape).background(PetalTheme.colors.success))
+                                Text("配置已保存", style = PetalTheme.typography.settings.saveSuccess, color = PetalTheme.colors.success)
                             }
                         }
                     }
@@ -283,17 +289,20 @@ fun SettingsScreen(
 @Composable
 private fun SettingsPanel(
     modifier: Modifier = Modifier,
-    contentPadding: PaddingValues = PaddingValues(horizontal = 24.dp, vertical = 4.dp),
-    contentSpacing: Dp = 0.dp,
+    contentPadding: PaddingValues = PaddingValues(
+        horizontal = PetalTheme.metrics.settings.panelHorizontalPadding,
+        vertical = PetalTheme.metrics.settings.panelVerticalPadding,
+    ),
+    contentSpacing: Dp = PetalTheme.metrics.settings.panelDefaultContentSpacing,
     content: @Composable ColumnScope.() -> Unit,
 ) {
-    val semantic = LocalSemanticColors.current
+    val semantic = LOCAL_SEMANTIC_COLORS.current
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
+            .clip(RoundedCornerShape(PetalTheme.metrics.settings.panelRadius))
             .background(semantic.bgContainer)
-            .border(0.5.dp, semantic.border, RoundedCornerShape(10.dp))
+            .border(PetalTheme.metrics.settings.panelBorderWidth, semantic.border, RoundedCornerShape(PetalTheme.metrics.settings.panelRadius))
             .padding(contentPadding),
         verticalArrangement = Arrangement.spacedBy(contentSpacing),
         content = content,
@@ -305,13 +314,15 @@ private fun SettingsPanel(
  */
 @Composable
 private fun GroupHeader(label: String, first: Boolean = false) {
-    val semantic = LocalSemanticColors.current
+    val semantic = LOCAL_SEMANTIC_COLORS.current
     Text(
         label,
-        fontSize = 13.sp,
-        fontWeight = FontWeight.SemiBold,
+        style = PetalTheme.typography.settings.groupHeader,
         color = semantic.textSecondary,
-        modifier = Modifier.fillMaxWidth().padding(top = if (first) 12.dp else 20.dp, bottom = 8.dp),
+        modifier = Modifier.fillMaxWidth().padding(
+            top = if (first) PetalTheme.metrics.settings.firstGroupTopPadding else PetalTheme.metrics.settings.groupTopPadding,
+            bottom = PetalTheme.metrics.settings.groupBottomPadding,
+        ),
     )
 }
 
@@ -320,67 +331,79 @@ private fun GroupHeader(label: String, first: Boolean = false) {
  */
 @Composable
 private fun SettingRow(label: String, desc: String, showDivider: Boolean = true, control: @Composable () -> Unit) {
-    val semantic = LocalSemanticColors.current
+    val semantic = LOCAL_SEMANTIC_COLORS.current
     Column(modifier = Modifier.fillMaxWidth()) {
         Row(
-            modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp),
+            modifier = Modifier.fillMaxWidth().padding(vertical = PetalTheme.metrics.settings.settingRowVerticalPadding),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(24.dp),
+            horizontalArrangement = Arrangement.spacedBy(PetalTheme.metrics.settings.settingRowContentSpacing),
         ) {
             Column(modifier = Modifier.weight(1f)) {
-                Text(label, fontSize = 15.sp, fontWeight = FontWeight.Medium, color = semantic.textPrimary)
-                Text(desc, fontSize = 13.sp, color = semantic.textSecondary, modifier = Modifier.padding(top = 3.dp))
+                Text(label, style = PetalTheme.typography.settings.optionTitle, color = semantic.textPrimary)
+                Text(desc, style = PetalTheme.typography.settings.optionDescription, color = semantic.textSecondary, modifier = Modifier.padding(top = PetalTheme.metrics.settings.settingDescriptionTopPadding))
             }
             control()
         }
-        if (showDivider) Box(Modifier.fillMaxWidth().height(0.5.dp).background(semantic.border))
+        if (showDivider) Box(Modifier.fillMaxWidth().height(PetalTheme.metrics.settings.settingRowDividerWidth).background(semantic.border))
     }
 }
 
 /**
- * 同步目录 Section（v2：radius 10 卡片；已配置 1px SuccessColor 描边 + 成功徽章，未配置 MateEmpty 风格徽章引导）。
+ * 同步目录 Section（v2：radius 10 卡片；已配置 1px PetalTheme.colors.success 描边 + 成功徽章，未配置 MateEmpty 风格徽章引导）。
  */
 @Composable
 private fun SyncDirSection(mountDir: String, mountConfigured: Boolean, onSelectDir: () -> Unit) {
-    val semantic = LocalSemanticColors.current
+    val semantic = LOCAL_SEMANTIC_COLORS.current
     MateSectionHeader("同步目录", icon = "folder")
     Column(
-        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(semantic.bgContainer)
+        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(PetalTheme.metrics.settings.mountPanelRadius)).background(semantic.bgContainer)
             .border(
-                width = if (mountConfigured) 1.dp else 0.5.dp,
-                color = if (mountConfigured) SuccessColor else semantic.border,
-                shape = RoundedCornerShape(10.dp),
+                width = if (mountConfigured) PetalTheme.metrics.settings.configuredMountBorderWidth else PetalTheme.metrics.settings.emptyMountBorderWidth,
+                color = if (mountConfigured) PetalTheme.colors.success else semantic.border,
+                shape = RoundedCornerShape(PetalTheme.metrics.settings.mountPanelRadius),
             )
-            .padding(horizontal = 24.dp, vertical = if (mountConfigured) 32.dp else 40.dp),
+            .padding(
+                horizontal = PetalTheme.metrics.settings.mountPanelHorizontalPadding,
+                vertical = if (mountConfigured) PetalTheme.metrics.settings.configuredMountVerticalPadding else PetalTheme.metrics.settings.emptyMountVerticalPadding,
+            ),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        verticalArrangement = Arrangement.spacedBy(PetalTheme.metrics.settings.mountPanelContentSpacing),
     ) {
         if (!mountConfigured) {
             // MateEmpty 风格图标区：72×72 radius 14 品牌浅底渐变徽章
             Box(
-                modifier = Modifier.size(72.dp).clip(RoundedCornerShape(14.dp)).background(BrandGradientSoft),
+                modifier = Modifier.size(PetalTheme.metrics.settings.emptyMountBadgeSize)
+                    .clip(RoundedCornerShape(PetalTheme.metrics.settings.emptyMountBadgeRadius))
+                    .background(PetalTheme.colors.brandGradientSoft),
                 contentAlignment = Alignment.Center,
             ) {
-                MateIcon(name = "folder-open", size = 48.dp, tint = BrandHover)
+                MateIcon(name = "folder-open", size = PetalTheme.metrics.settings.emptyMountIconSize, tint = PetalTheme.colors.brandHover)
             }
-            Text("尚未配置同步目录", fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-            Text("选择一个本地空目录作为云盘镜像，文件将自动双向同步。", fontSize = 14.sp, color = semantic.textSecondary)
+            Text("尚未配置同步目录", style = PetalTheme.typography.settings.emptyMountTitle)
+            Text("选择一个本地空目录作为云盘镜像，文件将自动双向同步。", style = PetalTheme.typography.settings.emptyMountDescription, color = semantic.textSecondary)
             MateButton(label = "选择目录", icon = "folder-open", onClick = onSelectDir)
         } else {
-            // 成功态图标徽章（v2 dialog__icon-badge--ok：40×40 radius 10，SuccessBg + SuccessColor）
+            // 成功态图标徽章（v2 dialog__icon-badge--ok：40×40 radius 10，PetalTheme.colors.successBg + PetalTheme.colors.success）
             Box(
-                modifier = Modifier.size(40.dp).clip(RoundedCornerShape(10.dp)).background(SuccessBg),
+                modifier = Modifier.size(PetalTheme.metrics.settings.configuredMountBadgeSize)
+                    .clip(RoundedCornerShape(PetalTheme.metrics.settings.configuredMountBadgeRadius))
+                    .background(PetalTheme.colors.successBg),
                 contentAlignment = Alignment.Center,
             ) {
-                MateIcon(name = "check", size = 20.dp, tint = SuccessColor)
+                MateIcon(name = "check", size = PetalTheme.metrics.settings.configuredMountIconSize, tint = PetalTheme.colors.success)
             }
-            Text("当前同步目录", fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-            Text(mountDir, fontSize = 13.sp, color = semantic.textSecondary, maxLines = 2, overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.clip(RoundedCornerShape(12.dp)).background(semantic.bgFill).padding(horizontal = 12.dp, vertical = 4.dp))
+            Text("当前同步目录", style = PetalTheme.typography.settings.currentMountTitle)
+            Text(mountDir, style = PetalTheme.typography.settings.currentMountPath, color = semantic.textSecondary, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.clip(RoundedCornerShape(PetalTheme.metrics.settings.mountPathRadius))
+                    .background(semantic.bgFill)
+                    .padding(
+                        horizontal = PetalTheme.metrics.settings.mountPathHorizontalPadding,
+                        vertical = PetalTheme.metrics.settings.mountPathVerticalPadding,
+                    ))
             MateButton(label = "更换目录", variant = MateButtonVariant.SOFT, icon = "folder-open", onClick = onSelectDir)
         }
     }
-    Spacer(Modifier.height(16.dp))
+    Spacer(Modifier.height(PetalTheme.metrics.settings.mountBannerSpacing))
     MateInfoBanner(message = "更换同步目录将清除所有本地缓存与登录状态并重启，云盘文件不受影响。", variant = MateBannerVariant.INFO)
 }
 
@@ -389,22 +412,31 @@ private fun SyncDirSection(mountDir: String, mountConfigured: Boolean, onSelectD
  */
 @Composable
 private fun AccountSection(userInfo: UserInfo?, userLabel: String, quotaUsed: Long?, quotaTotal: Long?, onLogout: () -> Unit) {
-    val semantic = LocalSemanticColors.current
+    val semantic = LOCAL_SEMANTIC_COLORS.current
     MateSectionHeader("账号管理", icon = "info")
     // 头像卡片（56×56 品牌渐变头像 + 用户名；padding 16/24）
-    SettingsPanel(contentPadding = PaddingValues(horizontal = 24.dp, vertical = 16.dp)) {
+    SettingsPanel(contentPadding = PaddingValues(
+        horizontal = PetalTheme.metrics.settings.accountPanelHorizontalPadding,
+        vertical = PetalTheme.metrics.settings.accountPanelVerticalPadding,
+    )) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(16.dp),
+            horizontalArrangement = Arrangement.spacedBy(PetalTheme.metrics.settings.accountContentSpacing),
         ) {
             Box(
-                modifier = Modifier.size(56.dp).clip(CircleShape).background(BrandGradient),
+                modifier = Modifier.size(PetalTheme.metrics.settings.accountAvatarSize).clip(CircleShape).background(PetalTheme.colors.brandGradient),
                 contentAlignment = Alignment.Center,
-            ) { Text(userLabel.firstOrNull()?.toString() ?: "华", color = Color.White, fontSize = 23.sp, fontWeight = FontWeight.SemiBold) }
-            Text(userLabel, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = semantic.textPrimary)
+            ) {
+                Text(
+                    userLabel.firstOrNull()?.toString() ?: "华",
+                    color = PetalTheme.colors.settingsAccountAvatarText,
+                    style = PetalTheme.typography.settings.accountAvatar,
+                )
+            }
+            Text(userLabel, style = PetalTheme.typography.settings.accountName, color = semantic.textPrimary)
         }
     }
-    Spacer(Modifier.height(16.dp))
+    Spacer(Modifier.height(PetalTheme.metrics.settings.accountSectionSpacing))
     SettingsPanel {
         // 账号信息
         GroupHeader("账号信息", first = true)
@@ -430,14 +462,14 @@ private fun AccountSection(userInfo: UserInfo?, userLabel: String, quotaUsed: Lo
  */
 @Composable
 private fun InfoRow(label: String, value: String, mono: Boolean = false) {
-    val semantic = LocalSemanticColors.current
-    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp)) {
+    val semantic = LOCAL_SEMANTIC_COLORS.current
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = PetalTheme.metrics.settings.detailRowVerticalPadding)) {
         Row {
-            Text(label, fontSize = 14.sp, color = semantic.textSecondary, modifier = Modifier.width(96.dp))
-            Text(value, fontSize = 14.sp, color = semantic.textPrimary)
+            Text(label, style = PetalTheme.typography.settings.detailLabel, color = semantic.textSecondary, modifier = Modifier.width(PetalTheme.metrics.settings.detailLabelWidth))
+            Text(value, style = PetalTheme.typography.settings.detailValue, color = semantic.textPrimary)
         }
-        Spacer(Modifier.height(12.dp))
-        Box(Modifier.fillMaxWidth().height(0.5.dp).background(semantic.border))
+        Spacer(Modifier.height(PetalTheme.metrics.settings.detailContentSpacing))
+        Box(Modifier.fillMaxWidth().height(PetalTheme.metrics.settings.detailDividerWidth).background(semantic.border))
     }
 }
 
@@ -453,22 +485,25 @@ private fun AboutSection(
     onCheckUpdate: () -> Unit,
     onInstallUpdate: () -> Unit,
 ) {
-    val semantic = LocalSemanticColors.current
+    val semantic = LOCAL_SEMANTIC_COLORS.current
     MateSectionHeader("关于", icon = "cloud")
-    SettingsPanel(contentPadding = PaddingValues(24.dp), contentSpacing = 14.dp) {
-        MateLogoWithText(height = 30.dp)
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text("版本 ${appVersion.ifBlank { "..." }}", fontSize = 13.sp, color = semantic.textSecondary)
+    SettingsPanel(
+        contentPadding = PaddingValues(PetalTheme.metrics.settings.aboutPanelPadding),
+        contentSpacing = PetalTheme.metrics.settings.aboutPanelContentSpacing,
+    ) {
+        MateLogoWithText(height = PetalTheme.metrics.settings.aboutLogoHeight)
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(PetalTheme.metrics.settings.versionContentSpacing)) {
+            Text("版本 ${appVersion.ifBlank { "..." }}", style = PetalTheme.typography.settings.version, color = semantic.textSecondary)
             MateButton(label = if (updateChecking) "检查中…" else "检查更新", variant = MateButtonVariant.TEXT, icon = "refresh",
                 onClick = onCheckUpdate, disabled = updateChecking)
-            if (updateStatus.isNotEmpty()) Text(updateStatus, fontSize = 13.sp, color = semantic.textSecondary)
+            if (updateStatus.isNotEmpty()) Text(updateStatus, style = PetalTheme.typography.settings.updateStatus, color = semantic.textSecondary)
         }
         if (availableUpdate != null) {
             MateButton(label = "安装 ${availableUpdate.version}", icon = "download", onClick = onInstallUpdate)
         }
-        Text("一款开源免费的华为云盘客户端", fontSize = 13.sp, color = semantic.textSecondary)
+        Text("一款开源免费的华为云盘客户端", style = PetalTheme.typography.settings.aboutDescription, color = semantic.textSecondary)
         // GitHub / GitCode 外链
-        Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(PetalTheme.metrics.settings.externalLinksSpacing)) {
             LinkItem("GitHub", "github", "https://github.com/yuanbaobaoo/PetalLink")
             LinkItem("GitCode", "gitcode", "https://gitcode.com/yuanbaobaoo/PetalLink")
         }
@@ -483,11 +518,11 @@ private fun LinkItem(label: String, icon: String, url: String) {
     Row(
         modifier = Modifier.clickable {
             runCatching { Desktop.getDesktop().browse(URI(url)) }
-        }.padding(vertical = 4.dp),
+        }.padding(vertical = PetalTheme.metrics.settings.externalLinkVerticalPadding),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        horizontalArrangement = Arrangement.spacedBy(PetalTheme.metrics.settings.externalLinkContentSpacing),
     ) {
-        MateIcon(name = icon, size = 16.dp, tint = BrandColor)
-        Text(label, fontSize = 14.sp, color = BrandColor)
+        MateIcon(name = icon, size = PetalTheme.metrics.settings.externalLinkIconSize, tint = PetalTheme.colors.brand)
+        Text(label, style = PetalTheme.typography.settings.externalLink, color = PetalTheme.colors.brand)
     }
 }

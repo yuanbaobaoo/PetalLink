@@ -26,6 +26,9 @@ secrets/
 .env
 .zcode
 
+# 本地 AI 协作说明（保留在工作区，不纳入版本控制）
+ai/
+
 # 构建产物与本地缓存
 .gradle/
 build/

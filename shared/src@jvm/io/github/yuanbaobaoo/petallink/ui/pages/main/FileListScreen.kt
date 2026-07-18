@@ -42,10 +42,8 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.window.Dialog
@@ -61,22 +59,8 @@ import io.github.yuanbaobaoo.petallink.ui.components.mate.MateEmpty
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateHDivider
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateTextField
 import io.github.yuanbaobaoo.petallink.ui.components.mate.confirmDialog
-import io.github.yuanbaobaoo.petallink.ui.theme.BrandColor
-import io.github.yuanbaobaoo.petallink.ui.theme.BrandLighter
-import io.github.yuanbaobaoo.petallink.ui.theme.ErrorColor
-import io.github.yuanbaobaoo.petallink.ui.theme.FolderAmber
-import io.github.yuanbaobaoo.petallink.ui.theme.FolderAmberBg
-import io.github.yuanbaobaoo.petallink.ui.theme.LocalSemanticColors
-import io.github.yuanbaobaoo.petallink.ui.theme.DesignTokens
-import io.github.yuanbaobaoo.petallink.ui.theme.SuccessColor
-import io.github.yuanbaobaoo.petallink.ui.theme.TileDoc
-import io.github.yuanbaobaoo.petallink.ui.theme.TileDocBg
-import io.github.yuanbaobaoo.petallink.ui.theme.TileImage
-import io.github.yuanbaobaoo.petallink.ui.theme.TileImageBg
-import io.github.yuanbaobaoo.petallink.ui.theme.TileSheet
-import io.github.yuanbaobaoo.petallink.ui.theme.TileSheetBg
-import io.github.yuanbaobaoo.petallink.ui.theme.TileVideo
-import io.github.yuanbaobaoo.petallink.ui.theme.TileVideoBg
+import io.github.yuanbaobaoo.petallink.ui.theme.LOCAL_SEMANTIC_COLORS
+import io.github.yuanbaobaoo.petallink.ui.theme.PetalTheme
 import io.github.yuanbaobaoo.petallink.config.SortField
 import io.github.yuanbaobaoo.petallink.commands.FreeableItem
 import io.github.yuanbaobaoo.petallink.ui.viewmodel.FileBrowserState
@@ -149,13 +133,14 @@ fun FileListScreen(
     onShowProps: (DriveFile) -> Unit,
     onCanFreeUp: (DriveFile, (Boolean) -> Unit) -> Unit,
 ) {
-    val semantic = LocalSemanticColors.current
+    val semantic = LOCAL_SEMANTIC_COLORS.current
+    val fileListControls = PetalTheme.metrics.fileList.controls
     var checked by remember(browser.folderId) { mutableStateOf<Set<String>>(emptySet()) }
     var showCheckboxes by remember { mutableStateOf(false) }
     var selectedId by remember { mutableStateOf<String?>(null) }
     // v2 列宽（FileListColumns）：size 110 / time 160
-    var sizeWidth by remember { mutableStateOf(110.dp) }
-    var timeWidth by remember { mutableStateOf(160.dp) }
+    var sizeWidth by remember { mutableStateOf(fileListControls.sizeColumnInitialWidth) }
+    var timeWidth by remember { mutableStateOf(fileListControls.timeColumnInitialWidth) }
     val files = browser.visibleFiles
     val checkedCount = checked.size
 
@@ -215,15 +200,26 @@ fun FileListScreen(
             val bulkBusy = isIndexing
             Row(
                 modifier = Modifier.fillMaxWidth()
-                    .padding(start = 24.dp, top = 10.dp, end = 24.dp)
-                    .height(44.dp)
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(Color(0xF01C1C1E))
-                    .padding(start = 16.dp, end = 8.dp),
+                    .padding(
+                        start = PetalTheme.metrics.fileList.controls.bulkBarHorizontalMargin,
+                        top = PetalTheme.metrics.fileList.controls.bulkBarTopMargin,
+                        end = PetalTheme.metrics.fileList.controls.bulkBarHorizontalMargin,
+                    )
+                    .height(PetalTheme.metrics.fileList.controls.bulkBarHeight)
+                    .clip(RoundedCornerShape(PetalTheme.metrics.fileList.controls.bulkBarRadius))
+                    .background(PetalTheme.colors.fileListBulkBackground)
+                    .padding(
+                        start = PetalTheme.metrics.fileList.controls.bulkBarStartPadding,
+                        end = PetalTheme.metrics.fileList.controls.bulkBarEndPadding,
+                    ),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                horizontalArrangement = Arrangement.spacedBy(PetalTheme.metrics.fileList.controls.bulkBarContentSpacing),
             ) {
-                Text("已选 $checkedCount 项", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
+                Text(
+                    "已选 $checkedCount 项",
+                    style = PetalTheme.typography.fileList.selectionSummary,
+                    color = PetalTheme.colors.fileListBulkSelectionText,
+                )
                 Spacer(Modifier.weight(1f))
                 BulkBarButton(label = "批量下载", icon = "download", disabled = bulkBusy,
                     onClick = { val s = files.filter { it.id in checked }; onDownload(s) })
@@ -247,13 +243,14 @@ fun FileListScreen(
 
         if (files.isNotEmpty()) {
             // v2：file-table 容器 padding 0 12
-            Column(modifier = Modifier.fillMaxWidth().weight(1f).padding(horizontal = 12.dp)) {
+            Column(modifier = Modifier.fillMaxWidth().weight(1f).padding(horizontal = PetalTheme.metrics.fileList.controls.tableHorizontalPadding)) {
                 // 表头（v2：38px，12.5sp semibold textSecondary，底部分隔线）
                 Row(
-                    modifier = Modifier.fillMaxWidth().height(38.dp).padding(horizontal = 12.dp),
+                    modifier = Modifier.fillMaxWidth().height(PetalTheme.metrics.fileList.controls.headerHeight)
+                        .padding(horizontal = PetalTheme.metrics.fileList.controls.headerHorizontalPadding),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Box(modifier = Modifier.width(40.dp), contentAlignment = Alignment.CenterStart) {
+                    Box(modifier = Modifier.width(PetalTheme.metrics.fileList.controls.checkboxColumnWidth), contentAlignment = Alignment.CenterStart) {
                         if (showCheckboxes) {
                             val headerCheck: Boolean? = if (checkedCount == 0) false
                             else if (checkedCount == files.size) true else null
@@ -269,19 +266,25 @@ fun FileListScreen(
                         onSort(SortField.Name)
                     }
                     HeaderCell("大小", browser.sortField == SortField.Size, browser.ascending, Modifier.width(sizeWidth),
-                        resizable = true, onResize = { delta -> sizeWidth = (sizeWidth + delta).coerceIn(64.dp, 400.dp) }) {
+                        resizable = true, onResize = { delta -> sizeWidth = (sizeWidth + delta).coerceIn(
+                            fileListControls.resizableColumnMinimumWidth,
+                            fileListControls.resizableColumnMaximumWidth,
+                        ) }) {
                         onSort(SortField.Size)
                     }
                     HeaderCell("修改时间", browser.sortField == SortField.ModifiedTime, browser.ascending, Modifier.width(timeWidth),
-                        resizable = true, onResize = { delta -> timeWidth = (timeWidth + delta).coerceIn(64.dp, 400.dp) }) {
+                        resizable = true, onResize = { delta -> timeWidth = (timeWidth + delta).coerceIn(
+                            fileListControls.resizableColumnMinimumWidth,
+                            fileListControls.resizableColumnMaximumWidth,
+                        ) }) {
                         onSort(SortField.ModifiedTime)
                     }
                     // v2 列宽：状态 72 / 操作 44
-                    Box(modifier = Modifier.width(72.dp), contentAlignment = Alignment.Center) {
-                        Text("状态", fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold, color = semantic.textSecondary)
+                    Box(modifier = Modifier.width(PetalTheme.metrics.fileList.controls.statusColumnWidth), contentAlignment = Alignment.Center) {
+                        Text("状态", style = PetalTheme.typography.fileList.statusColumnHeader, color = semantic.textSecondary)
                     }
-                    Box(modifier = Modifier.width(44.dp), contentAlignment = Alignment.Center) {
-                        Text("操作", fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold, color = semantic.textSecondary)
+                    Box(modifier = Modifier.width(PetalTheme.metrics.fileList.controls.actionColumnWidth), contentAlignment = Alignment.Center) {
+                        Text("操作", style = PetalTheme.typography.fileList.actionColumnHeader, color = semantic.textSecondary)
                     }
                 }
                 MateHDivider()
@@ -317,8 +320,8 @@ fun FileListScreen(
                     }
                 }
                 // 底部信息（v2 file-footer：h36，13sp textPlaceholder）
-                Box(modifier = Modifier.fillMaxWidth().height(36.dp), contentAlignment = Alignment.Center) {
-                    Text("${files.size} 项 · 已全部加载", fontSize = 13.sp, color = semantic.textPlaceholder)
+                Box(modifier = Modifier.fillMaxWidth().height(PetalTheme.metrics.fileList.controls.footerHeight), contentAlignment = Alignment.Center) {
+                    Text("${files.size} 项 · 已全部加载", style = PetalTheme.typography.fileList.loadedSummary, color = semantic.textPlaceholder)
                 }
             }
         }
@@ -375,27 +378,27 @@ private fun BulkBarButton(
 ) {
     val interaction = remember { MutableInteractionSource() }
     val hovered by interaction.collectIsHoveredAsState()
-    val contentColor = if (danger) Color(0xFFFDA4AF) else Color.White.copy(alpha = 0.85f)
-    val iconColor = if (danger) Color(0xFFFDA4AF) else Color.White.copy(alpha = 0.7f)
+    val contentColor = if (danger) PetalTheme.colors.fileListBulkDangerText else PetalTheme.colors.fileListBulkActionText
+    val iconColor = if (danger) PetalTheme.colors.fileListBulkDangerIcon else PetalTheme.colors.fileListBulkActionIcon
     val bg = when {
         disabled -> Color.Transparent
-        hovered && danger -> Color(0xFFFDA4AF).copy(alpha = 0.18f)
-        hovered -> Color.White.copy(alpha = 0.12f)
+        hovered && danger -> PetalTheme.colors.fileListBulkDangerHoverBackground
+        hovered -> PetalTheme.colors.fileListBulkActionHoverBackground
         else -> Color.Transparent
     }
     Row(
-        modifier = Modifier.height(32.dp)
-            .clip(RoundedCornerShape(8.dp))
+        modifier = Modifier.height(PetalTheme.metrics.fileList.controls.bulkActionHeight)
+            .clip(RoundedCornerShape(PetalTheme.metrics.fileList.controls.bulkActionRadius))
             .background(bg)
-            .alpha(if (disabled) 0.4f else 1f)
+            .alpha(if (disabled) PetalTheme.metrics.fileList.controls.bulkActionDisabledAlpha else 1f)
             .hoverable(interaction)
             .clickable(interactionSource = interaction, indication = null, enabled = !disabled, onClick = onClick)
-            .padding(horizontal = 14.dp),
+            .padding(horizontal = PetalTheme.metrics.fileList.controls.bulkActionHorizontalPadding),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        horizontalArrangement = Arrangement.spacedBy(PetalTheme.metrics.fileList.controls.bulkActionContentSpacing),
     ) {
-        MateIcon(name = icon, size = 16.dp, tint = iconColor)
-        Text(label, fontSize = DesignTokens.FONT_BODY.sp, fontWeight = FontWeight.Medium, color = contentColor)
+        MateIcon(name = icon, size = PetalTheme.metrics.fileList.controls.bulkActionIconSize, tint = iconColor)
+        Text(label, style = PetalTheme.typography.fileList.toolbarAction, color = contentColor)
     }
 }
 
@@ -407,14 +410,18 @@ private fun BulkBarCloseButton(onClick: () -> Unit) {
     val interaction = remember { MutableInteractionSource() }
     val hovered by interaction.collectIsHoveredAsState()
     Box(
-        modifier = Modifier.size(32.dp)
+        modifier = Modifier.size(PetalTheme.metrics.fileList.controls.bulkCloseSize)
             .clip(CircleShape)
-            .background(if (hovered) Color.White.copy(alpha = 0.12f) else Color.Transparent)
+            .background(if (hovered) PetalTheme.colors.fileListBulkCloseHoverBackground else Color.Transparent)
             .hoverable(interaction)
             .clickable(interactionSource = interaction, indication = null, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        MateIcon(name = "x", size = 16.dp, tint = if (hovered) Color.White else Color.White.copy(alpha = 0.7f))
+        MateIcon(
+            name = "x",
+            size = PetalTheme.metrics.fileList.controls.bulkCloseIconSize,
+            tint = if (hovered) PetalTheme.colors.fileListBulkCloseHoverIcon else PetalTheme.colors.fileListBulkCloseIcon,
+        )
     }
 }
 
@@ -431,7 +438,7 @@ private fun HeaderCell(
     onResize: ((androidx.compose.ui.unit.Dp) -> Unit)? = null,
     onClick: () -> Unit,
 ) {
-    val semantic = LocalSemanticColors.current
+    val semantic = LOCAL_SEMANTIC_COLORS.current
     Box(modifier = modifier) {
         Row(
             modifier = Modifier.fillMaxSize().clickable(
@@ -440,12 +447,12 @@ private fun HeaderCell(
                 onClick = onClick,
             ),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            horizontalArrangement = Arrangement.spacedBy(PetalTheme.metrics.fileList.controls.headerSortSpacing),
         ) {
             // v2：表头 12.5sp semibold textSecondary
-            Text(title, fontSize = 12.5.sp, color = semantic.textSecondary, fontWeight = FontWeight.SemiBold)
+            Text(title, style = PetalTheme.typography.fileList.genericColumnHeader, color = semantic.textSecondary)
             if (active) {
-                MateIcon(name = "arrow", size = 12.dp, tint = semantic.textSecondary,
+                MateIcon(name = "arrow", size = PetalTheme.metrics.fileList.controls.headerSortIconSize, tint = semantic.textSecondary,
                     modifier = Modifier.rotate(if (ascending) 0f else 90f))
             }
         }
@@ -453,7 +460,7 @@ private fun HeaderCell(
             Box(
                 modifier = Modifier
                     .align(Alignment.CenterEnd)
-                    .width(6.dp)
+                    .width(PetalTheme.metrics.fileList.controls.resizeHandleWidth)
                     .fillMaxHeight()
                     .pointerInput(Unit) {
                         detectDragGestures { change, dragAmount ->
@@ -467,7 +474,7 @@ private fun HeaderCell(
 }
 
 /**
- * 文件行（v2：56px，radius 8，hover bgHover，selected BrandLighter，双击触发，右键菜单条件渲染）。
+ * 文件行（v2：56px，radius 8，hover bgHover，selected PetalTheme.colors.brandLighter，双击触发，右键菜单条件渲染）。
  */
 @Composable
 private fun FileRow(
@@ -493,22 +500,22 @@ private fun FileRow(
     onFreeUp: () -> Unit,
     onCanFreeUp: (DriveFile, (Boolean) -> Unit) -> Unit,
 ) {
-    val semantic = LocalSemanticColors.current
+    val semantic = LOCAL_SEMANTIC_COLORS.current
     var menuExpanded by remember { mutableStateOf(false) }
     var canFree by remember { mutableStateOf<Boolean?>(null) }
     // v2：hover 态接入 hoverable（此前 hovered 变量未接线，hover 背景从未生效）
     val interaction = remember { MutableInteractionSource() }
     val hovered by interaction.collectIsHoveredAsState()
     val bg = when {
-        selected -> BrandLighter
+        selected -> PetalTheme.colors.brandLighter
         hovered -> semantic.bgHover
         else -> Color.Transparent
     }
     // 双击检测：用 pointerInput detectTapGestures(onDoubleTap)
     Column {
         Row(
-            modifier = Modifier.fillMaxWidth().height(56.dp)
-                .clip(RoundedCornerShape(8.dp))
+            modifier = Modifier.fillMaxWidth().height(PetalTheme.metrics.fileList.controls.rowHeight)
+                .clip(RoundedCornerShape(PetalTheme.metrics.fileList.controls.rowRadius))
                 .background(bg)
                 .hoverable(interaction)
                 .pointerInput(file.id) {
@@ -528,36 +535,36 @@ private fun FileRow(
                 ) {
                     // 右键菜单触发条件：这里用 secondary press 不便检测，简化为操作按钮触发
                 }
-                .padding(horizontal = 12.dp),
+                .padding(horizontal = PetalTheme.metrics.fileList.controls.rowHorizontalPadding),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             // checkbox 列
-            Box(modifier = Modifier.width(40.dp)) {
+            Box(modifier = Modifier.width(PetalTheme.metrics.fileList.controls.checkboxColumnWidth)) {
                 if (showCheckbox) MateCheckbox(checked = checked, onCheckedChange = { c -> if (c != null) onCheckedChange(c) })
             }
             // name 列（v2：图标 32×32 色块 tile，间距 12）
-            Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(PetalTheme.metrics.fileList.controls.rowNameContentSpacing)) {
                 LaunchedEffect(file.id, file.thumbnailLink) { onThumbnailNeeded() }
                 FileTypeTile(file = file, thumbnail = thumbnail)
-                Text(file.displayName(), fontSize = 15.sp, color = semantic.textPrimary,
+                Text(file.displayName(), style = PetalTheme.typography.fileList.rowFileName, color = semantic.textPrimary,
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             // size 列
-            Text(if (file.isFolder()) "—" else formatFileSize(file.sizeBytes), fontSize = 14.sp, color = semantic.textSecondary, modifier = Modifier.width(sizeWidth))
+            Text(if (file.isFolder()) "—" else formatFileSize(file.sizeBytes), style = PetalTheme.typography.fileList.rowFileSize, color = semantic.textSecondary, modifier = Modifier.width(sizeWidth))
             // time 列
-            Text(file.modifiedTime.orEmpty().replace("T", " ").take(16), fontSize = 14.sp, color = semantic.textSecondary, modifier = Modifier.width(timeWidth))
+            Text(file.modifiedTime.orEmpty().replace("T", " ").take(16), style = PetalTheme.typography.fileList.rowModifiedTime, color = semantic.textSecondary, modifier = Modifier.width(timeWidth))
             // status 列（v2 列宽 72）
-            Box(modifier = Modifier.width(72.dp), contentAlignment = Alignment.Center) {
+            Box(modifier = Modifier.width(PetalTheme.metrics.fileList.controls.statusColumnWidth), contentAlignment = Alignment.Center) {
                 val (statusIcon, statusColor) = when (status) {
-                    "synced" -> "local" to SuccessColor
+                    "synced" -> "local" to PetalTheme.colors.success
                     "placeholder" -> "cloud" to semantic.textSecondary
-                    "folder" -> "folder" to BrandColor
+                    "folder" -> "folder" to PetalTheme.colors.brand
                     else -> "cloud" to semantic.textPlaceholder
                 }
-                MateIcon(name = statusIcon, size = 16.dp, tint = statusColor)
+                MateIcon(name = statusIcon, size = PetalTheme.metrics.fileList.controls.rowStatusIconSize, tint = statusColor)
             }
             // actions 列（v2 列宽 44；操作按钮 → 右键菜单，锚点为本 Box）
-            Box(modifier = Modifier.width(44.dp), contentAlignment = Alignment.Center) {
+            Box(modifier = Modifier.width(PetalTheme.metrics.fileList.controls.actionColumnWidth), contentAlignment = Alignment.Center) {
                 MateButton(variant = MateButtonVariant.ICON, icon = "list", onClick = {
                     canFree = null; menuExpanded = true
                     onCanFreeUp(file) { canFree = it }
@@ -570,12 +577,16 @@ private fun FileRow(
                     ) {
                         Column(
                             modifier = Modifier
-                                .width(200.dp)
-                                .shadow(16.dp, RoundedCornerShape(10.dp))
-                                .clip(RoundedCornerShape(10.dp))
+                                .width(PetalTheme.metrics.fileList.controls.contextMenuWidth)
+                                .shadow(PetalTheme.metrics.fileList.controls.contextMenuShadowElevation, RoundedCornerShape(PetalTheme.metrics.fileList.controls.contextMenuRadius))
+                                .clip(RoundedCornerShape(PetalTheme.metrics.fileList.controls.contextMenuRadius))
                                 .background(semantic.bgContainer)
-                                .border(0.5.dp, semantic.border, RoundedCornerShape(10.dp))
-                                .padding(6.dp),
+                                .border(
+                                    PetalTheme.metrics.fileList.controls.contextMenuBorderWidth,
+                                    semantic.border,
+                                    RoundedCornerShape(PetalTheme.metrics.fileList.controls.contextMenuRadius),
+                                )
+                                .padding(PetalTheme.metrics.fileList.controls.contextMenuPadding),
                         ) {
                             // 按条件渲染（对标原 Vue ctx-menu）
                             if (mountConfigured) {
@@ -611,65 +622,71 @@ private fun FileRow(
  */
 @Composable
 private fun FileTypeTile(file: DriveFile, thumbnail: ByteArray?) {
-    val semantic = LocalSemanticColors.current
+    val semantic = LOCAL_SEMANTIC_COLORS.current
     val type = fileTypeIcon(file)
     if (thumbnail != null && !file.isFolder()) {
         val bitmap = remember(thumbnail) {
             runCatching { org.jetbrains.skia.Image.makeFromEncoded(thumbnail).toComposeImageBitmap() }.getOrNull()
         }
         if (bitmap != null) {
-            androidx.compose.foundation.Image(bitmap, null, Modifier.size(32.dp).clip(RoundedCornerShape(6.dp)))
+            androidx.compose.foundation.Image(
+                bitmap,
+                null,
+                Modifier.size(PetalTheme.metrics.fileList.controls.thumbnailSize)
+                    .clip(RoundedCornerShape(PetalTheme.metrics.fileList.controls.thumbnailRadius)),
+            )
             return
         }
     }
     val (bg, tint) = when (type) {
-        "folder" -> FolderAmberBg to FolderAmber
-        "file-text" -> TileDocBg to TileDoc
-        "image" -> TileImageBg to TileImage
-        "video" -> TileVideoBg to TileVideo
-        "chart" -> TileSheetBg to TileSheet
+        "folder" -> PetalTheme.colors.folderBg to PetalTheme.colors.folder
+        "file-text" -> PetalTheme.colors.documentBg to PetalTheme.colors.document
+        "image" -> PetalTheme.colors.imageBg to PetalTheme.colors.image
+        "video" -> PetalTheme.colors.videoBg to PetalTheme.colors.video
+        "chart" -> PetalTheme.colors.sheetBg to PetalTheme.colors.sheet
         else -> semantic.bgFill to semantic.textSecondary
     }
     Box(
-        modifier = Modifier.size(32.dp).clip(RoundedCornerShape(6.dp)).background(bg),
+        modifier = Modifier.size(PetalTheme.metrics.fileList.controls.thumbnailSize)
+            .clip(RoundedCornerShape(PetalTheme.metrics.fileList.controls.thumbnailRadius)).background(bg),
         contentAlignment = Alignment.Center,
     ) {
-        MateIcon(name = type, size = 18.dp, tint = tint)
+        MateIcon(name = type, size = PetalTheme.metrics.fileList.controls.fileTypeIconSize, tint = tint)
     }
 }
 
 /**
  * 右键菜单项（v2 .menu__item：h36 radius8，hover bgFill，padding 0 12，gap 10；
- * icon 16（默认 textSecondary，danger ErrorColor），文字 15sp（默认 textPrimary，danger ErrorColor）；
+ * icon 16（默认 textSecondary，danger PetalTheme.colors.error），文字 15sp（默认 textPrimary，danger PetalTheme.colors.error）；
  * enabled=false 时文字/图标 textPlaceholder 且不响应点击与 hover。
  */
 @Composable
 private fun CtxItem(label: String, icon: String, danger: Boolean = false, enabled: Boolean = true, onClick: () -> Unit) {
-    val semantic = LocalSemanticColors.current
+    val semantic = LOCAL_SEMANTIC_COLORS.current
     val interaction = remember { MutableInteractionSource() }
     val hovered by interaction.collectIsHoveredAsState()
     val contentColor = when {
         !enabled -> semantic.textPlaceholder
-        danger -> ErrorColor
+        danger -> PetalTheme.colors.error
         else -> semantic.textPrimary
     }
     val iconColor = when {
         !enabled -> semantic.textPlaceholder
-        danger -> ErrorColor
+        danger -> PetalTheme.colors.error
         else -> semantic.textSecondary
     }
     Row(
-        modifier = Modifier.fillMaxWidth().height(36.dp)
-            .clip(RoundedCornerShape(8.dp))
+        modifier = Modifier.fillMaxWidth().height(PetalTheme.metrics.fileList.controls.contextActionHeight)
+            .clip(RoundedCornerShape(PetalTheme.metrics.fileList.controls.contextActionRadius))
             .background(if (hovered && enabled) semantic.bgFill else Color.Transparent)
             .hoverable(interaction)
             .clickable(interactionSource = interaction, indication = null, enabled = enabled, onClick = onClick)
-            .padding(horizontal = 12.dp),
+            .padding(horizontal = PetalTheme.metrics.fileList.controls.contextActionHorizontalPadding),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        horizontalArrangement = Arrangement.spacedBy(PetalTheme.metrics.fileList.controls.contextActionContentSpacing),
     ) {
-        MateIcon(name = icon, size = 16.dp, tint = iconColor)
-        Text(label, color = contentColor, fontSize = DesignTokens.FONT_BODY.sp)
+        MateIcon(name = icon, size = PetalTheme.metrics.fileList.controls.contextActionIconSize, tint = iconColor)
+        Text(label, color = contentColor, style = PetalTheme.typography.fileList.secondaryAction)
     }
 }
 
@@ -680,9 +697,12 @@ private fun CtxItem(label: String, icon: String, danger: Boolean = false, enable
 private fun CtxDivider() {
     Box(
         modifier = Modifier.fillMaxWidth()
-            .padding(horizontal = 8.dp, vertical = 4.dp)
-            .height(0.5.dp)
-            .background(LocalSemanticColors.current.border),
+            .padding(
+                horizontal = PetalTheme.metrics.fileList.controls.contextDividerHorizontalPadding,
+                vertical = PetalTheme.metrics.fileList.controls.contextDividerVerticalPadding,
+            )
+            .height(PetalTheme.metrics.fileList.controls.contextDividerHeight)
+            .background(LOCAL_SEMANTIC_COLORS.current.border),
     )
 }
 
@@ -691,22 +711,22 @@ private fun CtxDivider() {
  */
 @Composable
 private fun RenameDialog(target: DriveFile, value: String, onValueChange: (String) -> Unit, onConfirm: () -> Unit, onDismiss: () -> Unit) {
-    val semantic = LocalSemanticColors.current
+    val semantic = LOCAL_SEMANTIC_COLORS.current
+    val metrics = PetalTheme.metrics.fileList
     val currentName = target.name ?: target.fileName.orEmpty()
     val valid = value.trim().isNotEmpty() && value.trim() != currentName &&
         '/' !in value && value != "." && value != ".."
     Dialog(onDismissRequest = onDismiss) {
         Column(
-            modifier = Modifier.width(420.dp)
-                .clip(RoundedCornerShape(DesignTokens.RADIUS_XL.dp))
+            modifier = Modifier.width(metrics.renameDialogWidth)
+                .clip(RoundedCornerShape(metrics.renameDialogRadius))
                 .background(semantic.bgContainer)
-                .padding(DesignTokens.SPACING_XL.dp),
-            verticalArrangement = Arrangement.spacedBy(DesignTokens.SPACING_LG.dp),
+                .padding(metrics.renameDialogPadding),
+            verticalArrangement = Arrangement.spacedBy(metrics.renameDialogContentSpacing),
         ) {
             Text(
                 text = "重命名",
-                fontSize = DesignTokens.FONT_TITLE_SM.sp,
-                fontWeight = FontWeight.SemiBold,
+                style = PetalTheme.typography.fileList.renameDialogTitle,
                 color = semantic.textPrimary,
             )
             MateTextField(
@@ -718,7 +738,7 @@ private fun RenameDialog(target: DriveFile, value: String, onValueChange: (Strin
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(
-                    DesignTokens.SPACING_SM.dp,
+                    metrics.renameDialogActionSpacing,
                     Alignment.End,
                 ),
             ) {
@@ -746,49 +766,49 @@ private fun MoveDialog(
     onConfirm: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    val semantic = LocalSemanticColors.current
+    val semantic = LOCAL_SEMANTIC_COLORS.current
+    val metrics = PetalTheme.metrics.fileList
     Dialog(onDismissRequest = onDismiss) {
         Column(
-            modifier = Modifier.width(460.dp)
-                .clip(RoundedCornerShape(DesignTokens.RADIUS_XL.dp))
+            modifier = Modifier.width(metrics.moveDialogWidth)
+                .clip(RoundedCornerShape(metrics.moveDialogRadius))
                 .background(semantic.bgContainer)
-                .padding(DesignTokens.SPACING_XL.dp),
-            verticalArrangement = Arrangement.spacedBy(DesignTokens.SPACING_LG.dp),
+                .padding(metrics.moveDialogPadding),
+            verticalArrangement = Arrangement.spacedBy(metrics.moveDialogContentSpacing),
         ) {
             Text(
                 "移动“${target.displayName()}”",
                 color = semantic.textPrimary,
-                fontSize = DesignTokens.FONT_TITLE_SM.sp,
-                fontWeight = FontWeight.SemiBold,
+                style = PetalTheme.typography.fileList.moveDialogTitle,
             )
             if (folders.isEmpty()) {
                 Text(
                     "当前已加载的目录树中没有可选目标，请先在侧边栏展开目标目录。",
                     color = semantic.textSecondary,
-                    fontSize = DesignTokens.FONT_BODY_SM.sp,
+                    style = PetalTheme.typography.fileList.moveDialogDescription,
                 )
             } else {
-                LazyColumn(modifier = Modifier.fillMaxWidth().height(260.dp)) {
+                LazyColumn(modifier = Modifier.fillMaxWidth().height(metrics.moveDialogFolderListHeight)) {
                     items(folders, key = { it.id.orEmpty() }) { folder ->
                         val id = folder.id ?: return@items
                         Row(
                             modifier = Modifier.fillMaxWidth()
-                                .clip(RoundedCornerShape(DesignTokens.RADIUS_MD.dp))
-                                .background(if (id == selectedParentId) BrandLighter else Color.Transparent)
+                                .clip(RoundedCornerShape(metrics.moveDialogFolderRadius))
+                                .background(if (id == selectedParentId) PetalTheme.colors.brandLighter else Color.Transparent)
                                 .clickable { onSelect(id) }
-                                .padding(DesignTokens.SPACING_MD.dp),
+                                .padding(metrics.moveDialogFolderPadding),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(DesignTokens.SPACING_MD.dp),
+                            horizontalArrangement = Arrangement.spacedBy(metrics.moveDialogFolderContentSpacing),
                         ) {
-                            MateIcon(name = "folder", size = 18.dp, tint = FolderAmber)
-                            Text(folder.displayName(), color = semantic.textPrimary, fontSize = DesignTokens.FONT_BODY.sp)
+                            MateIcon(name = "folder", size = metrics.moveDialogFolderIconSize, tint = PetalTheme.colors.folder)
+                            Text(folder.displayName(), color = semantic.textPrimary, style = PetalTheme.typography.fileList.moveDialogFolder)
                         }
                     }
                 }
             }
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(DesignTokens.SPACING_SM.dp, Alignment.End),
+                horizontalArrangement = Arrangement.spacedBy(metrics.moveDialogActionSpacing, Alignment.End),
             ) {
                 MateButton(label = "取消", variant = MateButtonVariant.TEXT, onClick = onDismiss)
                 MateButton(

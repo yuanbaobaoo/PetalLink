@@ -24,15 +24,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import io.github.yuanbaobaoo.petallink.ui.theme.BrandColor
-import io.github.yuanbaobaoo.petallink.ui.theme.LocalSemanticColors
+import io.github.yuanbaobaoo.petallink.ui.theme.LOCAL_SEMANTIC_COLORS
+import io.github.yuanbaobaoo.petallink.ui.theme.PetalTheme
 
 /**
  * 应用 Logo（v2：直接使用真实 logo.png，品牌蓝 squircle）。
@@ -46,25 +43,24 @@ import io.github.yuanbaobaoo.petallink.ui.theme.LocalSemanticColors
  */
 @Composable
 fun MateAppLogo(
-    size: Dp = 26.dp,
+    size: Dp = PetalTheme.metrics.basic.compactLogoSize,
     text: String = "PetalLink",
     container: Boolean = false,
 ) {
     if (container) {
         // container 模式：64×64 真实 logo（自带品牌蓝 squircle 底）
-        LogoImage(size = 64.dp)
+        LogoImage(size = PetalTheme.metrics.basic.largeLogoSize)
         return
     }
     Row(verticalAlignment = Alignment.CenterVertically) {
         LogoImage(size = size)
         if (text.isNotEmpty()) {
-            Spacer(Modifier.width(8.dp))
+            Spacer(Modifier.width(PetalTheme.metrics.basic.compactLogoTextSpacing))
             // 文字字号 = round(size_px * 0.42)；近似用 size.value*0.42。
             Text(
                 text,
-                fontSize = (size.value * 0.42f).sp,
-                fontWeight = FontWeight.SemiBold,
-                color = Color(0xFF1C1C1E),
+                style = PetalTheme.typography.brand.compactLogoLabel,
+                color = PetalTheme.colors.appLogoCompactText,
             )
         }
     }
@@ -78,15 +74,14 @@ fun MateAppLogo(
  * @param height 整体高度（dp），默认 32；图标 = height，文字字号 = round(height*0.36)
  */
 @Composable
-fun MateLogoWithText(height: Dp = 32.dp) {
+fun MateLogoWithText(height: Dp = PetalTheme.metrics.basic.fullLogoHeight) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         LogoImage(size = height)
-        Spacer(Modifier.width(6.dp))
+        Spacer(Modifier.width(PetalTheme.metrics.basic.fullLogoTextSpacing))
         Text(
             "PetalLink",
-            fontSize = (height.value * 0.36f).sp,
-            fontWeight = FontWeight.SemiBold,
-            color = Color(0xFF181818),
+            style = PetalTheme.typography.brand.fullLogoLabel,
+            color = PetalTheme.colors.appLogoFullText,
         )
     }
 }
@@ -112,13 +107,13 @@ private fun LogoImage(size: Dp) {
             modifier = Modifier
                 .size(size)
                 .clip(RoundedCornerShape(size * 0.225f))
-                .background(io.github.yuanbaobaoo.petallink.ui.theme.BrandGradient),
+                .background(io.github.yuanbaobaoo.petallink.ui.theme.PetalTheme.colors.brandGradient),
             contentAlignment = Alignment.Center,
         ) {
             io.github.yuanbaobaoo.petallink.ui.components.MateIcon(
                 name = "cloud",
                 size = size * 0.6f,
-                tint = Color.White,
+                tint = PetalTheme.colors.appLogoCompactIcon,
             )
         }
     }
@@ -144,7 +139,7 @@ fun MateScaffold(
     flush: Boolean = false,
     content: @Composable () -> Unit,
 ) {
-    val semantic = LocalSemanticColors.current
+    val semantic = LOCAL_SEMANTIC_COLORS.current
     Column(
         modifier = Modifier.fillMaxSize().background(if (flush) semantic.bgContainer else semantic.bgPage),
     ) { content() }
@@ -171,11 +166,11 @@ fun MateHover(
  * 竖分隔线（对标原 Vue `<MateVerticalSeparator height>`）。w 1px，bg border。
  */
 @Composable
-fun MateVerticalSeparator(height: Dp = 20.dp) {
-    val semantic = LocalSemanticColors.current
+fun MateVerticalSeparator(height: Dp = PetalTheme.metrics.basic.verticalSeparatorHeight) {
+    val semantic = LOCAL_SEMANTIC_COLORS.current
     Box(
         modifier = Modifier
-            .width(1.dp)
+            .width(PetalTheme.metrics.basic.verticalSeparatorWidth)
             .height(height)
             .background(semantic.border),
     )
@@ -188,7 +183,7 @@ fun MateVerticalSeparator(height: Dp = 20.dp) {
 fun MateBottomDivider(
     content: @Composable () -> Unit,
 ) {
-    val semantic = LocalSemanticColors.current
+    val semantic = LOCAL_SEMANTIC_COLORS.current
     Box(
         modifier = Modifier.fillMaxSize(),
     ) {
@@ -197,7 +192,7 @@ fun MateBottomDivider(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .height(0.5.dp)
+                .height(PetalTheme.metrics.basic.bottomBorderThickness)
                 .background(semantic.border),
         )
     }

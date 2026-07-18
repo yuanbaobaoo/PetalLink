@@ -29,19 +29,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import io.github.yuanbaobaoo.petallink.ui.components.MateIcon
-import io.github.yuanbaobaoo.petallink.ui.theme.BrandColor
-import io.github.yuanbaobaoo.petallink.ui.theme.BrandLighter
-import io.github.yuanbaobaoo.petallink.ui.theme.ErrorBg
-import io.github.yuanbaobaoo.petallink.ui.theme.ErrorColor
-import io.github.yuanbaobaoo.petallink.ui.theme.DesignTokens
-import io.github.yuanbaobaoo.petallink.ui.theme.LocalSemanticColors
-import io.github.yuanbaobaoo.petallink.ui.theme.WarningColor
+import io.github.yuanbaobaoo.petallink.ui.theme.LOCAL_SEMANTIC_COLORS
+import io.github.yuanbaobaoo.petallink.ui.theme.PetalTheme
 import kotlinx.coroutines.delay
 
 /**
@@ -74,12 +68,14 @@ fun MatePopupMenu(
     onDismiss: () -> Unit,
     onSelect: (String) -> Unit,
     modifier: Modifier = Modifier,
-    menuWidth: Int = 168,
+    menuWidth: Dp? = null,
     disabled: Boolean = false,
     trigger: @Composable () -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
-    val semantic = LocalSemanticColors.current
+    val semantic = LOCAL_SEMANTIC_COLORS.current
+    val menuMetrics = PetalTheme.metrics.menu
+    val resolvedMenuWidth = menuWidth ?: menuMetrics.defaultWidth
     val triggerInteraction = remember { MutableInteractionSource() }
 
     Box(
@@ -100,11 +96,11 @@ fun MatePopupMenu(
             ) {
                 Column(
                     modifier = Modifier
-                        .width(menuWidth.dp)
-                        .clip(RoundedCornerShape(10.dp))
+                        .width(resolvedMenuWidth)
+                        .clip(RoundedCornerShape(menuMetrics.containerRadius))
                         .background(semantic.bgContainer)
-                        .border(0.5.dp, semantic.border, RoundedCornerShape(10.dp))
-                        .padding(6.dp),
+                        .border(PetalTheme.metrics.overlay.menuBorderWidth, semantic.border, RoundedCornerShape(menuMetrics.containerRadius))
+                        .padding(PetalTheme.metrics.overlay.menuPadding),
                 ) {
                     items.forEach { item ->
                         if (item.divider) {
@@ -112,8 +108,11 @@ fun MatePopupMenu(
                             Box(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(horizontal = 8.dp, vertical = 4.dp)
-                                    .height(0.5.dp)
+                                    .padding(
+                                        horizontal = PetalTheme.metrics.overlay.menuDividerHorizontalPadding,
+                                        vertical = PetalTheme.metrics.overlay.menuDividerVerticalPadding,
+                                    )
+                                    .height(PetalTheme.metrics.overlay.menuDividerHeight)
                                     .background(semantic.border),
                             )
                         } else {
@@ -122,29 +121,29 @@ fun MatePopupMenu(
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .height(36.dp)
-                                    .clip(RoundedCornerShape(8.dp))
+                                    .height(menuMetrics.itemHeight)
+                                    .clip(RoundedCornerShape(menuMetrics.itemRadius))
                                     .background(if (itemHovered) semantic.bgFill else Color.Transparent)
                                     .mateClickable(itemInteraction) {
                                         expanded = false
                                         onSelect(item.value)
                                         onDismiss()
                                     }
-                                    .padding(horizontal = 12.dp),
+                                    .padding(horizontal = PetalTheme.metrics.overlay.menuItemHorizontalPadding),
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                horizontalArrangement = Arrangement.spacedBy(PetalTheme.metrics.overlay.menuItemContentSpacing),
                             ) {
                                 if (item.icon != null) {
                                     MateIcon(
                                         name = item.icon,
-                                        size = 16.dp,
-                                        tint = if (item.danger) ErrorColor else semantic.textSecondary,
+                                        size = PetalTheme.metrics.overlay.menuItemIconSize,
+                                        tint = if (item.danger) PetalTheme.colors.error else semantic.textSecondary,
                                     )
                                 }
                                 Text(
                                     item.label,
-                                    color = if (item.danger) ErrorColor else semantic.textPrimary,
-                                    fontSize = DesignTokens.FONT_BODY.sp,
+                                    color = if (item.danger) PetalTheme.colors.error else semantic.textPrimary,
+                                    style = PetalTheme.typography.menu.itemLabel,
                                 )
                             }
                         }
@@ -212,57 +211,70 @@ fun MateDialogHost() {
     val state = globalDialogState.value
     if (state == null) return
     val (options, resolver) = state
-    val semantic = LocalSemanticColors.current
+    val semantic = LOCAL_SEMANTIC_COLORS.current
+    val dialogMetrics = PetalTheme.metrics.dialog
 
     Box(
-        modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.36f)),
+        modifier = Modifier.fillMaxSize().background(PetalTheme.colors.overlayDialogScrim),
         contentAlignment = Alignment.Center,
     ) {
         Column(
             modifier = Modifier
                 .width(options.width.dp)
-                .clip(RoundedCornerShape(12.dp))
+                .clip(RoundedCornerShape(dialogMetrics.containerRadius))
                 .background(semantic.bgContainer),
         ) {
             // header：图标徽章 + 标题
             Row(
-                modifier = Modifier.fillMaxWidth().padding(start = 24.dp, end = 24.dp, top = 24.dp, bottom = 8.dp),
+                modifier = Modifier.fillMaxWidth().padding(
+                    start = PetalTheme.metrics.overlay.dialogHeaderHorizontalPadding,
+                    end = PetalTheme.metrics.overlay.dialogHeaderHorizontalPadding,
+                    top = PetalTheme.metrics.overlay.dialogHeaderTopPadding,
+                    bottom = PetalTheme.metrics.overlay.dialogHeaderBottomPadding,
+                ),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                horizontalArrangement = Arrangement.spacedBy(PetalTheme.metrics.overlay.dialogHeaderContentSpacing),
             ) {
                 if (options.titleIcon != null) {
                     Box(
                         modifier = Modifier
-                            .size(40.dp)
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(if (options.danger) ErrorBg else BrandLighter),
+                            .size(dialogMetrics.iconBadgeSize)
+                            .clip(RoundedCornerShape(dialogMetrics.iconBadgeRadius))
+                            .background(if (options.danger) PetalTheme.colors.errorBg else PetalTheme.colors.brandLighter),
                         contentAlignment = Alignment.Center,
                     ) {
                         MateIcon(
                             name = options.titleIcon,
-                            size = 20.dp,
-                            tint = if (options.danger) ErrorColor else BrandColor,
+                            size = PetalTheme.metrics.overlay.dialogTitleIconSize,
+                            tint = if (options.danger) PetalTheme.colors.error else PetalTheme.colors.brand,
                         )
                     }
                 }
                 Text(
                     options.title,
                     color = semantic.textPrimary,
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.SemiBold,
+                    style = PetalTheme.typography.dialog.title,
                 )
             }
             // body
             Text(
                 options.content,
                 color = semantic.textSecondary,
-                fontSize = 15.sp,
-                modifier = Modifier.fillMaxWidth().padding(start = 24.dp, end = 24.dp, top = 8.dp, bottom = 20.dp),
-                lineHeight = (15 * 1.65f).sp,
+                style = PetalTheme.typography.dialog.body,
+                modifier = Modifier.fillMaxWidth().padding(
+                    start = PetalTheme.metrics.overlay.dialogBodyHorizontalPadding,
+                    end = PetalTheme.metrics.overlay.dialogBodyHorizontalPadding,
+                    top = PetalTheme.metrics.overlay.dialogBodyTopPadding,
+                    bottom = PetalTheme.metrics.overlay.dialogBodyBottomPadding,
+                ),
             )
             // footer
             Row(
-                modifier = Modifier.fillMaxWidth().padding(start = 24.dp, end = 24.dp, bottom = 20.dp),
+                modifier = Modifier.fillMaxWidth().padding(
+                    start = PetalTheme.metrics.overlay.dialogFooterHorizontalPadding,
+                    end = PetalTheme.metrics.overlay.dialogFooterHorizontalPadding,
+                    bottom = PetalTheme.metrics.overlay.dialogFooterBottomPadding,
+                ),
                 horizontalArrangement = Arrangement.End,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -272,7 +284,7 @@ fun MateDialogHost() {
                         variant = MateButtonVariant.ICON_TEXT,
                         onClick = { closeDialog(false) },
                     )
-                    Spacer(Modifier.width(10.dp))
+                    Spacer(Modifier.width(PetalTheme.metrics.overlay.dialogActionSpacing))
                     MateButton(
                         label = options.confirmText,
                         variant = MateButtonVariant.PRIMARY,
@@ -329,10 +341,10 @@ fun showToast(
 fun MateToastHost() {
     val entry = globalToastState.value ?: return
     val (iconName, iconColor) = when (entry.variant) {
-        MateToastVariant.DEFAULT -> "info" to Color.White
-        MateToastVariant.SUCCESS -> "check" to Color(0xFF4ADE80)
-        MateToastVariant.WARNING -> "alert" to WarningColor
-        MateToastVariant.ERROR -> "alert" to Color(0xFFFB7185)
+        MateToastVariant.DEFAULT -> "info" to PetalTheme.colors.toastDefaultIcon
+        MateToastVariant.SUCCESS -> "check" to PetalTheme.colors.toastSuccessIcon
+        MateToastVariant.WARNING -> "alert" to PetalTheme.colors.warning
+        MateToastVariant.ERROR -> "alert" to PetalTheme.colors.toastErrorIcon
     }
     LaunchedEffect(entry) {
         delay(2000L)
@@ -344,15 +356,18 @@ fun MateToastHost() {
     ) {
         Row(
             modifier = Modifier
-                .padding(48.dp)
-                .clip(RoundedCornerShape(10.dp))
-                .background(Color(0xEB1C1C1E))
-                .padding(horizontal = 18.dp, vertical = 10.dp),
+                .padding(PetalTheme.metrics.overlay.toastOuterPadding)
+                .clip(RoundedCornerShape(PetalTheme.metrics.dialog.toastRadius))
+                .background(PetalTheme.colors.toastBackground)
+                .padding(
+                    horizontal = PetalTheme.metrics.overlay.toastHorizontalPadding,
+                    vertical = PetalTheme.metrics.overlay.toastVerticalPadding,
+                ),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(PetalTheme.metrics.overlay.toastContentSpacing),
         ) {
-            MateIcon(name = iconName, size = 16.dp, tint = iconColor)
-            Text(entry.message, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+            MateIcon(name = iconName, size = PetalTheme.metrics.overlay.toastIconSize, tint = iconColor)
+            Text(entry.message, color = PetalTheme.colors.toastText, style = PetalTheme.typography.dialog.toastMessage)
         }
     }
 }

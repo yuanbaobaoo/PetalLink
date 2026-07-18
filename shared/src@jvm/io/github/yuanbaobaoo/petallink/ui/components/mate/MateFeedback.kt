@@ -32,24 +32,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import io.github.yuanbaobaoo.petallink.ui.components.MateIcon
-import io.github.yuanbaobaoo.petallink.ui.theme.BrandColor
-import io.github.yuanbaobaoo.petallink.ui.theme.BrandGradient
-import io.github.yuanbaobaoo.petallink.ui.theme.BrandGradientSoft
-import io.github.yuanbaobaoo.petallink.ui.theme.BrandHover
-import io.github.yuanbaobaoo.petallink.ui.theme.BrandLighter
-import io.github.yuanbaobaoo.petallink.ui.theme.ErrorBg
-import io.github.yuanbaobaoo.petallink.ui.theme.ErrorColor
-import io.github.yuanbaobaoo.petallink.ui.theme.LocalSemanticColors
-import io.github.yuanbaobaoo.petallink.ui.theme.LocalReducedMotion
-import io.github.yuanbaobaoo.petallink.ui.theme.SuccessBg
-import io.github.yuanbaobaoo.petallink.ui.theme.SuccessColor
-import io.github.yuanbaobaoo.petallink.ui.theme.WarningBg
-import io.github.yuanbaobaoo.petallink.ui.theme.WarningColor
+import io.github.yuanbaobaoo.petallink.ui.theme.LOCAL_SEMANTIC_COLORS
+import io.github.yuanbaobaoo.petallink.ui.theme.LOCAL_REDUCED_MOTION
+import io.github.yuanbaobaoo.petallink.ui.theme.PetalTheme
 
 /**
  * 线性进度条（v2：h6 圆角条，brand 为渐变填充）。
@@ -66,12 +54,12 @@ import io.github.yuanbaobaoo.petallink.ui.theme.WarningColor
 fun MateLinearProgress(
     value: Float? = null,
     modifier: Modifier = Modifier,
-    height: Dp = 6.dp,
-    color: Color = BrandColor,
+    height: Dp = PetalTheme.metrics.feedback.controls.linearProgressHeight,
+    color: Color = PetalTheme.colors.brand,
 ) {
-    val semantic = LocalSemanticColors.current
-    val reducedMotion = LocalReducedMotion.current
-    val fillBrush: Brush = if (color == BrandColor) BrandGradient else Brush.linearGradient(listOf(color, color))
+    val semantic = LOCAL_SEMANTIC_COLORS.current
+    val reducedMotion = LOCAL_REDUCED_MOTION.current
+    val fillBrush: Brush = if (color == PetalTheme.colors.brand) PetalTheme.colors.brandGradient else Brush.linearGradient(listOf(color, color))
 
     Box(
         modifier = modifier
@@ -96,7 +84,10 @@ fun MateLinearProgress(
                 initialValue = 0f,
                 targetValue = 1f,
                 animationSpec = infiniteRepeatable(
-                    animation = tween(1200, easing = LinearEasing),
+                    animation = tween(
+                        PetalTheme.metrics.feedback.controls.circularProgressRotationDurationMillis,
+                        easing = LinearEasing,
+                    ),
                     repeatMode = RepeatMode.Restart,
                 ),
                 label = "mate-progress-offset",
@@ -125,13 +116,13 @@ fun MateLinearProgress(
  */
 @Composable
 fun MateCircularProgress(
-    size: Dp = 24.dp,
-    strokeWidth: Dp = 2.5.dp,
-    color: Color = BrandColor,
+    size: Dp = PetalTheme.metrics.feedback.controls.circularProgressSize,
+    strokeWidth: Dp = PetalTheme.metrics.feedback.controls.circularProgressStrokeWidth,
+    color: Color = PetalTheme.colors.brand,
     value: Float? = null,
 ) {
-    val semantic = LocalSemanticColors.current
-    val reducedMotion = LocalReducedMotion.current
+    val semantic = LOCAL_SEMANTIC_COLORS.current
+    val reducedMotion = LOCAL_REDUCED_MOTION.current
     val track = semantic.bgFill
 
     // 用 Canvas + drawArc 绘制环形（比 SVG 更可控）
@@ -181,13 +172,14 @@ enum class MateBannerVariant { INFO, SUCCESS, WARNING, ERROR }
 /**
  * 根据横幅变体返回对应的背景色与图标色。
  */
+@Composable
 private fun bannerVisual(variant: MateBannerVariant): Pair<Color, Color> {
     // 返回 (背景色, 图标色)
     return when (variant) {
-        MateBannerVariant.INFO -> BrandLighter to BrandColor
-        MateBannerVariant.SUCCESS -> SuccessBg to SuccessColor
-        MateBannerVariant.WARNING -> WarningBg to WarningColor
-        MateBannerVariant.ERROR -> ErrorBg to ErrorColor
+        MateBannerVariant.INFO -> PetalTheme.colors.brandLighter to PetalTheme.colors.brand
+        MateBannerVariant.SUCCESS -> PetalTheme.colors.successBg to PetalTheme.colors.success
+        MateBannerVariant.WARNING -> PetalTheme.colors.warningBg to PetalTheme.colors.warning
+        MateBannerVariant.ERROR -> PetalTheme.colors.errorBg to PetalTheme.colors.error
     }
 }
 
@@ -226,29 +218,32 @@ fun MateInfoBanner(
     action: @Composable (() -> Unit)? = null,
 ) {
     val (bg, iconColor) = bannerVisual(variant)
-    val semantic = LocalSemanticColors.current
+    val semantic = LOCAL_SEMANTIC_COLORS.current
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
+            .clip(RoundedCornerShape(PetalTheme.metrics.feedback.bannerRadius))
             .background(bg)
-            .padding(horizontal = 14.dp, vertical = 12.dp),
+            .padding(
+                horizontal = PetalTheme.metrics.feedback.controls.bannerHorizontalPadding,
+                vertical = PetalTheme.metrics.feedback.controls.bannerVerticalPadding,
+            ),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        horizontalArrangement = Arrangement.spacedBy(PetalTheme.metrics.feedback.controls.bannerContentSpacing),
     ) {
-        MateIcon(name = bannerIcon(variant), size = 18.dp, tint = iconColor)
+        MateIcon(name = bannerIcon(variant), size = PetalTheme.metrics.feedback.controls.bannerIconSize, tint = iconColor)
         Column(modifier = Modifier.weight(1f)) {
             if (title != null) {
-                Text(title, color = semantic.textPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                Text(title, color = semantic.textPrimary, style = PetalTheme.typography.feedback.bannerTitle)
             }
-            Text(message, color = semantic.textPrimary, fontSize = 14.sp, lineHeight = (14 * 1.55f).sp)
+            Text(message, color = semantic.textPrimary, style = PetalTheme.typography.feedback.bannerMessage)
         }
         action?.invoke()
         if (closable) {
             MateIcon(
                 name = "x",
-                size = 14.dp,
-                tint = iconColor.copy(alpha = 0.7f),
+                size = PetalTheme.metrics.feedback.controls.bannerCloseIconSize,
+                tint = iconColor.copy(alpha = PetalTheme.metrics.feedback.controls.tagIconAlpha),
                 modifier = Modifier.clip(CircleShape),
             )
             // 关闭按钮：简单实现，点击由调用方 onClose 绑定（这里不直接 clickable，保持纯展示）
@@ -282,32 +277,37 @@ fun MateTag(
     icon: String? = null,
     onClick: (() -> Unit)? = null,
 ) {
-    val semantic = LocalSemanticColors.current
+    val semantic = LOCAL_SEMANTIC_COLORS.current
     val (bg, fg) = when (theme) {
         MateTagTheme.DEFAULT -> semantic.bgFill to semantic.textSecondary
-        MateTagTheme.PRIMARY -> BrandLighter to BrandColor
-        MateTagTheme.SUCCESS -> SuccessBg to SuccessColor
-        MateTagTheme.WARNING -> WarningBg to WarningColor
-        MateTagTheme.ERROR -> ErrorBg to ErrorColor
+        MateTagTheme.PRIMARY -> PetalTheme.colors.brandLighter to PetalTheme.colors.brand
+        MateTagTheme.SUCCESS -> PetalTheme.colors.successBg to PetalTheme.colors.success
+        MateTagTheme.WARNING -> PetalTheme.colors.warningBg to PetalTheme.colors.warning
+        MateTagTheme.ERROR -> PetalTheme.colors.errorBg to PetalTheme.colors.error
     }
-    val padding = if (size == MateTagSize.SMALL) 6.dp else 10.dp
-    val verticalPadding = if (size == MateTagSize.SMALL) 2.dp else 3.dp
-    val fontSize = if (size == MateTagSize.SMALL) 13.sp else 14.sp
-    val iconSize = if (size == MateTagSize.SMALL) 12.dp else 14.dp
+    val controls = PetalTheme.metrics.feedback.controls
+    val padding = if (size == MateTagSize.SMALL) controls.smallTagHorizontalPadding else controls.mediumTagHorizontalPadding
+    val verticalPadding = if (size == MateTagSize.SMALL) controls.smallTagVerticalPadding else controls.mediumTagVerticalPadding
+    val labelStyle = if (size == MateTagSize.SMALL) {
+        PetalTheme.typography.feedback.smallTagLabel
+    } else {
+        PetalTheme.typography.feedback.mediumTagLabel
+    }
+    val iconSize = if (size == MateTagSize.SMALL) controls.smallTagIconSize else controls.mediumTagIconSize
 
     val tagInteraction = remember { MutableInteractionSource() }
     val visualModifier = modifier
-        .clip(RoundedCornerShape(5.dp))
+        .clip(RoundedCornerShape(if (size == MateTagSize.SMALL) PetalTheme.metrics.feedback.smallTagRadius else PetalTheme.metrics.feedback.mediumTagRadius))
         .background(bg)
         .padding(horizontal = padding, vertical = verticalPadding)
         .then(if (onClick != null) Modifier.mateClickable(tagInteraction, onClick) else Modifier)
     Row(
         modifier = visualModifier,
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        horizontalArrangement = Arrangement.spacedBy(controls.tagContentSpacing),
     ) {
         if (icon != null) MateIcon(name = icon, size = iconSize, tint = fg)
-        Text(label, color = fg, fontSize = fontSize, fontWeight = FontWeight.Medium)
+        Text(label, color = fg, style = labelStyle)
     }
 }
 
@@ -327,28 +327,28 @@ fun MateEmpty(
     description: String? = null,
     action: @Composable (() -> Unit)? = null,
 ) {
-    val semantic = LocalSemanticColors.current
+    val semantic = LOCAL_SEMANTIC_COLORS.current
     Column(
-        modifier = modifier.fillMaxWidth().padding(32.dp),
+        modifier = modifier.fillMaxWidth().padding(PetalTheme.metrics.feedback.controls.emptyStatePadding),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Box(
             modifier = Modifier
-                .size(72.dp)
-                .clip(RoundedCornerShape(14.dp))
-                .background(BrandGradientSoft),
+                .size(PetalTheme.metrics.feedback.emptyBadgeSize)
+                .clip(RoundedCornerShape(PetalTheme.metrics.feedback.emptyBadgeRadius))
+                .background(PetalTheme.colors.brandGradientSoft),
             contentAlignment = Alignment.Center,
         ) {
-            MateIcon(name = icon, size = 36.dp, tint = BrandHover)
+            MateIcon(name = icon, size = PetalTheme.metrics.feedback.controls.emptyStateIconSize, tint = PetalTheme.colors.brandHover)
         }
-        Spacer(Modifier.height(16.dp))
-        Text(title, color = semantic.textPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(PetalTheme.metrics.feedback.controls.emptyStateTitleSpacing))
+        Text(title, color = semantic.textPrimary, style = PetalTheme.typography.feedback.emptyStateTitle)
         if (description != null) {
-            Spacer(Modifier.height(6.dp))
-            Text(description, color = semantic.textSecondary, fontSize = 14.sp, lineHeight = (14 * 1.5f).sp)
+            Spacer(Modifier.height(PetalTheme.metrics.feedback.controls.emptyStateDescriptionSpacing))
+            Text(description, color = semantic.textSecondary, style = PetalTheme.typography.feedback.emptyStateDescription)
         }
         if (action != null) {
-            Spacer(Modifier.height(24.dp))
+            Spacer(Modifier.height(PetalTheme.metrics.feedback.controls.emptyStateActionSpacing))
             action()
         }
     }
@@ -367,18 +367,21 @@ fun MateStatChip(
     label: String,
     modifier: Modifier = Modifier,
 ) {
-    val semantic = LocalSemanticColors.current
+    val semantic = LOCAL_SEMANTIC_COLORS.current
     Row(
         modifier = modifier
-            .clip(RoundedCornerShape(8.dp))
+            .clip(RoundedCornerShape(PetalTheme.metrics.feedback.controls.statChipRadius))
             .background(semantic.bgFill)
-            .padding(horizontal = 8.dp, vertical = 4.dp),
+            .padding(
+                horizontal = PetalTheme.metrics.feedback.controls.statChipHorizontalPadding,
+                vertical = PetalTheme.metrics.feedback.controls.statChipVerticalPadding,
+            ),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        horizontalArrangement = Arrangement.spacedBy(PetalTheme.metrics.feedback.controls.statChipContentSpacing),
     ) {
-        MateIcon(name = icon, size = 12.dp, tint = semantic.textSecondary)
-        Text(count.toString(), color = semantic.textSecondary, fontSize = 13.sp, fontWeight = FontWeight.Medium)
-        Text(label, color = semantic.textSecondary, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+        MateIcon(name = icon, size = PetalTheme.metrics.feedback.controls.statChipIconSize, tint = semantic.textSecondary)
+        Text(count.toString(), color = semantic.textSecondary, style = PetalTheme.typography.feedback.statChipCount)
+        Text(label, color = semantic.textSecondary, style = PetalTheme.typography.feedback.statChipLabel)
     }
 }
 
@@ -394,16 +397,15 @@ fun MateSectionHeader(
     icon: String? = null,
     trailing: @Composable (() -> Unit)? = null,
 ) {
-    val semantic = LocalSemanticColors.current
+    val semantic = LOCAL_SEMANTIC_COLORS.current
     Row(
-        modifier = modifier.fillMaxWidth().padding(bottom = 12.dp),
+        modifier = modifier.fillMaxWidth().padding(bottom = PetalTheme.metrics.feedback.controls.sectionHeaderBottomPadding),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        horizontalArrangement = Arrangement.spacedBy(PetalTheme.metrics.feedback.controls.sectionHeaderContentSpacing),
     ) {
-        if (icon != null) MateIcon(name = icon, size = 18.dp, tint = BrandColor)
-        Text(text, color = semantic.textPrimary, fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
+        if (icon != null) MateIcon(name = icon, size = PetalTheme.metrics.feedback.controls.sectionHeaderIconSize, tint = PetalTheme.colors.brand)
+        Text(text, color = semantic.textPrimary, style = PetalTheme.typography.feedback.sectionHeader)
         trailing?.let {
-            Spacer(Modifier.width(0.dp))
             Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) { it() }
         }
     }
@@ -424,29 +426,32 @@ fun MateNavItem(
     icon: String? = null,
     active: Boolean = false,
     indent: Int = 0,
-    height: Dp = 46.dp,
+    height: Dp = PetalTheme.metrics.feedback.controls.navigationItemHeight,
 ) {
-    val semantic = LocalSemanticColors.current
-    val textColor = if (active) BrandColor else semantic.textPrimary
-    val iconColor = if (active) BrandColor else semantic.textSecondary
+    val semantic = LOCAL_SEMANTIC_COLORS.current
+    val textColor = if (active) PetalTheme.colors.brand else semantic.textPrimary
+    val iconColor = if (active) PetalTheme.colors.brand else semantic.textSecondary
     val navInteraction = remember { MutableInteractionSource() }
     Row(
         modifier = modifier
             .fillMaxWidth()
             .height(height)
-            .clip(RoundedCornerShape(8.dp))
-            .background(if (active) BrandLighter else Color.Transparent)
+            .clip(RoundedCornerShape(PetalTheme.metrics.feedback.controls.navigationItemRadius))
+            .background(if (active) PetalTheme.colors.brandLighter else Color.Transparent)
             .mateClickable(navInteraction, onClick)
-            .padding(start = (indent + 14).dp, end = 14.dp),
+            .padding(
+                start = PetalTheme.metrics.feedback.controls.navigationItemHorizontalPadding +
+                    PetalTheme.metrics.feedback.controls.navigationItemIndentPerLevel * indent,
+                end = PetalTheme.metrics.feedback.controls.navigationItemHorizontalPadding,
+            ),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        horizontalArrangement = Arrangement.spacedBy(PetalTheme.metrics.feedback.controls.navigationItemContentSpacing),
     ) {
-        if (icon != null) MateIcon(name = icon, size = 18.dp, tint = iconColor)
+        if (icon != null) MateIcon(name = icon, size = PetalTheme.metrics.feedback.controls.navigationItemIconSize, tint = iconColor)
         Text(
             label,
             color = textColor,
-            fontSize = 15.sp,
-            fontWeight = if (active) FontWeight.Medium else FontWeight.Normal,
+            style = if (active) PetalTheme.typography.feedback.activeNavigationItem else PetalTheme.typography.feedback.navigationItem,
             maxLines = 1,
         )
     }
@@ -460,12 +465,15 @@ fun MateNavGroupLabel(
     label: String,
     modifier: Modifier = Modifier,
 ) {
-    val semantic = LocalSemanticColors.current
+    val semantic = LOCAL_SEMANTIC_COLORS.current
     Text(
         label,
         color = semantic.textPlaceholder,
-        fontSize = 12.sp,
-        fontWeight = FontWeight.SemiBold,
-        modifier = modifier.padding(start = 14.dp, top = 20.dp, bottom = 6.dp),
+        style = PetalTheme.typography.feedback.navigationGroupLabel,
+        modifier = modifier.padding(
+            start = PetalTheme.metrics.feedback.controls.navigationGroupStartPadding,
+            top = PetalTheme.metrics.feedback.controls.navigationGroupTopPadding,
+            bottom = PetalTheme.metrics.feedback.controls.navigationGroupBottomPadding,
+        ),
     )
 }

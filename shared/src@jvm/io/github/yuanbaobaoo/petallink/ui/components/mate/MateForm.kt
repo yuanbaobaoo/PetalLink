@@ -36,21 +36,14 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import io.github.yuanbaobaoo.petallink.ui.components.MateIcon
-import io.github.yuanbaobaoo.petallink.ui.theme.BrandColor
-import io.github.yuanbaobaoo.petallink.ui.theme.BrandLight
-import io.github.yuanbaobaoo.petallink.ui.theme.DesignTokens
-import io.github.yuanbaobaoo.petallink.ui.theme.ErrorColor
-import io.github.yuanbaobaoo.petallink.ui.theme.LocalSemanticColors
-import io.github.yuanbaobaoo.petallink.ui.theme.SwitchOffTrack
+import io.github.yuanbaobaoo.petallink.ui.theme.LOCAL_SEMANTIC_COLORS
+import io.github.yuanbaobaoo.petallink.ui.theme.PetalTheme
 
 /**
  * 自绘容器文本输入（v2：填充式无边框）。
@@ -66,7 +59,6 @@ import io.github.yuanbaobaoo.petallink.ui.theme.SwitchOffTrack
  * @param prefixIcon 前缀图标 name（可选）
  * @param error 错误态（红色边框）
  * @param singleLine 单行（默认 true）
- * @param fontSize 字号 sp（默认使用正文 Token）
  * @param suffix 右侧自定义内容（如清除按钮）
  */
 @Composable
@@ -79,34 +71,35 @@ fun MateTextField(
     prefixIcon: String? = null,
     error: Boolean = false,
     singleLine: Boolean = true,
-    fontSize: Int = DesignTokens.FONT_BODY,
     keyboardOptions: KeyboardOptions = KeyboardOptions.Default,
     visualTransformation: VisualTransformation = VisualTransformation.None,
     suffix: @Composable (() -> Unit)? = null,
 ) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
-    val semantic = LocalSemanticColors.current
+    val semantic = LOCAL_SEMANTIC_COLORS.current
+    val formTypography = PetalTheme.typography.form
+    val formMetrics = PetalTheme.metrics.form
     // focus/error 时白底 + 2dp 描边；常态 bg-fill 无描边（用透明 2dp 占位避免尺寸跳动）
     val borderColor = when {
         !enabled -> Color.Transparent
-        error -> ErrorColor
-        focused -> BrandLight
+        error -> PetalTheme.colors.error
+        focused -> PetalTheme.colors.brandLight
         else -> Color.Transparent
     }
     Row(
         modifier = modifier
-            .height(38.dp)
-            .clip(RoundedCornerShape(8.dp))
+            .height(formMetrics.textFieldHeight)
+            .clip(RoundedCornerShape(formMetrics.textFieldRadius))
             .background(if (focused || error) semantic.bgContainer else semantic.bgFill)
-            .border(width = 2.dp, color = borderColor, shape = RoundedCornerShape(8.dp))
-            .alpha(if (enabled) 1f else 0.6f)
-            .padding(horizontal = 12.dp),
+            .border(width = formMetrics.controls.textFieldBorderWidth, color = borderColor, shape = RoundedCornerShape(formMetrics.textFieldRadius))
+            .alpha(if (enabled) 1f else formMetrics.controls.textFieldDisabledAlpha)
+            .padding(horizontal = formMetrics.controls.textFieldHorizontalPadding),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        horizontalArrangement = Arrangement.spacedBy(formMetrics.controls.textFieldContentSpacing),
     ) {
         if (prefixIcon != null) {
-            MateIcon(name = prefixIcon, size = 16.dp, tint = semantic.textPlaceholder)
+            MateIcon(name = prefixIcon, size = formMetrics.controls.textFieldPrefixIconSize, tint = semantic.textPlaceholder)
         }
         Box(modifier = Modifier.weight(1f)) {
             // BasicTextField 无 ripple，完全自绘光标
@@ -116,11 +109,8 @@ fun MateTextField(
                 modifier = Modifier.fillMaxWidth(),
                 enabled = enabled,
                 singleLine = singleLine,
-                textStyle = TextStyle(
-                    color = semantic.textPrimary,
-                    fontSize = fontSize.sp,
-                ),
-                cursorBrush = SolidColor(BrandColor),
+                textStyle = formTypography.textFieldInput.copy(color = semantic.textPrimary),
+                cursorBrush = SolidColor(PetalTheme.colors.brand),
                 interactionSource = interaction,
                 keyboardOptions = keyboardOptions,
                 visualTransformation = visualTransformation,
@@ -129,7 +119,7 @@ fun MateTextField(
                 Text(
                     placeholder,
                     color = semantic.textPlaceholder,
-                    fontSize = fontSize.sp,
+                    style = formTypography.textFieldPlaceholder,
                 )
             }
         }
@@ -163,21 +153,23 @@ fun MateNumberField(
     enabled: Boolean = true,
 ) {
     var text by remember(value) { mutableStateOf(value.toString()) }
-    val semantic = LocalSemanticColors.current
+    val semantic = LOCAL_SEMANTIC_COLORS.current
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
+    val formTypography = PetalTheme.typography.form
+    val formMetrics = PetalTheme.metrics.form
 
     Row(
         modifier = modifier
-            .height(38.dp)
-            .clip(RoundedCornerShape(8.dp))
+            .height(formMetrics.numberFieldHeight)
+            .clip(RoundedCornerShape(formMetrics.numberFieldRadius))
             .background(if (focused) semantic.bgContainer else semantic.bgFill)
-            .border(2.dp, if (focused) BrandLight else Color.Transparent, RoundedCornerShape(8.dp))
-            .padding(horizontal = 12.dp),
+            .border(formMetrics.controls.numberFieldBorderWidth, if (focused) PetalTheme.colors.brandLight else Color.Transparent, RoundedCornerShape(formMetrics.numberFieldRadius))
+            .padding(horizontal = formMetrics.controls.numberFieldHorizontalPadding),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        horizontalArrangement = Arrangement.spacedBy(formMetrics.controls.numberFieldContentSpacing),
     ) {
-        Box(modifier = Modifier.width(120.dp)) {
+        Box(modifier = Modifier.width(formMetrics.controls.numberFieldInputWidth)) {
             BasicTextField(
                 value = text,
                 onValueChange = { input ->
@@ -191,18 +183,17 @@ fun MateNumberField(
                 modifier = Modifier.fillMaxWidth(),
                 enabled = enabled,
                 singleLine = true,
-                textStyle = TextStyle(
+                textStyle = formTypography.numberFieldInput.copy(
                     color = semantic.textPrimary,
-                    fontSize = DesignTokens.FONT_BODY.sp,
                     textAlign = TextAlign.Center,
                 ),
-                cursorBrush = SolidColor(BrandColor),
+                cursorBrush = SolidColor(PetalTheme.colors.brand),
                 interactionSource = interaction,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
             )
         }
         if (suffix.isNotEmpty()) {
-            Text(suffix, color = semantic.textSecondary, fontSize = DesignTokens.FONT_BODY_SM.sp)
+            Text(suffix, color = semantic.textSecondary, style = formTypography.numberFieldSuffix)
         }
     }
 }
@@ -229,35 +220,34 @@ fun MateStepper(
     max: Int = 999_999,
     step: Int = 1,
 ) {
-    val semantic = LocalSemanticColors.current
+    val semantic = LOCAL_SEMANTIC_COLORS.current
     val minusEnabled = value > min
     val plusEnabled = value < max
 
     Row(
         modifier = modifier
-            .clip(RoundedCornerShape(8.dp))
+            .clip(RoundedCornerShape(PetalTheme.metrics.form.controls.stepperRadius))
             .background(semantic.bgFill)
-            .padding(3.dp),
+            .padding(PetalTheme.metrics.form.controls.stepperPadding),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         StepperButton(enabled = minusEnabled, onClick = { onValueChange((value - step).coerceIn(min, max)) }) { color ->
             // 用 x 旋转 45 度作为减号（与原 Vue 一致）
-            MateIcon(name = "x", size = 14.dp, tint = color, modifier = Modifier.scale(0.8f).rotate45())
+            MateIcon(name = "x", size = PetalTheme.metrics.form.controls.stepperMinusIconSize, tint = color, modifier = Modifier.scale(0.8f).rotate45())
         }
         // 中间数值（宽 44，居中，medium）
         Box(
-            modifier = Modifier.width(44.dp),
+            modifier = Modifier.width(PetalTheme.metrics.form.controls.stepperValueWidth),
             contentAlignment = Alignment.Center,
         ) {
             Text(
                 value.toString(),
                 color = semantic.textPrimary,
-                fontSize = DesignTokens.FONT_BODY.sp,
-                fontWeight = FontWeight.Medium,
+                style = PetalTheme.typography.form.stepperValue,
             )
         }
         StepperButton(enabled = plusEnabled, onClick = { onValueChange((value + step).coerceIn(min, max)) }) { color ->
-            Text("+", color = color, fontSize = DesignTokens.FONT_TITLE_SM.sp, fontWeight = FontWeight.Medium)
+            Text("+", color = color, style = PetalTheme.typography.form.stepperAction)
         }
     }
 }
@@ -269,15 +259,22 @@ fun MateStepper(
 private fun StepperButton(enabled: Boolean, onClick: () -> Unit, content: @Composable (Color) -> Unit) {
     val interaction = remember { MutableInteractionSource() }
     val hovered by interaction.collectIsHoveredAsState()
-    val semantic = LocalSemanticColors.current
+    val semantic = LOCAL_SEMANTIC_COLORS.current
     val active = enabled && hovered
     Box(
         modifier = Modifier
-            .size(30.dp)
-            .shadow(if (active) 1.dp else 0.dp, RoundedCornerShape(5.dp))
-            .clip(RoundedCornerShape(5.dp))
+            .size(PetalTheme.metrics.form.controls.stepperButtonSize)
+            .shadow(
+                if (active) {
+                    PetalTheme.metrics.form.controls.stepperButtonShadowElevation
+                } else {
+                    PetalTheme.metrics.form.controls.stepperButtonIdleElevation
+                },
+                RoundedCornerShape(PetalTheme.metrics.form.controls.stepperButtonRadius),
+            )
+            .clip(RoundedCornerShape(PetalTheme.metrics.form.controls.stepperButtonRadius))
             .background(if (active) semantic.bgContainer else Color.Transparent)
-            .alpha(if (enabled) 1f else 0.4f)
+            .alpha(if (enabled) 1f else PetalTheme.metrics.form.controls.stepperDisabledAlpha)
             .hoverable(interaction)
             .then(
                 if (enabled) Modifier.clickable(interactionSource = interaction, indication = null, onClick = onClick)
@@ -285,7 +282,7 @@ private fun StepperButton(enabled: Boolean, onClick: () -> Unit, content: @Compo
             ),
         contentAlignment = Alignment.Center,
     ) {
-        content(if (active) BrandColor else semantic.textSecondary)
+        content(if (active) PetalTheme.colors.brand else semantic.textSecondary)
     }
 }
 
@@ -311,18 +308,17 @@ fun MateSearchField(
     onValueChange: (String) -> Unit,
     modifier: Modifier = Modifier,
     placeholder: String = "搜索文件和文件夹...",
-    maxWidth: Dp = 0.dp,
+    maxWidth: Dp = PetalTheme.metrics.form.controls.searchUnboundedWidth,
     onSubmit: (String) -> Unit = {},
 ) {
-    val widthMod = if (maxWidth > 0.dp) Modifier.width(maxWidth) else Modifier.fillMaxWidth()
-    Box(modifier = modifier.then(widthMod).height(38.dp)) {
+    val widthMod = if (maxWidth > PetalTheme.metrics.form.controls.searchUnboundedWidth) Modifier.width(maxWidth) else Modifier.fillMaxWidth()
+    Box(modifier = modifier.then(widthMod).height(PetalTheme.metrics.form.searchFieldHeight)) {
         MateTextField(
             value = value,
             onValueChange = onValueChange,
             placeholder = placeholder,
             modifier = Modifier.fillMaxWidth(),
             prefixIcon = "search",
-            fontSize = DesignTokens.FONT_BODY,
             keyboardOptions = KeyboardOptions.Default.copy(
                 imeAction = androidx.compose.ui.text.input.ImeAction.Search,
             ),
@@ -347,8 +343,9 @@ fun MateSwitch(
     modifier: Modifier = Modifier,
     disabled: Boolean = false,
 ) {
-    val trackColor = if (checked) BrandColor else SwitchOffTrack
-    val knobOffset = if (checked) 21.dp else 3.dp
+    val trackColor = if (checked) PetalTheme.colors.brand else PetalTheme.colors.switchOffTrack
+    val controls = PetalTheme.metrics.form.controls
+    val knobOffset = if (checked) controls.switchCheckedKnobOffset else controls.switchUncheckedKnobOffset
     Row(
         modifier = modifier
             .then(
@@ -357,9 +354,9 @@ fun MateSwitch(
                     onCheckedChange(!checked)
                 },
             )
-            .alpha(if (disabled) 0.5f else 1f)
-            .size(46.dp, 28.dp)
-            .clip(RoundedCornerShape(14.dp))
+            .alpha(if (disabled) PetalTheme.metrics.form.controls.switchDisabledAlpha else 1f)
+            .size(controls.switchWidth, controls.switchHeight)
+            .clip(RoundedCornerShape(controls.switchRadius))
             .background(trackColor),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -367,10 +364,10 @@ fun MateSwitch(
         Box(
             modifier = Modifier
                 .padding(start = knobOffset)
-                .size(22.dp)
-                .shadow(2.dp, CircleShape)
+                .size(controls.switchKnobSize)
+                .shadow(controls.switchKnobShadowElevation, CircleShape)
                 .clip(CircleShape)
-                .background(Color.White),
+                .background(PetalTheme.colors.switchKnob),
         )
     }
 }
@@ -392,20 +389,20 @@ fun MateCheckbox(
     checked: Boolean?,
     onCheckedChange: (Boolean?) -> Unit,
     modifier: Modifier = Modifier,
-    size: Dp = 18.dp,
+    size: Dp = PetalTheme.metrics.form.controls.checkboxDefaultSize,
     disabled: Boolean = false,
 ) {
-    val semantic = LocalSemanticColors.current
+    val semantic = LOCAL_SEMANTIC_COLORS.current
     val interaction = remember { MutableInteractionSource() }
     val hovered by interaction.collectIsFocusedAsState()
     val isChecked = checked == true
     val isIndeterminate = checked == null
     val borderColor = when {
-        isChecked || isIndeterminate -> BrandColor
-        hovered && !disabled -> BrandColor
+        isChecked || isIndeterminate -> PetalTheme.colors.brand
+        hovered && !disabled -> PetalTheme.colors.brand
         else -> semantic.textPlaceholder
     }
-    val bgColor = if (isChecked || isIndeterminate) BrandColor else semantic.bgContainer
+    val bgColor = if (isChecked || isIndeterminate) PetalTheme.colors.brand else semantic.bgContainer
 
     Box(
         modifier = modifier
@@ -421,23 +418,31 @@ fun MateCheckbox(
                     onCheckedChange(next)
                 },
             )
-            .alpha(if (disabled) 0.5f else 1f)
+            .alpha(if (disabled) PetalTheme.metrics.form.controls.checkboxDisabledAlpha else 1f)
             .size(size)
-            .clip(RoundedCornerShape(5.dp))
+            .clip(RoundedCornerShape(PetalTheme.metrics.form.controls.checkboxRadius))
             .background(bgColor)
-            .border(1.5.dp, borderColor, RoundedCornerShape(5.dp)),
+            .border(
+                PetalTheme.metrics.form.controls.checkboxBorderWidth,
+                borderColor,
+                RoundedCornerShape(PetalTheme.metrics.form.controls.checkboxRadius),
+            ),
         contentAlignment = Alignment.Center,
     ) {
         when {
-            isChecked -> MateIcon(name = "check", size = (size - 5.dp), tint = Color.White)
+            isChecked -> MateIcon(
+                name = "check",
+                size = size - PetalTheme.metrics.form.controls.checkboxCheckInset,
+                tint = PetalTheme.colors.checkboxMark,
+            )
             isIndeterminate -> {
                 // 半选：1.5px 高白条，宽 size-9，radius 1
                 Box(
                     modifier = Modifier
-                        .width(size - 9.dp)
-                        .height(1.5.dp)
-                        .clip(RoundedCornerShape(1.dp))
-                        .background(Color.White),
+                        .width(size - PetalTheme.metrics.form.controls.checkboxIndeterminateInset)
+                        .height(PetalTheme.metrics.form.controls.checkboxIndeterminateHeight)
+                        .clip(RoundedCornerShape(PetalTheme.metrics.form.controls.checkboxIndeterminateRadius))
+                        .background(PetalTheme.colors.checkboxMark),
                 )
             }
         }
@@ -452,22 +457,22 @@ fun MateRadio(
     selected: Boolean,
     onSelect: () -> Unit,
     modifier: Modifier = Modifier,
-    size: Dp = 16.dp,
+    size: Dp = PetalTheme.metrics.form.controls.radioDefaultSize,
     disabled: Boolean = false,
 ) {
-    val semantic = LocalSemanticColors.current
-    val borderColor = if (selected) BrandColor else semantic.border
+    val semantic = LOCAL_SEMANTIC_COLORS.current
+    val borderColor = if (selected) PetalTheme.colors.brand else semantic.border
     Box(
         modifier = modifier
             .then(
                 if (disabled) Modifier
                 else Modifier.clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onSelect),
             )
-            .alpha(if (disabled) 0.5f else 1f)
+            .alpha(if (disabled) PetalTheme.metrics.form.controls.radioDisabledAlpha else 1f)
             .size(size)
             .clip(CircleShape)
             .background(semantic.bgContainer)
-            .border(1.dp, borderColor, CircleShape),
+            .border(PetalTheme.metrics.form.controls.radioBorderWidth, borderColor, CircleShape),
         contentAlignment = Alignment.Center,
     ) {
         if (selected) {
@@ -476,7 +481,7 @@ fun MateRadio(
                 modifier = Modifier
                     .size(size * 0.5f)
                     .clip(CircleShape)
-                    .background(BrandColor),
+                    .background(PetalTheme.colors.brand),
             )
         }
     }

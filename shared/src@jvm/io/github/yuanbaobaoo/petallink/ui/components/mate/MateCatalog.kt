@@ -25,13 +25,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import io.github.yuanbaobaoo.petallink.ui.components.MateIcon
 import io.github.yuanbaobaoo.petallink.ui.components.MateIcons
-import io.github.yuanbaobaoo.petallink.ui.theme.LocalSemanticColors
+import io.github.yuanbaobaoo.petallink.ui.theme.LOCAL_SEMANTIC_COLORS
+import io.github.yuanbaobaoo.petallink.ui.theme.PetalTheme
 
 /**
  * 组件预览页（开发期工具，对标原 Vue 的组件 storybook）。
@@ -42,7 +40,7 @@ import io.github.yuanbaobaoo.petallink.ui.theme.LocalSemanticColors
 @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 fun MateCatalog() {
-    val semantic = LocalSemanticColors.current
+    val semantic = LOCAL_SEMANTIC_COLORS.current
     var switchChecked by remember { mutableStateOf(false) }
     var checkboxState by remember { mutableStateOf<Boolean?>(false) }
     var stepperValue by remember { mutableStateOf(6) }
@@ -54,23 +52,23 @@ fun MateCatalog() {
             .fillMaxSize()
             .background(semantic.bgPage)
             .verticalScroll(scroll)
-            .padding(24.dp),
-        verticalArrangement = Arrangement.spacedBy(24.dp),
+            .padding(PetalTheme.metrics.catalog.pagePadding),
+        verticalArrangement = Arrangement.spacedBy(PetalTheme.metrics.catalog.sectionSpacing),
     ) {
         // 图标全集
         MateSectionHeader(text = "图标系统（32 个）", icon = "list")
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(PetalTheme.metrics.catalog.itemSpacing)) {
             MateIcons.NAMES.forEach { name ->
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    MateIcon(name = name, size = 24.dp, tint = semantic.textPrimary)
-                    Text(name, fontSize = 10.sp, color = semantic.textSecondary)
+                    MateIcon(name = name, size = PetalTheme.metrics.catalog.iconPreviewSize, tint = semantic.textPrimary)
+                    Text(name, style = PetalTheme.typography.catalog.iconName, color = semantic.textSecondary)
                 }
             }
         }
 
         // 按钮
         MateSectionHeader(text = "按钮", icon = "edit")
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(horizontalArrangement = Arrangement.spacedBy(PetalTheme.metrics.catalog.itemSpacing), verticalAlignment = Alignment.CenterVertically) {
             MateButton(label = "主按钮", onClick = {})
             MateButton(label = "危险", danger = true, onClick = {})
             MateButton(label = "加载中", loading = true, onClick = {})
@@ -83,7 +81,7 @@ fun MateCatalog() {
 
         // 表单
         MateSectionHeader(text = "表单", icon = "file-text")
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(horizontalArrangement = Arrangement.spacedBy(PetalTheme.metrics.catalog.itemSpacing), verticalAlignment = Alignment.CenterVertically) {
             MateStepper(value = stepperValue, onValueChange = { stepperValue = it }, min = 1, max = 20)
             MateSwitch(checked = switchChecked, onCheckedChange = { switchChecked = it })
             MateCheckbox(checked = checkboxState, onCheckedChange = { checkboxState = it })
@@ -93,22 +91,22 @@ fun MateCatalog() {
                 onValueChange = { text = it },
                 placeholder = "输入文本...",
                 prefixIcon = "search",
-                modifier = Modifier.width(200.dp),
+                modifier = Modifier.width(PetalTheme.metrics.catalog.fieldPreviewWidth),
             )
         }
 
         // 进度
         MateSectionHeader(text = "进度", icon = "sync")
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            MateLinearProgress(value = 0.6f, modifier = Modifier.width(200.dp))
-            MateLinearProgress(modifier = Modifier.width(200.dp))
-            MateCircularProgress(size = 32.dp, value = 0.7f)
-            MateCircularProgress(size = 32.dp)
+        Row(horizontalArrangement = Arrangement.spacedBy(PetalTheme.metrics.catalog.itemSpacing), verticalAlignment = Alignment.CenterVertically) {
+            MateLinearProgress(value = 0.6f, modifier = Modifier.width(PetalTheme.metrics.catalog.progressPreviewWidth))
+            MateLinearProgress(modifier = Modifier.width(PetalTheme.metrics.catalog.progressPreviewWidth))
+            MateCircularProgress(size = PetalTheme.metrics.catalog.circularProgressSize, value = 0.7f)
+            MateCircularProgress(size = PetalTheme.metrics.catalog.circularProgressSize)
         }
 
         // 横幅
         MateSectionHeader(text = "横幅", icon = "info")
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Column(verticalArrangement = Arrangement.spacedBy(PetalTheme.metrics.catalog.verticalGroupSpacing)) {
             MateInfoBanner(message = "这是信息横幅（info）", variant = MateBannerVariant.INFO)
             MateInfoBanner(message = "操作成功", variant = MateBannerVariant.SUCCESS)
             MateInfoBanner(message = "请检查输入", variant = MateBannerVariant.WARNING)
@@ -117,7 +115,7 @@ fun MateCatalog() {
 
         // 标签
         MateSectionHeader(text = "标签", icon = "check")
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(PetalTheme.metrics.catalog.compactItemSpacing)) {
             MateTag("默认", theme = MateTagTheme.DEFAULT)
             MateTag("主要", theme = MateTagTheme.PRIMARY)
             MateTag("成功", theme = MateTagTheme.SUCCESS)
@@ -128,7 +126,7 @@ fun MateCatalog() {
 
         // 导航
         MateSectionHeader(text = "导航项", icon = "settings")
-        Column(modifier = Modifier.width(200.dp)) {
+        Column(modifier = Modifier.width(PetalTheme.metrics.catalog.dialogPreviewWidth)) {
             MateNavItem(label = "同步目录", icon = "folder", active = true, onClick = {})
             MateNavItem(label = "传输设置", icon = "transfer", onClick = {})
             MateNavItem(label = "高级设置", icon = "settings", onClick = {}, indent = 1)
@@ -136,7 +134,7 @@ fun MateCatalog() {
 
         // 对话框/Toast 触发
         MateSectionHeader(text = "弹层", icon = "alert")
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(PetalTheme.metrics.catalog.itemSpacing)) {
             MateButton(
                 label = "打开对话框",
                 onClick = {

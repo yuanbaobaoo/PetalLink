@@ -20,7 +20,8 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import io.github.yuanbaobaoo.petallink.ui.theme.LocalReducedMotion
+import io.github.yuanbaobaoo.petallink.ui.theme.LOCAL_REDUCED_MOTION
+import io.github.yuanbaobaoo.petallink.ui.theme.PetalTheme
 import java.util.concurrent.ConcurrentHashMap
 import org.jetbrains.skia.Data
 import org.jetbrains.skia.Picture
@@ -102,7 +103,7 @@ internal object SvgIconCache {
 public fun MateIcon(
     name: String,
     modifier: Modifier = Modifier,
-    size: Dp = 16.dp,
+    size: Dp = PetalTheme.metrics.icon.defaultSize,
     tint: Color = Color.Unspecified,
     spin: Boolean = false,
 ) {
@@ -119,8 +120,8 @@ public fun MateIcon(
         Canvas(modifier.size(size)) {}
         return
     }
-    val resolvedTint = if (tint == Color.Unspecified) Color(0xFF181818) else tint
-    val reducedMotion = LocalReducedMotion.current
+    val resolvedTint = if (tint == Color.Unspecified) PetalTheme.colors.defaultIconTint else tint
+    val reducedMotion = LOCAL_REDUCED_MOTION.current
     val effectiveSpin = spin && !reducedMotion
     val rotation = if (effectiveSpin) {
         val transition = rememberInfiniteTransition(label = "mate-icon-spin")
@@ -128,7 +129,10 @@ public fun MateIcon(
             initialValue = 0f,
             targetValue = 360f,
             animationSpec = infiniteRepeatable(
-                animation = tween(durationMillis = 1000, easing = LinearEasing),
+                animation = tween(
+                    durationMillis = PetalTheme.metrics.icon.spinDurationMillis,
+                    easing = LinearEasing,
+                ),
                 repeatMode = RepeatMode.Restart,
             ),
             label = "mate-icon-rotation",

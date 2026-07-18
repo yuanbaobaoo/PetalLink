@@ -25,10 +25,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import io.github.yuanbaobaoo.petallink.data.TransferDirection
 import io.github.yuanbaobaoo.petallink.sync.TransferState
 import io.github.yuanbaobaoo.petallink.ui.components.MateIcon
@@ -42,15 +39,8 @@ import io.github.yuanbaobaoo.petallink.ui.components.mate.MatePopupMenu
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateTag
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateTagSize
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateTagTheme
-import io.github.yuanbaobaoo.petallink.ui.theme.BrandColor
-import io.github.yuanbaobaoo.petallink.ui.theme.BrandLighter
-import io.github.yuanbaobaoo.petallink.ui.theme.ErrorBg
-import io.github.yuanbaobaoo.petallink.ui.theme.ErrorColor
-import io.github.yuanbaobaoo.petallink.ui.theme.InfoBg
-import io.github.yuanbaobaoo.petallink.ui.theme.InfoColor
-import io.github.yuanbaobaoo.petallink.ui.theme.LocalSemanticColors
-import io.github.yuanbaobaoo.petallink.ui.theme.SuccessColor
-import io.github.yuanbaobaoo.petallink.ui.theme.WarningColor
+import io.github.yuanbaobaoo.petallink.ui.theme.LOCAL_SEMANTIC_COLORS
+import io.github.yuanbaobaoo.petallink.ui.theme.PetalTheme
 import io.github.yuanbaobaoo.petallink.ui.viewmodel.TransferTaskUi
 
 /**
@@ -63,15 +53,16 @@ private data class StateMeta(val icon: String, val label: String, val color: Col
  *
  * v2：中性灰由硬编码改为语义色（[neutral] 传 semantic.textSecondary，浅色下与原值一致）。
  */
+@Composable
 private fun stateMeta(state: TransferState, neutral: Color): StateMeta = when (state) {
     TransferState.Pending -> StateMeta("clock", "等待调度", neutral, false)
-    TransferState.Running -> StateMeta("sync", "传输中", BrandColor, true)
-    TransferState.WaitingForNetwork -> StateMeta("clock", "等待网络", WarningColor, false)
-    TransferState.BackingOff -> StateMeta("clock", "等待重试", WarningColor, false)
-    TransferState.VerifyingRemote -> StateMeta("sync", "核验远端", BrandColor, true)
-    TransferState.RestartRequired -> StateMeta("refresh", "等待重新规划", WarningColor, false)
-    TransferState.Completed -> StateMeta("check", "已完成", SuccessColor, false)
-    TransferState.Failed -> StateMeta("x", "失败", ErrorColor, false)
+    TransferState.Running -> StateMeta("sync", "传输中", PetalTheme.colors.brand, true)
+    TransferState.WaitingForNetwork -> StateMeta("clock", "等待网络", PetalTheme.colors.warning, false)
+    TransferState.BackingOff -> StateMeta("clock", "等待重试", PetalTheme.colors.warning, false)
+    TransferState.VerifyingRemote -> StateMeta("sync", "核验远端", PetalTheme.colors.brand, true)
+    TransferState.RestartRequired -> StateMeta("refresh", "等待重新规划", PetalTheme.colors.warning, false)
+    TransferState.Completed -> StateMeta("check", "已完成", PetalTheme.colors.success, false)
+    TransferState.Failed -> StateMeta("x", "失败", PetalTheme.colors.error, false)
     TransferState.Canceled -> StateMeta("x", "已取消", neutral, false)
 }
 
@@ -101,12 +92,13 @@ private fun dirLabel(direction: String): String = when (direction) {
  *
  * v2：等待类由硬编码灰改为语义色（[waitingColor] 传 semantic.textPlaceholder）。
  */
+@Composable
 private fun progressColor(state: TransferState, waitingColor: Color): Color = when (state) {
-    TransferState.Completed -> SuccessColor
-    TransferState.Failed -> ErrorColor
+    TransferState.Completed -> PetalTheme.colors.success
+    TransferState.Failed -> PetalTheme.colors.error
     TransferState.Pending, TransferState.WaitingForNetwork,
     TransferState.BackingOff, TransferState.RestartRequired -> waitingColor
-    else -> BrandColor
+    else -> PetalTheme.colors.brand
 }
 
 /**
@@ -142,7 +134,8 @@ fun TransferPopoverScreen(
     onClearFailed: () -> Unit,
     onClearFinished: () -> Unit,
 ) {
-    val semantic = LocalSemanticColors.current
+    val semantic = LOCAL_SEMANTIC_COLORS.current
+    val metrics = PetalTheme.metrics.transferPopover
     val processing = tasks.count {
         it.state in setOf(TransferState.Running, TransferState.VerifyingRemote, TransferState.Pending)
     }
@@ -158,25 +151,27 @@ fun TransferPopoverScreen(
     ) {
         Column(
             modifier = Modifier
-                .width(440.dp)
-                .height(580.dp)
-                .padding(top = 64.dp, end = 20.dp)
-                .shadow(elevation = 16.dp, shape = RoundedCornerShape(12.dp))
-                .clip(RoundedCornerShape(12.dp))
+                .width(metrics.panelWidth)
+                .height(metrics.panelHeight)
+                .padding(top = metrics.panelTopOffset, end = metrics.panelEndOffset)
+                .shadow(elevation = metrics.panelShadowElevation, shape = RoundedCornerShape(metrics.panelRadius))
+                .clip(RoundedCornerShape(metrics.panelRadius))
                 .background(semantic.bgContainer)
-                .border(0.5.dp, semantic.border, RoundedCornerShape(12.dp)),
+                .border(metrics.panelBorderWidth, semantic.border, RoundedCornerShape(metrics.panelRadius)),
         ) {
             // header 60（v2：transfer 图标 18 brand + 标题 18 semibold + ICON 关闭）
             Row(
-                modifier = Modifier.fillMaxWidth().height(60.dp).padding(start = 20.dp, end = 12.dp),
+                modifier = Modifier.fillMaxWidth().height(metrics.headerHeight).padding(
+                    start = metrics.headerStartPadding,
+                    end = metrics.headerEndPadding,
+                ),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                horizontalArrangement = Arrangement.spacedBy(metrics.headerContentSpacing),
             ) {
-                MateIcon(name = "transfer", size = 18.dp, tint = BrandColor)
+                MateIcon(name = "transfer", size = metrics.headerIconSize, tint = PetalTheme.colors.brand)
                 Text(
                     "传输队列",
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.SemiBold,
+                    style = PetalTheme.typography.transfer.panelTitle,
                     color = semantic.textPrimary,
                     modifier = Modifier.weight(1f),
                 )
@@ -184,9 +179,13 @@ fun TransferPopoverScreen(
             }
             // stats（v2：stat-pill 卡片行，padding 0/20/14，gap 8；右侧清空菜单 trigger 保持）
             Row(
-                modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 14.dp),
+                modifier = Modifier.fillMaxWidth().padding(
+                    start = metrics.summaryHorizontalPadding,
+                    end = metrics.summaryHorizontalPadding,
+                    bottom = metrics.summaryBottomPadding,
+                ),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(metrics.summaryItemSpacing),
             ) {
                 StatPill(num = processing, label = "处理中", modifier = Modifier.weight(1f))
                 StatPill(num = waiting, label = "等待中", modifier = Modifier.weight(1f))
@@ -231,26 +230,28 @@ fun TransferPopoverScreen(
  * stat-pill 统计卡片（v2：bgFill radius-md(8)，padding 8/10，上数字下标签）。
  *
  * 数字 17 bold（tabular-nums），标签 12 textSecondary；
- * error 变体（历史失败）：ErrorBg 底 + ErrorColor 数字。
+ * error 变体（历史失败）：PetalTheme.colors.errorBg 底 + PetalTheme.colors.error 数字。
  */
 @Composable
 private fun StatPill(num: Int, label: String, modifier: Modifier = Modifier, error: Boolean = false) {
-    val semantic = LocalSemanticColors.current
+    val semantic = LOCAL_SEMANTIC_COLORS.current
+    val metrics = PetalTheme.metrics.transferPopover
     Column(
         modifier = modifier
-            .clip(RoundedCornerShape(8.dp))
-            .background(if (error) ErrorBg else semantic.bgFill)
-            .padding(horizontal = 10.dp, vertical = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(2.dp),
+            .clip(RoundedCornerShape(metrics.summaryRadius))
+            .background(if (error) PetalTheme.colors.errorBg else semantic.bgFill)
+            .padding(
+                horizontal = metrics.summaryHorizontalContentPadding,
+                vertical = metrics.summaryVerticalContentPadding,
+            ),
+        verticalArrangement = Arrangement.spacedBy(metrics.summaryTextSpacing),
     ) {
         Text(
             "$num",
-            fontSize = 17.sp,
-            fontWeight = FontWeight.Bold,
-            color = if (error) ErrorColor else semantic.textPrimary,
-            style = androidx.compose.ui.text.TextStyle(fontFeatureSettings = "tnum"),
+            style = PetalTheme.typography.transfer.summaryValue.copy(fontFeatureSettings = "tnum"),
+            color = if (error) PetalTheme.colors.error else semantic.textPrimary,
         )
-        Text(label, fontSize = 12.sp, color = semantic.textSecondary)
+        Text(label, style = PetalTheme.typography.transfer.summaryLabel, color = semantic.textSecondary)
     }
 }
 
@@ -259,31 +260,39 @@ private fun StatPill(num: Int, label: String, modifier: Modifier = Modifier, err
  */
 @Composable
 private fun TransferItemRow(task: TransferTaskUi, onRetry: (Long) -> Unit) {
-    val semantic = LocalSemanticColors.current
+    val semantic = LOCAL_SEMANTIC_COLORS.current
+    val metrics = PetalTheme.metrics.transferPopover
     val meta = stateMeta(task.state, semantic.textSecondary)
-    // v2 方向色块配色：上传 BrandLighter/BrandColor；下载 InfoBg/InfoColor；删除 bgFill/textSecondary
+    // v2 方向色块配色：上传 PetalTheme.colors.brandLighter/PetalTheme.colors.brand；下载 PetalTheme.colors.infoBg/PetalTheme.colors.info；删除 bgFill/textSecondary
     val (dirBg, dirFg) = when (task.direction) {
-        "download", "download_update" -> InfoBg to InfoColor
+        "download", "download_update" -> PetalTheme.colors.infoBg to PetalTheme.colors.info
         "delete" -> semantic.bgFill to semantic.textSecondary
-        else -> BrandLighter to BrandColor
+        else -> PetalTheme.colors.brandLighter to PetalTheme.colors.brand
     }
     Column {
         Row(
-            modifier = Modifier.fillMaxWidth().heightIn(min = 68.dp).padding(horizontal = 20.dp, vertical = 10.dp),
+            modifier = Modifier.fillMaxWidth().heightIn(min = metrics.taskMinimumHeight).padding(
+                horizontal = metrics.taskHorizontalPadding,
+                vertical = metrics.taskVerticalPadding,
+            ),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(metrics.taskContentSpacing),
         ) {
             // 方向色块（36×36 radius 8）
             Box(
-                modifier = Modifier.size(36.dp).clip(RoundedCornerShape(8.dp)).background(dirBg),
+                modifier = Modifier.size(metrics.directionBadgeSize)
+                    .clip(RoundedCornerShape(metrics.directionBadgeRadius)).background(dirBg),
                 contentAlignment = Alignment.Center,
             ) {
-                MateIcon(name = dirIcon(task.direction), size = 18.dp, tint = dirFg)
+                MateIcon(name = dirIcon(task.direction), size = metrics.directionIconSize, tint = dirFg)
             }
             // 信息区（flex:1，v2 gap 5）
-            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(metrics.taskInfoSpacing)) {
                 // 名称行（v2：dir 文字 chip MateTag SMALL + 文件名 14.5 medium）
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(metrics.taskNameSpacing),
+                ) {
                     MateTag(
                         label = dirLabel(task.direction),
                         theme = if (task.direction == "upload") MateTagTheme.PRIMARY else MateTagTheme.DEFAULT,
@@ -291,8 +300,7 @@ private fun TransferItemRow(task: TransferTaskUi, onRetry: (Long) -> Unit) {
                     )
                     Text(
                         task.fileName,
-                        fontSize = 14.5.sp,
-                        fontWeight = FontWeight.Medium,
+                        style = PetalTheme.typography.transfer.taskName,
                         color = semantic.textPrimary,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
@@ -302,35 +310,37 @@ private fun TransferItemRow(task: TransferTaskUi, onRetry: (Long) -> Unit) {
                 if ((task.state == TransferState.Failed || task.state == TransferState.RestartRequired) && task.errorMessage != null) {
                     Text(
                         task.errorMessage,
-                        fontSize = 13.sp,
-                        color = ErrorColor,
-                        lineHeight = (13 * 1.45f).sp,
+                        style = PetalTheme.typography.transfer.taskDescription,
+                        color = PetalTheme.colors.error,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                     )
                 } else if (task.direction != "delete" && task.bytesTotal > 0) {
                     // 进度条 + 百分比 + 已传/总字节（对标原 Vue tp-item__pct；v2：12.5sp textSecondary tabular）
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(metrics.taskProgressSpacing),
+                    ) {
                         MateLinearProgress(
                             value = task.progress,
                             color = progressColor(task.state, semantic.textPlaceholder),
                             modifier = Modifier.weight(1f),
                         )
                         val pctText = "${(task.progress * 100).toInt()}% · ${formatFileSize(task.bytesDone)}/${formatFileSize(task.bytesTotal)}"
-                        Text(pctText, fontSize = 12.5.sp, color = semantic.textSecondary, style = androidx.compose.ui.text.TextStyle(fontFeatureSettings = "tnum"))
+                        Text(pctText, color = semantic.textSecondary, style = PetalTheme.typography.transfer.taskProgress.copy(fontFeatureSettings = "tnum"))
                     }
                 } else if (task.direction == "delete") {
-                    Text("删除操作", fontSize = 13.sp, color = semantic.textSecondary)
+                    Text("删除操作", style = PetalTheme.typography.transfer.deleteOperation, color = semantic.textSecondary)
                 }
             }
             // 状态区（80px 右对齐，stateMeta 九态映射，13sp medium）
             Row(
-                modifier = Modifier.width(80.dp),
+                modifier = Modifier.width(metrics.taskStateWidth),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(3.dp, Alignment.End),
+                horizontalArrangement = Arrangement.spacedBy(metrics.taskStateSpacing, Alignment.End),
             ) {
-                MateIcon(name = meta.icon, size = 12.dp, tint = meta.color, spin = meta.spin)
-                Text(meta.label, fontSize = 13.sp, fontWeight = FontWeight.Medium, color = meta.color)
+                MateIcon(name = meta.icon, size = metrics.taskStateIconSize, tint = meta.color, spin = meta.spin)
+                Text(meta.label, style = PetalTheme.typography.transfer.taskState, color = meta.color)
             }
             // 重试按钮（条件）
             if (canRetry(task)) {
