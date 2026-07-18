@@ -1,0 +1,56 @@
+product:
+  type: kmp/lib
+  platforms: [jvm]
+
+dependencies:
+  - $libs.kotlin.coroutines
+  - $libs.kotlin.serialization.json
+  - $libs.ktor.core
+  - $libs.ktor.content.negotiation
+  - $libs.ktor.serialization.json
+  - $libs.room.runtime
+  - $libs.sqlite.bundled
+
+dependencies@jvm:
+  - $compose.desktop.currentOs
+  - $libs.ktor.cio
+  - $libs.jna
+  - $libs.jna.platform
+  - $libs.slf4j.nop: runtime-only
+
+test-dependencies:
+  - $libs.kotlin.coroutines.test
+  - $libs.ktor.mock
+
+repositories:
+  - https://maven.aliyun.com/repository/public
+  - https://maven.aliyun.com/repository/google
+  - https://maven.google.com
+  - https://repo.maven.apache.org/maven2
+
+plugins:
+  petallink-toolchain: enabled
+
+settings:
+  kotlin:
+    version: 2.3.20
+    serialization:
+      format: json
+      version: 1.7.3
+    ksp:
+      version: 2.3.9
+      processors:
+        - $libs.room.compiler
+      processorOptions:
+        room.schemaLocation: ../schemas
+  jvm:
+    jdk:
+      version: 25
+      selectionMode: alwaysProvision
+    release: 25
+    test:
+      freeJvmArgs:
+        - --enable-native-access=ALL-UNNAMED
+  compose:
+    enabled: true
+    version: 1.11.1

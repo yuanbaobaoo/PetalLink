@@ -31,11 +31,11 @@ object EnvLoader {
      *
      * 搜索顺序（首个命中即用）：
      * 1. 当前工作目录的 `.env`
-     * 2. 当前工作目录逐级向上的 `.env`（最多 4 级，覆盖 Gradle 子模块工作目录场景）
+     * 2. 当前工作目录逐级向上的 `.env`（最多 4 级，覆盖子模块工作目录场景）
      * 3. 可执行文件 / classpath 目录的 `.env`
      *
      * 对标原 Rust `env_loader.rs`：当前目录 → exe 目录 → exe 父目录。
-     * CMP `./gradlew run` 时工作目录是项目根，直接读取 `.env`。
+     * CMP `./kotlin run` 时工作目录是项目根，直接读取 `.env`。
      *
      * @param workingDirectory 当前进程用于搜索 `.env` 的起始目录
      */

@@ -2,7 +2,7 @@
 
 > 所有回复使用**中文**，代码注释使用**简短、准确的中文**，代码标识符和专有技术名词保留标准英文写法。
 > 
-> **UI 开发必须遵循 `docs/plan/09-设计系统.md` 与 `src/jvmMain/.../ui/theme/DesignTokens.kt` 中定义的设计令牌**（颜色、间距、圆角、字号统一取自 `DesignTokens`，禁止在 Composable 内硬编码带单位的数值）。
+> **UI 开发必须遵循 `docs/plan/09-设计系统.md` 与 `shared/src@jvm/.../ui/theme/DesignTokens.kt` 中定义的设计令牌**（颜色、间距、圆角、字号统一取自 `DesignTokens`，禁止在 Composable 内硬编码带单位的数值）。
 
 ---
 
@@ -282,8 +282,8 @@ private suspend fun <T> drive(block: suspend () -> T): AppResult<T> = try {
 
 ### 6.1 测试组织
 
-- `commonTest/`：跨平台纯逻辑测试（不依赖 JVM 平台特性），包结构镜像 `commonMain`。
-- `jvmTest/`：依赖 JVM/macOS 平台的测试（文件系统、JNA、Ktor 引擎、ApplicationRoot 装配）。
+- `shared/test/`：跨平台纯逻辑测试（不依赖 JVM 平台特性），包结构镜像 `shared/src`。
+- `shared/test@jvm/`：依赖 JVM/macOS 平台的测试（文件系统、JNA、Ktor 引擎、ApplicationRoot 装配）。
 - 测试文件命名 `XxxTest.kt`，与被测类同包；兼容性测试放 `compat/` 子包（如 `LegacyTauriCompatibilityTest`）。
 
 ### 6.2 测试编写约定
@@ -307,15 +307,15 @@ fun 跨日期写不同文件并清理30天以前日志() { ... }
 
 - 只保留核心业务合同、协议边界、状态机、恢复语义和高风险回归测试；删除重复、低价值或只验证实现细节的测试。
 - 真实云端、真实账号或人工环境测试必须用 `@Ignore` 标注，并通过明确的环境变量显式启用；默认测试不得访问真实外部服务或产生外部副作用。
-- 不硬编码测试数量；文档统一以 `./gradlew :shared:jvmTest -- --list-tests`（或实际命令输出）为准。
+- 不硬编码测试数量；文档统一以 `./kotlin test` 的实际输出为准。
 
 ### 6.4 验证命令
 
 常规验证至少包括：
 
 ```bash
-./gradlew :shared:jvmTest                    # 单元 + 集成测试
-./gradlew :shared:compileKotlinJvm           # 编译检查
+./kotlin test                                # 单元 + 集成测试
+./kotlin build                               # 编译检查
 ```
 
 涉及行为变更时再运行相关测试；发布前的完整矩阵见 `ai/release-rule.md`。
@@ -328,7 +328,7 @@ fun 跨日期写不同文件并清理30天以前日志() { ... }
 
 ### 8.1 agent 行为边界（强制）
 
-- **agent 只允许"打包"，不允许"执行自己写的代码"。**"打包"指调用既有的、用户已知的构建命令（如 `./gradlew :shared:packageDmg`）。agent 不得运行任何由自己新编写、尚未经用户逐行审查确认的任务、脚本或可执行产物。
+- **agent 只允许"打包"，不允许"执行自己写的代码"。**"打包"指调用既有的、用户已知的构建命令（如 `./kotlin do packageDmg`）。agent 不得运行任何由自己新编写、尚未经用户逐行审查确认的任务、脚本或可执行产物。
 - 新增任何构建任务、脚本、会删除文件的自定义逻辑，必须先在对话中以完整源码形式交用户审查，得到明确同意后才能执行；不得先写进文件再顺带跑起来。
 
 ### 8.2 禁止的文件系统操作（强制）

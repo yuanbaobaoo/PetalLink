@@ -62,8 +62,13 @@ kotlin {
     }
 
     sourceSets {
-        jvmMain { kotlin.srcDir(generatedBuildInfo) }
+        jvmMain {
+            kotlin.srcDir("shared/src@jvm")
+            kotlin.srcDir(generatedBuildInfo)
+            resources.srcDir("shared/resources@jvm")
+        }
         commonMain {
+            kotlin.srcDir("shared/src")
             dependencies {
                 implementation(libs.kotlin.coroutines)
                 implementation(libs.kotlin.serialization.json)
@@ -84,6 +89,7 @@ kotlin {
             }
         }
         commonTest {
+            kotlin.srcDir("shared/test")
             dependencies {
                 implementation(kotlin("test"))
                 implementation(libs.kotlin.coroutines)
@@ -91,6 +97,7 @@ kotlin {
                 implementation(libs.ktor.mock)
             }
         }
+        jvmTest { kotlin.srcDir("shared/test@jvm") }
     }
 }
 
@@ -128,9 +135,9 @@ compose.desktop {
                 packageBuildVersion = petalLinkVersion
                 dmgPackageVersion = petalLinkVersion
                 dmgPackageBuildVersion = petalLinkVersion
-                iconFile.set(project.file("src/jvmMain/resources/icon.icns"))
-                entitlementsFile.set(project.file("src/jvmMain/resources/Entitlements.plist"))
-                runtimeEntitlementsFile.set(project.file("src/jvmMain/resources/RuntimeEntitlements.plist"))
+                iconFile.set(project.file("shared/resources@jvm/icon.icns"))
+                entitlementsFile.set(project.file("shared/resources@jvm/Entitlements.plist"))
+                runtimeEntitlementsFile.set(project.file("shared/resources@jvm/RuntimeEntitlements.plist"))
                 signing {
                     sign.set(providers.environmentVariable("PETALLINK_MAC_SIGN").map { it.toBoolean() }.orElse(false))
                     identity.set(providers.environmentVariable("PETALLINK_MAC_SIGN_IDENTITY"))

@@ -1,0 +1,23 @@
+product: jvm/app
+
+dependencies:
+  - ../shared
+
+repositories:
+  - https://maven.aliyun.com/repository/public
+  - https://maven.aliyun.com/repository/google
+  - https://maven.google.com
+  - https://repo.maven.apache.org/maven2
+
+settings:
+  kotlin:
+    version: 2.3.20
+  jvm:
+    jdk:
+      version: 25
+      selectionMode: alwaysProvision
+    release: 25
+    mainClass: io.github.yuanbaobaoo.petallink.launcher.MainKt
+  compose:
+    enabled: true
+    version: 1.11.1

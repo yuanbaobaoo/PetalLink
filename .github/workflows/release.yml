@@ -14,11 +14,6 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-          cache: gradle
       - name: Validate tag and single version source
         shell: bash
         run: |
@@ -58,7 +53,7 @@ jobs:
           HWCLOUD_CLIENT_ID: ${{ secrets.HWCLOUD_CLIENT_ID }}
           HWCLOUD_CLIENT_SECRET: ${{ secrets.HWCLOUD_CLIENT_SECRET }}
         run: |
-          ./gradlew jvmTest createReleaseDistributable notarizeReleaseDmg --stacktrace
+          ./kotlin do releaseDmg
       - name: Staple and prepare updater artifact
         shell: bash
         run: |

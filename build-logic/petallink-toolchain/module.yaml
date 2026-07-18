@@ -1,0 +1,11 @@
+product: jvm/amper-plugin
+
+pluginInfo:
+  id: petallink-toolchain
+
+settings:
+  jvm:
+    jdk:
+      version: 25
+      selectionMode: alwaysProvision
+    release: 21
