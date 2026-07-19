@@ -9,7 +9,29 @@ permissions:
   contents: write
 
 jobs:
+  ci:
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unit, contract and integration tests
+        run: ./kotlin test
+      - name: Build unsigned DMG
+        run: ./kotlin do packageDmg
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: .kotlin/build/reports
+      - name: Upload unsigned DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: PetalLink-unsigned-dmg
+          path: build/compose/binaries/main/dmg/*.dmg
+
   release-macos:
+    needs: ci
     runs-on: macos-14
     timeout-minutes: 60
     steps:

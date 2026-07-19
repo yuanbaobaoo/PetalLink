@@ -127,7 +127,14 @@ fun MainScreen(
                 // 左侧：搜索框 + 清除按钮（v2：flex:1，max-width 420px；weight fill=false 让剩余空间留在按钮前）
                 MateSearchField(
                     value = searchKeyword,
-                    onValueChange = { searchKeyword = it },
+                    onValueChange = { value ->
+                        searchKeyword = value
+                        // 搜索态下清空关键词时退出搜索，恢复展示全部目录
+                        if (value.isBlank() && submittedSearch.isNotEmpty()) {
+                            submittedSearch = ""
+                            onSearch("")
+                        }
+                    },
                     onSubmit = { query ->
                         // 仅回车提交才触发搜索（对标原 Vue @submit）
                         val keyword = query.trim()
