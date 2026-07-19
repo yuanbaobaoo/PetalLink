@@ -442,10 +442,11 @@ class DesktopAppViewModel(
     }
 
     /**
-     * 打开文件项：文件夹则进入，文件则按需下载到本地后刷新。
+     * 打开文件项：文件夹则进入；仅在已配置同步目录时，文件才按需下载到本地后刷新。
      */
     fun openItem(file: DriveFile) {
         if (file.isFolder()) return enterFolder(file)
+        if (!mutableState.value.config.mountConfigured) return
         val id = file.id ?: return
         val destination = localPathFor(file)
         scope.launch {

@@ -193,265 +193,265 @@ object DesignTokens {
         // 品牌标识字体。
         brand = BrandTypography(
             // 紧凑 Logo 文字。
-            compactLogoLabel = textStyle(11f, FontWeight.SemiBold),
+            compactLogoLabel = textStyle(10f, FontWeight.SemiBold),
             // 完整 Logo 文字。
-            fullLogoLabel = textStyle(11.5f, FontWeight.SemiBold),
+            fullLogoLabel = textStyle(10.5f, FontWeight.SemiBold),
         ),
         // 按钮字体。
         button = ButtonTypography(
             // 主按钮文字。
-            primaryLabel = textStyle(14f, FontWeight.Medium),
+            primaryLabel = textStyle(12f, FontWeight.Medium),
             // 软色按钮文字。
-            softLabel = textStyle(12f, FontWeight.Medium),
+            softLabel = textStyle(11f, FontWeight.Medium),
             // 文字按钮文字。
-            textLabel = textStyle(13f, FontWeight.Medium),
+            textLabel = textStyle(12f, FontWeight.Medium),
             // 图标文字按钮文字。
-            iconTextLabel = textStyle(14f, FontWeight.Medium),
+            iconTextLabel = textStyle(12f, FontWeight.Medium),
             // 按钮角标文字。
-            badgeLabel = textStyle(11f, FontWeight.SemiBold),
+            badgeLabel = textStyle(10f, FontWeight.SemiBold),
         ),
         // 菜单字体。
         menu = MenuTypography(
             // 菜单项文字。
-            itemLabel = textStyle(14f),
+            itemLabel = textStyle(13f),
         ),
         // 表单字体。
         form = FormTypography(
             // 文本框输入文字。
-            textFieldInput = textStyle(14f),
+            textFieldInput = textStyle(13f),
             // 文本框占位文字。
-            textFieldPlaceholder = textStyle(14f),
+            textFieldPlaceholder = textStyle(13f),
             // 数值框输入文字。
-            numberFieldInput = textStyle(14f),
+            numberFieldInput = textStyle(13f),
             // 数值框单位文字。
-            numberFieldSuffix = textStyle(13f),
+            numberFieldSuffix = textStyle(12f),
             // 步进器数值文字。
-            stepperValue = textStyle(14f, FontWeight.Medium),
+            stepperValue = textStyle(13f, FontWeight.Medium),
             // 步进器操作文字。
-            stepperAction = textStyle(17f, FontWeight.Medium),
+            stepperAction = textStyle(16f, FontWeight.Medium),
         ),
         // 提示和导航字体。
         feedback = FeedbackTypography(
             // 横幅标题。
-            bannerTitle = textStyle(14f, FontWeight.SemiBold),
+            bannerTitle = textStyle(13f, FontWeight.SemiBold),
             // 横幅正文。
-            bannerMessage = textStyle(14f, lineHeight = 21.7f),
+            bannerMessage = textStyle(13f, lineHeight = 21.7f),
             // 小标签文字。
-            smallTagLabel = textStyle(13f, FontWeight.Medium),
+            smallTagLabel = textStyle(12f, FontWeight.Medium),
             // 中标签文字。
-            mediumTagLabel = textStyle(14f, FontWeight.Medium),
+            mediumTagLabel = textStyle(13f, FontWeight.Medium),
             // 空状态标题。
-            emptyStateTitle = textStyle(16f, FontWeight.SemiBold),
+            emptyStateTitle = textStyle(15f, FontWeight.SemiBold),
             // 空状态说明。
-            emptyStateDescription = textStyle(14f, lineHeight = 21f),
+            emptyStateDescription = textStyle(13f, lineHeight = 21f),
             // 统计数量。
-            statChipCount = textStyle(13f, FontWeight.Medium),
+            statChipCount = textStyle(12f, FontWeight.Medium),
             // 统计标签。
-            statChipLabel = textStyle(13f, FontWeight.Medium),
+            statChipLabel = textStyle(12f, FontWeight.Medium),
             // 区块标题。
-            sectionHeader = textStyle(19f, FontWeight.SemiBold),
+            sectionHeader = textStyle(18f, FontWeight.SemiBold),
             // 导航项文字。
-            navigationItem = textStyle(15f),
+            navigationItem = textStyle(14f),
             // 活动导航项文字。
-            activeNavigationItem = textStyle(15f, FontWeight.Medium),
+            activeNavigationItem = textStyle(14f, FontWeight.Medium),
             // 导航分组文字。
             navigationGroupLabel = textStyle(12f, FontWeight.SemiBold),
         ),
         // 对话框字体。
         dialog = DialogTypography(
             // 对话框标题。
-            title = textStyle(18f, FontWeight.SemiBold),
+            title = textStyle(17f, FontWeight.SemiBold),
             // 对话框正文。
-            body = textStyle(15f, lineHeight = 24.75f),
+            body = textStyle(14f, lineHeight = 24.75f),
             // Toast 消息。
-            toastMessage = textStyle(14f, FontWeight.Medium),
+            toastMessage = textStyle(13f, FontWeight.Medium),
         ),
         // 侧边栏字体。
         sidebar = SidebarTypography(
             // 区块标签。
-            sectionLabel = textStyle(12f, FontWeight.SemiBold, letterSpacing = 0.4f),
+            sectionLabel = textStyle(11f, FontWeight.SemiBold, letterSpacing = 0.4f),
             // 账号头像文字。
-            accountAvatar = textStyle(15f, FontWeight.SemiBold),
+            accountAvatar = textStyle(14f, FontWeight.SemiBold),
             // 账号名称。
-            accountName = textStyle(15f, FontWeight.SemiBold),
+            accountName = textStyle(14f, FontWeight.SemiBold),
             // 账号邮箱。
-            accountEmail = textStyle(14f),
+            accountEmail = textStyle(12f),
             // 配额说明。
-            quotaDescription = textStyle(12.5f),
+            quotaDescription = textStyle(11.5f),
             // 更新下载提示。
-            downloadUpdateLabel = textStyle(14f, FontWeight.SemiBold),
+            downloadUpdateLabel = textStyle(13f, FontWeight.SemiBold),
             // 更新下载进度。
-            downloadUpdateProgress = textStyle(14f, FontWeight.Bold),
+            downloadUpdateProgress = textStyle(13f, FontWeight.Bold),
             // 可用更新提示。
-            availableUpdateLabel = textStyle(14f, FontWeight.SemiBold),
+            availableUpdateLabel = textStyle(13f, FontWeight.SemiBold),
             // 关闭更新操作。
-            dismissUpdateAction = textStyle(14f),
+            dismissUpdateAction = textStyle(13f),
             // 安装更新操作。
-            installUpdateAction = textStyle(13f, FontWeight.SemiBold),
+            installUpdateAction = textStyle(12f, FontWeight.SemiBold),
             // 目录树节点。
-            treeNodeLabel = textStyle(14f),
+            treeNodeLabel = textStyle(13f),
             // 选中目录树节点。
-            selectedTreeNodeLabel = textStyle(14f, FontWeight.Medium),
+            selectedTreeNodeLabel = textStyle(13f, FontWeight.Medium),
         ),
         // 面包屑字体。
         breadcrumb = BreadcrumbTypography(
             // 分隔符。
-            separator = textStyle(13f),
+            separator = textStyle(12f),
             // 普通路径项。
-            item = textStyle(14f),
+            item = textStyle(13f),
             // 当前路径项。
-            currentItem = textStyle(14f, FontWeight.SemiBold),
+            currentItem = textStyle(13f, FontWeight.SemiBold),
         ),
         // 状态栏字体。
         statusBar = StatusBarTypography(
             // 当前同步状态。
-            currentStatus = textStyle(14f, FontWeight.Medium),
+            currentStatus = textStyle(13f, FontWeight.Medium),
             // 最近同步时间。
-            lastSyncTime = textStyle(13.5f),
+            lastSyncTime = textStyle(12.5f),
         ),
         // 文件列表字体。
         fileList = FileListTypography(
             // 选中项汇总。
-            selectionSummary = textStyle(14f, FontWeight.SemiBold),
+            selectionSummary = textStyle(13f, FontWeight.SemiBold),
             // 状态列标题。
-            statusColumnHeader = textStyle(12.5f, FontWeight.SemiBold),
+            statusColumnHeader = textStyle(11.5f, FontWeight.SemiBold),
             // 操作列标题。
-            actionColumnHeader = textStyle(12.5f, FontWeight.SemiBold),
+            actionColumnHeader = textStyle(11.5f, FontWeight.SemiBold),
             // 已加载项汇总。
-            loadedSummary = textStyle(13f),
+            loadedSummary = textStyle(12f),
             // 工具栏操作。
-            toolbarAction = textStyle(14f, FontWeight.Medium),
+            toolbarAction = textStyle(13f, FontWeight.Medium),
             // 通用列标题。
-            genericColumnHeader = textStyle(12.5f, FontWeight.SemiBold),
+            genericColumnHeader = textStyle(11.5f, FontWeight.SemiBold),
             // 文件名称。
-            rowFileName = textStyle(15f),
+            rowFileName = textStyle(14f),
             // 文件大小。
-            rowFileSize = textStyle(14f),
+            rowFileSize = textStyle(13f),
             // 修改时间。
-            rowModifiedTime = textStyle(14f),
+            rowModifiedTime = textStyle(13f),
             // 次要操作。
-            secondaryAction = textStyle(14f),
+            secondaryAction = textStyle(13f),
             // 重命名弹窗标题。
-            renameDialogTitle = textStyle(17f, FontWeight.SemiBold),
+            renameDialogTitle = textStyle(16f, FontWeight.SemiBold),
             // 移动弹窗标题。
-            moveDialogTitle = textStyle(17f),
+            moveDialogTitle = textStyle(16f),
             // 移动弹窗说明。
-            moveDialogDescription = textStyle(13f),
+            moveDialogDescription = textStyle(12f),
             // 移动目标目录。
-            moveDialogFolder = textStyle(14f),
+            moveDialogFolder = textStyle(13f),
         ),
         // 设置页字体。
         settings = SettingsTypography(
             // 页面标题。
-            pageTitle = textStyle(17f, FontWeight.SemiBold),
+            pageTitle = textStyle(16f, FontWeight.SemiBold),
             // 数值范围提示。
-            numberRangeHint = textStyle(14f),
+            numberRangeHint = textStyle(13f),
             // 日志保留说明。
-            logRetentionDescription = textStyle(15f, lineHeight = 24f),
+            logRetentionDescription = textStyle(14f, lineHeight = 24f),
             // 校验错误。
-            validationError = textStyle(13f),
+            validationError = textStyle(12f),
             // 保存成功提示。
-            saveSuccess = textStyle(13f),
+            saveSuccess = textStyle(12f),
             // 设置分组标题。
-            groupHeader = textStyle(13f, FontWeight.SemiBold),
+            groupHeader = textStyle(12f, FontWeight.SemiBold),
             // 设置项标题。
-            optionTitle = textStyle(15f, FontWeight.Medium),
+            optionTitle = textStyle(14f, FontWeight.Medium),
             // 设置项说明。
-            optionDescription = textStyle(13f),
+            optionDescription = textStyle(12f),
             // 未挂载标题。
-            emptyMountTitle = textStyle(15f, FontWeight.SemiBold),
+            emptyMountTitle = textStyle(14f, FontWeight.SemiBold),
             // 未挂载说明。
-            emptyMountDescription = textStyle(14f),
+            emptyMountDescription = textStyle(13f),
             // 当前挂载标题。
-            currentMountTitle = textStyle(15f, FontWeight.SemiBold),
+            currentMountTitle = textStyle(14f, FontWeight.SemiBold),
             // 当前挂载路径。
-            currentMountPath = textStyle(13f),
+            currentMountPath = textStyle(12f),
             // 账号头像文字。
-            accountAvatar = textStyle(23f, FontWeight.SemiBold),
+            accountAvatar = textStyle(22f, FontWeight.SemiBold),
             // 账号名称。
-            accountName = textStyle(17f, FontWeight.SemiBold),
+            accountName = textStyle(16f, FontWeight.SemiBold),
             // 详情标签。
-            detailLabel = textStyle(14f),
+            detailLabel = textStyle(13f),
             // 详情内容。
-            detailValue = textStyle(14f),
+            detailValue = textStyle(13f),
             // 版本号。
-            version = textStyle(13f),
+            version = textStyle(12f),
             // 更新状态。
-            updateStatus = textStyle(13f),
+            updateStatus = textStyle(12f),
             // 关于说明。
-            aboutDescription = textStyle(13f),
+            aboutDescription = textStyle(12f),
             // 外部链接。
-            externalLink = textStyle(14f),
+            externalLink = textStyle(13f),
         ),
         // 登录页字体。
         login = LoginTypography(
             // 登录标题。
-            title = textStyle(21f, FontWeight.SemiBold, letterSpacing = -0.2f),
+            title = textStyle(20f, FontWeight.SemiBold, letterSpacing = -0.2f),
             // 授权状态提示。
-            authorizingMessage = textStyle(15f, FontWeight.Medium),
+            authorizingMessage = textStyle(14f, FontWeight.Medium),
             // 页脚提示。
-            footerHint = textStyle(13f),
+            footerHint = textStyle(12f),
         ),
         // 传输面板字体。
         transfer = TransferTypography(
             // 面板标题。
-            panelTitle = textStyle(18f, FontWeight.SemiBold),
+            panelTitle = textStyle(17f, FontWeight.SemiBold),
             // 汇总数值。
-            summaryValue = textStyle(17f, FontWeight.Bold),
+            summaryValue = textStyle(16f, FontWeight.Bold),
             // 汇总标签。
-            summaryLabel = textStyle(12f),
+            summaryLabel = textStyle(11f),
             // 任务名称。
-            taskName = textStyle(14.5f, FontWeight.Medium),
+            taskName = textStyle(13.5f, FontWeight.Medium),
             // 任务说明。
-            taskDescription = textStyle(13f, lineHeight = 18.85f),
+            taskDescription = textStyle(12f, lineHeight = 18.85f),
             // 任务进度。
-            taskProgress = textStyle(12.5f),
+            taskProgress = textStyle(11.5f),
             // 删除操作提示。
-            deleteOperation = textStyle(13f),
+            deleteOperation = textStyle(12f),
             // 任务状态。
-            taskState = textStyle(13f, FontWeight.Medium),
+            taskState = textStyle(12f, FontWeight.Medium),
         ),
         // 更新弹窗字体。
         update = UpdateTypography(
             // 弹窗标题。
-            dialogTitle = textStyle(18f, FontWeight.SemiBold),
+            dialogTitle = textStyle(17f, FontWeight.SemiBold),
             // 版本号。
-            version = textStyle(16f, FontWeight.Bold),
+            version = textStyle(15f, FontWeight.Bold),
             // 失败提示。
-            failureMessage = textStyle(15f),
+            failureMessage = textStyle(14f),
             // 更新说明标签。
-            releaseNotesLabel = textStyle(13f, FontWeight.SemiBold),
+            releaseNotesLabel = textStyle(12f, FontWeight.SemiBold),
             // 更新说明正文。
-            releaseNotesBody = textStyle(13f),
+            releaseNotesBody = textStyle(12f),
             // 无更新说明提示。
-            noReleaseNotesMessage = textStyle(15f),
+            noReleaseNotesMessage = textStyle(14f),
             // 下载进度。
-            progress = textStyle(13f, FontWeight.SemiBold),
+            progress = textStyle(12f, FontWeight.SemiBold),
             // 等待提示。
-            waitingMessage = textStyle(15f),
+            waitingMessage = textStyle(14f),
         ),
         // 日志查看器字体。
         logViewer = LogViewerTypography(
             // 页面标题。
-            pageTitle = textStyle(17f, FontWeight.SemiBold),
+            pageTitle = textStyle(16f, FontWeight.SemiBold),
             // 日志消息。
-            recordMessage = textStyle(14.5f),
+            recordMessage = textStyle(13.5f),
             // 日志元数据。
-            recordMetadata = textStyle(12.5f),
+            recordMetadata = textStyle(11.5f),
         ),
         // 主页面字体。
         main = MainTypography(
             // 搜索区域标题。
-            searchHeader = textStyle(13.5f, FontWeight.SemiBold),
+            searchHeader = textStyle(12.5f, FontWeight.SemiBold),
             // 搜索结果名称。
-            searchResultName = textStyle(15f),
+            searchResultName = textStyle(14f),
             // 搜索结果说明。
-            searchResultDescription = textStyle(13f),
+            searchResultDescription = textStyle(12f),
         ),
         // 图标目录字体。
         catalog = CatalogTypography(
             // 图标名称。
-            iconName = textStyle(10f),
+            iconName = textStyle(9f),
         ),
     )
 

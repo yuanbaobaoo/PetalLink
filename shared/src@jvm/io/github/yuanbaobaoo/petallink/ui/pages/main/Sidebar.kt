@@ -23,6 +23,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -43,6 +44,7 @@ import io.github.yuanbaobaoo.petallink.ui.theme.LOCAL_SEMANTIC_COLORS
 import io.github.yuanbaobaoo.petallink.ui.theme.PetalTheme
 import io.github.yuanbaobaoo.petallink.drive.DriveFile
 import io.github.yuanbaobaoo.petallink.drive.displayName
+import io.github.yuanbaobaoo.petallink.ui.viewmodel.BrowserBreadcrumb
 
 /**
  * 侧边栏（v2：design/v2/02-main.html .sidebar）。
@@ -58,6 +60,7 @@ import io.github.yuanbaobaoo.petallink.drive.displayName
  * @param rootChildren 根目录子文件夹列表
  * @param directoryChildren 各文件夹 ID → 子文件夹列表
  * @param selectedFolderId 当前选中文件夹 ID
+ * @param breadcrumbs 当前浏览路径；路径上的目录自动展开
  * @param userName 用户显示名
  * @param quotaText 配额文本（如 "1.2 GB / 5 GB"）
  * @param onNavigate 点击目录树节点导航
@@ -67,6 +70,7 @@ fun Sidebar(
     rootChildren: List<DriveFile>,
     directoryChildren: Map<String, List<DriveFile>>,
     selectedFolderId: String?,
+    breadcrumbs: List<BrowserBreadcrumb>,
     userName: String?,
     quotaText: String?,
     updateDownloading: Boolean,
@@ -114,6 +118,7 @@ fun Sidebar(
                 folder = DriveFile(id = null, name = "全部文件", category = "folder"),
                 depth = 0,
                 selectedId = selectedFolderId,
+                pathFolderIds = breadcrumbs.mapTo(linkedSetOf()) { it.id },
                 children = rootChildren,
                 directoryChildren = directoryChildren,
                 onSelect = onNavigate,
@@ -268,12 +273,14 @@ private fun SidebarUpdateBanner(version: String, onDismiss: () -> Unit, onInstal
  * 行高 32px，缩进 depth*14+8，gap 8，radius 6；
  * chevron(16px 宽，arrow 图标展开 rotate 90°)；文件夹图标 16px PetalTheme.colors.folder；名称 14px；
  * 三态：默认 secondary / hover bg-hover / 选中 PetalTheme.colors.brandLighter 底 + PetalTheme.colors.brand 字 + medium。
+ * 当前浏览路径上的节点自动展开；离开路径时收起，避免树与右侧文件列表脱节。
  */
 @Composable
 private fun SidebarTreeNode(
     folder: DriveFile,
     depth: Int,
     selectedId: String?,
+    pathFolderIds: Set<String?>,
     children: List<DriveFile>,
     directoryChildren: Map<String, List<DriveFile>>,
     onSelect: (DriveFile) -> Unit,
@@ -281,8 +288,13 @@ private fun SidebarTreeNode(
     val semantic = LOCAL_SEMANTIC_COLORS.current
     val metrics = PetalTheme.metrics.sidebar
     val isSelected = folder.id == selectedId
+    val isOnCurrentPath = folder.id in pathFolderIds
     var expanded by remember(folder.id) { mutableStateOf(depth == 0) }
     val name = folder.displayName()
+
+    LaunchedEffect(pathFolderIds) {
+        expanded = depth == 0 || isOnCurrentPath
+    }
 
     Column {
         Row(
@@ -307,7 +319,14 @@ private fun SidebarTreeNode(
         ) {
             // chevron（16px 宽命中区，arrow 图标展开 rotate 90°）
             Box(
-                modifier = Modifier.size(metrics.treeExpanderSize),
+                modifier = Modifier
+                    .size(metrics.treeExpanderSize)
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                    ) {
+                        expanded = !expanded
+                    },
                 contentAlignment = Alignment.Center,
             ) {
                 MateIcon(
@@ -336,6 +355,7 @@ private fun SidebarTreeNode(
                     folder = child,
                     depth = depth + 1,
                     selectedId = selectedId,
+                    pathFolderIds = pathFolderIds,
                     children = directoryChildren[childId].orEmpty(),
                     directoryChildren = directoryChildren,
                     onSelect = onSelect,

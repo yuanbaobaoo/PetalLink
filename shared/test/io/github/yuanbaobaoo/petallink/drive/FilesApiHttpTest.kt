@@ -18,6 +18,23 @@ import kotlin.test.assertTrue
 
 class FilesApiHttpTest {
     @Test
+    fun 搜索使用文件名条件和当前目录过滤() { runBlocking {
+        var queryParam = ""
+        val engine = MockEngine { request ->
+            queryParam = request.url.parameters["queryParam"].orEmpty()
+            respond(
+                """{"category":"drive#fileList","files":[]}""",
+                HttpStatusCode.OK,
+                headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+
+        api(engine).search("报告", "folder-1")
+
+        assertEquals("fileName contains '报告' and 'folder-1' in parentFolder", queryParam)
+    } }
+
+    @Test
     fun list使用真实root和parent查询且cursor循环失败() { runBlocking {
         val requests = mutableListOf<String>()
         val engine = MockEngine { request ->

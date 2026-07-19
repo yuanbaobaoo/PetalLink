@@ -5,8 +5,8 @@ package io.github.yuanbaobaoo.petallink.ui.pages.main
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
@@ -501,6 +501,8 @@ private fun FileRow(
     onCanFreeUp: (DriveFile, (Boolean) -> Unit) -> Unit,
 ) {
     val semantic = LOCAL_SEMANTIC_COLORS.current
+    // 未配置同步目录时，文件不能按需下载；目录仍可用于浏览云端层级。
+    val rowClickEnabled = file.isFolder() || mountConfigured
     var menuExpanded by remember { mutableStateOf(false) }
     var canFree by remember { mutableStateOf<Boolean?>(null) }
     // v2：hover 态接入 hoverable（此前 hovered 变量未接线，hover 背景从未生效）
@@ -511,30 +513,26 @@ private fun FileRow(
         hovered -> semantic.bgHover
         else -> Color.Transparent
     }
-    // 双击检测：用 pointerInput detectTapGestures(onDoubleTap)
+    // 单击选中；双击目录进入、文件按需下载。未配置同步目录时禁用文件行手势。
     Column {
         Row(
             modifier = Modifier.fillMaxWidth().height(PetalTheme.metrics.fileList.controls.rowHeight)
                 .clip(RoundedCornerShape(PetalTheme.metrics.fileList.controls.rowRadius))
                 .background(bg)
-                .hoverable(interaction)
-                .pointerInput(file.id) {
-                    detectTapGestures(
-                        onTap = { onClick() },
-                        onDoubleTap = { onDoubleClick() },
-                        onLongPress = {
-                            // 右键菜单替代：长按弹出
-                            canFree = null; menuExpanded = true
-                            onCanFreeUp(file) { canFree = it }
-                        },
-                    )
-                }
-                .clickable(
+                .hoverable(interaction, enabled = rowClickEnabled)
+                .combinedClickable(
+                    enabled = rowClickEnabled,
                     interactionSource = interaction,
                     indication = null,
-                ) {
-                    // 右键菜单触发条件：这里用 secondary press 不便检测，简化为操作按钮触发
-                }
+                    onClick = onClick,
+                    onDoubleClick = onDoubleClick,
+                    onLongClick = {
+                        // 右键菜单替代：长按弹出。
+                        canFree = null
+                        menuExpanded = true
+                        onCanFreeUp(file) { canFree = it }
+                    },
+                )
                 .padding(horizontal = PetalTheme.metrics.fileList.controls.rowHorizontalPadding),
             verticalAlignment = Alignment.CenterVertically,
         ) {

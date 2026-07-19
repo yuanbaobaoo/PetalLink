@@ -105,6 +105,7 @@ fun MainScreen(
             rootChildren = browser.directoryChildren[FileBrowserViewModel.ROOT_KEY].orEmpty(),
             directoryChildren = browser.directoryChildren,
             selectedFolderId = browser.folderId,
+            breadcrumbs = browser.breadcrumbs,
             userName = userName,
             quotaText = quotaText,
             updateDownloading = updateDownloading,
@@ -127,11 +128,13 @@ fun MainScreen(
                 MateSearchField(
                     value = searchKeyword,
                     onValueChange = { searchKeyword = it },
-                    onSubmit = {
+                    onSubmit = { query ->
                         // 仅回车提交才触发搜索（对标原 Vue @submit）
-                        if (searchKeyword.isNotBlank()) {
-                            submittedSearch = searchKeyword
-                            onSearch(searchKeyword)
+                        val keyword = query.trim()
+                        if (keyword.isNotEmpty()) {
+                            searchKeyword = keyword
+                            submittedSearch = keyword
+                            onSearch(keyword)
                         }
                     },
                     modifier = Modifier.weight(1f, fill = false).widthIn(max = PetalTheme.metrics.mainPage.searchMaximumWidth),

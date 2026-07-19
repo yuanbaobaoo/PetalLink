@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.Text
 import androidx.compose.runtime.Composable
@@ -59,6 +60,8 @@ import io.github.yuanbaobaoo.petallink.ui.theme.PetalTheme
  * @param prefixIcon 前缀图标 name（可选）
  * @param error 错误态（红色边框）
  * @param singleLine 单行（默认 true）
+ * @param keyboardOptions 软键盘选项
+ * @param keyboardActions 软键盘动作回调
  * @param suffix 右侧自定义内容（如清除按钮）
  */
 @Composable
@@ -72,6 +75,7 @@ fun MateTextField(
     error: Boolean = false,
     singleLine: Boolean = true,
     keyboardOptions: KeyboardOptions = KeyboardOptions.Default,
+    keyboardActions: KeyboardActions = KeyboardActions.Default,
     visualTransformation: VisualTransformation = VisualTransformation.None,
     suffix: @Composable (() -> Unit)? = null,
 ) {
@@ -113,6 +117,7 @@ fun MateTextField(
                 cursorBrush = SolidColor(PetalTheme.colors.brand),
                 interactionSource = interaction,
                 keyboardOptions = keyboardOptions,
+                keyboardActions = keyboardActions,
                 visualTransformation = visualTransformation,
             )
             if (value.isEmpty() && placeholder.isNotEmpty()) {
@@ -321,6 +326,9 @@ fun MateSearchField(
             prefixIcon = "search",
             keyboardOptions = KeyboardOptions.Default.copy(
                 imeAction = androidx.compose.ui.text.input.ImeAction.Search,
+            ),
+            keyboardActions = KeyboardActions(
+                onSearch = { onSubmit(value) },
             ),
         )
     }

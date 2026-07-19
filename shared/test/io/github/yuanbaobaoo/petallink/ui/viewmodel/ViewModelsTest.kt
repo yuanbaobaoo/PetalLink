@@ -86,6 +86,20 @@ class ViewModelsTest {
     }
 
     @Test
+    fun FileBrowserViewModel_进入目录保留完整面包屑路径() {
+        val vm = FileBrowserViewModel()
+        val parent = DriveFile(id = "parent", name = "父目录", mimeType = "application/vnd.huawei-apps.folder")
+        val child = DriveFile(id = "child", name = "子目录", mimeType = "application/vnd.huawei-apps.folder")
+
+        vm.enter(parent)
+        vm.enter(child)
+
+        assertEquals(listOf(null, "parent", "child"), vm.state.value.breadcrumbs.map { it.id })
+        vm.navigateTo(vm.state.value.breadcrumbs.first())
+        assertEquals(listOf(null), vm.state.value.breadcrumbs.map { it.id })
+    }
+
+    @Test
     fun TransferTaskUi_进度百分比() {
         val task = TransferTaskUi(1, "a", TransferState.Running, 1, 200, 50, "upload", null)
         assertEquals(0.25f, task.progress)
