@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>09 · 系统托盘与全局反馈 - PetalLink v2 原型</title>
+<link rel="stylesheet" href="assets/v2.css">
+<script src="assets/sprite.js"></script>
+<style>
+  /* macOS 桌面 + 菜单栏模拟（v2 品牌蓝壁纸） */
+  .desktop {
+    width: 900px;
+    height: 480px;
+    border-radius: var(--r-lg);
+    box-shadow: 0 32px 80px -16px rgba(16, 24, 40, 0.28), 0 0 0 0.5px rgba(0, 0, 0, 0.08);
+    background:
+      radial-gradient(900px 420px at 18% 0%, rgba(255, 255, 255, 0.4) 0%, transparent 55%),
+      linear-gradient(160deg, #A9CBF7 0%, #4A8BF0 55%, #003A99 100%);
+    position: relative;
+    overflow: hidden;
+    flex: none;
+  }
+  .menubar {
+    height: 28px;
+    background: rgba(250, 250, 252, 0.72);
+    backdrop-filter: blur(20px);
+    display: flex;
+    align-items: center;
+    padding: 0 12px;
+    font-size: 13px;
+    gap: 16px;
+    color: var(--ink-900);
+    box-shadow: 0 0.5px 0 rgba(0, 0, 0, 0.12);
+  }
+  .menubar__right { margin-left: auto; display: flex; align-items: center; gap: 14px; }
+  .tray-icon {
+    width: 22px; height: 22px;
+    display: flex; align-items: center; justify-content: center;
+    color: rgba(0, 0, 0, 0.75);
+    border-radius: 5px;
+  }
+  .tray-icon:hover { background: rgba(0, 0, 0, 0.08); }
+  .tray-anchor { position: relative; }
+  .tray-anchor .tray-menu { position: absolute; top: 26px; right: -4px; z-index: 100; }
+  /* 后台运行说明卡 */
+  .info-card {
+    width: 420px;
+    background: var(--bg-card);
+    border-radius: var(--r-xl);
+    box-shadow: var(--sh-md), 0 0 0 0.5px var(--line);
+    padding: 24px;
+  }
+</style>
+</head>
+<body>
+<div class="canvas">
+
+  <!-- ============ 场景 1：托盘菜单（含进行中传输） ============ -->
+  <div class="scene">
+    <div class="scene__label"><b>系统托盘 · 菜单</b>　版本标识 / 显示主窗口 / 进行中传输项 / 退出 PetalLink（F-MOUNT-08）</div>
+    <div class="desktop">
+      <div class="menubar">
+        <span style="font-weight:700;">&#63743;</span>
+        <span style="font-weight:600;">PetalLink</span>
+        <span>文件</span><span>编辑</span><span>显示</span><span>窗口</span><span>帮助</span>
+        <div class="menubar__right">
+          <span class="tray-anchor">
+            <span class="tray-icon" title="PetalLink · 同步中"><span class="icon icon--16"><svg><use href="#i-cloud"/></svg></span></span>
+            <!-- 托盘弹出菜单 -->
+            <div class="tray-menu">
+              <div class="tray-menu__item is-disabled">PetalLink - 华为云盘 Mac 客户端开源版</div>
+              <div class="tray-menu__sep"></div>
+              <div class="tray-menu__item">显示主窗口</div>
+              <div class="tray-menu__sep"></div>
+              <div class="tray-menu__item is-disabled">Q4经营分析报告.docx</div>
+              <div class="tray-menu__item is-disabled">　上传中…62%</div>
+              <div class="tray-menu__item is-disabled">产品演示视频.mp4</div>
+              <div class="tray-menu__item is-disabled">　下载中…28%</div>
+              <div class="tray-menu__sep"></div>
+              <div class="tray-menu__item">退出 PetalLink</div>
+            </div>
+          </span>
+          <span style="font-size:12px;">7月17日 周五 14:32</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 场景 2：托盘菜单（无传输） ============ -->
+  <div class="scene">
+    <div class="scene__label"><b>系统托盘 · 空闲态</b>　无进行中传输时不展示传输段</div>
+    <div class="desktop" style="height:320px;">
+      <div class="menubar">
+        <span style="font-weight:700;">&#63743;</span>
+        <span style="font-weight:600;">PetalLink</span>
+        <span>文件</span><span>编辑</span><span>显示</span><span>窗口</span><span>帮助</span>
+        <div class="menubar__right">
+          <span class="tray-anchor">
+            <span class="tray-icon" title="PetalLink · 同步完成"><span class="icon icon--16"><svg><use href="#i-cloud"/></svg></span></span>
+            <div class="tray-menu">
+              <div class="tray-menu__item is-disabled">PetalLink - 华为云盘 Mac 客户端开源版</div>
+              <div class="tray-menu__sep"></div>
+              <div class="tray-menu__item">显示主窗口</div>
+              <div class="tray-menu__sep"></div>
+              <div class="tray-menu__item">退出 PetalLink</div>
+            </div>
+          </span>
+          <span style="font-size:12px;">7月17日 周五 14:35</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 场景 3：后台运行行为 + Toast ============ -->
+  <div class="scene">
+    <div class="scene__label"><b>后台运行与全局反馈</b>　关窗仅隐藏（accessory 模式），仅托盘「退出」真正退出；Toast 用于操作结果反馈</div>
+    <div style="display:flex;gap:32px;align-items:flex-start;flex-wrap:wrap;justify-content:center;">
+      <!-- 后台运行说明卡 -->
+      <div class="info-card">
+        <div style="font-size:15px;font-weight:600;margin-bottom:14px;">窗口关闭行为</div>
+        <div style="display:flex;flex-direction:column;gap:12px;font-size:13px;color:var(--ink-600);line-height:1.65;">
+          <div style="display:flex;gap:8px;">
+            <span class="icon icon--16" style="color:var(--brand-600);flex:none;"><svg><use href="#i-info"/></svg></span>
+            <span>点击窗口关闭按钮 / Cmd+Q：取消退出，窗口隐藏，转为后台 accessory 模式（Dock 图标隐藏，仅保留菜单栏托盘）。</span>
+          </div>
+          <div style="display:flex;gap:8px;">
+            <span class="icon icon--16" style="color:var(--brand-600);flex:none;"><svg><use href="#i-cloud"/></svg></span>
+            <span>后台期间同步引擎持续运行，托盘 tooltip 实时显示同步状态，传输进度在托盘菜单可见。</span>
+          </div>
+          <div style="display:flex;gap:8px;">
+            <span class="icon icon--16" style="color:var(--err);flex:none;"><svg><use href="#i-x"/></svg></span>
+            <span>仅托盘菜单「退出 PetalLink」真正退出进程；退出后挂载目录保持可写，下次启动按快照 diff 自动补齐同步。</span>
+          </div>
+        </div>
+      </div>
+      <!-- Toast 特写 -->
+      <div style="display:flex;flex-direction:column;gap:16px;align-items:flex-start;">
+        <div class="toast">
+          <span class="icon icon--16"><svg><use href="#i-check"/></svg></span>
+          配置已保存
+        </div>
+        <div class="toast toast--err">
+          <span class="icon icon--16"><svg><use href="#i-alert"/></svg></span>
+          设置开机自启失败
+        </div>
+        <div class="toast">
+          <span class="icon icon--16"><svg><use href="#i-check"/></svg></span>
+          日志已导出到 ~/Downloads/petallink-logs-20260717.zip
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <a class="back-link" href="index.html">← 返回 v2 原型导航</a>
+</div>
+</body>
+</html>
