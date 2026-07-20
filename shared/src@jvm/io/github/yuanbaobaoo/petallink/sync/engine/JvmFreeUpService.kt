@@ -2,6 +2,7 @@ package io.github.yuanbaobaoo.petallink.sync.engine
 
 import io.github.yuanbaobaoo.petallink.AppError
 import io.github.yuanbaobaoo.petallink.core.AppPaths
+import io.github.yuanbaobaoo.petallink.core.logging.Logger
 import io.github.yuanbaobaoo.petallink.data.PetalLinkDb
 import io.github.yuanbaobaoo.petallink.data.SyncItem
 import io.github.yuanbaobaoo.petallink.data.repository.FreeUpStagingRecord
@@ -72,6 +73,7 @@ class JvmFreeUpService(
     private val remote: FreeUpRemoteVerifier,
     private val nowMs: () -> Long = System::currentTimeMillis,
 ) {
+    private val logger = Logger()
     private val root = mountRoot.toAbsolutePath().normalize()
     private val leases = ConcurrentHashMap<String, Mutex>()
 
@@ -212,11 +214,13 @@ class JvmFreeUpService(
                 continue
             }
             if (Files.exists(target, LinkOption.NOFOLLOW_LINKS) && !placeholder.isPlaceholder(target.toString())) {
+                logger.warn("mount.manager") { "释放空间恢复无法覆盖原路径，已保留为可见副本 path=$target" }
                 continue
             }
             if (Files.exists(target, LinkOption.NOFOLLOW_LINKS)) Files.delete(target)
             Files.move(staging, target, StandardCopyOption.ATOMIC_MOVE)
             fsyncDirectory(target.parent)
+            logger.warn("mount.manager") { "检测到中断的释放空间操作，已恢复原文件 path=$target" }
             db.inodeMap.upsert(readInode(target), record.relativePath, record.fileId, nowMs())
             if (record.sourceMtime != null && record.sourceSize != null) {
                 db.syncItems.casRollbackCloudOnly(

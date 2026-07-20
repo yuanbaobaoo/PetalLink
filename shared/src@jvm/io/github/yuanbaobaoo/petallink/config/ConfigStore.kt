@@ -1,5 +1,6 @@
 package io.github.yuanbaobaoo.petallink.config
 
+import io.github.yuanbaobaoo.petallink.core.logging.Logger
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
@@ -15,12 +16,16 @@ class JsonConfigStore(private val configPath: Path) : ConfigStore {
     private val json = kotlinx.serialization.json.Json {
         prettyPrint = true; ignoreUnknownKeys = true
     }
+    private val logger = Logger()
 
     /**
      * 从磁盘读取配置；存在旧值时迁移并按需落盘，缺失或空文件返回 null。
      */
     override fun load(): UserConfig? {
-        if (!Files.exists(configPath)) return null
+        if (!Files.exists(configPath)) {
+            logger.info("config.store") { "配置文件不存在，使用默认配置" }
+            return null
+        }
         val text = Files.readString(configPath)
         if (text.isBlank()) return null
         val (config, dirty) = decodeAndMigrate(text)
@@ -48,6 +53,7 @@ class JsonConfigStore(private val configPath: Path) : ConfigStore {
         } finally {
             Files.deleteIfExists(temp)
         }
+        logger.info("config.store") { "配置已保存 mount=${config.mountDir}" }
     }
 
     /**

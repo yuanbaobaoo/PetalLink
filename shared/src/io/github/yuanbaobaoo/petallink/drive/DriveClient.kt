@@ -2,6 +2,7 @@ package io.github.yuanbaobaoo.petallink.drive
 
 import io.github.yuanbaobaoo.petallink.AppError
 import io.github.yuanbaobaoo.petallink.auth.TokenPair
+import io.github.yuanbaobaoo.petallink.core.logging.Logger
 import io.ktor.client.*
 import io.ktor.client.plugins.*
 import io.ktor.client.request.*
@@ -58,6 +59,8 @@ class DriveClient(
     private val tokenRefresher: suspend () -> TokenPair,
     private val onNetworkFailure: () -> Unit = {},
 ) {
+    private val logger = Logger()
+
     /**
      * 执行带 401 重放的请求（对标 execute_with_retry）。
      *
@@ -81,6 +84,7 @@ class DriveClient(
         if (resp1.status.value != 401) return resp1
 
         // 401 → 刷新 token 后重放一次
+        logger.warn("drive.client") { "收到 401，刷新 token 后重放" }
         val refreshed = tokenRefresher()
         val resp2 = sendRequest(method, url, refreshed.accessToken, configure)
         return resp2

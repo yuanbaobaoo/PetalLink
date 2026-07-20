@@ -150,6 +150,89 @@ class BfsCloudTreeRefresherTest {
         assertEquals(1, getStartCalls)
     }
 
+    @Test
+    fun 同路径重名文件覆盖容忍不中断全量刷新() = runBlocking {
+        val engine = MockEngine { request ->
+            val url = request.url.toString()
+            val body = when {
+                url.contains("getStartCursor") -> """{"category":"drive#startCursor","startCursor":"s0"}"""
+                url.contains("/changes?") -> """{"category":"drive#changeList","changes":[],"newStartCursor":"c1"}"""
+                else -> fileList(
+                    """{"category":"drive#file","id":"first","fileName":"dup.txt","mimeType":"text/plain","parentFolder":["root"]}""",
+                    """{"category":"drive#file","id":"second","fileName":"dup.txt","mimeType":"text/plain","parentFolder":["root"]}""",
+                )
+            }
+            respond(body, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
+        }
+        val store = MemoryStore()
+
+        val cache = refresher(engine, store).refreshFull()
+
+        assertEquals(setOf("dup.txt"), cache.tree.keys)
+        assertEquals("second", cache.tree["dup.txt"]?.id)
+        assertEquals("second", cache.pathToId["dup.txt"])
+        assertTrue(cache.isTrusted())
+        assertEquals(cache, store.value)
+    }
+
+    @Test
+    fun BFS按默认skipPatterns过滤云端垃圾文件且不递归跳过目录() = runBlocking {
+        val calls = mutableListOf<String>()
+        val engine = MockEngine { request ->
+            val url = request.url.toString()
+            calls += url
+            val body = when {
+                url.contains("getStartCursor") -> """{"category":"drive#startCursor","startCursor":"s0"}"""
+                url.contains("/changes?") -> """{"category":"drive#changeList","changes":[],"newStartCursor":"c1"}"""
+                url.contains("trash") -> fileList("""{"category":"drive#file","id":"junk","fileName":"junk.txt","mimeType":"text/plain","parentFolder":["trash"]}""")
+                else -> fileList(
+                    """{"category":"drive#file","id":"keep","fileName":"keep.txt","mimeType":"text/plain","parentFolder":["root"]}""",
+                    """{"category":"drive#file","id":"ds","fileName":".DS_Store","mimeType":"text/plain","parentFolder":["root"]}""",
+                    """{"category":"drive#file","id":"tmp","fileName":"download.tmp","mimeType":"text/plain","parentFolder":["root"]}""",
+                    """{"category":"drive#file","id":"internal","fileName":".hwcloud_marker","mimeType":"text/plain","parentFolder":["root"]}""",
+                    """{"category":"drive#file","id":"trash","fileName":".Trash","mimeType":"application/vnd.huawei-apps.folder","parentFolder":["root"]}""",
+                )
+            }
+            respond(body, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
+        }
+        val store = MemoryStore()
+
+        val cache = refresher(engine, store).refreshFull()
+
+        assertEquals(listOf("keep.txt"), cache.tree.keys.sorted())
+        assertTrue(cache.isTrusted())
+        assertTrue(calls.none { it.contains("trash") }, "命中 skip 规则的目录不得再发起列举请求")
+    }
+
+    @Test
+    fun 自定义skipPatterns同样作用于云端树() = runBlocking {
+        val engine = MockEngine { request ->
+            val url = request.url.toString()
+            val body = when {
+                url.contains("getStartCursor") -> """{"category":"drive#startCursor","startCursor":"s0"}"""
+                url.contains("/changes?") -> """{"category":"drive#changeList","changes":[],"newStartCursor":"c1"}"""
+                else -> fileList(
+                    """{"category":"drive#file","id":"keep","fileName":"keep.txt","mimeType":"text/plain","parentFolder":["root"]}""",
+                    """{"category":"drive#file","id":"part","fileName":"movie.part","mimeType":"text/plain","parentFolder":["root"]}""",
+                )
+            }
+            respond(body, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
+        }
+        val store = MemoryStore()
+        val client = DriveClient(HttpClient(engine), { "token" }, { TokenPair("new", "refresh", Long.MAX_VALUE) })
+        val refresher = BfsCloudTreeRefresher(
+            FilesApi(client, "https://example.test/drive/v1"),
+            ChangesApi(client, "https://example.test/drive/v1"),
+            store,
+            skipPatterns = listOf("*.part"),
+        )
+
+        val cache = refresher.refreshFull()
+
+        assertEquals(listOf("keep.txt"), cache.tree.keys.sorted())
+        assertTrue(cache.isTrusted())
+    }
+
     private fun refresher(engine: MockEngine, store: CloudTreeCheckpointStore): BfsCloudTreeRefresher {
         val client = DriveClient(HttpClient(engine), { "token" }, { TokenPair("new", "refresh", Long.MAX_VALUE) })
         return BfsCloudTreeRefresher(

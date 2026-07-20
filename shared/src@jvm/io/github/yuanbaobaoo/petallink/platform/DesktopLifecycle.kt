@@ -1,6 +1,7 @@
 package io.github.yuanbaobaoo.petallink.platform
 
 import com.sun.jna.NativeLibrary
+import io.github.yuanbaobaoo.petallink.core.logging.Logger
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.net.InetAddress
@@ -112,6 +113,8 @@ class LaunchAgentManager(
     private val command: Path,
     private val launchAgentsDir: Path = Path.of(System.getProperty("user.home"), "Library", "LaunchAgents"),
 ) {
+    private val logger = Logger()
+
     val plistPath: Path get() = launchAgentsDir.resolve("$bundleId.plist")
 
     /**
@@ -126,6 +129,7 @@ class LaunchAgentManager(
         if (!enabled) {
             launchctl("bootout", "gui/${currentUid()}/$bundleId")
             Files.deleteIfExists(plistPath)
+            logger.info("platform.launch_at_login") { "开机自启已禁用，LaunchAgent plist 已移除：label=$bundleId" }
             return
         }
         Files.createDirectories(launchAgentsDir)
@@ -149,6 +153,7 @@ class LaunchAgentManager(
         }
         launchctl("bootout", "gui/${currentUid()}/$bundleId")
         launchctl("bootstrap", "gui/${currentUid()}", plistPath.toString())
+        logger.info("platform.launch_at_login") { "开机自启已启用，LaunchAgent 已 bootstrap：label=$bundleId" }
     }
 
     /**
@@ -182,6 +187,7 @@ class LaunchAgentManager(
  * AppKit activationPolicy 的 best-effort JNA 桥；失败时保留 Compose 默认行为。
  */
 object MacActivationPolicy {
+    private val logger = Logger()
     private val available = System.getProperty("os.name").contains("mac", ignoreCase = true)
 
     /**
@@ -232,6 +238,12 @@ object MacActivationPolicy {
             if (activate) {
                 val activateSel = selector.invokePointer(arrayOf("activateIgnoringOtherApps:"))
                 send.invoke(Void.TYPE, arrayOf(app, activateSel, true))
+            }
+        }.onSuccess {
+            if (policy == 0L) {
+                logger.info("platform.activation") { "已设 .regular policy" }
+            } else {
+                logger.info("platform.activation") { "已设 .accessory policy" }
             }
         }
     }

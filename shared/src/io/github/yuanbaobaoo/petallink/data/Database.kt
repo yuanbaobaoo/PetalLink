@@ -4,6 +4,7 @@ import io.github.yuanbaobaoo.petallink.data.repository.FreeUpStagingRepository
 import io.github.yuanbaobaoo.petallink.data.repository.InodeMapRepository
 import io.github.yuanbaobaoo.petallink.data.repository.SyncItemRepository
 import io.github.yuanbaobaoo.petallink.data.repository.TransferRepository
+import androidx.room.useWriterConnection
 
 /**
  * 应用数据库访问入口。
@@ -39,6 +40,14 @@ class PetalLinkDb(dbPath: String) {
     suspend fun clearMountState() {
         database.maintenanceDao().clearMountState()
     }
+
+    /**
+     * 在单个写事务内执行块（用于基线批量结算原子化，对标 settlement.rs:297-375 的同事务提交）。
+     */
+    suspend fun <T> withTransaction(block: suspend () -> T): T =
+        database.useWriterConnection { conn ->
+            conn.withTransaction(androidx.room.Transactor.SQLiteTransactionType.IMMEDIATE) { block() }
+        }
 
     /**
      * 关闭数据库并释放底层 SQLite 资源。

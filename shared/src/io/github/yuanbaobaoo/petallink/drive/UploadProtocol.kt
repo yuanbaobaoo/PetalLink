@@ -3,6 +3,18 @@ package io.github.yuanbaobaoo.petallink.drive
 import io.github.yuanbaobaoo.petallink.AppError
 
 /**
+ * 429 限流错误：携带服务端 Retry-After 头解析值（对标 retry_policy.rs:157-166）。
+ *
+ * 不继承 [AppError]（sealed 限制），由传输层显式捕获并转为 BackingOff +
+ * 服务端指定截止时间；未携带 Retry-After 时回退指数退避。
+ */
+class RateLimitError(
+    val status: Int,
+    val retryAfter: RetryAfter?,
+    message: String,
+) : Throwable(message)
+
+/**
  * 上传协议纯逻辑（对标原项目 drive/upload_api/protocol.rs）
  *
  * 详见 docs/03 §上传、docs/10 阶段 2。

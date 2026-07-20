@@ -39,6 +39,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import io.github.yuanbaobaoo.petallink.ui.components.MateIcon
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateAppLogo
+import io.github.yuanbaobaoo.petallink.ui.components.mate.MateCircularProgress
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateLinearProgress
 import io.github.yuanbaobaoo.petallink.ui.theme.LOCAL_SEMANTIC_COLORS
 import io.github.yuanbaobaoo.petallink.ui.theme.PetalTheme
@@ -63,7 +64,9 @@ import io.github.yuanbaobaoo.petallink.ui.viewmodel.BrowserBreadcrumb
  * @param breadcrumbs 当前浏览路径；路径上的目录自动展开
  * @param userName 用户显示名
  * @param quotaText 配额文本（如 "1.2 GB / 5 GB"）
+ * @param treeLoadingIds 正在懒加载子目录的文件夹 ID 集合（节点显示加载指示）
  * @param onNavigate 点击目录树节点导航
+ * @param onExpandNode 展开未加载过的节点时触发懒加载
  */
 @Composable
 fun Sidebar(
@@ -78,7 +81,10 @@ fun Sidebar(
     updateAvailableVersion: String?,
     onDismissUpdate: () -> Unit,
     onInstallUpdate: () -> Unit = {},
+    onShowUpdate: () -> Unit = {},
     onNavigate: (DriveFile) -> Unit,
+    treeLoadingIds: Set<String> = emptySet(),
+    onExpandNode: (DriveFile) -> Unit = {},
 ) {
     val semantic = LOCAL_SEMANTIC_COLORS.current
     val metrics = PetalTheme.metrics.sidebar
@@ -122,6 +128,8 @@ fun Sidebar(
                 children = rootChildren,
                 directoryChildren = directoryChildren,
                 onSelect = onNavigate,
+                treeLoadingIds = treeLoadingIds,
+                onExpandNode = onExpandNode,
             )
         }
 
@@ -175,13 +183,13 @@ fun Sidebar(
             }
         }
 
-        // 更新下载进度卡（v2 .sidebar__update 渐变卡片）
+        // 更新下载进度卡（v2 .sidebar__update 渐变卡片，点击重开更新弹窗）
         if (updateDownloading) {
-            SidebarUpdateProgress(updateDownloadProgress)
+            SidebarUpdateProgress(updateDownloadProgress, onShowUpdate)
         }
         // 更新提示卡（v2 .sidebar__update 渐变卡片）
         if (updateAvailableVersion != null) {
-            SidebarUpdateBanner(updateAvailableVersion, onDismissUpdate, onInstallUpdate)
+            SidebarUpdateBanner(updateAvailableVersion, onDismissUpdate, onInstallUpdate, onShowUpdate)
         }
     }
 }
@@ -190,7 +198,7 @@ fun Sidebar(
  * 更新下载进度卡（v2：margin 0/10/10，PetalTheme.colors.brandGradient 底 radius 10 padding 12，白字 + 白色进度条）。
  */
 @Composable
-private fun SidebarUpdateProgress(progress: Float) {
+private fun SidebarUpdateProgress(progress: Float, onShowUpdate: () -> Unit) {
     val metrics = PetalTheme.metrics.sidebar
     Column(
         modifier = Modifier
@@ -202,6 +210,10 @@ private fun SidebarUpdateProgress(progress: Float) {
             )
             .clip(RoundedCornerShape(metrics.updateCardRadius))
             .background(PetalTheme.colors.brandGradient)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+            ) { onShowUpdate() }
             .padding(metrics.updateCardPadding),
     ) {
         Row(
@@ -221,7 +233,7 @@ private fun SidebarUpdateProgress(progress: Float) {
  * 更新提示卡（v2：margin 0/10/10，PetalTheme.colors.brandGradient 底 radius 10 padding 12，白字标题 + 圆形半透明 × + 白底「立即更新」按钮）。
  */
 @Composable
-private fun SidebarUpdateBanner(version: String, onDismiss: () -> Unit, onInstall: () -> Unit) {
+private fun SidebarUpdateBanner(version: String, onDismiss: () -> Unit, onInstall: () -> Unit, onShowUpdate: () -> Unit) {
     val metrics = PetalTheme.metrics.sidebar
     Column(
         modifier = Modifier
@@ -252,17 +264,34 @@ private fun SidebarUpdateBanner(version: String, onDismiss: () -> Unit, onInstal
             }
         }
         Spacer(Modifier.height(metrics.availableActionSpacing))
-        // 「立即更新」按钮（白底 h28 radius 5，PetalTheme.colors.brand 字，点击触发安装更新）
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(metrics.installButtonHeight)
-                .clip(RoundedCornerShape(metrics.installButtonRadius))
-                .background(PetalTheme.colors.sidebarInstallBackground)
-                .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onInstall),
-            contentAlignment = Alignment.Center,
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(metrics.treeNodeContentSpacing),
         ) {
-            Text("立即更新", style = PetalTheme.typography.sidebar.installUpdateAction, color = PetalTheme.colors.brand)
+            // 「日志」按钮（查看更新日志，重开更新弹窗；对标原 Vue update-banner__changelog）
+            Box(
+                modifier = Modifier
+                    .height(metrics.installButtonHeight)
+                    .clip(RoundedCornerShape(metrics.installButtonRadius))
+                    .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onShowUpdate)
+                    .padding(horizontal = metrics.updateCardPadding),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text("日志", style = PetalTheme.typography.sidebar.installUpdateAction, color = PetalTheme.colors.sidebarUpdateText)
+            }
+            // 「立即更新」按钮（白底 h28 radius 5，PetalTheme.colors.brand 字，点击触发安装更新）
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .height(metrics.installButtonHeight)
+                    .clip(RoundedCornerShape(metrics.installButtonRadius))
+                    .background(PetalTheme.colors.sidebarInstallBackground)
+                    .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onInstall),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text("立即更新", style = PetalTheme.typography.sidebar.installUpdateAction, color = PetalTheme.colors.brand)
+            }
         }
     }
 }
@@ -284,6 +313,8 @@ private fun SidebarTreeNode(
     children: List<DriveFile>,
     directoryChildren: Map<String, List<DriveFile>>,
     onSelect: (DriveFile) -> Unit,
+    treeLoadingIds: Set<String>,
+    onExpandNode: (DriveFile) -> Unit,
 ) {
     val semantic = LOCAL_SEMANTIC_COLORS.current
     val metrics = PetalTheme.metrics.sidebar
@@ -317,7 +348,7 @@ private fun SidebarTreeNode(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(metrics.treeNodeContentSpacing),
         ) {
-            // chevron（16px 宽命中区，arrow 图标展开 rotate 90°）
+            // chevron（16px 宽命中区，arrow 图标展开 rotate 90°）；展开未加载过的节点时触发懒加载
             Box(
                 modifier = Modifier
                     .size(metrics.treeExpanderSize)
@@ -326,15 +357,21 @@ private fun SidebarTreeNode(
                         indication = null,
                     ) {
                         expanded = !expanded
+                        val id = folder.id
+                        if (expanded && id != null && directoryChildren[id] == null) onExpandNode(folder)
                     },
                 contentAlignment = Alignment.Center,
             ) {
-                MateIcon(
-                    name = "arrow",
-                    size = metrics.treeArrowIconSize,
-                    tint = semantic.textSecondary,
-                    modifier = Modifier.rotate(if (expanded) 90f else 0f),
-                )
+                if (folder.id != null && folder.id in treeLoadingIds) {
+                    MateCircularProgress(size = metrics.treeArrowIconSize)
+                } else {
+                    MateIcon(
+                        name = "arrow",
+                        size = metrics.treeArrowIconSize,
+                        tint = semantic.textSecondary,
+                        modifier = Modifier.rotate(if (expanded) 90f else 0f),
+                    )
+                }
             }
             // 文件夹图标（16px PetalTheme.colors.folder）
             MateIcon(name = "folder", size = metrics.treeFolderIconSize, tint = PetalTheme.colors.folder)
@@ -359,6 +396,8 @@ private fun SidebarTreeNode(
                     children = directoryChildren[childId].orEmpty(),
                     directoryChildren = directoryChildren,
                     onSelect = onSelect,
+                    treeLoadingIds = treeLoadingIds,
+                    onExpandNode = onExpandNode,
                 )
             }
         }

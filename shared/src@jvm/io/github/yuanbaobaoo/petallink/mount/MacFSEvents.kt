@@ -16,7 +16,81 @@ import java.nio.file.Path
 /**
  * FSEvents 原生事件，包含变更路径、事件标志位和事件 ID。
  */
-data class NativeFSEvent(val path: String, val flags: Int, val eventId: ULong)
+data class NativeFSEvent(val path: String, val flags: Int, val eventId: ULong) {
+    /**
+     * 是否为内容级变更事件（对标原项目 local_watcher.rs 只放行 Create/Modify/Remove/Other）。
+     * 按 kFSEventStreamEventFlag* 语义判定：创建/删除/改名/内容修改以及必须整树重扫的流级标志
+     * （丢事件/根变更/挂载变更）放行；仅含元数据位（xattr/FinderInfo/owner/inode meta）的事件忽略——
+     * 占位符创建与 markDownloaded 写 xattr 正属此类，放行会自触发全量重扫。
+     */
+    fun isChangeEvent(): Boolean = flags and CHANGE_EVENT_MASK != 0
+
+    companion object {
+        /**
+         * kFSEventStreamEventFlagItemCreated：条目被创建。
+         */
+        const val FLAG_ITEM_CREATED = 0x00000100
+        /**
+         * kFSEventStreamEventFlagItemRemoved：条目被删除。
+         */
+        const val FLAG_ITEM_REMOVED = 0x00000200
+        /**
+         * kFSEventStreamEventFlagItemInodeMetaMod：inode 元数据变化（仅元数据，不放行）。
+         */
+        const val FLAG_ITEM_INODE_META_MOD = 0x00000400
+        /**
+         * kFSEventStreamEventFlagItemRenamed：条目被改名/移动。
+         */
+        const val FLAG_ITEM_RENAMED = 0x00000800
+        /**
+         * kFSEventStreamEventFlagItemModified：条目内容被修改。
+         */
+        const val FLAG_ITEM_MODIFIED = 0x00001000
+        /**
+         * kFSEventStreamEventFlagItemFinderInfoMod：FinderInfo 变化（仅元数据，不放行）。
+         */
+        const val FLAG_ITEM_FINDER_INFO_MOD = 0x00002000
+        /**
+         * kFSEventStreamEventFlagItemChangeOwner：属主变化（仅元数据，不放行）。
+         */
+        const val FLAG_ITEM_CHANGE_OWNER = 0x00004000
+        /**
+         * kFSEventStreamEventFlagItemXattrMod：扩展属性变化（仅元数据，不放行）。
+         */
+        const val FLAG_ITEM_XATTR_MOD = 0x00008000
+        /**
+         * kFSEventStreamEventFlagItemIsFile：条目是普通文件（类型位，不构成变更）。
+         */
+        const val FLAG_ITEM_IS_FILE = 0x00010000
+        /**
+         * kFSEventStreamEventFlagItemIsDir：条目是目录（类型位，不构成变更）。
+         */
+        const val FLAG_ITEM_IS_DIR = 0x00020000
+        /**
+         * kFSEventStreamEventFlagMustScanSubDirs：事件丢失，必须重新扫描子树。
+         */
+        const val FLAG_MUST_SCAN_SUB_DIRS = 0x00000001
+        /**
+         * kFSEventStreamEventFlagRootChanged：被监听根路径本身发生变化。
+         */
+        const val FLAG_ROOT_CHANGED = 0x00000020
+
+        // 其余需要整树重扫的流级标志：UserDropped / KernelDropped / EventIdsWrapped / Mount / Unmount。
+        private const val FLAG_USER_DROPPED = 0x00000002
+        private const val FLAG_KERNEL_DROPPED = 0x00000004
+        private const val FLAG_EVENT_IDS_WRAPPED = 0x00000008
+        private const val FLAG_MOUNT = 0x00000040
+        private const val FLAG_UNMOUNT = 0x00000080
+
+        /**
+         * 放行的变更位掩码：内容级条目变更 + 需要整树重扫的流级事件。
+         */
+        private const val CHANGE_EVENT_MASK =
+            FLAG_MUST_SCAN_SUB_DIRS or FLAG_USER_DROPPED or FLAG_KERNEL_DROPPED or FLAG_EVENT_IDS_WRAPPED or
+                FLAG_ROOT_CHANGED or FLAG_MOUNT or FLAG_UNMOUNT or
+                FLAG_ITEM_CREATED or FLAG_ITEM_REMOVED or FLAG_ITEM_RENAMED or FLAG_ITEM_MODIFIED
+    }
+}
 
 /**
  * FSEvents 事件源工厂，创建对指定路径的监听并返回可关闭的资源
@@ -29,7 +103,7 @@ fun interface FSEventSourceFactory {
 }
 
 /**
- * CoreServices FSEventStream 的 JNA 封装；回调由专用 CFRunLoop daemon 线程承载。
+ * CoreServices FSEventStream 的 JNA 封装；回调经 FSEventStreamSetDispatchQueue 派发到 GCD 全局并发队列。
  */
 object MacFSEventSourceFactory : FSEventSourceFactory {
     /**
@@ -43,15 +117,15 @@ object MacFSEventSourceFactory : FSEventSourceFactory {
 }
 
 /**
- * macOS FSEvents 监听源实现：基于 JNA 调用 CoreServices/CoreFoundation 启动事件流，
- * 在专用 CFRunLoop 线程上接收并派发原生事件。
+ * macOS FSEvents 监听源实现：基于 JNA 调用 CoreServices/CoreFoundation 创建并启动事件流；
+ * daemon 线程只负责装拆流与等待关闭信号，事件回调经 FSEventStreamSetDispatchQueue 在 GCD 全局并发队列上派发。
  */
 private class MacFSEventSource(
     private val paths: List<String>,
     private val consumer: (NativeFSEvent) -> Unit,
 ) : AutoCloseable {
     /**
-     * CoreFoundation 框架的 JNA 绑定接口（CFString / CFArray / CFRunLoop 等引用计数与运行循环管理）。
+     * CoreFoundation 框架的 JNA 绑定接口（CFString / CFArray 创建与引用计数管理）。
      */
     private interface CoreFoundation : Library {
         /**
@@ -62,18 +136,6 @@ private class MacFSEventSource(
          * CoreFoundation CFArrayCreate 的 JNA 声明，由一组指针构造不可变 CFArray。
          */
         fun CFArrayCreate(allocator: Pointer?, values: Pointer, count: Long, callbacks: Pointer?): Pointer?
-        /**
-         * CoreFoundation CFRunLoopGetCurrent 的 JNA 声明，取当前线程的 CFRunLoop。
-         */
-        fun CFRunLoopGetCurrent(): Pointer?
-        /**
-         * CoreFoundation CFRunLoopRun 的 JNA 声明，在当前线程阻塞运行 CFRunLoop。
-         */
-        fun CFRunLoopRun()
-        /**
-         * CoreFoundation CFRunLoopStop 的 JNA 声明，停止指定 CFRunLoop。
-         */
-        fun CFRunLoopStop(runLoop: Pointer)
         /**
          * CoreFoundation CFRelease 的 JNA 声明，释放 CoreFoundation 对象的引用计数。
          */

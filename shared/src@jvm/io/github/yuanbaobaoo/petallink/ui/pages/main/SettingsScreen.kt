@@ -5,6 +5,7 @@ package io.github.yuanbaobaoo.petallink.ui.pages.main
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -42,7 +43,9 @@ import io.github.yuanbaobaoo.petallink.ui.components.MateIcon
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateBannerVariant
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateButton
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateButtonVariant
+import io.github.yuanbaobaoo.petallink.ui.components.mate.MateDialogOptions
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateInfoBanner
+import io.github.yuanbaobaoo.petallink.ui.components.mate.MateLinearProgress
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateLogoWithText
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateNavGroupLabel
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateNavItem
@@ -52,6 +55,7 @@ import io.github.yuanbaobaoo.petallink.ui.components.mate.MateStepper
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateSwitch
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateTextField
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateToastVariant
+import io.github.yuanbaobaoo.petallink.ui.components.mate.confirmDialog
 import io.github.yuanbaobaoo.petallink.ui.components.mate.showToast
 import io.github.yuanbaobaoo.petallink.ui.theme.LOCAL_SEMANTIC_COLORS
 import io.github.yuanbaobaoo.petallink.ui.theme.PetalTheme
@@ -109,6 +113,9 @@ fun SettingsScreen(
     onInstallUpdate: () -> Unit,
     onSelectDir: ((String) -> Unit) -> Unit,
     onSave: (UserConfig) -> List<String>,
+    updateDownloading: Boolean = false,
+    updateDownloadProgress: Float = 0f,
+    onShowUpdate: () -> Unit = {},
 ) {
     val semantic = LOCAL_SEMANTIC_COLORS.current
     var tab by remember { mutableStateOf(SettingsTab.SYNC_DIR) }
@@ -216,7 +223,17 @@ fun SettingsScreen(
                                 }
                                 GroupHeader("维护")
                                 SettingRow("清空缓存并重启", "清除登录状态、同步数据库、同步快照与配置文件，然后重启 App。适用于排查同步异常或切换账号时使用。", showDivider = false) {
-                                    MateButton(label = "清空", icon = "trash", danger = true, onClick = onClearCache)
+                                    MateButton(label = "清空", icon = "trash", danger = true, onClick = {
+                                        confirmDialog(
+                                            MateDialogOptions(
+                                                title = "清空缓存并重启",
+                                                content = "将清除登录状态、同步数据库、同步快照与配置文件，并重启 App。云盘文件不受影响，但此操作不可撤销，确定继续？",
+                                                confirmText = "清空并重启",
+                                                danger = true,
+                                                titleIcon = "trash",
+                                            ),
+                                        ) { confirmed -> if (confirmed) onClearCache() }
+                                    })
                                 }
                             }
                         }
@@ -231,7 +248,12 @@ fun SettingsScreen(
                                 MateButton(label = "打开日志查看器", onClick = onOpenLogs)
                             }
                         }
-                        SettingsTab.ABOUT -> AboutSection(appVersion, availableUpdate, updateStatus, updateChecking, onCheckUpdate, onInstallUpdate)
+                        SettingsTab.ABOUT -> AboutSection(
+                            appVersion, availableUpdate, updateStatus, updateChecking, onCheckUpdate, onInstallUpdate,
+                            updateDownloading = updateDownloading,
+                            updateDownloadProgress = updateDownloadProgress,
+                            onShowUpdate = onShowUpdate,
+                        )
                     }
                 }
                 // footer（仅 syncDir/transfer/advanced；v2 .settings-footer：64px，padding 0/32，顶细边）
@@ -452,7 +474,17 @@ private fun AccountSection(userInfo: UserInfo?, userLabel: String, quotaUsed: Lo
         // 退出登录
         GroupHeader("账号操作")
         SettingRow("退出登录", "清除本地 token 并返回登录页。后台进程仍会继续，可从菜单栏彻底退出。", showDivider = false) {
-            MateButton(label = "退出登录", icon = "x", danger = true, onClick = onLogout)
+            MateButton(label = "退出登录", icon = "x", danger = true, onClick = {
+                confirmDialog(
+                    MateDialogOptions(
+                        title = "退出登录",
+                        content = "将清除本地 token 并返回登录页，后台同步会停止。确定退出登录？",
+                        confirmText = "退出登录",
+                        danger = true,
+                        titleIcon = "x",
+                    ),
+                ) { confirmed -> if (confirmed) onLogout() }
+            })
         }
     }
 }
@@ -484,6 +516,9 @@ private fun AboutSection(
     updateChecking: Boolean,
     onCheckUpdate: () -> Unit,
     onInstallUpdate: () -> Unit,
+    updateDownloading: Boolean = false,
+    updateDownloadProgress: Float = 0f,
+    onShowUpdate: () -> Unit = {},
 ) {
     val semantic = LOCAL_SEMANTIC_COLORS.current
     MateSectionHeader("关于", icon = "cloud")
@@ -499,7 +534,20 @@ private fun AboutSection(
             if (updateStatus.isNotEmpty()) Text(updateStatus, style = PetalTheme.typography.settings.updateStatus, color = semantic.textSecondary)
         }
         if (availableUpdate != null) {
-            MateButton(label = "安装 ${availableUpdate.version}", icon = "download", onClick = onInstallUpdate)
+            Row(horizontalArrangement = Arrangement.spacedBy(PetalTheme.metrics.settings.versionContentSpacing)) {
+                MateButton(label = "安装 ${availableUpdate.version}", icon = "download", onClick = onInstallUpdate)
+                // 「查看更新日志」（重开更新弹窗，对标原 Vue SettingsPage）
+                MateButton(label = "查看更新日志", variant = MateButtonVariant.TEXT, icon = "info", onClick = onShowUpdate)
+            }
+        }
+        if (updateDownloading) {
+            // 可点击的下载进度条（点击重开更新弹窗）
+            Box(
+                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(PetalTheme.metrics.settings.mountPanelRadius))
+                    .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onShowUpdate),
+            ) {
+                MateLinearProgress(value = updateDownloadProgress)
+            }
         }
         Text("一款开源免费的华为云盘客户端", style = PetalTheme.typography.settings.aboutDescription, color = semantic.textSecondary)
         // GitHub / GitCode 外链

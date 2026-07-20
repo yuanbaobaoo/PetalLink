@@ -1,6 +1,7 @@
 package io.github.yuanbaobaoo.petallink.sync.engine
 
 import io.github.yuanbaobaoo.petallink.AppError
+import io.github.yuanbaobaoo.petallink.core.logging.Logger
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.file.AtomicMoveNotSupportedException
@@ -28,6 +29,7 @@ class JvmCloudTreeCheckpointStore(
     private val commitProbe: (CheckpointCommitStage) -> Unit = {},
 ) : CloudTreeCheckpointStore {
     private val mutex = Mutex()
+    private val logger = Logger()
     private val json = Json { prettyPrint = true; encodeDefaults = true; ignoreUnknownKeys = false }
     private val tmp get() = file.resolveSibling("${file.fileName}.tmp")
     private val backup get() = file.resolveSibling("${file.fileName}.bak")
@@ -37,7 +39,9 @@ class JvmCloudTreeCheckpointStore(
      */
     override suspend fun loadTrusted(): CloudTreeCache? = mutex.withLock { io {
         Files.deleteIfExists(tmp)
-        loadOne(file) ?: loadOne(backup)
+        (loadOne(file) ?: loadOne(backup))?.also { cache ->
+            logger.info("sync.cloud_tree") { "从缓存加载可信云端 checkpoint files=${cache.tree.size}" }
+        }
     } }
 
     /**
@@ -76,10 +80,13 @@ class JvmCloudTreeCheckpointStore(
                 if (hadPrevious && Files.exists(backup)) atomicReplace(backup, file)
                 else if (!hadPrevious) Files.deleteIfExists(file)
                 syncDirectory(parent)
+            }.onFailure { rollbackError ->
+                logger.error("sync.cloud_tree", { "云端 checkpoint 提交失败且旧版本回滚失败" }, rollbackError)
             }
             Files.deleteIfExists(tmp)
             throw AppError.LocalIo("云树 checkpoint 原子提交失败: $file", error)
         }
+        logger.info("sync.cloud_tree") { "可信云端 checkpoint 已提交 files=${checkpoint.tree.size}" }
         Unit
     } }
 
@@ -97,9 +104,24 @@ class JvmCloudTreeCheckpointStore(
      */
     private fun loadOne(candidate: Path): CloudTreeCache? {
         if (!Files.isRegularFile(candidate)) return null
-        return runCatching {
-            json.decodeFromString<CloudTreeCache>(Files.readString(candidate)).also(CloudTreeCache::validateTrusted)
-        }.getOrNull()
+        val raw = try {
+            Files.readString(candidate)
+        } catch (e: Throwable) {
+            logger.warn("sync.cloud_tree") { "读取云端 checkpoint 失败，将全量刷新 error=$e" }
+            return null
+        }
+        val cache = try {
+            json.decodeFromString<CloudTreeCache>(raw)
+        } catch (e: Throwable) {
+            logger.warn("sync.cloud_tree") { "解析云端 checkpoint 失败，将全量刷新 error=$e" }
+            return null
+        }
+        return try {
+            cache.also(CloudTreeCache::validateTrusted)
+        } catch (e: Throwable) {
+            logger.warn("sync.cloud_tree") { "云端 checkpoint 不可信，将全量刷新 error=$e" }
+            null
+        }
     }
 
     /**

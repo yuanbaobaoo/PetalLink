@@ -192,6 +192,78 @@ class TaskRunnerStateMachineTest {
         assertEquals(2, peak.get())
     }
 
+    @Test
+    fun 显式重试预检拒绝则不转Pending() = withDb { db ->
+        var executions = 0
+        val operations = FakeOperations(
+            preflightFn = { PreflightResult.Reject("上传源已变化", TransferState.RestartRequired) },
+            execute = { executions++; TaskOutput(TaskDisposition.COMPLETED) },
+        )
+        val runner = TaskRunner(db.transfers, operations, { true }, { 1_000L }, { 0L })
+        val id = db.transfers.insert(task(state = TransferState.Failed).copy(operation = 0))
+
+        assertEquals(TaskDisposition.RESTART_REQUIRED, runner.retryExplicit(id))
+        assertEquals(0, executions)
+        val updated = assertNotNull(db.transfers.findById(id))
+        assertEquals(TransferState.RestartRequired, updated.state)
+        assertEquals("上传源已变化", updated.errorMessage)
+    }
+
+    @Test
+    fun 离线时resumeVerifying整体跳过() = withDb { db ->
+        var verifies = 0
+        val operations = FakeOperations(verify = {
+            verifies++
+            RemoteVerification.Committed("cloud")
+        })
+        val id = db.transfers.insert(task(state = TransferState.VerifyingRemote, nextRetryAt = 0L))
+        val runner = TaskRunner(db.transfers, operations, { false }, { 1_000L }, { 0L })
+
+        runner.performOnlineRecovery()
+
+        assertEquals(0, verifies)
+        assertEquals(TransferState.VerifyingRemote, db.transfers.findById(id)?.state)
+    }
+
+    @Test
+    fun 启动恢复下载断点以磁盘tmp大小为准() = withDb { db ->
+        val downloadId = db.transfers.insert(
+            task(
+                state = TransferState.Running,
+                direction = TransferDirection.DOWNLOAD,
+                totalSize = 100L,
+                transferred = 40L,
+                resumeOffset = 40L,
+            ),
+        )
+        val operations = FakeOperations(durableOffset = { 12L })
+        val runner = TaskRunner(db.transfers, operations, { true }, { 5_000L }, { 0L })
+
+        runner.performStartupRecovery {}
+
+        val download = assertNotNull(db.transfers.findById(downloadId))
+        assertEquals(TransferState.Pending, download.state)
+        assertEquals(12L, download.resumeOffset)
+        assertEquals(12L, download.transferred)
+    }
+
+    @Test
+    fun 退避四二九优先服务端RetryAfter() = withDb { db ->
+        val operations = FakeOperations(execute = {
+            TaskOutput(
+                TaskDisposition.BACKING_OFF,
+                errorMessage = "限流 429",
+                retryAfter = io.github.yuanbaobaoo.petallink.drive.RetryAfter.DelaySeconds(120),
+            )
+        })
+        val runner = TaskRunner(db.transfers, operations, { true }, { 10_000L }, { 0L })
+        val id = db.transfers.insert(task(totalSize = 10L))
+
+        assertEquals(TaskDisposition.BACKING_OFF, runner.runExpected(context(db, id)))
+        // 服务端 Retry-After: 120 → 10_000 + 120_000，而非本地指数退避 11_000
+        assertEquals(130_000L, db.transfers.findById(id)?.nextRetryAt)
+    }
+
     private fun task(
         state: TransferState = TransferState.Pending,
         direction: TransferDirection = TransferDirection.UPLOAD,
@@ -246,15 +318,18 @@ class TaskRunnerStateMachineTest {
     }
 
     private class FakeOperations(
+        private val preflightFn: suspend (TaskContext) -> PreflightResult = { PreflightResult.Ok },
         private val execute: suspend (TaskContext) -> TaskOutput = {
             TaskOutput(TaskDisposition.COMPLETED)
         },
         private val verify: suspend (TaskContext) -> RemoteVerification = {
             RemoteVerification.Committed(it.fileId)
         },
+        private val durableOffset: (suspend (TaskContext) -> Long?)? = null,
     ) : TransferOperations {
-        override suspend fun preflight(task: TaskContext) = PreflightResult.Ok
+        override suspend fun preflight(task: TaskContext) = preflightFn(task)
         override suspend fun execute(task: TaskContext, progress: TaskProgressReporter) = execute(task)
         override suspend fun verifyRemote(task: TaskContext) = verify(task)
+        override suspend fun durableDownloadOffset(task: TaskContext): Long? = durableOffset?.invoke(task)
     }
 }

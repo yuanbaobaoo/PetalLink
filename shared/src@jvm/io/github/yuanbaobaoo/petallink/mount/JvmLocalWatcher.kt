@@ -1,5 +1,6 @@
 package io.github.yuanbaobaoo.petallink.mount
 
+import io.github.yuanbaobaoo.petallink.core.logging.Logger
 import java.nio.file.Path
 import java.nio.file.Files
 import java.util.concurrent.atomic.AtomicLong
@@ -27,6 +28,7 @@ class JvmLocalWatcher(
         require(!Files.isSymbolicLink(it) && Files.isDirectory(it)) { "FSEvents 根路径必须是非符号链接目录: $it" }
     }
     private val root = lexicalRoot.toRealPath()
+    private val logger = Logger()
     private val generation = AtomicLong(0)
     private val lock = Any()
     private val pending = linkedSetOf<String>()
@@ -52,6 +54,7 @@ class JvmLocalWatcher(
             delay(warmupMs)
             if (generation.get() == current) mutableChanges.emit(emptyList())
         }
+        logger.info("mount.local_watcher") { "本地文件监视器已启动 dir=$root debounce=${debounceMs / 1_000}" }
     }
 
     /**
@@ -70,14 +73,28 @@ class JvmLocalWatcher(
         warmupJob?.cancel()
         warmupJob = null
         runCatching { oldSource?.close() }
+        if (oldSource != null) {
+            logger.info("mount.local_watcher") { "本地文件监视器已停止" }
+        }
     }
 
     /**
-     * 处理单条原生事件：warmup 与代际失配直接忽略，命中则加入待处理集合并启动 debounce。
+     * 处理单条原生事件：纯元数据事件（如 xattr 写入）直接忽略，warmup 与代际失配直接忽略，命中则加入待处理集合并启动 debounce。
      */
     private fun handleEvent(current: Long, event: NativeFSEvent) {
-        if (generation.get() != current || nanoTime() < warmupUntilNanos) return
+        // 仅放行内容级变更（对标 local_watcher.rs:307-316 的 Create/Modify/Remove/Other 过滤）；
+        // 占位符创建与 markDownloaded 写 xattr 只产生元数据位事件，放行会自触发全量重扫。
+        if (!event.isChangeEvent()) {
+            logger.debug("mount.local_watcher") { "watcher: 忽略纯元数据事件 kind=${event.flags} path=${event.path}" }
+            return
+        }
+        if (generation.get() != current) return
+        if (nanoTime() < warmupUntilNanos) {
+            logger.debug("mount.local_watcher") { "watcher warmup: 丢弃历史事件 kind=${event.flags}" }
+            return
+        }
         val relative = sanitize(event.path) ?: return
+        logger.debug("mount.local_watcher") { "watcher: 接受事件 kind=${event.flags} paths=[$relative]" }
         synchronized(lock) {
             if (generation.get() != current) return
             pending += relative
@@ -101,11 +118,17 @@ class JvmLocalWatcher(
         val eventRoot = when {
             path.startsWith(root) -> root
             path.startsWith(lexicalRoot) -> lexicalRoot
-            else -> return null
+            else -> {
+                logger.debug("mount.local_watcher") { "watcher: 路径不在挂载目录下，跳过 path=$path mount=$root" }
+                return null
+            }
         }
         val relative = eventRoot.relativize(path)
         if (relative.none()) return ""
-        if (relative.any { SkipFilter.shouldSkip(it.toString(), skipPatterns) }) return null
+        if (relative.any { SkipFilter.shouldSkip(it.toString(), skipPatterns) }) {
+            logger.debug("mount.local_watcher") { "watcher: 跳过排除文件 path=$path" }
+            return null
+        }
         return relative.joinToString("/") { it.toString() }
     }
 

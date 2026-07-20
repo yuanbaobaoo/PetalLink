@@ -4,6 +4,7 @@ import io.github.yuanbaobaoo.petallink.AppError
 import io.github.yuanbaobaoo.petallink.config.AppConfig
 import io.github.yuanbaobaoo.petallink.config.ConfigStore
 import io.github.yuanbaobaoo.petallink.config.JvmMountPaths
+import io.github.yuanbaobaoo.petallink.core.logging.Logger
 import io.github.yuanbaobaoo.petallink.data.PetalLinkDb
 import io.github.yuanbaobaoo.petallink.data.SyncItem
 import io.github.yuanbaobaoo.petallink.data.TransferDirection
@@ -28,6 +29,8 @@ internal class JvmDriveMutationSettler(
     private val db: PetalLinkDb,
     private val xattrs: XattrAccess = MacXattrAccess,
 ) {
+    private val logger = Logger()
+
     /**
      * 路径变更计划；记录 fileId、新旧相对路径、受影响的同步基线及挂载根目录。
      */
@@ -188,8 +191,9 @@ internal class JvmDriveMutationSettler(
         }
         try {
             db.transfers.pruneHistory(100)
-        } catch (_: Throwable) {
+        } catch (error: Throwable) {
             // 修剪历史不得把“远端已删 + 留痕已写”伪装成删除失败。
+            logger.warn("commands.drive") { "修剪传输历史失败，不影响删除留痕：fileId=${plan.fileId}：${error.message}" }
         }
     }
 

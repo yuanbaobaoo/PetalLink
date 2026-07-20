@@ -1,6 +1,7 @@
 package io.github.yuanbaobaoo.petallink.auth
 
 import io.github.yuanbaobaoo.petallink.AppError
+import io.github.yuanbaobaoo.petallink.core.logging.Logger
 import io.ktor.client.HttpClient
 import io.ktor.client.request.header
 import io.ktor.client.request.request
@@ -30,10 +31,13 @@ class UserInfoApi(
     private val restPhpUrl: String = AuthConstants.REST_PHP_URL,
     private val oidcUrl: String = AuthConstants.USER_INFO_URL,
 ) {
+    private val logger = Logger()
+
     /**
      * 并发拉取 OIDC、展示信息、手机号三个端点并合并为账号资料。单端点失败只丢弃该端点结果。
      */
     suspend fun get(): UserInfo = coroutineScope {
+        logger.info("auth.user_info_api") { "开始拉取账号信息" }
         val token = tokenProvider()
         val info = async { runCatching { getDisplayInfo(token) }.getOrNull() }
         val phone = async { runCatching { getPhone(token) }.getOrNull() }
@@ -51,11 +55,16 @@ class UserInfoApi(
      */
     private suspend fun getDisplayInfo(token: String): JsonObject {
         val body = "access_token=${Pkce.enc(token)}&getNickName=1"
-        return requestObject(
-            HttpMethod.Post,
-            "$restPhpUrl?nsp_svc=GOpen.User.getInfo",
-            body,
-        )
+        return try {
+            requestObject(
+                HttpMethod.Post,
+                "$restPhpUrl?nsp_svc=GOpen.User.getInfo",
+                body,
+            )
+        } catch (e: AppError.Data) {
+            logger.warn("auth.user_info_api") { "GOpen.User.getInfo 返回非对象" }
+            throw e
+        }
     }
 
     /**

@@ -2,6 +2,8 @@ package io.github.yuanbaobaoo.petallink.mount
 
 import io.github.yuanbaobaoo.petallink.AppError
 import io.github.yuanbaobaoo.petallink.config.AppConfig
+import io.github.yuanbaobaoo.petallink.core.logging.Logger
+import io.github.yuanbaobaoo.petallink.sync.engine.DownloadTargetIdentity
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.FileAlreadyExistsException
 import java.nio.file.Files
@@ -21,6 +23,7 @@ class JvmPlaceholderManager(
 ) : PlaceholderManager {
     private val lexicalRoot = mountRoot.toAbsolutePath().normalize()
     private val root = requireSafeRoot(lexicalRoot)
+    private val logger = Logger()
 
     /**
      * 必要时为相对路径创建占位符；已存在文件则补齐 Finder 灰色标签后返回 false，新建成功返回 true。
@@ -103,7 +106,10 @@ class JvmPlaceholderManager(
         if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
             throw AppError.LocalIo("拒绝删除非普通文件: $path")
         }
-        if (Files.size(path) == 0L && readState(path) != PlaceholderState.PLACEHOLDER) return@io
+        if (Files.size(path) == 0L && readState(path) != PlaceholderState.PLACEHOLDER) {
+            logger.debug("mount.manager") { "保留非占位 0 字节文件 path=$path" }
+            return@io
+        }
         Files.deleteIfExists(path)
     }
 
@@ -125,7 +131,31 @@ class JvmPlaceholderManager(
             runCatching { moveAtomicallyWhenPossible(backup, source) }
             throw AppError.LocalIo("备份已修改占位符时清理 xattr 失败: $backup", error)
         }
+        logger.info("mount.manager") { "占位被修改过，已备份：$source → $backup" }
         backup.toString()
+    }
+
+    /**
+     * 读取下载目标的本地身份（供 TransferOperationsImpl 下载安全护栏，对标 download_api.rs verify_local_destination）。
+     *
+     * - 不存在 → Missing；
+     * - 0 字节占位符 → Placeholder（携带可选 fileId 身份标记）；
+     * - 有内容的普通文件 → Occupied（size/mtime 快照）；
+     * - 目录、符号链接等 → Inaccessible。
+     */
+    suspend fun downloadTargetIdentity(absolutePath: String): DownloadTargetIdentity = io {
+        val path = safeAbsolute(absolutePath)
+        if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) return@io DownloadTargetIdentity.Missing
+        if (Files.isSymbolicLink(path) || !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
+            return@io DownloadTargetIdentity.Inaccessible
+        }
+        val size = Files.size(path)
+        if (size == 0L && readState(path) == PlaceholderState.PLACEHOLDER) {
+            val fileId = xattrs.get(path.toString(), AppConfig.XATTR_FILE_ID)
+                ?.decodeToString()?.trimEnd('\u0000')?.takeIf(String::isNotBlank)
+            return@io DownloadTargetIdentity.Placeholder(fileId)
+        }
+        DownloadTargetIdentity.Occupied(size, Files.getLastModifiedTime(path).toMillis())
     }
 
     /**
@@ -174,6 +204,8 @@ class JvmPlaceholderManager(
             Files.createFile(path)
             created = true
             xattrs.set(path.toString(), AppConfig.XATTR_STATE, PlaceholderState.PLACEHOLDER.xattrValue.encodeToByteArray())
+            // 持久化占位符（对标 manager.rs:224 file.sync_all()），失败走下方回滚
+            java.nio.channels.FileChannel.open(path, java.nio.file.StandardOpenOption.WRITE).use { it.force(true) }
             setFinderGreyLabelSync(path, true)
         } catch (error: Throwable) {
             if (created) {

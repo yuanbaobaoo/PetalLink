@@ -1,5 +1,6 @@
 package io.github.yuanbaobaoo.petallink.sync.engine
 
+import io.github.yuanbaobaoo.petallink.core.logging.Logger
 import io.github.yuanbaobaoo.petallink.sync.SyncAction
 import io.github.yuanbaobaoo.petallink.sync.SyncActionType
 import io.github.yuanbaobaoo.petallink.sync.SyncSnapshot
@@ -9,6 +10,8 @@ import io.github.yuanbaobaoo.petallink.sync.isFolder
  * Planner 之后、Executor 之前的目录安全整形。
  */
 object ActionPlannerGuards {
+    private val logger = Logger()
+
     /**
      * 对规划后的动作做目录安全整形，并按路径深度排序后返回
      */
@@ -54,6 +57,7 @@ object ActionPlannerGuards {
             }
         }
         rescue.sortedWith(compareBy<String> { it.count { char -> char == '/' } }.thenBy { it }).forEach { path ->
+            logger.info("sync.engine.action_filters") { "为救援内容补建云端目录 rel=$path" }
             actions += SyncAction(
                 SyncActionType.CREATE_FOLDER,
                 path,
@@ -67,10 +71,17 @@ object ActionPlannerGuards {
      */
     private fun preserveBackupParents(snapshot: SyncSnapshot, actions: MutableList<SyncAction>) {
         val backupPaths = actions.filter { it.type == SyncActionType.BACKUP_BEFORE_CLOUD_DELETE }.map { it.relativePath }
-        actions.removeAll { action ->
+        val preserved = actions.filter { action ->
             action.type == SyncActionType.DELETE_FROM_LOCAL && snapshot.local[action.relativePath]?.isFolder == true &&
                 backupPaths.any { it.startsWith("${action.relativePath}/") }
         }
+        for (dir in preserved) {
+            logger.info("sync.engine.action_filters") { "保留本地目录：目录下有文件需 BackupBeforeCloudDelete（备份副本需要栖身目录） dir=${dir.relativePath}" }
+        }
+        if (preserved.isNotEmpty()) {
+            logger.info("sync.engine.action_filters") { "目录删除保护：保留 ${preserved.size} 个有备份子文件的目录" }
+        }
+        actions.removeAll(preserved.toSet())
     }
 
     /**
@@ -80,8 +91,13 @@ object ActionPlannerGuards {
         val roots = actions.filter { it.type == SyncActionType.DELETE_FROM_CLOUD }
             .map { it.relativePath }
             .filter { snapshot.cloud[it]?.isFolder() == true }
+        val before = actions.size
         actions.removeAll { action ->
             action.type == SyncActionType.DELETE_FROM_CLOUD && roots.any { root -> action.relativePath != root && action.relativePath.startsWith("$root/") }
+        }
+        val removed = before - actions.size
+        if (removed > 0) {
+            logger.info("sync.engine.action_filters") { "显式目录删除覆盖子孙动作；仅去重，不提前结算 removed=$removed" }
         }
     }
 
@@ -92,8 +108,13 @@ object ActionPlannerGuards {
         val roots = actions.filter { it.type == SyncActionType.DELETE_FROM_LOCAL }
             .map { it.relativePath }
             .filter { snapshot.local[it]?.isFolder == true }
+        val before = actions.size
         actions.removeAll { action ->
             action.type == SyncActionType.DELETE_FROM_LOCAL && roots.any { root -> action.relativePath != root && action.relativePath.startsWith("$root/") }
+        }
+        val skipped = before - actions.size
+        if (skipped > 0) {
+            logger.info("sync.engine.action_filters") { "DeleteFromLocal 祖先去重：跳过 $skipped 个被子目录删除覆盖的文件" }
         }
     }
 }

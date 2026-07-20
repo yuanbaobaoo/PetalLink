@@ -1,6 +1,7 @@
 package io.github.yuanbaobaoo.petallink.commands
 
 import io.github.yuanbaobaoo.petallink.AppError
+import io.github.yuanbaobaoo.petallink.core.logging.Logger
 import io.github.yuanbaobaoo.petallink.mount.JvmPlaceholderManager
 import io.github.yuanbaobaoo.petallink.sync.ConflictResolver
 import io.github.yuanbaobaoo.petallink.sync.SyncAction
@@ -23,6 +24,7 @@ internal class JvmConflictCoordinator(
     private val hasActiveUpload: suspend (String) -> Boolean,
     private val zoneId: ZoneId = ZoneId.systemDefault(),
 ) {
+    private val logger = Logger()
 
     /**
      * 解决双端修改冲突；本地胜出时云端内容先下载为副本，云端胜出时先移动本地副本。
@@ -52,6 +54,7 @@ internal class JvmConflictCoordinator(
         val modifiedAt = Files.getLastModifiedTime(source, LinkOption.NOFOLLOW_LINKS).toMillis()
         val backup = allocateBackup(source, ConflictResolver.ConflictSide.LOCAL, modifiedAt)
         placeholder.moveToConflictCopy(source.toString(), backup.toString())
+        logger.info("sync.executor.actions") { "云端删除但本地有未上传修改，已备份副本 src=$source backup=$backup" }
     }
 
     /**

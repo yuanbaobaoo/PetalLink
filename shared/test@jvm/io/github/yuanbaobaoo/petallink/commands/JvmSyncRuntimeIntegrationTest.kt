@@ -48,7 +48,7 @@ class JvmSyncRuntimeIntegrationTest {
                     """{"category":"drive#changeList","changes":[],"newStartCursor":"c1"}"""
                 request.method == HttpMethod.Post && url.contains("uploadType=multipart") -> {
                     uploadCalls++
-                    """{"category":"drive#file","id":"uploaded","fileName":"local.txt","mimeType":"text/plain","parentFolder":["root"],"size":"5"}"""
+                    """{"category":"drive#file","id":"uploaded","fileName":"local.txt","mimeType":"text/plain","parentFolder":["root"],"size":"5","editedTime":"2026-01-01T00:00:00Z"}"""
                 }
                 url.contains("/files?") ->
                     """{"category":"drive#fileList","files":[{"category":"drive#file","id":"remote","fileName":"remote.txt","mimeType":"text/plain","parentFolder":["root"],"size":"6"}]}"""
@@ -112,7 +112,7 @@ class JvmSyncRuntimeIntegrationTest {
                 url.contains("/changes?") ->
                     """{"category":"drive#changeList","changes":[],"newStartCursor":"c1"}"""
                 request.method == HttpMethod.Post && url.contains("uploadType=multipart") ->
-                    """{"category":"drive#file","id":"uploaded","fileName":"local.txt","mimeType":"text/plain","parentFolder":["root"],"size":"5"}"""
+                    """{"category":"drive#file","id":"uploaded","fileName":"local.txt","mimeType":"text/plain","parentFolder":["root"],"size":"5","editedTime":"2026-01-01T00:00:00Z"}"""
                 request.method == HttpMethod.Delete -> {
                     deleteCalls++
                     "{}"

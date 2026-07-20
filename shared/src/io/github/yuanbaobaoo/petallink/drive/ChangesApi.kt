@@ -2,6 +2,7 @@ package io.github.yuanbaobaoo.petallink.drive
 
 import io.github.yuanbaobaoo.petallink.AppError
 import io.github.yuanbaobaoo.petallink.auth.Pkce
+import io.github.yuanbaobaoo.petallink.core.logging.Logger
 import io.ktor.client.statement.*
 import io.ktor.http.*
 import kotlinx.serialization.json.Json
@@ -28,6 +29,8 @@ class ChangesApi(
     private val client: DriveClient,
     private val base: String = DriveConstants.DRIVE_API_BASE,
 ) {
+    private val logger = Logger()
+
     /**
      * 获取初始 cursor
      */
@@ -105,6 +108,9 @@ class ChangesApi(
                 if (!seen.add(nextCursor)) {
                     throw AppError.Remote(0, "cursor 未推进或形成循环: $nextCursor")
                 }
+                logger.debug("drive.changes_api") {
+                    "Changes:list 继续翻页 pageNumber=$pageNum pageCount=${changes.size} total=${all.size}"
+                }
                 cursor = nextCursor
                 continue
             }
@@ -115,6 +121,7 @@ class ChangesApi(
             if (!ChangeParser.isCursorAdvanced(seen, finalCursor, cursor, changes.size)) {
                 throw AppError.Remote(0, "newStartCursor 未推进或形成循环: $finalCursor")
             }
+            logger.info("drive.changes_api") { "Changes:list 已完整追平 pages=$pageNum total=${all.size}" }
             return all to finalCursor
         }
         throw AppError.Remote(0, "未能在分页上限内结束")

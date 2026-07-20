@@ -54,6 +54,11 @@ class AntiOscillation {
     fun contains(relativePath: String): Boolean = relativePath in state.get()
 
     /**
+     * 当前最近删除路径集合（供 ActionPlannerGuards 的救援目录判定使用）
+     */
+    fun paths(): Set<String> = state.get().keys
+
+    /**
      * 当前记录的已删除路径数量
      */
     fun size(): Int = state.get().size

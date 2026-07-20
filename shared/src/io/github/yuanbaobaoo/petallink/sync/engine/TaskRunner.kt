@@ -2,12 +2,14 @@ package io.github.yuanbaobaoo.petallink.sync.engine
 
 import io.github.yuanbaobaoo.petallink.AppError
 import io.github.yuanbaobaoo.petallink.config.AppConfig
+import io.github.yuanbaobaoo.petallink.core.logging.Logger
 import io.github.yuanbaobaoo.petallink.data.ColumnPatch
 import io.github.yuanbaobaoo.petallink.data.TransferPatch
 import io.github.yuanbaobaoo.petallink.data.TransferDirection
 import io.github.yuanbaobaoo.petallink.data.TransferTask
 import io.github.yuanbaobaoo.petallink.data.RunningTransferPatch
 import io.github.yuanbaobaoo.petallink.drive.ResumeSession
+import io.github.yuanbaobaoo.petallink.drive.RetryAfter
 import io.github.yuanbaobaoo.petallink.data.repository.TransferRepository
 import io.github.yuanbaobaoo.petallink.data.repository.StaleRevisionException
 import io.github.yuanbaobaoo.petallink.sync.RetryPolicy
@@ -38,6 +40,14 @@ interface TransferOperations {
      * 远端核验（VerifyingRemote 状态用）
      */
     suspend fun verifyRemote(task: TaskContext): RemoteVerification
+
+    /**
+     * 启动恢复时读取下载断点的磁盘真值（§3.11，对标 recovery.rs:400-424：
+     * 以 .tmp 临时文件实际大小为准，而非 DB 中的 resumeOffset）。
+     *
+     * 返回 null 表示实现无法判定，TaskRunner 回退使用 DB 断点。
+     */
+    suspend fun durableDownloadOffset(task: TaskContext): Long? = null
 }
 
 /**
@@ -117,6 +127,11 @@ data class TaskOutput(
     val cloudFileId: String? = null,
     val bytesTransferred: Long? = null,
     val errorMessage: String? = null,
+    /**
+     * 429 限流时服务端指定的重试时间（§3.11，原 retry_policy.rs:157-166）；
+     * 非空时优先于本地指数退避。
+     */
+    val retryAfter: RetryAfter? = null,
 )
 
 /**
@@ -203,8 +218,10 @@ class TaskProgressReporter(
     private val stateRevision: Long,
     private val throttleMs: Long = PROGRESS_THROTTLE_MS,
     private val onProgress: suspend (Long) -> Unit = {},
+    private val direction: TransferDirection = TransferDirection.UPLOAD,
 ) {
     private var lastReportMs: Long = 0L
+    private val logger = Logger()
 
     /**
      * 上报进度（刻意不递增 revision）
@@ -212,7 +229,14 @@ class TaskProgressReporter(
     suspend fun report(bytesDone: Long, nowMs: Long) {
         if (nowMs - lastReportMs < throttleMs) return  // 节流
         lastReportMs = nowMs
-        if (repository.updateRunningProgress(taskId, stateRevision, bytesDone)) onProgress(taskId)
+        if (repository.updateRunningProgress(taskId, stateRevision, bytesDone)) {
+            onProgress(taskId)
+        } else {
+            // revision 已过期（任务被其他执行者推进/终结）→ 丢弃过期回调
+            logger.debug("sync.executor.transfer_operations") {
+                if (direction == TransferDirection.UPLOAD) "忽略过期上传进度回调" else "忽略过期下载进度回调"
+            }
+        }
     }
 
     /**
@@ -265,6 +289,7 @@ class TaskRunner(
 ) {
     // CAS 并发控制：同一路径同时只允许一个任务 Running
     private val runningSemaphore = Semaphore(maxConcurrentTransfers.coerceIn(1, 20))
+    private val logger = Logger()
 
     /**
      * 执行单个任务（对标 run_expected 主链）。
@@ -348,6 +373,7 @@ class TaskRunner(
             running.id,
             running.stateRevision,
             onProgress = onTaskChanged,
+            direction = running.direction,
         )
         return try {
             val output = operations.execute(running, progress)
@@ -400,7 +426,9 @@ class TaskRunner(
                     TaskDisposition.FAILED
                 } else {
                     val baseAttempt = (newAttempt - 1).coerceAtLeast(0)
-                    val deadline = nowMs() + RetryPolicy.backoff(baseAttempt, jitterMs()).inWholeMilliseconds
+                    // §3.11（原 retry_policy.rs:157-166）：429 优先服务端 Retry-After，缺省回退指数退避
+                    val deadline = output.retryAfter?.nextRetryAt(nowMs())
+                        ?: (nowMs() + RetryPolicy.backoff(baseAttempt, jitterMs()).inWholeMilliseconds)
                     transitionFailure(task, TransferState.BackingOff, newAttempt, output.errorMessage, deadline)
                     TaskDisposition.BACKING_OFF
                 }
@@ -428,28 +456,43 @@ class TaskRunner(
     /**
      * 结算错误（对标 settle_error → classify_transfer_error）。
      * 按错误类型决定：WaitForNetwork / Backoff / VerifyRemote / Fail。
+     *
+     * §3.3（原 retry_policy.rs:62-68,97-140,167-177）：
+     * - 写操作（上传/删除）网络错误按「请求是否可能已送达」分流：可能送达 → VerifyingRemote；
+     * - 500/502/503/504 退避预算耗尽且写入可能已送达 → VerifyingRemote；
+     * - upload_session_expired（RemoteAmbiguous）→ VerifyingRemote。
      */
     private suspend fun settleError(task: TaskContext, error: AppError): TaskDisposition {
-        val output = when (error.kind) {
-            AppError.ErrorKind.NETWORK -> TaskOutput(
+        val modifiesRemote = task.direction == TransferDirection.UPLOAD ||
+            task.direction == TransferDirection.DELETE
+        val budgetExhausted = task.attempt + 1 >= AppConfig.MAX_AUTOMATIC_ATTEMPTS
+        val output = when (RetryPolicy.classifyTransferError(error, modifiesRemote, budgetExhausted)) {
+            RetryPolicy.RecoveryDecision.VERIFY_REMOTE -> {
+                logger.warn("sync.task_runner.recovery") {
+                    "写入结果不确定，转远端核验而非盲目重放 task_id=${task.id} error=${error.message}"
+                }
+                TaskOutput(TaskDisposition.VERIFYING_REMOTE, errorMessage = error.message)
+            }
+            RetryPolicy.RecoveryDecision.WAIT_FOR_NETWORK -> TaskOutput(
                 TaskDisposition.WAITING_FOR_NETWORK, errorMessage = error.message
             ).also { onNetworkFailure() }
-            AppError.ErrorKind.AUTH -> TaskOutput(
-                TaskDisposition.FAILED, errorMessage = "鉴权失败: ${error.message}"
-            )
-            AppError.ErrorKind.REMOTE -> {
+            RetryPolicy.RecoveryDecision.BACKOFF -> {
                 val status = (error as? AppError.Remote)?.status ?: 0
-                when {
-                    status in 500..599 -> TaskOutput(
-                        TaskDisposition.BACKING_OFF, errorMessage = "服务端错误 $status"
-                    )
-                    status == 429 -> TaskOutput(
-                        TaskDisposition.BACKING_OFF, errorMessage = "限流 429"
-                    )
-                    else -> TaskOutput(TaskDisposition.FAILED, errorMessage = "远端错误 $status")
-                }
+                TaskOutput(
+                    TaskDisposition.BACKING_OFF,
+                    errorMessage = if (status == 429) "限流 429" else "服务端错误 $status",
+                )
             }
-            else -> TaskOutput(TaskDisposition.FAILED, errorMessage = error.message)
+            RetryPolicy.RecoveryDecision.FAIL -> when (error.kind) {
+                AppError.ErrorKind.AUTH -> TaskOutput(
+                    TaskDisposition.FAILED, errorMessage = "鉴权失败: ${error.message}"
+                )
+                AppError.ErrorKind.REMOTE -> TaskOutput(
+                    TaskDisposition.FAILED,
+                    errorMessage = "远端错误 ${(error as? AppError.Remote)?.status ?: 0}",
+                )
+                else -> TaskOutput(TaskDisposition.FAILED, errorMessage = error.message)
+            }
         }
         return settle(task, output)
     }
@@ -526,6 +569,14 @@ class TaskRunner(
 
         // 步骤 7: recover_interrupted_transfers + commit_recovery_checkpoint
         recoverInterrupted()
+        val completed = repository.selectByState(TransferState.Completed).size
+        val waitingNetwork = repository.selectByState(TransferState.WaitingForNetwork).size
+        val verifyingRemote = repository.selectByState(TransferState.VerifyingRemote).size
+        val failed = repository.selectByState(TransferState.Failed).size
+        logger.info("sync.engine.lifecycle") {
+            "中断传输已通过统一 TaskRunner 恢复 completed=$completed" +
+                " waiting_network=$waitingNetwork verifying_remote=$verifyingRemote failed=$failed"
+        }
 
         // 步骤 8: run_sync_cycle_inner（在 engine 层做：rescan + plan + execute）
     }
@@ -534,7 +585,19 @@ class TaskRunner(
      * 步骤 1：恢复进程中断时仍处于 Running 的任务——写操作转 VerifyingRemote，下载保留断点转 Pending。
      */
     private suspend fun recoverInterruptedRunning() {
-        for (task in repository.selectByState(TransferState.Running)) {
+        // 启动期同路径重复任务收敛（对标 recovery.rs:296-336）：每组只恢复最新一条，其余抑制
+        val running = repository.selectByState(TransferState.Running)
+        val selected = running.filter { it.relativePath == null }.toMutableList()
+        running.filter { it.relativePath != null }
+            .groupBy { it.relativePath!! }
+            .forEach { (_, samePath) ->
+                val newestFirst = samePath.sortedWith(
+                    compareByDescending<TransferTask> { it.createdAt }.thenByDescending { it.id ?: 0L },
+                )
+                selected += newestFirst.first()
+                for (duplicate in newestFirst.drop(1)) suppressStartupDuplicate(duplicate)
+            }
+        for (task in selected) {
             val ctx = task.toContext()
             if (task.direction == TransferDirection.UPLOAD || task.direction == TransferDirection.DELETE) {
                 transition(
@@ -549,6 +612,11 @@ class TaskRunner(
                     ctx, TransferState.RestartRequired, ctx.attempt,
                     "进程中断，保留已验证下载断点并重新建立 Range 请求", null,
                 )
+                // §3.11（原 recovery.rs:400-424）：下载断点以磁盘 .tmp 实际大小为准；
+                // 实现无法判定时回退 DB 断点。
+                val durable = operations.durableDownloadOffset(ctx)
+                val resumedTransferred = durable ?: min(task.transferred, task.totalSize)
+                val resumedOffset = durable ?: min(task.resumeOffset, task.totalSize)
                 transition(
                     restart, TransferState.Pending,
                     TransferPatch(
@@ -556,8 +624,8 @@ class TaskRunner(
                         errorMessage = ColumnPatch.Clear,
                         nextRetryAt = ColumnPatch.Clear,
                         finishedAt = ColumnPatch.Clear,
-                        transferred = min(task.transferred, task.totalSize),
-                        resumeOffset = min(task.resumeOffset, task.totalSize),
+                        transferred = resumedTransferred,
+                        resumeOffset = resumedOffset,
                     ),
                 )
             } else {
@@ -567,15 +635,37 @@ class TaskRunner(
     }
 
     /**
+     * 抑制启动期同路径重复任务：写操作转远端核验，下载转重新规划（对标 suppress_startup_duplicate）。
+     */
+    private suspend fun suppressStartupDuplicate(task: TransferTask) {
+        val ctx = task.toContext()
+        if (task.direction == TransferDirection.UPLOAD || task.direction == TransferDirection.DELETE) {
+            transition(
+                ctx, TransferState.VerifyingRemote,
+                TransferPatch(
+                    errorMessage = ColumnPatch.Set("启动恢复：同路径重复任务已收敛，等待核验"),
+                    nextRetryAt = ColumnPatch.Set(nowMs()),
+                ),
+            )
+        } else {
+            transitionFailure(ctx, TransferState.RestartRequired, ctx.attempt, "启动恢复：同路径重复任务已收敛", null)
+        }
+    }
+
+    /**
      * 步骤 5：提升歧义重启（RestartRequired → VerifyingRemote）
      */
     private suspend fun promoteAmbiguousRestarts() {
         val restarts = repository.selectByState(TransferState.RestartRequired)
-        for (task in restarts.filter { !it.remoteResultFileId.isNullOrBlank() }) {
+        val promotable = restarts.filter { !it.remoteResultFileId.isNullOrBlank() }
+        for (task in promotable) {
             transition(
                 task.toContext(), TransferState.VerifyingRemote,
                 TransferPatch(nextRetryAt = ColumnPatch.Set(nowMs()), finishedAt = ColumnPatch.Clear),
             )
+        }
+        if (promotable.isNotEmpty()) {
+            logger.info("sync.engine.cycle") { "已将含远端结果的重规划任务恢复为核验态 promoted=${promotable.size}" }
         }
     }
 
@@ -598,8 +688,13 @@ class TaskRunner(
 
     /**
      * resume_verifying：核验 VerifyingRemote 任务
+     * §3.11（原 recovery.rs:33-35）：离线时整体跳过核验。
      */
     private suspend fun resumeVerifying() {
+        if (!isOnline()) {
+            logger.debug("sync.task_runner.recovery") { "离线，跳过远端核验任务恢复" }
+            return
+        }
         val verifying = repository.selectByState(TransferState.VerifyingRemote)
         for (task in verifying) {
             if ((task.nextRetryAt ?: Long.MIN_VALUE) > nowMs()) continue
@@ -618,6 +713,7 @@ class TaskRunner(
                     )
                 }
                 is RemoteVerification.Err -> {
+                    logger.warn("sync.task_runner.recovery") { "远端写入核验暂不可用，保留歧义状态 task_id=${ctx.id} error=${result.message}" }
                     transition(
                         ctx, TransferState.VerifyingRemote,
                         TransferPatch(
@@ -653,6 +749,9 @@ class TaskRunner(
 
     /**
      * Failed/RestartRequired 只有显式重试才会重新规划；歧义远端结果仍优先核验。
+     *
+     * §3.11（原 admission.rs:218-236 prepare_retry）：转 Pending 前先做预检，
+     * 预检拒绝则持久化到目标态（Failed/RestartRequired），不再盲目重放。
      */
     suspend fun retryExplicit(taskId: Long): TaskDisposition {
         val task = repository.findById(taskId) ?: return TaskDisposition.FAILED
@@ -668,16 +767,41 @@ class TaskRunner(
             )
             return TaskDisposition.VERIFYING_REMOTE
         }
-        val pending = transition(
-            task.toContext(), TransferState.Pending,
-            TransferPatch(
-                errorKind = ColumnPatch.Clear,
-                errorMessage = ColumnPatch.Clear,
-                nextRetryAt = ColumnPatch.Clear,
-                finishedAt = ColumnPatch.Clear,
-                attemptCount = 0,
-            ),
-        )
+        val ctx = task.toContext()
+        // 预检（对标 prepare_retry 的 validate_static + 后端预检）
+        val preflight = try {
+            operations.preflight(ctx)
+        } catch (error: AppError) {
+            logger.warn("sync.task_runner.recovery") { "显式重试预检异常，保持原状态 task_id=$taskId error=${error.message}" }
+            return TaskDisposition.FAILED
+        }
+        if (preflight is PreflightResult.Reject) {
+            try {
+                transitionFailure(ctx, preflight.targetState, ctx.attempt, preflight.reason, null)
+            } catch (_: StaleRevisionException) {
+                return TaskDisposition.BLOCKED
+            }
+            return when (preflight.targetState) {
+                TransferState.RestartRequired -> TaskDisposition.RESTART_REQUIRED
+                TransferState.Failed -> TaskDisposition.FAILED
+                else -> TaskDisposition.BLOCKED
+            }
+        }
+        val pending = try {
+            transition(
+                ctx, TransferState.Pending,
+                TransferPatch(
+                    errorKind = ColumnPatch.Clear,
+                    errorMessage = ColumnPatch.Clear,
+                    nextRetryAt = ColumnPatch.Clear,
+                    finishedAt = ColumnPatch.Clear,
+                    attemptCount = 0,
+                ),
+            )
+        } catch (_: StaleRevisionException) {
+            // 对标 accept_retry_after_preflight：预检后状态已变化则拒绝
+            return TaskDisposition.BLOCKED
+        }
         return runExpected(pending)
     }
 }

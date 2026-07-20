@@ -1,7 +1,7 @@
 package io.github.yuanbaobaoo.petallink.mount
 
-import io.github.yuanbaobaoo.petallink.AppError
 import io.github.yuanbaobaoo.petallink.config.AppConfig
+import io.github.yuanbaobaoo.petallink.core.logging.Logger
 import java.nio.file.Path
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
@@ -69,8 +69,13 @@ class LsofFileBusyChecker(
         commands.filterNot { it in AppConfig.STABILITY_LSOF_WHITELIST }.distinct()
 
     companion object {
+        private val logger = Logger()
+
         /**
-         * 调用系统 lsof 采样占用文件的进程命令名，超时或异常转换为 AppError.LocalIo。
+         * 调用系统 lsof 采样占用文件的进程命令名。
+         *
+         * §3.10（原 stability.rs:153-164）：lsof 启动失败 / 超时 / 退出码 >1 一律按
+         * 「不忙」放行并记录告警——工具性故障不得把传输打成 Failed 终态。
          */
         fun sampleWithLsof(path: Path): List<String> {
             val process = try {
@@ -78,17 +83,24 @@ class LsofFileBusyChecker(
                     .redirectErrorStream(true)
                     .start()
             } catch (error: Throwable) {
-                throw AppError.LocalIo("无法启动 lsof", error)
+                logger.warn("mount.stability") { "lsof 启动失败，按不忙放行 path=$path error=${error.message}" }
+                return emptyList()
             }
             if (!process.waitFor(5, TimeUnit.SECONDS)) {
                 process.destroyForcibly()
-                throw AppError.LocalIo("lsof 超时: $path")
+                logger.warn("mount.stability") { "lsof 超时，按不忙放行 path=$path" }
+                return emptyList()
             }
             val output = process.inputStream.bufferedReader().use { it.readText() }
             return when (process.exitValue()) {
                 0 -> LsofParser.commands(output)
                 1 -> emptyList() // lsof 未找到打开者的标准退出码
-                else -> throw AppError.LocalIo("lsof 失败 exit=${process.exitValue()}: ${output.take(500)}")
+                else -> {
+                    logger.warn("mount.stability") {
+                        "lsof 失败按不忙放行 exit=${process.exitValue()} path=$path output=${output.take(500)}"
+                    }
+                    emptyList()
+                }
             }
         }
     }

@@ -77,8 +77,9 @@ object LoggerRuntime {
             logDirectory = directory
             minLevel = level
             this.clock = clock
-            ringBuffer.clear()
+            // 先清理（可能产生「清理超期日志文件」日志），再重置环形缓冲，保证测试只看到自身写入的记录
             cleanupOldLogs(directory)
+            ringBuffer.clear()
         }
 
     /**
@@ -120,33 +121,32 @@ object LoggerRuntime {
     fun snapshot(count: Int = 1000): List<LogRecord> = ringBuffer.snapshot(count.coerceIn(0, 1000))
 
     /**
-     * 清空环形缓冲并删除磁盘上的日志文件。
+     * 清空环形缓冲（对标原 logs_clear 只清内存缓冲，磁盘按日文件保留至 30 天自动清理）。
      */
     fun clear() = synchronized(lock) {
         ringBuffer.clear()
-        logDirectory?.let { directory ->
-            if (Files.exists(directory)) Files.list(directory).use { files ->
-                files.filter { it.fileName.toString().startsWith("PetalLink.log.") }
-                    .forEach(Files::deleteIfExists)
-            }
-        }
     }
 
     /**
-     * 将所有按日日志按时间顺序合并导出到指定文件。
+     * 将所有按日日志按时间顺序合并导出到指定文件；无内容时抛错（对标原 logs_export「日志目录为空」）。
      */
     fun exportTo(destination: Path) = synchronized(lock) {
         destination.parent?.let(Files::createDirectories)
+        val logger = Logger()
+        var fileCount = 0
         val content = logDirectory?.let { directory ->
             if (!Files.exists(directory)) "" else Files.list(directory).use { files ->
-                files.filter { it.fileName.toString().startsWith("PetalLink.log.") }
+                val logFiles = files.filter { it.fileName.toString().startsWith("PetalLink.log.") }
                     .sorted()
-                    .map(Files::readString)
                     .toList()
-                    .joinToString("")
+                fileCount = logFiles.size
+                logger.info("commands.platform") { "logs_export 开始导出：dir=$directory, count=${logFiles.size}, files=${logFiles.map { it.fileName.toString() }}" }
+                logFiles.map(Files::readString).joinToString("")
             }
         } ?: ""
+        require(content.isNotBlank()) { "日志目录为空" }
         Files.writeString(destination, content)
+        logger.info("commands.platform") { "logs_export 完成：out_bytes=${content.toByteArray(Charsets.UTF_8).size}, file_count=$fileCount" }
     }
 
     /**
@@ -162,15 +162,17 @@ object LoggerRuntime {
      */
     private fun cleanupOldLogs(directory: Path) {
         val today = Instant.ofEpochMilli(clock.millis()).atZone(ZoneOffset.UTC).toLocalDate()
+        var removed = 0
         Files.list(directory).use { files ->
             files.filter { it.fileName.toString().startsWith("PetalLink.log.") }.forEach { file ->
                 val date = runCatching {
                     java.time.LocalDate.parse(file.fileName.toString().removePrefix("PetalLink.log."))
                 }.getOrNull() ?: return@forEach
                 if (java.time.temporal.ChronoUnit.DAYS.between(date, today) > MAX_LOG_DAYS) {
-                    Files.deleteIfExists(file)
+                    if (Files.deleteIfExists(file)) removed++
                 }
             }
         }
+        Logger().info("core.logging") { "清理超期日志文件：removed=$removed, max_days=$MAX_LOG_DAYS" }
     }
 }

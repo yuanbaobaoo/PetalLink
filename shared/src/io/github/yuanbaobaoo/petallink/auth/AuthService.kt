@@ -1,6 +1,7 @@
 package io.github.yuanbaobaoo.petallink.auth
 
 import io.github.yuanbaobaoo.petallink.AppError
+import io.github.yuanbaobaoo.petallink.core.logging.Logger
 import io.ktor.client.*
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
@@ -25,6 +26,7 @@ class AuthService(
     private val refresher: TokenRefresher,
 ) {
     private val json = Json { ignoreUnknownKeys = true }
+    private val logger = Logger()
 
     /**
      * 用授权码换 token（对标 exchange_code_for_token）。
@@ -58,6 +60,7 @@ class AuthService(
             val desc = body["error_description"]?.jsonPrimitive?.content
                 ?: body["error"]?.jsonPrimitive?.content
                 ?: "未知错误"
+            logger.error("auth.service", { "换 token 失败：$desc status=${resp.status.value}" }, null)
             throw AppError.Auth("授权码换 token 失败: $desc")
         }
         val body = Json.parseToJsonElement(resp.bodyAsText()).jsonObject

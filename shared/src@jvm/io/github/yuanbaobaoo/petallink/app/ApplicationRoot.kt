@@ -71,6 +71,8 @@ data class DesktopUiState(
     val thumbnails: Map<String, ByteArray> = emptyMap(),
     val fileStatuses: Map<String, String> = emptyMap(),
     val quotaText: String? = null,
+    val quotaUsedBytes: Long? = null,
+    val quotaTotalBytes: Long? = null,
     val logs: List<LogRecordDisplay> = emptyList(),
     val userInfo: UserInfo? = null,
     val userName: String? = null,
@@ -80,9 +82,11 @@ data class DesktopUiState(
     val updatePhase: UpdaterPhase = UpdaterPhase.IDLE,
     val updateDownloadProgress: Float = 0f,
     val updateReadyToQuit: Boolean = false,
+    val updateDialogDismissed: Boolean = false,
     val launchAtLogin: Boolean = false,
     val errorMessage: String? = null,
     val sidebarRefresh: Int = 0,
+    val downloadProgressText: String? = null,
 )
 
 /**
@@ -93,6 +97,7 @@ class DesktopAppViewModel(
     private val commands: CommandService,
     private val netGuard: NetGuard,
 ) {
+    private val logger = Logger()
     private val mutableState = MutableStateFlow(DesktopUiState())
     private val browser = FileBrowserViewModel()
     private val syncViewModel = SyncViewModel()
@@ -130,6 +135,8 @@ class DesktopAppViewModel(
                 mutableState.value = mutableState.value.copy(
                     sync = snap,
                     sidebarRefresh = syncViewModel.sidebarRefresh.value,
+                    // setupPhase 随同步快照重算：首轮同步完成后 NEEDS_FIRST_SYNC → ACTIVE
+                    setupPhase = deriveSetupPhase(mutableState.value.config.mountConfigured, snap),
                 )
             }
         }
@@ -239,6 +246,7 @@ class DesktopAppViewModel(
             }
         }
         val loggedIn = authState.loggedIn
+        logger.info("app") { "配置加载成功：mount=${config.mountDir}, configured=${config.mountConfigured}" }
         mutableState.value = mutableState.value.copy(
             initialized = true,
             loggedIn = loggedIn,
@@ -253,6 +261,7 @@ class DesktopAppViewModel(
         )
         if (loggedIn) refresh()
         if (loggedIn) loadUserInfo()
+        if (loggedIn) loadQuota()
     }
 
     /**
@@ -278,6 +287,7 @@ class DesktopAppViewModel(
                         setupPhase = deriveSetupPhase(resetConfig.mountConfigured),
                     )
                     loadUserInfo()
+                    loadQuota()
                     if (resetConfig.mountConfigured) refresh()
                 }
                 is AppResult.Err -> mutableState.value = mutableState.value.copy(
@@ -396,6 +406,44 @@ class DesktopAppViewModel(
     }
 
     /**
+     * 目录树节点导航：用节点自带完整路径替换面包屑（对标原 Vue SidebarTreeNode 的 pathStack 替换）。
+     */
+    fun enterFolderFromTree(folder: DriveFile) {
+        val path = browser.treePathTo(folder.id)
+        browser.enterWithPath(folder, path)
+        refresh()
+    }
+
+    /**
+     * 目录树懒加载（对标原 Vue SidebarTreeNode 每节点 listFiles）：拉取指定文件夹的全部
+     * 子目录写入目录树缓存，不改变当前浏览位置；失败静默，重新展开可重试。
+     */
+    fun loadTreeChildren(folder: DriveFile) {
+        val id = folder.id ?: return
+        if (browser.state.value.treeLoadingIds.contains(id)) return
+        browser.beginTreeLoad(id)
+        scope.launch {
+            val all = mutableListOf<DriveFile>()
+            var cursor: String? = null
+            var pages = 0
+            val ok = run {
+                while (pages < 20) {
+                    when (val result = commands.driveList(id, cursor, 100)) {
+                        is AppResult.Ok -> {
+                            all += result.value.files
+                            cursor = result.value.nextCursor ?: return@run true
+                            pages++
+                        }
+                        is AppResult.Err -> return@run false
+                    }
+                }
+                true
+            }
+            if (ok) browser.applyTreeChildren(id, all) else browser.failTreeLoad(id)
+        }
+    }
+
+    /**
      * 根据面包屑导航到指定层级并刷新。
      */
     fun navigateTo(breadcrumb: BrowserBreadcrumb) {
@@ -425,10 +473,12 @@ class DesktopAppViewModel(
     fun sort(field: SortField) = browser.sort(field)
 
     /**
-     * 异步加载文件缩略图，已加载或请求中的不重复拉取。
+     * 异步加载文件缩略图，已加载或请求中的不重复拉取；仅 image/video 类型请求（对标原 Vue isThumbnailType）。
      */
     fun loadThumbnail(file: DriveFile) {
         val id = file.id ?: return
+        val mime = file.mimeType.orEmpty()
+        if (!mime.startsWith("image/") && !mime.startsWith("video/")) return
         if (file.thumbnailLink.isNullOrBlank() || id in mutableState.value.thumbnails || !thumbnailRequests.add(id)) return
         scope.launch {
             when (val result = commands.driveGetThumbnail(id)) {
@@ -442,29 +492,70 @@ class DesktopAppViewModel(
     }
 
     /**
-     * 打开文件项：文件夹则进入；仅在已配置同步目录时，文件才按需下载到本地后刷新。
+     * 打开文件项：文件夹则进入；仅在已配置同步目录时，文件才按需下载到本地后刷新（下载期间显示进度遮罩）。
      */
     fun openItem(file: DriveFile) {
         if (file.isFolder()) return enterFolder(file)
         if (!mutableState.value.config.mountConfigured) return
         val id = file.id ?: return
         val destination = localPathFor(file)
+        mutableState.value = mutableState.value.copy(downloadProgressText = "正在下载 ${file.displayName()}…")
         scope.launch {
-            when (val result = commands.syncDownloadOnDemand(id, destination.toString())) {
-                is AppResult.Ok -> mutableState.value = mutableState.value.copy(syncStatus = "已下载 ${file.displayName()}")
-                is AppResult.Err -> mutableState.value = mutableState.value.copy(errorMessage = result.error.message)
+            try {
+                when (val result = commands.syncDownloadOnDemand(id, destination.toString())) {
+                    is AppResult.Ok -> mutableState.value = mutableState.value.copy(syncStatus = "已下载 ${file.displayName()}")
+                    is AppResult.Err -> mutableState.value = mutableState.value.copy(errorMessage = result.error.message)
+                }
+                refresh()
+            } finally {
+                mutableState.value = mutableState.value.copy(downloadProgressText = null)
             }
-            refresh()
         }
     }
 
     /**
-     * 批量删除指定文件项，首个错误回写到 UI，完成后刷新。
+     * 批量下载指定文件项：跳过文件夹（对标原 Vue FileListView 批量下载），完成后状态栏反馈数量。
+     */
+    fun downloadItems(files: List<DriveFile>) = scope.launch {
+        if (!mutableState.value.config.mountConfigured) return@launch
+        val targets = files.filter { !it.isFolder() }
+        if (targets.isEmpty()) return@launch
+        var downloaded = 0
+        var firstError: String? = null
+        mutableState.value = mutableState.value.copy(downloadProgressText = "正在批量下载 ${targets.size} 项…")
+        try {
+            for (file in targets) {
+                val id = file.id ?: continue
+                when (val result = commands.syncDownloadOnDemand(id, localPathFor(file).toString())) {
+                    is AppResult.Ok -> downloaded++
+                    is AppResult.Err -> if (firstError == null) firstError = result.error.message
+                }
+            }
+            mutableState.value = mutableState.value.copy(syncStatus = "已下载 $downloaded 项", errorMessage = firstError)
+            refresh()
+        } finally {
+            mutableState.value = mutableState.value.copy(downloadProgressText = null)
+        }
+    }
+
+    /**
+     * 批量删除指定文件项：逐条收集失败原因 toast 汇总（对标原 Vue FileListView），首个错误回写到 UI，完成后刷新。
      */
     fun deleteItems(files: List<DriveFile>) = scope.launch {
         val errors = files.mapNotNull { file ->
             val id = file.id ?: return@mapNotNull "${file.displayName()} 缺少 id"
             (commands.driveDeleteFile(id, file.displayName()) as? AppResult.Err)?.error?.message
+        }
+        if (errors.isEmpty()) {
+            io.github.yuanbaobaoo.petallink.ui.components.mate.showToast(
+                "已删除 ${files.size} 项",
+                io.github.yuanbaobaoo.petallink.ui.components.mate.MateToastVariant.SUCCESS,
+            )
+        } else {
+            io.github.yuanbaobaoo.petallink.ui.components.mate.showToast(
+                "删除失败 ${errors.size} 项：${errors.first()}",
+                io.github.yuanbaobaoo.petallink.ui.components.mate.MateToastVariant.ERROR,
+            )
         }
         mutableState.value = mutableState.value.copy(errorMessage = errors.firstOrNull())
         refresh()
@@ -532,6 +623,9 @@ class DesktopAppViewModel(
 
     /**
      * 使用 macOS 原生目录选择器获取同步根目录，并把结果交给调用方决定何时保存配置。
+     *
+     * 对标原 Vue isEmptyDir 校验：过滤隐藏文件与 skipPatterns 后非空的目录会被拒绝，
+     * 避免与已有文件冲突。
      */
     fun chooseMountDirectory(onSelected: (String) -> Unit) {
         val property = "apple.awt.fileDialogForDirectories"
@@ -541,10 +635,30 @@ class DesktopAppViewModel(
             val dialog = java.awt.FileDialog(null as java.awt.Frame?, "选择同步目录", java.awt.FileDialog.LOAD)
             dialog.isMultipleMode = false
             dialog.isVisible = true
-            dialog.files.firstOrNull()?.toPath()?.toAbsolutePath()?.normalize()?.toString()?.let(onSelected)
+            val selected = dialog.files.firstOrNull()?.toPath()?.toAbsolutePath()?.normalize() ?: return
+            if (!isEffectivelyEmptyDir(selected)) {
+                showError("所选目录不为空。请选择一个空目录作为同步目录，避免与已有文件冲突。")
+                return
+            }
+            onSelected(selected.toString())
         } finally {
             if (previous == null) System.clearProperty(property) else System.setProperty(property, previous)
         }
+    }
+
+    /**
+     * 校验目录在过滤隐藏文件与 skipPatterns 后为空（对标原 Vue utils/fs.ts isEmptyDir）。
+     */
+    private fun isEffectivelyEmptyDir(dir: java.nio.file.Path): Boolean {
+        val patterns = mutableState.value.config.skipPatterns
+        return runCatching {
+            java.nio.file.Files.list(dir).use { entries ->
+                entries.noneMatch { entry ->
+                    val name = entry.fileName.toString()
+                    !name.startsWith(".") && !io.github.yuanbaobaoo.petallink.mount.SkipFilter.shouldSkip(name, patterns)
+                }
+            }
+        }.getOrDefault(false)
     }
 
     /**
@@ -557,12 +671,14 @@ class DesktopAppViewModel(
     }
 
     /**
-     * 查询云盘配额并更新为"已用 / 总量"文本。
+     * 查询云盘配额并更新"已用 / 总量"文本与字节数（设置页账号管理展示）。
      */
     fun loadQuota() = scope.launch {
         when (val result = commands.driveGetAbout()) {
             is AppResult.Ok -> mutableState.value = mutableState.value.copy(
                 quotaText = "${formatBytes(result.value.usedBytes())} / ${formatBytes(result.value.totalBytes())}",
+                quotaUsedBytes = result.value.usedBytes(),
+                quotaTotalBytes = result.value.totalBytes(),
             )
             is AppResult.Err -> mutableState.value = mutableState.value.copy(errorMessage = result.error.message)
         }
@@ -652,6 +768,22 @@ class DesktopAppViewModel(
     }
 
     /**
+     * 重试指定的传输任务并回报结果（用于按钮防抖与 toast 反馈，对标原 Vue TransferPopover）。
+     */
+    fun retryTransferWithResult(taskId: Long, onResult: (Boolean) -> Unit) = scope.launch {
+        when (val result = commands.transferRetry(taskId)) {
+            is AppResult.Ok -> {
+                onResult(true)
+                refresh()
+            }
+            is AppResult.Err -> {
+                mutableState.value = mutableState.value.copy(errorMessage = result.error.message)
+                onResult(false)
+            }
+        }
+    }
+
+    /**
      * 清除所有已完成的传输任务记录。
      */
     fun clearFinishedTransfers() = scope.launch {
@@ -676,10 +808,16 @@ class DesktopAppViewModel(
     }
 
     /**
-     * 将日志导出到桌面 PetalLink-logs.txt 文件。
+     * 弹出保存对话框导出全部日志（默认桌面 PetalLink-logs.txt，对标原 Vue save() 对话框）。
      */
     fun exportLogs() {
-        val target = Path.of(System.getProperty("user.home"), "Desktop", "PetalLink-logs.txt")
+        val defaultName = "PetalLink-logs-${java.time.LocalDate.now()}.txt"
+        val dialog = java.awt.FileDialog(null as java.awt.Frame?, "导出日志", java.awt.FileDialog.SAVE)
+        dialog.file = defaultName
+        dialog.isVisible = true
+        val dir = dialog.directory ?: return
+        val name = dialog.file ?: return
+        val target = java.nio.file.Path.of(dir, name)
         when (val result = commands.platformLogsExport(target.toString())) {
             is AppResult.Ok -> mutableState.value = mutableState.value.copy(syncStatus = "日志已导出到 $target")
             is AppResult.Err -> mutableState.value = mutableState.value.copy(errorMessage = result.error.message)
@@ -687,10 +825,15 @@ class DesktopAppViewModel(
     }
 
     /**
-     * 将当前配置导出为 JSON 写入桌面 PetalLink-config.json 文件。
+     * 弹出保存对话框导出当前配置为 JSON（默认桌面 PetalLink-config.json）。
      */
     fun exportConfig() {
-        val target = Path.of(System.getProperty("user.home"), "Desktop", "PetalLink-config.json")
+        val dialog = java.awt.FileDialog(null as java.awt.Frame?, "导出配置", java.awt.FileDialog.SAVE)
+        dialog.file = "PetalLink-config.json"
+        dialog.isVisible = true
+        val dir = dialog.directory ?: return
+        val name = dialog.file ?: return
+        val target = java.nio.file.Path.of(dir, name)
         when (val result = commands.configExportJson()) {
             is AppResult.Ok -> runCatching { java.nio.file.Files.writeString(target, result.value) }
                 .onSuccess { mutableState.value = mutableState.value.copy(syncStatus = "配置已导出到 $target") }
@@ -700,7 +843,7 @@ class DesktopAppViewModel(
     }
 
     /**
-     * 弹出文件选择对话框，读取所选 JSON 并导入为应用配置。
+     * 弹出文件选择对话框，读取所选 JSON；解析校验后经用户确认再应用（对标原项目「不在此入口直接覆盖当前配置文件」）。
      */
     fun importConfig() {
         val dialog = java.awt.FileDialog(null as java.awt.Frame?, "导入配置", java.awt.FileDialog.LOAD)
@@ -712,7 +855,23 @@ class DesktopAppViewModel(
         }
         when (val result = commands.configImportJson(parsed)) {
             is AppResult.Ok -> {
-                mutableState.value = mutableState.value.copy(config = result.value, syncStatus = "配置已导入")
+                io.github.yuanbaobaoo.petallink.ui.components.mate.confirmDialog(
+                    io.github.yuanbaobaoo.petallink.ui.components.mate.MateDialogOptions(
+                        title = "导入配置",
+                        content = "导入将覆盖当前配置并立即应用（含同步目录设置），是否继续？",
+                        confirmText = "导入并应用",
+                        danger = true,
+                        titleIcon = "info",
+                    ),
+                ) { confirmed ->
+                    if (!confirmed) return@confirmDialog
+                    val errors = saveConfig(result.value)
+                    mutableState.value = if (errors.isEmpty()) {
+                        mutableState.value.copy(syncStatus = "配置已导入")
+                    } else {
+                        mutableState.value.copy(errorMessage = errors.joinToString("；"))
+                    }
+                }
             }
             is AppResult.Err -> mutableState.value = mutableState.value.copy(errorMessage = result.error.message)
         }
@@ -763,6 +922,7 @@ class DesktopAppViewModel(
                     updateStatus = result.value?.let { "发现新版本 ${it.version}" }
                         ?: if (automatic) "" else "已是最新版本",
                     updatePhase = if (result.value != null) UpdaterPhase.AVAILABLE else UpdaterPhase.IDLE,
+                    updateDialogDismissed = false,
                 )
                 is AppResult.Err -> if (!automatic) {
                     mutableState.value = mutableState.value.copy(
@@ -781,10 +941,32 @@ class DesktopAppViewModel(
     fun installUpdate() {
         val manifest = mutableState.value.availableUpdate ?: return
         scope.launch {
+            // 等待活动传输完成（对标原 updater waitForTransfers：5 分钟上限，2 秒轮询）
+            if (commands.transferHasActive()) {
+                mutableState.value = mutableState.value.copy(
+                    updateStatus = "等待传输完成…",
+                    updatePhase = UpdaterPhase.WAITING_TRANSFERS,
+                    updateDialogDismissed = false,
+                    errorMessage = null,
+                )
+                val deadlineMs = System.currentTimeMillis() + 5 * 60 * 1_000L
+                while (commands.transferHasActive() && System.currentTimeMillis() < deadlineMs) {
+                    kotlinx.coroutines.delay(2_000)
+                }
+                if (commands.transferHasActive()) {
+                    mutableState.value = mutableState.value.copy(
+                        updateStatus = "更新失败",
+                        updatePhase = UpdaterPhase.FAILED,
+                        errorMessage = "等待传输完成超时，请稍后重试",
+                    )
+                    return@launch
+                }
+            }
             mutableState.value = mutableState.value.copy(
-                updateStatus = "等待传输并下载更新…",
+                updateStatus = "下载更新中…",
                 updatePhase = UpdaterPhase.DOWNLOADING,
                 updateDownloadProgress = 0f,
+                updateDialogDismissed = false,
                 errorMessage = null,
             )
             when (val result = commands.updaterDownloadAndInstall(manifest) { done, total ->
@@ -808,10 +990,19 @@ class DesktopAppViewModel(
     }
 
     /**
-     * 关闭更新弹窗（回到 IDLE，但保留 availableUpdate 以便侧边栏提示）。
+     * 关闭更新弹窗（双轨制，对标原 updater store：弹窗关闭不影响侧栏入口与下载进度卡）。
      */
     fun dismissUpdateDialog() {
-        mutableState.value = mutableState.value.copy(updatePhase = UpdaterPhase.IDLE)
+        mutableState.value = mutableState.value.copy(updateDialogDismissed = true)
+    }
+
+    /**
+     * 重新打开更新弹窗（侧栏更新横幅/下载进度卡/「日志」入口）。
+     */
+    fun showUpdateDialog() {
+        if (mutableState.value.availableUpdate != null) {
+            mutableState.value = mutableState.value.copy(updateDialogDismissed = false)
+        }
     }
 
     /**
@@ -840,9 +1031,8 @@ class DesktopAppViewModel(
      *
      * mountConfigured=false → NEEDS_SETUP；=true 但从未成功同步 → NEEDS_FIRST_SYNC；否则 ACTIVE。
      */
-    private fun deriveSetupPhase(mountConfigured: Boolean): SetupPhase {
+    private fun deriveSetupPhase(mountConfigured: Boolean, snap: SyncSnapshotUi = mutableState.value.sync): SetupPhase {
         if (!mountConfigured) return SetupPhase.NEEDS_SETUP
-        val snap = mutableState.value.sync
         // 已有过同步内容（基线非空）或上次同步时间存在 → ACTIVE，否则等待首次同步
         return if (snap.total > 0 || snap.lastSyncTime != null) SetupPhase.ACTIVE else SetupPhase.NEEDS_FIRST_SYNC
     }
@@ -898,18 +1088,36 @@ class DesktopAppViewModel(
     }
 
     /**
-     * 校验并保存配置，成功后进入文件页；校验或保存失败时返回错误信息列表。
+     * 校验并保存配置，成功后进入文件页并按新配置重算 setupPhase；校验或保存失败时返回错误信息列表。
      */
     fun saveConfig(config: UserConfig): List<String> {
         val errors = ConfigValidator.validate(config)
         if (errors.isNotEmpty()) return errors
         return when (val result = commands.configSave(config)) {
             is AppResult.Ok -> {
-                mutableState.value = mutableState.value.copy(config = config, page = AppPage.FILES)
+                mutableState.value = mutableState.value.copy(
+                    config = config,
+                    page = AppPage.FILES,
+                    setupPhase = deriveSetupPhase(config.mountConfigured),
+                )
                 emptyList()
             }
             is AppResult.Err -> listOf(result.error.message ?: "配置保存失败")
         }
+    }
+
+    /**
+     * 在全局错误横幅展示一条错误消息。
+     */
+    fun showError(message: String) {
+        mutableState.value = mutableState.value.copy(errorMessage = message)
+    }
+
+    /**
+     * 关闭错误横幅（登录页「重新授权」，对标原 Vue auth.dismissError）。
+     */
+    fun dismissError() {
+        mutableState.value = mutableState.value.copy(errorMessage = null)
     }
 
     /**

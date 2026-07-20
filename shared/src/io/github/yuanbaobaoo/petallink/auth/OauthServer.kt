@@ -1,6 +1,7 @@
 package io.github.yuanbaobaoo.petallink.auth
 
 import io.github.yuanbaobaoo.petallink.AppError
+import io.github.yuanbaobaoo.petallink.core.logging.Logger
 import kotlinx.coroutines.TimeoutCancellationException
 
 
@@ -23,6 +24,7 @@ class OauthServer(
     private val timeoutMs: Long = AuthConstants.OAUTH_TIMEOUT_SECS * 1000L,
 ) {
     @Volatile private var listener: java.net.ServerSocket? = null
+    private val logger = Logger()
 
     /**
      * 先绑定端口，再由调用方打开浏览器，避免快速回调竞态。
@@ -32,6 +34,7 @@ class OauthServer(
         listener = java.net.ServerSocket(port, 1, java.net.InetAddress.getByName(AuthConstants.LOOPBACK_HOST)).also {
             it.soTimeout = 100
         }
+        logger.info("auth.oauth_server") { "启动 OAuth 回调监听 addr=${AuthConstants.LOOPBACK_HOST}:$port" }
     }
 
     /**
@@ -42,6 +45,8 @@ class OauthServer(
         val state: String?,
         val error: String?,
         val errorDescription: String?,
+        /** 华为 sub_error（如 20042 表示 scope 未授权） */
+        val subError: String? = null,
     )
 
     /**
@@ -84,10 +89,12 @@ class OauthServer(
                     state = params["state"],
                     error = params["error"],
                     errorDescription = params["error_description"],
+                    subError = params["sub_error"],
                 )
             }
         } catch (e: TimeoutCancellationException) {
             server.close()
+            logger.warn("auth.oauth_server") { "OAuth 回调等待超时" }
             throw AppError.Auth("OAuth 回调超时（${AuthConstants.OAUTH_TIMEOUT_SECS}秒）")
         } catch (e: Throwable) {
             server.close()
@@ -105,6 +112,9 @@ class OauthServer(
                 return server.accept()
             } catch (_: SocketTimeoutException) {
                 yield()
+            } catch (e: Throwable) {
+                logger.warn("auth.oauth_server") { "OAuth 回调 accept 失败 error=$e" }
+                throw e
             }
         }
     }
@@ -113,8 +123,12 @@ class OauthServer(
      * 停止服务器（主动取消）。
      */
     fun stop() {
-        try { listener?.close() } catch (e: Throwable) {}
+        val active = listener
+        try { active?.close() } catch (e: Throwable) {}
         listener = null
+        if (active != null) {
+            logger.info("auth.oauth_server") { "OAuth 回调 server 已关闭" }
+        }
     }
 
     /**
@@ -157,12 +171,20 @@ class OauthServer(
  * OAuth 回调校验器，校验 state 并提取授权码或抛出鉴权异常
  */
 object OauthCallbackValidator {
+    private val logger = Logger()
+
     /**
      * 校验 state 匹配并提取授权码，否则抛出鉴权异常
      */
     fun requireCode(result: OauthServer.CallbackResult, expectedState: String): String {
-        if (result.state != expectedState) throw AppError.Auth("OAuth state 校验失败")
+        if (result.state != expectedState) {
+            logger.warn("auth.service") { "state 不匹配 expected=$expectedState got=${result.state}" }
+            throw AppError.Auth("OAuth state 校验失败")
+        }
         return result.code
-            ?: throw AppError.Auth("授权失败: ${result.errorDescription ?: result.error ?: "未知"}")
+            ?: throw AppError.Auth(
+                "授权失败: ${result.errorDescription ?: result.error ?: "未知"}" +
+                    (result.subError?.let { "（sub_error=$it）" } ?: ""),
+            )
     }
 }

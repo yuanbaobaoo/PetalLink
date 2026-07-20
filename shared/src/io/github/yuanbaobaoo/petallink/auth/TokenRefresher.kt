@@ -1,6 +1,7 @@
 package io.github.yuanbaobaoo.petallink.auth
 
 import io.github.yuanbaobaoo.petallink.AppError
+import io.github.yuanbaobaoo.petallink.core.logging.Logger
 import io.ktor.client.*
 import io.ktor.client.request.*
 import io.ktor.client.request.forms.*
@@ -30,6 +31,7 @@ class TokenRefresher(
 ) {
     private val singleflightMutex = Mutex()
     private var activeFlight: CompletableDeferred<TokenPair>? = null
+    private val logger = Logger()
 
     /**
      * 执行 token 刷新（Singleflight 去重）。
@@ -62,6 +64,7 @@ class TokenRefresher(
      * 实际刷新请求（对标 refresh，用 .form()，refresh_token 无特殊字符）
      */
     private suspend fun doRefresh(): TokenPair {
+        logger.info("auth.token_refresher") { "开始刷新 token..." }
         val current = currentTokenProvider()
             ?: throw AppError.Auth("无 token 可刷新，需重新登录")
         val params = ParametersBuilder().apply {
@@ -88,7 +91,7 @@ class TokenRefresher(
         val tokenType = body["token_type"]?.jsonPrimitive?.content ?: "Bearer"
         val scope = body["scope"]?.jsonPrimitive?.content ?: current.scope
 
-        return TokenPair.fromResponse(
+        val token = TokenPair.fromResponse(
             accessToken = accessToken,
             refreshToken = refreshToken,
             expiresInSec = expiresIn,
@@ -96,5 +99,7 @@ class TokenRefresher(
             scope = scope,
             nowMs = io.github.yuanbaobaoo.petallink.drive.PlatformTime.millis(),
         )
+        logger.info("auth.token_refresher") { "token 刷新成功" }
+        return token
     }
 }

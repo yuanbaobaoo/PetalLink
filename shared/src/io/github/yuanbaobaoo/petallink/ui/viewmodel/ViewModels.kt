@@ -196,6 +196,7 @@ data class FileBrowserState(
     val ascending: Boolean = true,
     val loading: Boolean = false,
     val directoryChildren: Map<String, List<DriveFile>> = emptyMap(),
+    val treeLoadingIds: Set<String> = emptySet(),
 ) {
     val visibleFiles: List<DriveFile> get() {
         val filtered = if (query.isBlank()) files else files.filter {
@@ -304,6 +305,71 @@ class FileBrowserViewModel {
      * 返回指定文件夹下已缓存的子目录，供目录树懒加载展示
      */
     fun treeChildren(folderId: String?): List<DriveFile> = childrenByFolder[folderId].orEmpty()
+
+    /**
+     * 开始一次目录树懒加载：标记节点 loading（不参与文件列表的 requestId 乱序保护）。
+     */
+    fun beginTreeLoad(folderId: String) {
+        _state.value = _state.value.copy(treeLoadingIds = _state.value.treeLoadingIds + folderId)
+    }
+
+    /**
+     * 写入目录树懒加载结果：只更新目录树缓存，不改变当前浏览位置。
+     */
+    fun applyTreeChildren(folderId: String, files: List<DriveFile>) {
+        val folders = files.filter { it.isFolder() }
+        childrenByFolder[folderId] = folders
+        _state.value = _state.value.copy(
+            directoryChildren = _state.value.directoryChildren + (folderId to folders),
+            treeLoadingIds = _state.value.treeLoadingIds - folderId,
+        )
+    }
+
+    /**
+     * 目录树懒加载失败：清除节点 loading，保留旧缓存，用户可重新展开重试。
+     */
+    fun failTreeLoad(folderId: String) {
+        _state.value = _state.value.copy(treeLoadingIds = _state.value.treeLoadingIds - folderId)
+    }
+
+    /**
+     * 计算目录树节点从根到自身的完整路径（用于树点击替换面包屑，对标原 Vue SidebarTreeNode 的 path prop）。
+     */
+    fun treePathTo(folderId: String?): List<BrowserBreadcrumb> {
+        val root = listOf(BrowserBreadcrumb(null, "全部文件"))
+        if (folderId == null) return root
+        val names = mutableMapOf<String, String>()
+        val parentOf = mutableMapOf<String, String?>()
+        for ((parentId, children) in _state.value.directoryChildren) {
+            for (child in children) {
+                val id = child.id ?: continue
+                names[id] = child.displayName()
+                parentOf[id] = parentId.takeIf { it != ROOT_KEY }
+            }
+        }
+        val segments = mutableListOf<BrowserBreadcrumb>()
+        var current: String? = folderId
+        var guard = 0
+        while (current != null && guard++ < 100) {
+            val name = names[current] ?: break
+            segments += BrowserBreadcrumb(current, name)
+            current = parentOf[current]
+        }
+        return root + segments.asReversed()
+    }
+
+    /**
+     * 用目录树给定的完整路径替换面包屑并进入该文件夹（对标原 Vue 树点击 pathStack 替换）。
+     */
+    fun enterWithPath(folder: DriveFile, path: List<BrowserBreadcrumb>) {
+        require(folder.isFolder()) { "只能进入文件夹" }
+        val id = requireNotNull(folder.id) { "文件夹缺少 id" }
+        acceptedRequest = ++requestSequence
+        _state.value = _state.value.copy(
+            folderId = id, breadcrumbs = path, files = emptyList(),
+            nextCursor = null, query = "", loading = true,
+        )
+    }
 
     companion object { const val ROOT_KEY = "__root__" }
 }

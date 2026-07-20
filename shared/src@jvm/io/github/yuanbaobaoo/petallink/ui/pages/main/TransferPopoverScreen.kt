@@ -20,6 +20,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.border
 import androidx.compose.material.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -31,6 +35,7 @@ import io.github.yuanbaobaoo.petallink.sync.TransferState
 import io.github.yuanbaobaoo.petallink.ui.components.MateIcon
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateButton
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateButtonVariant
+import io.github.yuanbaobaoo.petallink.ui.components.mate.MateCircularProgress
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateEmpty
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateHDivider
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateLinearProgress
@@ -39,6 +44,8 @@ import io.github.yuanbaobaoo.petallink.ui.components.mate.MatePopupMenu
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateTag
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateTagSize
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateTagTheme
+import io.github.yuanbaobaoo.petallink.ui.components.mate.MateToastVariant
+import io.github.yuanbaobaoo.petallink.ui.components.mate.showToast
 import io.github.yuanbaobaoo.petallink.ui.theme.LOCAL_SEMANTIC_COLORS
 import io.github.yuanbaobaoo.petallink.ui.theme.PetalTheme
 import io.github.yuanbaobaoo.petallink.ui.viewmodel.TransferTaskUi
@@ -129,13 +136,25 @@ private fun canRetry(task: TransferTaskUi): Boolean {
 fun TransferPopoverScreen(
     tasks: List<TransferTaskUi>,
     onDismiss: () -> Unit,
-    onRetry: (Long) -> Unit,
+    onRetry: (Long, (Boolean) -> Unit) -> Unit,
     onClearCompleted: () -> Unit,
     onClearFailed: () -> Unit,
     onClearFinished: () -> Unit,
 ) {
     val semantic = LOCAL_SEMANTIC_COLORS.current
     val metrics = PetalTheme.metrics.transferPopover
+    // 重试防抖：单任务重试期间禁用重复点击，完成后 toast 反馈（对标原 Vue retryingId）
+    var retryingId by remember { mutableStateOf<Long?>(null) }
+    val requestRetry: (Long) -> Unit = { id ->
+        if (retryingId == null) {
+            retryingId = id
+            onRetry(id) { ok ->
+                retryingId = null
+                if (ok) showToast("已重新提交传输任务", MateToastVariant.SUCCESS)
+                else showToast("重试失败，请稍后再试", MateToastVariant.ERROR)
+            }
+        }
+    }
     val processing = tasks.count {
         it.state in setOf(TransferState.Running, TransferState.VerifyingRemote, TransferState.Pending)
     }
@@ -218,7 +237,7 @@ fun TransferPopoverScreen(
             } else {
                 LazyColumn(modifier = Modifier.weight(1f)) {
                     items(tasks, key = { it.id }) { task ->
-                        TransferItemRow(task, onRetry)
+                        TransferItemRow(task, retrying = retryingId == task.id, onRetry = requestRetry)
                     }
                 }
             }
@@ -259,7 +278,7 @@ private fun StatPill(num: Int, label: String, modifier: Modifier = Modifier, err
  * 单个传输任务行（v2：minHeight 68，padding 10/20，含底分隔线）。
  */
 @Composable
-private fun TransferItemRow(task: TransferTaskUi, onRetry: (Long) -> Unit) {
+private fun TransferItemRow(task: TransferTaskUi, retrying: Boolean, onRetry: (Long) -> Unit) {
     val semantic = LOCAL_SEMANTIC_COLORS.current
     val metrics = PetalTheme.metrics.transferPopover
     val meta = stateMeta(task.state, semantic.textSecondary)
@@ -342,13 +361,17 @@ private fun TransferItemRow(task: TransferTaskUi, onRetry: (Long) -> Unit) {
                 MateIcon(name = meta.icon, size = metrics.taskStateIconSize, tint = meta.color, spin = meta.spin)
                 Text(meta.label, style = PetalTheme.typography.transfer.taskState, color = meta.color)
             }
-            // 重试按钮（条件）
+            // 重试按钮（条件；重试中显示进度指示并防抖）
             if (canRetry(task)) {
-                MateButton(
-                    variant = MateButtonVariant.ICON,
-                    icon = "refresh",
-                    onClick = { onRetry(task.id) },
-                )
+                if (retrying) {
+                    MateCircularProgress(size = metrics.taskStateIconSize)
+                } else {
+                    MateButton(
+                        variant = MateButtonVariant.ICON,
+                        icon = "refresh",
+                        onClick = { onRetry(task.id) },
+                    )
+                }
             }
         }
         // item 底分隔线（对标 .transfer-item border-bottom）

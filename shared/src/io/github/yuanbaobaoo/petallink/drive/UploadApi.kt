@@ -2,6 +2,7 @@ package io.github.yuanbaobaoo.petallink.drive
 
 import io.github.yuanbaobaoo.petallink.AppError
 import io.github.yuanbaobaoo.petallink.auth.Pkce
+import io.github.yuanbaobaoo.petallink.core.logging.Logger
 import io.ktor.client.request.header
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.*
@@ -29,6 +30,8 @@ class UploadApi(
     private val client: DriveClient,
     private val base: String = "https://driveapis.cloud.huawei.com.cn/upload/drive/v1",
 ) {
+    private val logger = Logger()
+
     /**
      * 小文件 multipart/related 上传。
      *
@@ -65,6 +68,7 @@ class UploadApi(
                 ),
             )
         }
+        if (resp.status.value == 429) throw rateLimited(resp)
         if (resp.status.value != 200) throw AppError.Remote(resp.status.value, "小文件上传未返回 200")
         val file = parseDriveFile(Json.parseToJsonElement(resp.bodyAsText()).jsonObject)
         // 完成校验：id 非空 + size 匹配 + name 匹配
@@ -107,7 +111,11 @@ class UploadApi(
                 ),
             )
         }
+        if (resp.status.value == 429) throw rateLimited(resp)
         if (resp.status.value !in 200..299) {
+            logger.warn("drive.upload_api.multipart") {
+                "PATCH 更新失败，保留云端旧文件 fileId=$fileId status=${resp.status.value}"
+            }
             throw AppError.Remote(resp.status.value, "小文件 Update 失败，保留云端旧文件")
         }
         val file = parseDriveFile(Json.parseToJsonElement(resp.bodyAsText()).jsonObject)
@@ -139,11 +147,23 @@ class UploadApi(
             header(HttpHeaders.ContentType, ContentType.Application.Json.toString())
             setBody(meta.toString())
         }
+        val initBody = resp.bodyAsText()
+        logger.info("drive.upload_api.resumable") {
+            "resume 会话初始化响应 status=${resp.status.value} hasLocation=${resp.headers[HttpHeaders.Location] != null} response=$initBody file=$fileName size=$totalSize"
+        }
+        if (resp.status.value == 429) throw rateLimited(resp)
         if (resp.status.value != 200) throw AppError.Remote(resp.status.value, "断点续传初始化未返回 200")
         // 踩坑 12：session URL 从 Location 响应头取
         val sessionUrl = resp.headers[HttpHeaders.Location]
-            ?: throw AppError.Remote(resp.status.value, "断点续传初始化缺少 Location 头")
-        val body = Json.parseToJsonElement(resp.bodyAsText()).jsonObject
+            ?: run {
+                val keys = runCatching { Json.parseToJsonElement(initBody).jsonObject.keys.joinToString(",") }
+                    .getOrDefault("<无法解析响应体>")
+                logger.error("drive.upload_api.resumable", {
+                    "上传会话响应缺少 serverId 且无 Location 头 response=$initBody keys=$keys"
+                }, null)
+                throw AppError.Remote(resp.status.value, "断点续传初始化缺少 Location 头")
+            }
+        val body = Json.parseToJsonElement(initBody).jsonObject
         val serverId = body["serverId"]?.jsonPrimitive?.contentOrNull
             ?: body["id"]?.jsonPrimitive?.contentOrNull
             ?: body["fileId"]?.jsonPrimitive?.contentOrNull
@@ -190,7 +210,8 @@ class UploadApi(
                 sessionUrl = resp.headers[HttpHeaders.Location],
             )
         }
-        throw AppError.Remote(status, "会话状态查询失败")
+        if (status == 429) throw rateLimited(resp)
+        throw sessionAwareError(resp, "会话状态查询失败")
     }
 
     /**
@@ -224,8 +245,12 @@ class UploadApi(
             val body = Json.parseToJsonElement(response.bodyAsText()).jsonObject
             val ranges = body["rangeList"]?.jsonArray?.map { it.jsonPrimitive.content }
                 ?: throw AppError.Remote(308, "308 响应缺少 rangeList")
+            val uploaded = UploadProtocol.parseConfirmedOffset(ranges, totalSize)
+            logger.debug("drive.upload_api.chunk") {
+                "分片已由服务端确认 (308) offset=$offset chunkLen=${content.size} uploaded=$uploaded rangeList=$ranges"
+            }
             return ChunkResult(
-                uploaded = UploadProtocol.parseConfirmedOffset(ranges, totalSize),
+                uploaded = uploaded,
                 finalFile = null,
                 sessionUrl = rotatedUrl,
             )
@@ -245,7 +270,58 @@ class UploadApi(
                 AppError.Remote(status, "分片写入结果不确定"),
             )
         }
-        throw AppError.Remote(status, "上传分片失败")
+        if (status == 429) throw rateLimited(response)
+        throw sessionAwareError(response, "上传分片失败")
+    }
+
+    /**
+     * 429 限流：优先携带服务端 Retry-After（对标 retry_policy.rs:157-166）。
+     */
+    private fun rateLimited(resp: HttpResponse): RateLimitError = RateLimitError(
+        resp.status.value,
+        ErrorClassifier.parseRetryAfter(resp.headers[HttpHeaders.RetryAfter]),
+        "限流 ${resp.status.value}",
+    )
+
+    /**
+     * 会话敏感端点的错误构造（对标 upload_api/protocol.rs upload_response_error）：
+     * 404/410 或正文含 CONTENT_NOT_FOUND/UPLOAD_ID_NOT_FOUND → 会话已失效，
+     * 但失效会话可能已接收早先分片或最终写入 → RemoteAmbiguous（上层只能 VerifyingRemote）。
+     */
+    private suspend fun sessionAwareError(resp: HttpResponse, fallback: String): AppError {
+        val status = resp.status.value
+        val body = runCatching { resp.bodyAsText() }.getOrDefault("")
+        val upper = body.uppercase()
+        if (status == 404 || status == 410 || "CONTENT_NOT_FOUND" in upper || "UPLOAD_ID_NOT_FOUND" in upper) {
+            return AppError.RemoteAmbiguous("上传会话已失效 ($status)，丢弃持久化会话身份前必须复核远端写入")
+        }
+        return AppError.Remote(status, fallback)
+    }
+
+    /**
+     * 创建上传前查重：父目录下是否已存在同名远端文件（对标 transfer_operations.rs:206-217）。
+     * 列表为读请求；失败时抛 [AppError]，由调用方按读语义分类。
+     */
+    suspend fun hasSiblingNamed(parentFolder: String?, fileName: String): Boolean {
+        val folderToken = parentFolder?.takeIf { it.isNotBlank() } ?: "root"
+        require(folderToken.isNotBlank() && '\'' !in folderToken && '\\' !in folderToken) {
+            "parentFolder 不允许为空、单引号或反斜线"
+        }
+        val query = "'$folderToken' in parentFolder".encodeURLParameter()
+        var cursor: String? = null
+        repeat(1000) {
+            val url = buildString {
+                append("${DriveConstants.DRIVE_API_BASE}/files?fields=*&pageSize=100&queryParam=$query")
+                cursor?.takeIf { it.isNotBlank() }?.let { append("&cursor=${it.encodeURLParameter()}") }
+            }
+            val resp = client.executeWithRetry(HttpMethod.Get, url, HttpSemantics.READ)
+            if (resp.status.value == 429) throw rateLimited(resp)
+            if (resp.status.value != 200) throw AppError.Remote(resp.status.value, "创建前查重 list 未返回 200")
+            val page = DriveParsers.parseFileListPage(Json.parseToJsonElement(resp.bodyAsText()), "create-precheck")
+            if (page.files.any { it.name == fileName }) return true
+            cursor = page.nextCursor ?: return false
+        }
+        throw AppError.Remote(0, "创建前查重达到页数上限")
     }
 
     /**
@@ -261,6 +337,9 @@ class UploadApi(
             val status = querySessionStatus(session, totalSize)
             ChunkResult(status.uploaded, status.finalFile, status.sessionUrl)
         } catch (queryError: Throwable) {
+            logger.warn("drive.upload_api.chunk") {
+                "分片结果不确定且会话查询失败，保留原始写入歧义 queryError=${queryError.message}"
+            }
             throw AppError.RemoteAmbiguous("上传分片结果不确定且会话状态查询失败", queryError)
         }.also {
             if (it.finalFile == null && it.uploaded < offset) {

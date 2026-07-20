@@ -36,6 +36,7 @@ import io.github.yuanbaobaoo.petallink.drive.DriveFile
 import io.github.yuanbaobaoo.petallink.drive.displayName
 import io.github.yuanbaobaoo.petallink.sync.isFolder
 import io.github.yuanbaobaoo.petallink.ui.components.MateIcon
+import io.github.yuanbaobaoo.petallink.ui.components.mate.MateBannerVariant
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateButton
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateButtonVariant
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateCircularProgress
@@ -83,7 +84,7 @@ fun MainScreen(
     onRefresh: () -> Unit,
     onOpenFinder: () -> Unit,
     onOpenSettings: () -> Unit,
-    onRetryTransfer: (Long) -> Unit,
+    onRetryTransfer: (Long, (Boolean) -> Unit) -> Unit,
     onClearFinishedTransfers: () -> Unit,
     onClearCompletedTransfers: () -> Unit,
     onClearFailedTransfers: () -> Unit,
@@ -91,6 +92,9 @@ fun MainScreen(
     onFirstSync: () -> Unit,
     onRetrySetup: () -> Unit,
     onInstallUpdate: () -> Unit,
+    treeLoadingIds: Set<String> = emptySet(),
+    onExpandNode: (DriveFile) -> Unit = {},
+    onShowUpdate: () -> Unit = {},
 ) {
     val semantic = LOCAL_SEMANTIC_COLORS.current
     val mountConfigured = setupPhase == SetupPhase.ACTIVE || setupPhase == SetupPhase.NEEDS_FIRST_SYNC
@@ -113,7 +117,10 @@ fun MainScreen(
             updateAvailableVersion = updateAvailableVersion,
             onDismissUpdate = onDismissUpdate,
             onInstallUpdate = onInstallUpdate,
+            onShowUpdate = onShowUpdate,
             onNavigate = onNavigate,
+            treeLoadingIds = treeLoadingIds,
+            onExpandNode = onExpandNode,
         )
 
         // 右侧主区
@@ -198,7 +205,21 @@ fun MainScreen(
             if (!mountConfigured || setupPhase == SetupPhase.NEEDS_FIRST_SYNC) {
                 SyncSetupBanner(setupPhase, mountDir, errorMessage, onSelectDir, onFirstSync, onRetrySetup)
             } else if (mountConfigured) {
-                SyncStatusBar(sync)
+                SyncStatusBar(sync, transfers)
+                // ACTIVE 态错误横幅（对标原 Vue MainPage.vue info-area 常驻错误展示）
+                if (errorMessage != null) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth()
+                            .padding(
+                                horizontal = PetalTheme.metrics.syncSetup.horizontalPadding,
+                                vertical = PetalTheme.metrics.syncSetup.verticalPadding,
+                            )
+                            .background(semantic.bgContainer),
+                    ) {
+                        MateInfoBanner(message = errorMessage, variant = MateBannerVariant.ERROR)
+                    }
+                    MateHDivider()
+                }
             }
 
             // 面包屑（含底分隔线）

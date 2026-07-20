@@ -24,6 +24,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
+import io.github.yuanbaobaoo.petallink.sync.TransferState
 import io.github.yuanbaobaoo.petallink.ui.components.MateIcon
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateDialogOptions
 import io.github.yuanbaobaoo.petallink.ui.components.mate.MateHDivider
@@ -34,6 +35,7 @@ import io.github.yuanbaobaoo.petallink.ui.components.mate.confirmDialog
 import io.github.yuanbaobaoo.petallink.ui.theme.LOCAL_SEMANTIC_COLORS
 import io.github.yuanbaobaoo.petallink.ui.theme.PetalTheme
 import io.github.yuanbaobaoo.petallink.ui.viewmodel.SyncSnapshotUi
+import io.github.yuanbaobaoo.petallink.ui.viewmodel.TransferTaskUi
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -48,15 +50,17 @@ import java.util.Locale
  * 失败弹窗：列出 failedItems(path+error)。底部 MateHDivider 分隔线。
  *
  * @param snap 完整同步快照
+ * @param transfers 传输任务列表（空闲细分文案：核验中/等待重试/等待重规划/等待传输，对标原 Vue transfer store）
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun SyncStatusBar(
     snap: SyncSnapshotUi,
+    transfers: List<TransferTaskUi> = emptyList(),
 ) {
     val semantic = LOCAL_SEMANTIC_COLORS.current
     val isIdle = snap.isIdle
-    val statusText = statusTextFor(snap)
+    val statusText = statusTextFor(snap, transfers)
     var showFailed by remember { mutableStateOf(false) }
 
     if (snap.failed > 0 && showFailed) {
@@ -136,9 +140,9 @@ fun SyncStatusBar(
 }
 
 /**
- * 9 种 syncPhase 文案 + 空闲细分（对标原 Vue statusText computed）。
+ * 9 种 syncPhase 文案 + 空闲细分（对标原 Vue statusText computed，含 transfer store 细分）。
  */
-private fun statusTextFor(snap: SyncSnapshotUi): String = when (snap.syncPhase) {
+private fun statusTextFor(snap: SyncSnapshotUi, transfers: List<TransferTaskUi>): String = when (snap.syncPhase) {
     "indexing-startup" -> "正在读取云端索引（首次）…"
     "indexing-manual" -> "正在读取云端索引…"
     "indexing-auto-full" -> "正在读取云端索引（全量纠偏）…"
@@ -150,6 +154,10 @@ private fun statusTextFor(snap: SyncSnapshotUi): String = when (snap.syncPhase) 
     "syncing-startup" -> "正在同步（启动恢复）…"
     else -> when {
         snap.uploading > 0 || snap.downloading > 0 -> "同步中"
+        transfers.any { it.state == TransferState.VerifyingRemote } -> "正在核验远端…"
+        transfers.any { it.state == TransferState.BackingOff } -> "等待下次重试…"
+        transfers.any { it.state == TransferState.RestartRequired } -> "等待重新规划…"
+        transfers.any { it.state == TransferState.Pending } -> "等待传输…"
         snap.waitingNetwork > 0 -> "等待网络恢复…"
         snap.failed > 0 -> "同步存在失败项"
         else -> "同步完成"

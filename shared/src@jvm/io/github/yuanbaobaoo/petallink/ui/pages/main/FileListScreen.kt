@@ -43,6 +43,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.input.pointer.PointerButton
+import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
@@ -130,7 +135,6 @@ fun FileListScreen(
     onSyncFolder: (DriveFile) -> Unit,
     onRename: (DriveFile, String) -> Unit,
     onMove: (DriveFile, String) -> Unit,
-    onShowProps: (DriveFile) -> Unit,
     onCanFreeUp: (DriveFile, (Boolean) -> Unit) -> Unit,
 ) {
     val semantic = LOCAL_SEMANTIC_COLORS.current
@@ -154,12 +158,26 @@ fun FileListScreen(
         .filter { it.isFolder() }
         .distinctBy { it.id }
     val requestDelete: (List<DriveFile>, () -> Unit) -> Unit = { selection, afterDelete ->
-        val names = selection.take(5).joinToString("、") { it.displayName() }
-        val suffix = if (selection.size > 5) " 等 ${selection.size} 项" else ""
+        // 按本地同步状态区分警告文案（对标原 Vue FileListView 的 checkFileLocalStatus 逻辑）
+        val content = if (selection.size == 1) {
+            val f = selection.first()
+            when {
+                f.isFolder() -> "确定删除文件夹「${f.displayName()}」吗？删除后进入回收站。"
+                fileStatuses[f.id] == "synced" ->
+                    "确定删除「${f.displayName()}」吗？\n\n⚠️ 此文件已双端对齐到本地，删除后云端和本地文件将同时被移除。删除后进入回收站，可从回收站恢复。"
+                else -> "确定删除「${f.displayName()}」吗？删除后进入回收站。"
+            }
+        } else {
+            val syncedCount = selection.count { fileStatuses[it.id] == "synced" }
+            val base = "确定删除选中的 ${selection.size} 项吗？删除后进入回收站。"
+            if (syncedCount > 0) {
+                "$base\n\n⚠️ 其中 $syncedCount 项已双端对齐到本地，删除后云端和本地文件将同时被移除。删除后进入回收站，可从回收站恢复。"
+            } else base
+        }
         confirmDialog(
             MateDialogOptions(
-                title = "确认删除",
-                content = "将从云端删除：$names$suffix。此操作会同步到本地，且不能在应用内撤销。",
+                title = "删除文件",
+                content = content,
                 confirmText = "删除",
                 danger = true,
                 titleIcon = "trash",
@@ -171,24 +189,33 @@ fun FileListScreen(
             }
         }
     }
+    var freeUpBusy by remember { mutableStateOf(false) }
     val requestFreeUp: (List<DriveFile>) -> Unit = { selection ->
-        onPreviewFreeUp(selection) { items ->
-            val totalBytes = items.sumOf { it.size }
-            val content = if (items.isEmpty()) {
-                "所选内容中没有通过远端校验、可安全释放的本地文件。"
-            } else {
-                "将释放 ${items.size} 个本地文件，共 ${formatFileSize(totalBytes)}。云端内容会保留，本地文件将变为占位符。"
-            }
-            confirmDialog(
-                MateDialogOptions(
-                    title = if (items.isEmpty()) "无法释放空间" else "释放空间预览",
-                    content = content,
-                    confirmText = if (items.isEmpty()) "关闭" else "确认释放",
-                    danger = items.isNotEmpty(),
-                    titleIcon = "cloud",
-                ),
-            ) { confirmed ->
-                if (confirmed && items.isNotEmpty()) onFreeUp(items)
+        // 防重复（对标原 Vue freeUpConfirmLoading）
+        if (!freeUpBusy) {
+            freeUpBusy = true
+            onPreviewFreeUp(selection) { items ->
+                freeUpBusy = false
+                val totalBytes = items.sumOf { it.size }
+                val content = if (items.isEmpty()) {
+                    "所选内容中没有通过远端校验、可安全释放的本地文件。"
+                } else {
+                    // 逐项列表（名称+大小，前 10 项；对标原 Vue 释放空间预览对话框）
+                    val listed = items.take(10).joinToString("\n") { "${it.name}（${formatFileSize(it.size)}）" }
+                    val more = if (items.size > 10) "\n…等 ${items.size} 项" else ""
+                    "将释放 ${items.size} 个本地文件，共 ${formatFileSize(totalBytes)}。云端内容会保留，本地文件将变为占位符。\n\n$listed$more"
+                }
+                confirmDialog(
+                    MateDialogOptions(
+                        title = if (items.isEmpty()) "无法释放空间" else "释放空间预览",
+                        content = content,
+                        confirmText = if (items.isEmpty()) "关闭" else "确认释放",
+                        danger = items.isNotEmpty(),
+                        titleIcon = "cloud",
+                    ),
+                ) { confirmed ->
+                    if (confirmed && items.isNotEmpty()) onFreeUp(items)
+                }
             }
         }
     }
@@ -312,7 +339,7 @@ fun FileListScreen(
                             onSync = { onSyncFolder(file) },
                             onRename = { renameTarget = file; renameValue = file.name ?: file.fileName ?: "" },
                             onMove = { moveTarget = file; moveParentId = null },
-                            onShowProps = { propsTarget = file; onShowProps(file) },
+                            onShowProps = { propsTarget = file },
                             onDelete = { requestDelete(listOf(file)) {} },
                             onFreeUp = { requestFreeUp(listOf(file)) },
                             onCanFreeUp = onCanFreeUp,
@@ -476,6 +503,7 @@ private fun HeaderCell(
 /**
  * 文件行（v2：56px，radius 8，hover bgHover，selected PetalTheme.colors.brandLighter，双击触发，右键菜单条件渲染）。
  */
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class, androidx.compose.ui.ExperimentalComposeUiApi::class)
 @Composable
 private fun FileRow(
     file: DriveFile,
@@ -513,8 +541,10 @@ private fun FileRow(
         hovered -> semantic.bgHover
         else -> Color.Transparent
     }
-    // 单击选中；双击目录进入、文件按需下载。未配置同步目录时禁用文件行手势。
+    // 单击选中；双击目录进入、文件按需下载；右键在光标处弹菜单（对标原 Vue @contextmenu）。未配置同步目录时禁用文件行手势。
+    var menuPosition by remember { mutableStateOf<androidx.compose.ui.geometry.Offset?>(null) }
     Column {
+        Box {
         Row(
             modifier = Modifier.fillMaxWidth().height(PetalTheme.metrics.fileList.controls.rowHeight)
                 .clip(RoundedCornerShape(PetalTheme.metrics.fileList.controls.rowRadius))
@@ -527,12 +557,25 @@ private fun FileRow(
                     onClick = onClick,
                     onDoubleClick = onDoubleClick,
                     onLongClick = {
-                        // 右键菜单替代：长按弹出。
                         canFree = null
+                        menuPosition = null
                         menuExpanded = true
                         onCanFreeUp(file) { canFree = it }
                     },
                 )
+                .pointerInput(Unit) {
+                    awaitEachGesture {
+                        val event = awaitPointerEvent()
+                        if (event.button == PointerButton.Secondary) {
+                            // 右键：在光标处弹菜单（对标原 Vue @contextmenu）
+                            canFree = null
+                            menuPosition = event.changes.first().position
+                            menuExpanded = true
+                            onCanFreeUp(file) { canFree = it }
+                            event.changes.forEach { it.consume() }
+                        }
+                    }
+                }
                 .padding(horizontal = PetalTheme.metrics.fileList.controls.rowHorizontalPadding),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -551,7 +594,7 @@ private fun FileRow(
             Text(if (file.isFolder()) "—" else formatFileSize(file.sizeBytes), style = PetalTheme.typography.fileList.rowFileSize, color = semantic.textSecondary, modifier = Modifier.width(sizeWidth))
             // time 列
             Text(file.modifiedTime.orEmpty().replace("T", " ").take(16), style = PetalTheme.typography.fileList.rowModifiedTime, color = semantic.textSecondary, modifier = Modifier.width(timeWidth))
-            // status 列（v2 列宽 72）
+            // status 列（v2 列宽 72；hover 显示文案 tooltip，对标原 Vue :title）
             Box(modifier = Modifier.width(PetalTheme.metrics.fileList.controls.statusColumnWidth), contentAlignment = Alignment.Center) {
                 val (statusIcon, statusColor) = when (status) {
                     "synced" -> "local" to PetalTheme.colors.success
@@ -559,55 +602,77 @@ private fun FileRow(
                     "folder" -> "folder" to PetalTheme.colors.brand
                     else -> "cloud" to semantic.textPlaceholder
                 }
-                MateIcon(name = statusIcon, size = PetalTheme.metrics.fileList.controls.rowStatusIconSize, tint = statusColor)
+                val statusTip = when (status) {
+                    "synced" -> "已同步到本地"
+                    "placeholder" -> "本地占位"
+                    "folder" -> "文件夹"
+                    else -> "仅云端（未同步到本地）"
+                }
+                androidx.compose.foundation.TooltipArea(
+                    tooltip = {
+                        Box(
+                            modifier = Modifier.clip(RoundedCornerShape(6.dp)).background(semantic.bgContainer)
+                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                        ) {
+                            Text(statusTip, style = PetalTheme.typography.fileList.rowFileSize, color = semantic.textSecondary)
+                        }
+                    },
+                ) {
+                    MateIcon(name = statusIcon, size = PetalTheme.metrics.fileList.controls.rowStatusIconSize, tint = statusColor)
+                }
             }
-            // actions 列（v2 列宽 44；操作按钮 → 右键菜单，锚点为本 Box）
+            // actions 列（v2 列宽 44；操作按钮 → 右键菜单）
             Box(modifier = Modifier.width(PetalTheme.metrics.fileList.controls.actionColumnWidth), contentAlignment = Alignment.Center) {
                 MateButton(variant = MateButtonVariant.ICON, icon = "list", onClick = {
-                    canFree = null; menuExpanded = true
+                    canFree = null; menuPosition = null; menuExpanded = true
                     onCanFreeUp(file) { canFree = it }
                 })
-                if (menuExpanded) {
-                    // v2 自绘菜单（对标 05-file-ops .menu：w200 radius10 + 阴影 + 0.5px 描边，padding 6）
-                    Popup(
-                        onDismissRequest = { menuExpanded = false },
-                        properties = PopupProperties(focusable = true),
-                    ) {
-                        Column(
-                            modifier = Modifier
-                                .width(PetalTheme.metrics.fileList.controls.contextMenuWidth)
-                                .shadow(PetalTheme.metrics.fileList.controls.contextMenuShadowElevation, RoundedCornerShape(PetalTheme.metrics.fileList.controls.contextMenuRadius))
-                                .clip(RoundedCornerShape(PetalTheme.metrics.fileList.controls.contextMenuRadius))
-                                .background(semantic.bgContainer)
-                                .border(
-                                    PetalTheme.metrics.fileList.controls.contextMenuBorderWidth,
-                                    semantic.border,
-                                    RoundedCornerShape(PetalTheme.metrics.fileList.controls.contextMenuRadius),
-                                )
-                                .padding(PetalTheme.metrics.fileList.controls.contextMenuPadding),
-                        ) {
-                            // 按条件渲染（对标原 Vue ctx-menu）
-                            if (mountConfigured) {
-                                CtxItem("执行双端对齐", "sync", enabled = !isIndexing) { menuExpanded = false; onSync() }
-                                CtxDivider()
-                            }
-                            if (canFree == true) {
-                                CtxItem("释放空间", "cloud") { menuExpanded = false; onFreeUp() }
-                                CtxDivider()
-                            }
-                            if (mountConfigured) {
-                                CtxItem("重命名", "edit", enabled = !isIndexing) { menuExpanded = false; onRename() }
-                                CtxItem("移动到…", "folder-open", enabled = !isIndexing) { menuExpanded = false; onMove() }
-                            }
-                            CtxItem("属性", "info") { menuExpanded = false; onShowProps() }
-                            if (mountConfigured) {
-                                CtxDivider()
-                                CtxItem("删除", "trash", danger = true, enabled = !isIndexing) { menuExpanded = false; onDelete() }
-                            }
-                        }
+            }
+        }
+        if (menuExpanded) {
+            // v2 自绘菜单（对标 05-file-ops .menu：w200 radius10 + 阴影 + 0.5px 描边，padding 6）；
+            // 按钮打开锚定行尾，右键打开锚定光标位置（Popup 自动做视口钳制）
+            val anchor = menuPosition
+            Popup(
+                alignment = if (anchor == null) Alignment.BottomEnd else Alignment.TopStart,
+                offset = anchor?.let { androidx.compose.ui.unit.IntOffset(it.x.toInt(), it.y.toInt()) } ?: androidx.compose.ui.unit.IntOffset.Zero,
+                onDismissRequest = { menuExpanded = false },
+                properties = PopupProperties(focusable = true),
+            ) {
+                Column(
+                    modifier = Modifier
+                        .width(PetalTheme.metrics.fileList.controls.contextMenuWidth)
+                        .shadow(PetalTheme.metrics.fileList.controls.contextMenuShadowElevation, RoundedCornerShape(PetalTheme.metrics.fileList.controls.contextMenuRadius))
+                        .clip(RoundedCornerShape(PetalTheme.metrics.fileList.controls.contextMenuRadius))
+                        .background(semantic.bgContainer)
+                        .border(
+                            PetalTheme.metrics.fileList.controls.contextMenuBorderWidth,
+                            semantic.border,
+                            RoundedCornerShape(PetalTheme.metrics.fileList.controls.contextMenuRadius),
+                        )
+                        .padding(PetalTheme.metrics.fileList.controls.contextMenuPadding),
+                ) {
+                    // 按条件渲染（对标原 Vue ctx-menu）
+                    if (mountConfigured) {
+                        CtxItem("执行双端对齐", "sync", enabled = !isIndexing) { menuExpanded = false; onSync() }
+                        CtxDivider()
+                    }
+                    if (canFree == true) {
+                        CtxItem("释放空间", "cloud") { menuExpanded = false; onFreeUp() }
+                        CtxDivider()
+                    }
+                    if (mountConfigured) {
+                        CtxItem("重命名", "edit", enabled = !isIndexing) { menuExpanded = false; onRename() }
+                        CtxItem("移动到…", "folder-open", enabled = !isIndexing) { menuExpanded = false; onMove() }
+                    }
+                    CtxItem("属性", "info") { menuExpanded = false; onShowProps() }
+                    if (mountConfigured) {
+                        CtxDivider()
+                        CtxItem("删除", "trash", danger = true, enabled = !isIndexing) { menuExpanded = false; onDelete() }
                     }
                 }
             }
+        }
         }
         // 行底分隔线 0.5px
         MateHDivider()
@@ -732,6 +797,9 @@ private fun RenameDialog(target: DriveFile, value: String, onValueChange: (Strin
                 onValueChange = onValueChange,
                 modifier = Modifier.fillMaxWidth(),
                 error = value.isNotEmpty() && !valid,
+                // 回车确认（对标原 Vue @enter）
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = { if (valid) onConfirm() }),
             )
             Row(
                 modifier = Modifier.fillMaxWidth(),

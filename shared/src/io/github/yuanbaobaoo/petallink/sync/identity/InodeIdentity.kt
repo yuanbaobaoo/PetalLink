@@ -4,6 +4,7 @@ import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
+import io.github.yuanbaobaoo.petallink.core.logging.Logger
 
 /**
  * 基于 inode 的文件身份识别（对标原项目 inode 方案，docs/11 §4.1）
@@ -79,6 +80,8 @@ data class DetectedMove(
  * 基于稳定 inode 的文件移动检测器，比对扫描快照识别本地文件的移动
  */
 object InodeMoveDetector {
+    private val logger = Logger()
+
     /**
      * 同 inode 且路径改变时才输出 move；copy 产生新 inode，因而不会被误判为 move。
      * 成功识别后立即更新路径映射，但不自动 purge，由完整扫描提交者统一执行。
@@ -91,6 +94,7 @@ object InodeMoveDetector {
         for (entry in entries.sortedBy { it.relativePath }) {
             val old = identity.lookup(entry.inode) ?: continue
             if (old.relativePath == entry.relativePath) continue
+            logger.info("sync.engine.reconciliation") { "检测到本地文件路径变化 reason=inode 未变且路径变化 old=${old.relativePath} new=${entry.relativePath}" }
             result += DetectedMove(entry.inode, old.fileId, old.relativePath, entry.relativePath)
             identity.upsert(entry.inode, entry.relativePath, old.fileId)
         }

@@ -2,6 +2,7 @@ package io.github.yuanbaobaoo.petallink.drive
 
 import io.github.yuanbaobaoo.petallink.AppError
 import io.github.yuanbaobaoo.petallink.auth.Pkce
+import io.github.yuanbaobaoo.petallink.core.logging.Logger
 import io.ktor.client.request.header
 import io.ktor.client.statement.*
 import io.ktor.http.*
@@ -33,6 +34,13 @@ class DownloadApi(
         val resp = client.executeWithRetry(
             HttpMethod.Get, "$base/files/${Pkce.enc(fileId)}?fields=*", HttpSemantics.READ,
         )
+        if (resp.status.value == 429) {
+            throw RateLimitError(
+                429,
+                ErrorClassifier.parseRetryAfter(resp.headers[HttpHeaders.RetryAfter]),
+                "限流 429",
+            )
+        }
         if (resp.status.value != 200) {
             throw AppError.Remote(resp.status.value, "fetchRemoteMetadata 未返回 200")
         }
@@ -125,6 +133,8 @@ fun parseContentRange(header: String?): Triple<Long, Long, Long>? {
     return Triple(start, end, total)
 }
 
+private val logger = Logger()
+
 /**
  * 校验 Range 响应偏移（对标 validated_response_offset）。
  * - 200 → 0（服务端忽略 Range，从头写）
@@ -140,9 +150,18 @@ fun validatedResponseOffset(
     if (status == 200) return 0L
     if (status == 206) {
         val (start, end, total) = parseContentRange(contentRangeHeader)
-            ?: throw AppError.Remote(206, "Range 响应缺少 Content-Range")
+            ?: run {
+                logger.warn("drive.download_api") {
+                    "Range 响应不可信，从 0 重启 requestedOffset=$requestedOffset message=Range 响应缺少 Content-Range"
+                }
+                throw AppError.Remote(206, "Range 响应缺少 Content-Range")
+            }
         if (start != requestedOffset || total != expectedTotal || end < start || end >= total) {
-            throw AppError.Remote(206, "Range 响应不匹配: start=$start end=$end total=$total")
+            val message = "Range 响应不匹配: start=$start end=$end total=$total"
+            logger.warn("drive.download_api") {
+                "Range 响应不可信，从 0 重启 requestedOffset=$requestedOffset message=$message"
+            }
+            throw AppError.Remote(206, message)
         }
         return start
     }

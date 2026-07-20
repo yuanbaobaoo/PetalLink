@@ -6,13 +6,9 @@ import io.github.yuanbaobaoo.petallink.data.SyncItem
 import io.github.yuanbaobaoo.petallink.mount.LocalFileEntry
 import io.github.yuanbaobaoo.petallink.sync.DbBaselineEntry
 import io.github.yuanbaobaoo.petallink.sync.SyncAction
-import io.github.yuanbaobaoo.petallink.sync.SyncStatus
 import io.github.yuanbaobaoo.petallink.sync.engine.CloudTreeCache
 import io.github.yuanbaobaoo.petallink.sync.identity.DetectedMove
 import io.github.yuanbaobaoo.petallink.sync.identity.LocalMoveActionReconciler
-import java.nio.file.Files
-import java.nio.file.LinkOption
-import java.nio.file.Path
 import java.time.Instant
 
 /**
@@ -45,21 +41,30 @@ internal class JvmInodeMoveCoordinator(
 
     /**
      * 在动作与基线都提交后刷新 inode 身份映射，并清理本轮未见记录。
+     *
+     * 扫描快照来自周期开始前：周期内的确定性记账（下载安装/释放空间产生的新 inode，
+     * scannedAt >= [freshSinceMs]）比扫描更新，既不被扫描回写覆盖、也不参与 purge
+     * （对标 transfer_operations.rs:380-381）。
      */
-    suspend fun refresh(entries: List<LocalFileEntry>) {
+    suspend fun refresh(entries: List<LocalFileEntry>, freshSinceMs: Long = Long.MAX_VALUE) {
         val baselines = db.syncItems.selectAll().associateBy { it.localPath }
+        val recordsByPath = db.inodeMap.selectAll().associateBy { it.relativePath }
         val scannedAt = nowMs()
         for (entry in entries) {
             val baseline = baselines[entry.relativePath] ?: continue
+            val existing = recordsByPath[entry.relativePath]
+            if (existing != null && existing.inode != entry.inode && existing.scannedAt >= freshSinceMs) continue
             db.inodeMap.upsert(entry.inode, entry.relativePath, baseline.fileId, scannedAt)
         }
-        db.inodeMap.purgeMissing(entries.mapTo(mutableSetOf()) { it.inode })
+        val keep = entries.mapTo(mutableSetOf()) { it.inode }
+        keep += recordsByPath.values.filter { it.scannedAt >= freshSinceMs }.map { it.inode }
+        db.inodeMap.purgeMissing(keep)
     }
 
     /**
      * 在单个事务中把移动目录及全部后代基线替换为新路径。
      */
-    suspend fun settleSubtree(root: Path, cloud: CloudTreeCache, action: SyncAction) {
+    suspend fun settleSubtree(cloud: CloudTreeCache, action: SyncAction) {
         val fileId = action.fileId ?: throw AppError.Data("云端移动缺少 fileId")
         val oldRoot = db.syncItems.findByFileId(fileId)?.localPath
             ?: throw AppError.Data("云端移动缺少旧基线: $fileId")
@@ -68,15 +73,18 @@ internal class JvmInodeMoveCoordinator(
             it.localPath == oldRoot || it.localPath.startsWith(oldPrefix)
         }
         if (oldItems.isEmpty()) throw AppError.Data("云端移动基线子树为空: $oldRoot")
-        val replacements = oldItems.map { item -> replacement(root, cloud, action, oldRoot, item) }
+        val replacements = oldItems.map { item -> replacement(cloud, action, oldRoot, item) }
         db.syncItems.replaceSubtree(oldRoot, replacements)
     }
 
     /**
-     * 根据移动后的本地路径和可信云树构造一条成功基线。
+     * 根据移动后的路径和可信云树构造基线。
+     *
+     * 结构性移动只结算结构事实（路径/名称/父目录），内容事实（localMtime/localSize/sha256/
+     * isFolder/status/errorMessage/lastSyncTime）必须保留最后实际同步的版本——不能把移动前后
+     * 的编辑误认为已同步（对标 results.rs:204-233）；紧随的重扫周期负责上传内容差异。
      */
     private fun replacement(
-        root: Path,
         cloud: CloudTreeCache,
         action: SyncAction,
         oldRoot: String,
@@ -85,39 +93,13 @@ internal class JvmInodeMoveCoordinator(
         val suffix = item.localPath.removePrefix(oldRoot)
         val newPath = action.relativePath + suffix
         val remote = cloud.tree[newPath] ?: throw AppError.Data("移动后云树缺少路径: $newPath")
-        val localPath = safeLocalPath(root, newPath)
-        val exists = Files.exists(localPath, LinkOption.NOFOLLOW_LINKS)
         return item.copy(
             localPath = newPath,
             parentFolderId = remote.singleParentOrNull,
             name = remote.name ?: newPath.substringAfterLast('/'),
-            isFolder = Files.isDirectory(localPath, LinkOption.NOFOLLOW_LINKS),
             size = remote.sizeBytes,
-            localSize = if (exists && Files.isRegularFile(localPath, LinkOption.NOFOLLOW_LINKS)) {
-                Files.size(localPath)
-            } else null,
-            sha256 = remote.contentHash,
-            localMtime = if (exists) Files.getLastModifiedTime(localPath, LinkOption.NOFOLLOW_LINKS).toMillis() else null,
-            cloudEditedTime = remote.editedTime?.let { runCatching { Instant.parse(it).toEpochMilli() }.getOrNull() },
-            lastSyncTime = nowMs(),
-            status = SyncStatus.SYNCED,
-            errorMessage = null,
+            cloudEditedTime = remote.editedTime?.let { runCatching { Instant.parse(it).toEpochMilli() }.getOrNull() }
+                ?: item.cloudEditedTime,
         )
-    }
-
-    /**
-     * 校验相对路径并解析为挂载根内的路径。
-     */
-    private fun safeLocalPath(root: Path, relativePath: String): Path {
-        val relative = Path.of(relativePath)
-        if (relative.isAbsolute || relative.none() || relative.any { it.toString() == ".." || it.toString() == "." }) {
-            throw AppError.LocalIo("非法同步路径: $relativePath")
-        }
-        val canonicalRoot = root.toRealPath()
-        val target = canonicalRoot.resolve(relative).normalize()
-        if (!target.startsWith(canonicalRoot) || target == canonicalRoot) {
-            throw AppError.LocalIo("同步路径越界: $relativePath")
-        }
-        return target
     }
 }

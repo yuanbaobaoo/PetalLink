@@ -1,5 +1,6 @@
 package io.github.yuanbaobaoo.petallink.platform
 
+import io.github.yuanbaobaoo.petallink.core.logging.Logger
 import io.github.yuanbaobaoo.petallink.ui.viewmodel.TransferTaskUi
 import io.github.yuanbaobaoo.petallink.sync.TransferState
 import java.awt.AWTException
@@ -29,6 +30,7 @@ class DesktopTray(
     private val onShow: () -> Unit,
     private val onQuit: () -> Unit,
 ) {
+    private val logger = Logger()
     private var trayIcon: TrayIcon? = null
 
     /**
@@ -71,6 +73,7 @@ class DesktopTray(
         return try {
             SystemTray.getSystemTray().add(icon)
             trayIcon = icon
+            logger.info("platform.tray") { "系统托盘图标+菜单已创建" }
             true
         } catch (e: AWTException) {
             false
@@ -81,7 +84,12 @@ class DesktopTray(
      * 重建菜单（传输任务变化时调用）。
      */
     fun rebuildMenu() {
-        trayIcon?.setPopupMenu(buildMenu())
+        val icon = trayIcon ?: return
+        val menu = runCatching { buildMenu() }
+            .onFailure { logger.warn("platform.tray") { "构造托盘菜单失败：${it.message}" } }
+            .getOrNull() ?: return
+        runCatching { icon.setPopupMenu(menu) }
+            .onFailure { logger.warn("platform.tray") { "托盘菜单重建失败：${it.message}" } }
     }
 
     /**
@@ -128,6 +136,8 @@ class DesktopTray(
         val loader = Thread.currentThread().contextClassLoader ?: ClassLoader.getSystemClassLoader()
         val stream = loader.getResourceAsStream("assets/menubar-icon.png") ?: return null
         ImageIO.read(stream)
+    }.onFailure {
+        logger.warn("platform.tray") { "menubar PNG 加载失败，回退到应用图标：${it.message}" }
     }.getOrNull()
 
     /**
@@ -151,7 +161,12 @@ class DesktopTray(
         }
         addSeparator()
         // 退出 PetalLink（对标原版 quit）
-        add(MenuItem("退出 PetalLink").apply { addActionListener(ActionListener { onQuit() }) })
+        add(MenuItem("退出 PetalLink").apply {
+            addActionListener(ActionListener {
+                logger.info("platform.tray") { "菜单栏「退出 PetalLink」— 真退出" }
+                onQuit()
+            })
+        })
     }
 
     /**

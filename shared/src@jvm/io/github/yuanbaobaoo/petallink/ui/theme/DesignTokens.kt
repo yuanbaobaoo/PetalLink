@@ -193,9 +193,9 @@ object DesignTokens {
         // 品牌标识字体。
         brand = BrandTypography(
             // 紧凑 Logo 文字。
-            compactLogoLabel = textStyle(10f, FontWeight.SemiBold),
+            compactLogoLabel = textStyle(14f, FontWeight.SemiBold),
             // 完整 Logo 文字。
-            fullLogoLabel = textStyle(10.5f, FontWeight.SemiBold),
+            fullLogoLabel = textStyle(14f, FontWeight.SemiBold),
         ),
         // 按钮字体。
         button = ButtonTypography(

@@ -1,6 +1,7 @@
 package io.github.yuanbaobaoo.petallink.sync
 
 import io.github.yuanbaobaoo.petallink.config.AppConfig
+import io.github.yuanbaobaoo.petallink.core.logging.Logger
 import io.github.yuanbaobaoo.petallink.drive.DriveFile
 
 /**
@@ -16,6 +17,7 @@ import io.github.yuanbaobaoo.petallink.drive.DriveFile
  * - is_cloud_changed：editedTime 变化（null → 视为未变，防误下载）
  */
 object Planner {
+    private val logger = Logger()
 
     /**
      * pending fileId 前缀（对标 PENDING_FILE_ID_PREFIX）
@@ -167,8 +169,10 @@ object Planner {
                     SyncAction(SyncActionType.DELETE_FROM_LOCAL, path, db.fileId, null, "云端已删除文件夹 → 同步删除本地")
                 local.hasContent && isLocalChanged(local, db) ->
                     SyncAction(SyncActionType.BACKUP_BEFORE_CLOUD_DELETE, path, db.fileId, null, "云端已删除但本地有未上传修改 → 备份副本")
-                else ->
+                else -> {
+                    logger.debug("sync.planner") { "云端已删除文件 → 同步删除本地占位/未改文件 rel=$path local_has_content=${local.hasContent} is_placeholder=${local.isPlaceholder}" }
                     SyncAction(SyncActionType.DELETE_FROM_LOCAL, path, db.fileId, null, "云端已删除 → 删除本地")
+                }
             }
         }
         // 无 DB
@@ -232,6 +236,7 @@ object Planner {
             if (!snapshot.cloudTreeTrusted &&
                 (action.type == SyncActionType.DELETE_FROM_LOCAL || action.type == SyncActionType.DELETE_FROM_CLOUD)
             ) {
+                logger.warn("sync.planner") { "云端 checkpoint 不可信，抑制删除动作 path=$path action=${action.type}" }
                 continue  // 云端 checkpoint 不可信，抑制删除
             }
 

@@ -19,6 +19,7 @@ import java.nio.file.Paths
 import io.github.yuanbaobaoo.petallink.mount.JvmPlaceholderManager
 import io.github.yuanbaobaoo.petallink.mount.JvmUploadStabilityProbe
 import io.github.yuanbaobaoo.petallink.platform.LaunchAgentManager
+import io.github.yuanbaobaoo.petallink.core.logging.Logger
 import io.github.yuanbaobaoo.petallink.core.net_guard.NetGuard
 import io.github.yuanbaobaoo.petallink.core.net_guard.NetState
 import io.github.yuanbaobaoo.petallink.update.JvmUpdateService
@@ -56,6 +57,7 @@ class CommandService private constructor(
     private val eventHub: SyncEventHub,
 ) {
     @Volatile private var activeOauthServer: OauthServer? = null
+    private val logger = Logger()
     val syncStates: kotlinx.coroutines.flow.StateFlow<SyncStatusSnapshot> get() = statusAggregator.snapshots
     val folderSyncProgress: kotlinx.coroutines.flow.StateFlow<FolderSyncProgress?>? get() = syncPlan?.folderSyncProgress()
     val uploadFailures: kotlinx.coroutines.flow.SharedFlow<UploadFailedEvent>? get() = syncPlan?.uploadFailures()
@@ -74,11 +76,23 @@ class CommandService private constructor(
         return try {
             val stored = tokenStore.load()
             if (stored != null) {
-                authService.ensureValidAccessToken()
+                try {
+                    authService.ensureValidAccessToken()
+                } catch (error: Throwable) {
+                    logger.warn("auth.service") { "恢复登录态时刷新失败，保留本地 token 并返回错误：${error.message}" }
+                    throw error
+                }
                 val config = configStore.load() ?: UserConfig()
-                if (config.mountConfigured && config.mountDir.isNotBlank()) syncPlan?.start()
+                if (config.mountConfigured && config.mountDir.isNotBlank()) {
+                    logger.info("commands") { "SyncEngine 异步启动中..." }
+                    runCatching { syncPlan?.start() }
+                        .onSuccess { logger.info("commands") { "SyncEngine 启动完成 ✓" } }
+                        .onFailure { logger.error("commands", { "SyncEngine 启动失败" }, it) }
+                        .getOrThrow()
+                }
             } else {
                 resetAccountRuntimeAndMount()
+                logger.info("commands") { "孤儿状态已清理（DB/cloudtree/syncstate/mount_configured）" }
             }
             AppResult.Ok(AuthState(
                 loggedIn = tokenStore.load() != null,
@@ -97,6 +111,7 @@ class CommandService private constructor(
      */
     suspend fun authLogin(port: Int): AppResult<TokenPair> {
         return try {
+            logger.info("auth.service") { "开始 OAuth 授权流程：port=$port" }
             val clientId = envLoader.resolvedClientId()
             if (clientId.isBlank()) throw AppError.Auth("缺少华为 OAuth client_id")
             if (!envLoader.clientSecretConfigured()) throw AppError.Auth("缺少华为 OAuth client_secret")
@@ -111,13 +126,17 @@ class CommandService private constructor(
                 val authorizeUrl = Pkce.buildAuthorizeUrl(
                     redirectUri, expectedState, pkce, clientId,
                 )
+                logger.info("auth.service") { "打开授权页：$authorizeUrl" }
                 ProcessBuilder("open", authorizeUrl).start()
                 val result = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                     oauth.waitForCallback()
                 }
                 val code = OauthCallbackValidator.requireCode(result, expectedState)
+                logger.info("auth.service") { "收到授权码，换取 token..." }
                 val token = authService.exchangeCodeForToken(code, redirectUri, pkce.codeVerifier)
                 resetAccountRuntimeAndMount()
+                logger.info("auth.service") { "OAuth 授权流程完成 ✓" }
+                logger.info("commands.auth") { "登录成功，已彻底清空上一账号同步缓存与目录配置，等待用户重新配置" }
                 AppResult.Ok(token)
             } finally {
                 oauth.stop()
@@ -133,6 +152,7 @@ class CommandService private constructor(
     suspend fun authCancelLogin(): AppResult<Unit> = safe {
         activeOauthServer?.stop()
         activeOauthServer = null
+        logger.info("auth.service") { "用户取消授权" }
     }
 
     /**
@@ -142,6 +162,7 @@ class CommandService private constructor(
         return try {
             resetAccountRuntimeAndMount()
             tokenStore.clear()
+            logger.info("auth.service") { "已退出登录" }
             AppResult.Ok(Unit)
         } catch (error: Throwable) {
             AppResult.Err(AppError.Internal(error.message ?: "登出清理失败"))
@@ -197,7 +218,7 @@ class CommandService private constructor(
      */
     fun configExportJson(): AppResult<String> = safe { Json.encodeToString(UserConfig.serializer(), configStore.load() ?: UserConfig()) }
     /**
-     * 解析并校验导入的 JSON 配置，成功后保存。
+     * 解析并校验导入的 JSON 配置并返回（对标原项目：此入口不直接覆盖当前配置文件，由调用方决定何时保存）。
      */
     fun configImportJson(jsonStr: String): AppResult<UserConfig> {
         val config = try {
@@ -209,10 +230,7 @@ class CommandService private constructor(
         ConfigValidator.validate(config).firstOrNull()?.let {
             return AppResult.Err(AppError.Internal(it))
         }
-        return when (val saved = configSave(config)) {
-            is AppResult.Ok -> AppResult.Ok(config)
-            is AppResult.Err -> saved
-        }
+        return AppResult.Ok(config)
     }
 
     // ============ drive (12) ============
@@ -243,6 +261,7 @@ class CommandService private constructor(
      * 删除云端文件/文件夹，并在同步互斥下结算本地基线与删除留痕。
      */
     suspend fun driveDeleteFile(id: String, name: String?): AppResult<Unit> = drive {
+        ensureNotIndexing()
         var remoteCommitted = false
         try {
             exclusiveSyncMutation {
@@ -255,13 +274,15 @@ class CommandService private constructor(
         } finally {
             if (remoteCommitted) syncPlan?.remoteMutationCommitted()
         }
+        logger.info("commands.drive") { "删除云端文件已核验：fileId=$id" }
     }
     /**
      * 重命名云端文件，并结算本地路径与同步基线。
      */
     suspend fun driveRenameFile(id: String, newName: String): AppResult<DriveFile> = drive {
+        ensureNotIndexing()
         var remoteCommitted = false
-        try {
+        val file = try {
             exclusiveSyncMutation {
                 val settler = JvmDriveMutationSettler(configStore, db)
                 val plan = settler.planRename(id, newName)
@@ -273,14 +294,17 @@ class CommandService private constructor(
         } finally {
             if (remoteCommitted) syncPlan?.remoteMutationCommitted()
         }
+        logger.info("commands.drive") { "重命名已核验并结算：fileId=$id, newName=$newName" }
+        file
     }
     /**
      * 将云端文件移动到新的父目录，并结算本地路径与同步基线。
      */
     suspend fun driveMoveFile(id: String, newParentFolder: String): AppResult<DriveFile> =
         drive {
+            ensureNotIndexing()
             var remoteCommitted = false
-            try {
+            val file = try {
                 exclusiveSyncMutation {
                     val settler = JvmDriveMutationSettler(configStore, db)
                     val plan = settler.planMove(id, newParentFolder)
@@ -294,6 +318,8 @@ class CommandService private constructor(
             } finally {
                 if (remoteCommitted) syncPlan?.remoteMutationCommitted()
             }
+            logger.info("commands.drive") { "移动已核验并结算：fileId=$id, targetFolder=$newParentFolder" }
+            file
         }
     /**
      * 按关键字在指定父目录下搜索云端文件。
@@ -406,7 +432,8 @@ class CommandService private constructor(
      * 请求同步引擎重试指定 taskId 的传输任务。
      */
     suspend fun transferRetry(taskId: Long): AppResult<Unit> = dbSafeSusp {
-        when (val result = syncPlan?.retryTransfer(taskId)) {
+        val plan = syncPlan ?: throw AppError.Internal("同步引擎未启动")
+        when (val result = plan.retryTransfer(taskId)) {
             is AppResult.Err -> throw result.error
             else -> Unit
         }
@@ -417,6 +444,7 @@ class CommandService private constructor(
      * 入队对指定云端目录的递归双向同步（后台 BFS 下载/上传）。
      */
     suspend fun syncFolderRecursive(folderId: String, relPath: String): AppResult<Long> = drive {
+        ensureNotIndexing()
         val accepted = syncPlan?.enqueueFolderSync(folderId, relPath)
             ?: throw AppError.Internal("同步引擎未启动")
         if (!accepted) throw AppError.Internal("已有同步周期或目录同步正在运行，本次请求未开始")
@@ -463,6 +491,7 @@ class CommandService private constructor(
      * 批量释放多个文件的本地空间，返回成功/失败统计与释放字节数。
      */
     suspend fun syncFreeUpBatch(items: List<FreeableItem>): AppResult<FreeUpBatchResult> = drive {
+        ensureNotIndexing()
         var ok = 0; var fail = 0; var freedBytes = 0L; val errs = mutableListOf<String>()
         for (item in items) {
             try {
@@ -505,6 +534,8 @@ class CommandService private constructor(
     fun platformLaunchAtLoginSetEnabled(enabled: Boolean): Boolean = runCatching {
         launchAgentManager().setEnabled(enabled)
         launchAgentManager().isEnabled() == enabled
+    }.onFailure {
+        logger.error("commands.platform", { "设置开机自启失败" }, it)
     }.getOrDefault(false)
     /**
      * 清理全部本地缓存：停止同步、清空 token、DB 与同步状态/检查点文件。
@@ -521,6 +552,7 @@ class CommandService private constructor(
                     name.startsWith("changes_cursor_") || name == "incomplete-shutdown"
             }.forEach(Files::deleteIfExists)
         }
+        logger.info("commands.platform") { "缓存已清空，准备重启" }
     }
     /**
      * 读取最近 1000 条日志记录。
@@ -684,7 +716,22 @@ class CommandService private constructor(
     private suspend fun runDownloadCommand(fileId: String, destPath: String) {
         val store = JvmTransferFileStore()
         val (_, relative, destination) = resolveCommandPath(destPath)
-        val metadata = downloadApi.fetchRemoteMetadata(fileId)
+        // 实时元数据失败时回退可信同步基线；二者皆缺版本信息则拒绝创建任务（对标原 free_up.rs:525-553）
+        val cached = db.syncItems.findByFileId(fileId)
+            ?.takeIf { it.size >= 0L && it.cloudEditedTime != null }
+        val metadata = try {
+            downloadApi.fetchRemoteMetadata(fileId)
+        } catch (error: Throwable) {
+            if (cached == null) throw error
+            logger.warn("commands.free_up") { "按需下载获取实时元数据失败，使用可信同步基线 fileId=$fileId error=$error" }
+            null
+        }
+        val expectedEditedMs = metadata?.editedTime?.let { raw ->
+            runCatching { java.time.Instant.parse(raw).toEpochMilli() }.getOrNull()
+        } ?: cached?.cloudEditedTime
+            ?: throw AppError.Data("按需下载缺少可信云端 editedTime，拒绝创建任务")
+        val cloudSize = metadata?.size?.takeIf { it >= 0L } ?: cached?.size
+            ?: throw AppError.Data("按需下载缺少可信云端文件大小，拒绝创建任务")
         val isUpdate = Files.isRegularFile(destination, java.nio.file.LinkOption.NOFOLLOW_LINKS) && Files.size(destination) > 0
         val id = db.transfers.insert(
             TransferTask(
@@ -693,13 +740,13 @@ class CommandService private constructor(
                 fileId = fileId,
                 localPath = destination.toString(),
                 name = destination.fileName.toString(),
-                totalSize = metadata.size,
+                totalSize = cloudSize,
                 state = TransferState.Pending,
                 errorMessage = null,
                 createdAt = System.currentTimeMillis(),
                 relativePath = relative,
                 operation = if (isUpdate) 3 else 2,
-                expectedCloudEditedTime = metadata.editedTime?.let { java.time.Instant.parse(it).toEpochMilli() },
+                expectedCloudEditedTime = expectedEditedMs,
             ),
         )
         val disposition = commandTaskRunner(store).runExpected(db.transfers.findById(id)!!.toTaskContext())
@@ -735,6 +782,7 @@ class CommandService private constructor(
      */
     private fun commandTaskRunner(store: JvmTransferFileStore): TaskRunner {
         val probe = JvmUploadStabilityProbe()
+        val placeholder = JvmPlaceholderManager(configuredMountRoot())
         val operations = TransferOperationsImpl(
             uploadApi = uploadApi,
             downloadApi = downloadApi,
@@ -747,6 +795,8 @@ class CommandService private constructor(
             remoteVerification = JvmRemoteTransferVerifier(filesApi, store)::verify,
             deleteRemote = filesApi::deleteFile,
             ensureUploadCapacity = aboutApi::ensureUploadCapacity,
+            downloadTargetProbe = placeholder::downloadTargetIdentity,
+            backupModifiedPlaceholder = { placeholder.backupModifiedPlaceholder(it) },
         )
         val concurrency = (configStore.load() ?: UserConfig()).concurrency
         return TaskRunner(
@@ -763,6 +813,14 @@ class CommandService private constructor(
     }
 
     // ============ helpers ============
+    /**
+     * 云端树索引重建时拒绝文件操作（对标原 ensure_not_indexing）。
+     */
+    private fun ensureNotIndexing() {
+        if (statusAggregator.snapshots.value.runtime.isIndexing) {
+            throw AppError.Data("正在读取云端索引，请稍后再试")
+        }
+    }
     /**
      * 包装同步块：将任意异常转为 [AppResult.Err]（Internal）。
      */
@@ -868,6 +926,7 @@ class CommandService private constructor(
 class FileTokenStore(tokenPath: Path = AppPaths.fromEnvironment().tokenFile) : TokenStore {
     private val file = tokenPath.toFile()
     private val json = Json { ignoreUnknownKeys = true }
+    private val logger = Logger()
     private val MAGIC = byteArrayOf('P'.code.toByte(), 'T'.code.toByte(), 'L'.code.toByte(), '1'.code.toByte())
     private val nonceLen = 12
 
@@ -902,18 +961,27 @@ class FileTokenStore(tokenPath: Path = AppPaths.fromEnvironment().tokenFile) : T
      */
     override suspend fun load(): TokenPair? {
         if (!file.exists()) return null
+        val data = try {
+            file.readBytes()
+        } catch (e: Throwable) {
+            logger.warn("auth.token_store") { "token 文件读取失败：${e.message}" }
+            return null
+        }
+        if (data.size < MAGIC.size + nonceLen + 16) return null
+        // 验证 MAGIC
+        if (!data.take(MAGIC.size).toByteArray().contentEquals(MAGIC)) return null
         return try {
-            val data = file.readBytes()
-            if (data.size < MAGIC.size + nonceLen + 16) return null
-            // 验证 MAGIC
-            if (!data.take(MAGIC.size).toByteArray().contentEquals(MAGIC)) return null
             val nonce = data.copyOfRange(MAGIC.size, MAGIC.size + nonceLen)
             val ciphertext = data.copyOfRange(MAGIC.size + nonceLen, data.size)
             val key = deriveKey()
             val plaintext = io.github.yuanbaobaoo.petallink.platform.ChaCha20Poly1305.decrypt(key, nonce, ciphertext)
             val tokenPair = TokenSerializer.deserialize(plaintext)
+            logger.info("auth.token_store") { "从加密 token 文件恢复登录态" }
             tokenPair
-        } catch (e: Throwable) { null }
+        } catch (e: Throwable) {
+            logger.warn("auth.token_store") { "token 解密失败（损坏/跨机器/UUID 变更？），视为未登录：${e.message}" }
+            null
+        }
     }
 
     /**
@@ -951,12 +1019,16 @@ class FileTokenStore(tokenPath: Path = AppPaths.fromEnvironment().tokenFile) : T
         } finally {
             Files.deleteIfExists(temp)
         }
+        logger.info("auth.token_store") { "token 已加密保存到本地文件（机器码绑定，权限 600）" }
     }
 
     /**
      * 删除本地 token 文件。
      */
-    override suspend fun clear() { file.delete() }
+    override suspend fun clear() {
+        file.delete()
+        logger.info("auth.token_store") { "已清除 token 文件" }
+    }
 
     /**
      * 以 runBlocking 阻塞方式加载 token，供非挂起上下文使用。

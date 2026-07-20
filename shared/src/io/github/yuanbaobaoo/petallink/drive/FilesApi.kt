@@ -2,6 +2,7 @@ package io.github.yuanbaobaoo.petallink.drive
 
 import io.github.yuanbaobaoo.petallink.AppError
 import io.github.yuanbaobaoo.petallink.auth.Pkce
+import io.github.yuanbaobaoo.petallink.core.logging.Logger
 import io.ktor.client.request.header
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.*
@@ -23,6 +24,8 @@ class FilesApi(
     private val client: DriveClient,
     private val base: String = DriveConstants.DRIVE_API_BASE,
 ) {
+    private val logger = Logger()
+
     /**
      * 列出文件（分页）
      */
@@ -70,12 +73,24 @@ class FilesApi(
     suspend fun createFile(name: String, parentFolder: String?, isFolder: Boolean): DriveFile {
         require(name.isNotBlank()) { "名称不能为空" }
         val expectedParent = parentFolder ?: "root"
-        if (isFolder) findUniqueFolder(name, parentFolder, expectedParent)?.let { return it }
+        if (isFolder) {
+            findUniqueFolder(name, parentFolder, expectedParent)?.let {
+                logger.info("drive.files_api.write") {
+                    "创建文件夹前核验命中唯一同名目录，跳过 POST folderId=${it.id} folderName=$name parentId=$expectedParent"
+                }
+                return it
+            }
+        }
         return try {
             createFileOnce(name, parentFolder, isFolder, expectedParent)
         } catch (submitError: Throwable) {
             if (isFolder) {
-                findUniqueFolder(name, parentFolder, expectedParent)?.let { return it }
+                findUniqueFolder(name, parentFolder, expectedParent)?.let {
+                    logger.info("drive.files_api.write") {
+                        "创建文件夹响应不确定，父目录唯一核验确认已提交 folderId=${it.id} folderName=$name parentId=$expectedParent error=${submitError.message}"
+                    }
+                    return it
+                }
             }
             throw submitError
         }

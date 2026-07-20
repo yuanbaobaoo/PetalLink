@@ -1,5 +1,7 @@
 package io.github.yuanbaobaoo.petallink.core
 
+import io.github.yuanbaobaoo.petallink.core.logging.Logger
+
 /**
  * 凭据加载（对标 src/core/env_loader.rs + constants.rs 解析优先级）。
  *
@@ -8,6 +10,8 @@ package io.github.yuanbaobaoo.petallink.core
  */
 
 object EnvLoader {
+
+    private val logger = Logger()
 
     /**
      * 华为 OAuth client credentials（由 .env 或环境变量注入）
@@ -59,6 +63,7 @@ object EnvLoader {
             .mapNotNull { path -> if (java.nio.file.Files.isDirectory(path)) path else path.parent }
             .mapTo(candidates) { it.resolve(".env").normalize() }
 
+        var loadedPath: java.nio.file.Path? = null
         for (path in candidates.distinct()) {
             if (!java.nio.file.Files.exists(path)) continue
             try {
@@ -76,10 +81,17 @@ object EnvLoader {
                         "HWCLOUD_CLIENT_SECRET" -> envClientSecret = value
                     }
                 }
+                loadedPath = path
                 break  // 找到第一个 .env 就返回
             } catch (e: Throwable) {
                 // 读取失败忽略，继续下一个候选
             }
+        }
+        if (loadedPath != null) {
+            logger.debug("core.env_loader") { "已加载 .env：$loadedPath" }
+            logger.info("app") { "已加载 .env 配置：$loadedPath" }
+        } else {
+            logger.debug("app") { ".env 不存在或加载失败，使用默认/构建期注入的配置" }
         }
     }
 

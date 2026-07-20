@@ -113,23 +113,32 @@ class PersistentTransferIntegrationTest {
         val ranges = mutableListOf<String>()
         val store = JvmTransferFileStore()
         val operations = operations(store, MockEngine { request ->
-            if (request.method.value == "POST") {
-                respond(
-                    """{"serverId":"s1","uploadId":"u1","sliceSize":10485760}""",
+            when {
+                // §3.7 Create 上传前同名预检（列父目录）
+                request.method.value == "GET" -> respond(
+                    """{"category":"drive#fileList","files":[]}""",
                     HttpStatusCode.OK,
-                    headersOf(HttpHeaders.Location, "https://upload.test/session"),
+                    headersOf(HttpHeaders.ContentType, "application/json"),
                 )
-            } else {
-                put++
-                ranges += request.headers[HttpHeaders.ContentRange].orEmpty()
-                when (put) {
-                    1 -> respond("""{"rangeList":["0-10485759"]}""", HttpStatusCode.PermanentRedirect)
-                    2 -> respond("""{"rangeList":["0-20971519"]}""", HttpStatusCode.PermanentRedirect)
-                    else -> respond(
-                        """{"category":"drive#file","id":"cloud-large","fileName":"large.bin","mimeType":"application/octet-stream","size":"$total"}""",
+                request.method.value == "POST" -> {
+                    respond(
+                        """{"serverId":"s1","uploadId":"u1","sliceSize":10485760}""",
                         HttpStatusCode.OK,
-                        headersOf(HttpHeaders.ContentType, "application/json"),
+                        headersOf(HttpHeaders.Location, "https://upload.test/session"),
                     )
+                }
+                else -> {
+                    put++
+                    ranges += request.headers[HttpHeaders.ContentRange].orEmpty()
+                    when (put) {
+                        1 -> respond("""{"rangeList":["0-10485759"]}""", HttpStatusCode.PermanentRedirect)
+                        2 -> respond("""{"rangeList":["0-20971519"]}""", HttpStatusCode.PermanentRedirect)
+                        else -> respond(
+                            """{"category":"drive#file","id":"cloud-large","fileName":"large.bin","mimeType":"application/octet-stream","size":"$total","editedTime":"2026-07-16T00:00:00Z"}""",
+                            HttpStatusCode.OK,
+                            headersOf(HttpHeaders.ContentType, "application/json"),
+                        )
+                    }
                 }
             }
         })
