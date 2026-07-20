@@ -2,6 +2,8 @@
 
 华为云空间 macOS 桌面客户端。PetalLink 通过华为 Drive REST API 直连云端，将云端文件映射到本地目录，并提供可恢复的双向同步。
 
+> **⚠️ `dev/cmp-kotlin-toolchain` 已冻结，暂停维护。Kotlin/Compose Multiplatform 迁移技术验证已完成——应用可编译、运行并通过测试，但 Kotlin Toolchain 生态尚不成熟（Compose Desktop 打包、热更新、IDE 集成等方面），继续投入性价比较低。代码保留，待 Kotlin Toolchain 迭代后再评估是否继续。
+
 本分支是 Kotlin/Compose Multiplatform Desktop JVM 移植版本：以 Kotlin Toolchain 为唯一构建入口，不要求预装 Gradle 或 JDK。
 
 > 华为云空间目前不原生支持 macOS。PetalLink 不依赖 HMS Core SDK，而是使用 OAuth 2.0 和华为 Drive REST API 提供桌面端云盘体验。
