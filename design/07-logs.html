@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>07 · 日志查看器 - PetalLink v2 原型</title>
+<link rel="stylesheet" href="assets/v2.css">
+<script src="assets/sprite.js"></script>
+<style>
+  /* 日志页专属：级别 chip 定宽居中，列表视觉对齐 */
+  .log-level { min-width: 58px; justify-content: center; flex: none; }
+</style>
+</head>
+<body>
+<div class="canvas">
+
+  <!-- ============ 场景 1：日志查看器（全部级别） ============ -->
+  <div class="scene">
+    <div class="scene__label"><b>日志查看器</b>　级别过滤 chips + 导出 / 清空，newest-first，最多 1000 条（F-CFG-05）</div>
+    <div class="mac-window">
+      <div class="mac-titlebar">
+        <div class="traffic"><i></i><i></i><i></i></div>
+        <div class="mac-titlebar__title">PetalLink - 华为云盘客户端开源版</div>
+      </div>
+      <div class="mac-body" style="flex-direction:column;background:var(--bg-app);">
+        <!-- 窗口头部：返回 + 标题 -->
+        <div class="toolbar" style="height:56px;border-bottom:1px solid var(--line);">
+          <button class="btn-circle"><span class="icon icon--18" style="transform:rotate(180deg);"><svg><use href="#i-arrow"/></svg></span></button>
+          <span style="font-size:17px;font-weight:600;">同步日志</span>
+        </div>
+        <!-- 级别过滤 + 操作 -->
+        <div class="log-toolbar">
+          <span class="chip chip--outline chip--clickable is-active">ALL</span>
+          <span class="chip chip--outline chip--clickable">INFO</span>
+          <span class="chip chip--outline chip--clickable">WARN</span>
+          <span class="chip chip--outline chip--clickable">ERROR</span>
+          <span style="flex:1;"></span>
+          <button class="btn-circle" title="导出日志"><span class="icon icon--16"><svg><use href="#i-download"/></svg></span></button>
+          <button class="btn-circle" title="清空日志"><span class="icon icon--16"><svg><use href="#i-trash"/></svg></span></button>
+        </div>
+        <!-- 日志卡片列表 -->
+        <div class="log-list">
+          <div class="log-item">
+            <span class="chip chip--err log-level">ERROR</span>
+            <div>
+              <div class="log-item__msg">上传失败：配额不足（剩余 512 MB，文件 3.2 GB）：文档/视频/发布会录像-4K.mov</div>
+              <div class="log-item__meta">2026-07-17 14:32:08 · petallink::sync::executor</div>
+            </div>
+          </div>
+          <div class="log-item">
+            <span class="chip chip--warn log-level">WARN</span>
+            <div>
+              <div class="log-item__msg">文件被持续编辑超过 5 分钟，标记 Editing 并跳过自动同步：文档/工作/竞品分析.md</div>
+              <div class="log-item__meta">2026-07-17 14:28:41 · petallink::sync::watcher</div>
+            </div>
+          </div>
+          <div class="log-item">
+            <span class="chip chip--info log-level">INFO</span>
+            <div>
+              <div class="log-item__msg">同步完成：处理 24 项变更（上传 3 / 下载 2 / 删除 1），结算基线 revision 1284</div>
+              <div class="log-item__meta">2026-07-17 14:25:19 · petallink::sync::engine</div>
+            </div>
+          </div>
+          <div class="log-item">
+            <span class="chip chip--info log-level">INFO</span>
+            <div>
+              <div class="log-item__msg">FSEvents 捕获 3 个本地变更，进入 3s debounce</div>
+              <div class="log-item__meta">2026-07-17 14:24:52 · petallink::sync::watcher</div>
+            </div>
+          </div>
+          <div class="log-item">
+            <span class="chip chip--warn log-level">WARN</span>
+            <div>
+              <div class="log-item__msg">被动请求失败产生 Offline 边沿，进入 TCP 探测（30s 间隔 / 3s 超时）</div>
+              <div class="log-item__meta">2026-07-17 14:20:03 · petallink::core::net_guard</div>
+            </div>
+          </div>
+          <div class="log-item">
+            <span class="chip chip--info log-level">INFO</span>
+            <div>
+              <div class="log-item__msg">连续 2 次探测成功，恢复 Online：cloud catch-up → VerifyingRemote → planner</div>
+              <div class="log-item__meta">2026-07-17 14:21:36 · petallink::core::net_guard</div>
+            </div>
+          </div>
+          <div class="log-item">
+            <span class="chip chip--info log-level">INFO</span>
+            <div>
+              <div class="log-item__msg">token 距过期不足 60s，主动刷新成功</div>
+              <div class="log-item__meta">2026-07-17 14:15:00 · petallink::auth</div>
+            </div>
+          </div>
+          <div class="log-item">
+            <span class="chip chip--info log-level">INFO</span>
+            <div>
+              <div class="log-item__msg">增量同步完成：nextCursor 原子 checkpoint，应用 6 个 Changes 批次</div>
+              <div class="log-item__meta">2026-07-17 14:10:44 · petallink::sync::engine</div>
+            </div>
+          </div>
+          <div class="log-item">
+            <span class="chip chip--gray log-level">DEBUG</span>
+            <div>
+              <div class="log-item__msg">冲突检测：本地 mtime 晚于云端 editedTime 92s（&gt; 60s 容忍窗口），以本地为准，云端副本重命名</div>
+              <div class="log-item__meta">2026-07-17 14:05:41 · petallink::sync::engine</div>
+            </div>
+          </div>
+          <div class="log-item">
+            <span class="chip chip--info log-level">INFO</span>
+            <div>
+              <div class="log-item__msg">启动首次同步 catch-up 成功，恢复上传/下载/清理 tombstone，进入 planner</div>
+              <div class="log-item__meta">2026-07-17 09:00:12 · petallink::sync::engine</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 场景 2：按级别过滤（ERROR） ============ -->
+  <div class="scene">
+    <div class="scene__label"><b>日志查看器 · 级别过滤</b>　选中 ERROR，仅展示错误条目</div>
+    <div class="mac-window">
+      <div class="mac-titlebar">
+        <div class="traffic"><i></i><i></i><i></i></div>
+        <div class="mac-titlebar__title">PetalLink - 华为云盘客户端开源版</div>
+      </div>
+      <div class="mac-body" style="flex-direction:column;background:var(--bg-app);">
+        <div class="toolbar" style="height:56px;border-bottom:1px solid var(--line);">
+          <button class="btn-circle"><span class="icon icon--18" style="transform:rotate(180deg);"><svg><use href="#i-arrow"/></svg></span></button>
+          <span style="font-size:17px;font-weight:600;">同步日志</span>
+        </div>
+        <div class="log-toolbar">
+          <span class="chip chip--outline chip--clickable">ALL</span>
+          <span class="chip chip--outline chip--clickable">INFO</span>
+          <span class="chip chip--outline chip--clickable">WARN</span>
+          <span class="chip chip--err chip--clickable">ERROR</span>
+          <span style="flex:1;"></span>
+          <button class="btn-circle" title="导出日志"><span class="icon icon--16"><svg><use href="#i-download"/></svg></span></button>
+          <button class="btn-circle" title="清空日志"><span class="icon icon--16"><svg><use href="#i-trash"/></svg></span></button>
+        </div>
+        <div class="log-list">
+          <div class="log-item">
+            <span class="chip chip--err log-level">ERROR</span>
+            <div>
+              <div class="log-item__msg">上传失败：配额不足（剩余 512 MB，文件 3.2 GB）：文档/视频/发布会录像-4K.mov</div>
+              <div class="log-item__meta">2026-07-17 14:32:08 · petallink::sync::executor</div>
+            </div>
+          </div>
+          <div class="log-item">
+            <span class="chip chip--err log-level">ERROR</span>
+            <div>
+              <div class="log-item__msg">下载 416 且 offset &gt; 0：discard 本地 .tmp 并从 0 重下（仅一次安全回退）：产品演示视频.mp4</div>
+              <div class="log-item__meta">2026-07-17 11:48:22 · petallink::sync::executor</div>
+            </div>
+          </div>
+          <div class="log-item">
+            <span class="chip chip--err log-level">ERROR</span>
+            <div>
+              <div class="log-item__msg">OAuth 回调 5 分钟超时，授权流程已取消</div>
+              <div class="log-item__meta">2026-07-16 20:03:57 · petallink::auth</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <a class="back-link" href="index.html">← 返回 v2 原型导航</a>
+</div>
+</body>
+</html>
