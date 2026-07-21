@@ -108,4 +108,32 @@ void main() {
     expect(find.text('授权失败，请重试'), findsNothing);
     expect(find.text('使用华为账号登录'), findsOneWidget);
   });
+
+  testWidgets('授权成功 → 自动跳转 /files（回归：此前停留登录页）', (tester) async {
+    Get.reset();
+    Get.put<AuthService>(AuthService(
+      secrets: const AuthSecrets(clientId: 'id', clientSecret: 'secret'),
+    ));
+    final auth = _FakeAuthController();
+    Get.put<AuthController>(auth);
+
+    await tester.pumpWidget(GetMaterialApp(
+      initialRoute: '/login',
+      getPages: [
+        GetPage(
+            name: '/login',
+            page: () => const MateLinkTheme(child: LoginPage())),
+        GetPage(
+            name: '/files', page: () => const Scaffold(body: Text('files'))),
+      ],
+    ));
+    await tester.pumpAndSettle();
+    expect(Get.currentRoute, '/login');
+
+    // 模拟 OAuth 完成：状态变为 authorized
+    auth.state.value = const AuthState(status: AuthStatus.authorized);
+    await tester.pumpAndSettle();
+
+    expect(Get.currentRoute, '/files');
+  });
 }

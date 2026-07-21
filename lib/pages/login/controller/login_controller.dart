@@ -107,6 +107,9 @@ class LoginController extends GetxController {
       switch (authState.status) {
         case AuthStatus.authorized:
           state.value = state.value.copyWith(status: AuthStatus.authorized);
+          // 授权成功 → 跳转文件页（对齐 Vue App.vue 的条件渲染切换；
+          // GetX 中间件 redirect 只在路由变化时触发，状态变化需显式导航）
+          Get.offAllNamed('/files');
         case AuthStatus.error:
           state.value = state.value.copyWith(
             status: AuthStatus.error,
