@@ -1,0 +1,4 @@
+// 应用基础信息
+// PRODUCT_NAME 和 PRODUCT_BUNDLE_IDENTIFIER 在 Debug.xcconfig / Release.xcconfig 中分别设置
+
+PRODUCT_COPYRIGHT = Copyright © 2026 yuanbaobaoo. All rights reserved.

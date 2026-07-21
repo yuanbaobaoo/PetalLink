@@ -1,0 +1,449 @@
+import 'dart:async';
+import 'dart:io';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
+import 'package:petal_link/core/error/app_error.dart';
+import 'package:petal_link/core/storage/app_paths.dart';
+import 'package:petal_link/core/storage/database_service.dart';
+import 'package:petal_link/entity/drive_file.dart';
+import 'package:petal_link/entity/transfer_task.dart';
+import 'package:petal_link/service/drive/changes_service.dart';
+import 'package:petal_link/service/drive/download_service.dart';
+import 'package:petal_link/service/drive/files_service.dart';
+import 'package:petal_link/service/drive/upload_service.dart';
+import 'package:petal_link/service/mount/manager.dart';
+import 'package:petal_link/service/sync/baseline_store.dart';
+import 'package:petal_link/service/sync/engine.dart';
+import 'package:petal_link/service/sync/engine/executor.dart';
+import 'package:petal_link/service/sync/status_aggregator.dart';
+import 'package:petal_link/service/transfer/task_runner.dart';
+import 'package:petal_link/service/transfer/task_runner_contracts.dart';
+import 'package:petal_link/service/transfer/transfer_service.dart';
+import 'package:petal_link/types/enums.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
+
+import '../auth/fake_http.dart';
+import '../drive/drive_test_util.dart';
+import '../mount/proc_xattr.dart';
+
+/// 引擎周期测试（对齐 Rust engine/cycle.rs + cache.rs）：
+/// 启动恢复（BFS + 占位）→ watcher/poll 触发 → 防重入合并 →
+/// 未信 checkpoint 禁删 → 连续 300 次增量强制全量。
+
+/// 可控云端 fake（list/getStartCursor/changes 计数与故障注入）。
+class _CloudFake {
+  /// parentId → 子项 JSON
+  final Map<String, List<Map<String, dynamic>>> children = {};
+
+  int listCalls = 0;
+  int getStartCursorCalls = 0;
+  int changesCalls = 0;
+  String cursor = 'c0';
+  List<Map<String, dynamic>> pendingChanges = [];
+  bool failList = false;
+  bool failChanges = false;
+  Completer<void>? listGate;
+
+  FakeHttpAdapter adapter() {
+    return FakeHttpAdapter((request) async {
+      final path = request.uri.path;
+      if (path.endsWith('/changes/getStartCursor')) {
+        getStartCursorCalls++;
+        return jsonResponse(
+            {'category': 'drive#startCursor', 'startCursor': cursor});
+      }
+      if (path.endsWith('/changes')) {
+        changesCalls++;
+        if (failChanges) return jsonResponse({'error': 'boom'}, status: 500);
+        final next = '${cursor}n';
+        final changes = pendingChanges;
+        pendingChanges = [];
+        cursor = next;
+        return jsonResponse({
+          'category': 'drive#changeList',
+          'changes': changes,
+          'newStartCursor': next,
+        });
+      }
+      if (path.endsWith('/files')) {
+        listCalls++;
+        if (failList) return jsonResponse({'error': 'boom'}, status: 500);
+        final gate = listGate;
+        if (gate != null) await gate.future;
+        final qp = request.uri.queryParameters['queryParam'] ?? '';
+        final match =
+            RegExp("'([^']+)' in parentFolder").firstMatch(qp);
+        final parent = match?.group(1) ?? 'root';
+        return jsonResponse(fileListPageJson(children[parent] ?? const []));
+      }
+      if (path.contains('/files/')) {
+        // GET /files/{id}：一律 404（verifyDeleted → true）
+        return jsonResponse(
+            {'error': {'code': 'notFound'}}, status: 404);
+      }
+      throw StateError('未处理请求: ${request.uri}');
+    });
+  }
+}
+
+class _FakeOps extends TaskOperations {
+  int executeCalls = 0;
+
+  @override
+  Future<TaskExecutionOutcome> execute(
+    TransferTask task,
+    TaskProgressCallbacks progress,
+  ) async {
+    executeCalls++;
+    if (task.operation == TransferOperation.Download ||
+        task.operation == TransferOperation.DownloadUpdate) {
+      // 模拟下载落盘（供基线结算 stat）
+      await File(task.localPath!).writeAsString('cloud');
+    }
+    return TaskExecutionOutcome(
+      cloudFile: DriveFile(
+        id: task.fileId ?? 'cloud-${task.name}',
+        name: task.name,
+        size: task.sourceSize ?? task.totalSize,
+        parentFolder:
+            task.parentFileId != null ? [task.parentFileId!] : null,
+        editedTime:
+            DateTime.fromMillisecondsSinceEpoch(1700000000000, isUtc: true),
+      ),
+    );
+  }
+}
+
+class _Fixture {
+  late Directory mountDir;
+  late Directory supportRoot;
+  late _CloudFake cloud;
+  late FilesService filesService;
+  late ChangesService changesService;
+  late TaskRunner runner;
+  late _FakeOps ops;
+  late SyncEngine engine;
+  late bool online;
+  late int nowMs;
+
+  Future<void> tearDown() async {
+    await engine.shutdownSync();
+    await runner.dispose();
+    await DatabaseService.instance.close();
+    DatabaseService.debugDatabasePath = null;
+    AppPaths.debugSupportRoot = null;
+    if (mountDir.existsSync()) mountDir.deleteSync(recursive: true);
+    if (supportRoot.existsSync()) supportRoot.deleteSync(recursive: true);
+  }
+}
+
+Future<_Fixture> _buildEngine({
+  Duration pollInterval = Duration.zero,
+}) async {
+  final f = _Fixture();
+  f.mountDir = Directory.systemTemp.createTempSync('engine_cycle_mount');
+  f.supportRoot = Directory.systemTemp.createTempSync('engine_cycle_support');
+  AppPaths.debugSupportRoot = f.supportRoot.path;
+  DatabaseService.debugDatabasePath = '${f.supportRoot.path}/petal_link.db';
+  f.cloud = _CloudFake();
+  final client = buildTestClient(f.cloud.adapter());
+  f.filesService = FilesService(client);
+  f.changesService = ChangesService(client);
+  f.online = true;
+  f.nowMs = 1700000000000;
+  f.ops = _FakeOps();
+  final transferService = TransferService(DatabaseService.instance);
+  f.runner = TaskRunner(
+    transferService: transferService,
+    operations: f.ops,
+    isOnline: () => f.online,
+    nowMs: () => f.nowMs,
+    mountRootProvider: () => f.mountDir.path,
+  );
+  final mount = MountManager(
+    f.mountDir.path,
+    xattr: ProcXattrService(),
+    db: DatabaseService.instance,
+  );
+  final baselineStore = SyncBaselineStore(
+    db: DatabaseService.instance,
+    mountProvider: () => mount,
+    nowMs: () => f.nowMs,
+  );
+  f.runner.setSyncHooks(baselineStore);
+  f.engine = SyncEngine(
+    filesApi: f.filesService,
+    changesApi: f.changesService,
+    db: DatabaseService.instance,
+    statusAggregator: StatusAggregator.independent(),
+    baselineStore: baselineStore,
+    debounce: const Duration(milliseconds: 50),
+    pollInterval: pollInterval,
+    onlineCheck: () => f.online,
+    nowMs: () => f.nowMs,
+  );
+  f.engine.setMount(mount);
+  f.engine.setExecutor(
+    SyncExecutor(
+      filesApi: f.filesService,
+      uploadApi: UploadService(client),
+      downloadApi: DownloadService(client),
+      db: DatabaseService.instance,
+      mount: mount,
+      taskRunner: f.runner,
+      concurrencyProvider: () async => 4,
+      beginActivity: f.engine.activity.begin,
+    ),
+    f.runner,
+  );
+  await f.runner.start();
+  return f;
+}
+
+Future<List<({String path, SyncItemStatus status})>> items() async {
+  final db = await DatabaseService.instance.database;
+  final rows = await db.query('sync_items');
+  return [
+    for (final r in rows)
+      (
+        path: r['local_path'] as String,
+        status: SyncItemStatus.fromCode(r['status'] as int? ?? 0)!,
+      ),
+  ];
+}
+
+void main() {
+  setUpAll(() {
+    sqfliteFfiInit();
+    databaseFactory = databaseFactoryFfi;
+  });
+
+  test('启动周期：无缓存全量 BFS → 云端新文件创建占位 + CLOUD_ONLY 基线', () async {
+    final f = await _buildEngine();
+    try {
+      f.cloud.children['root'] = [
+        folderJson(id: 'd1', name: 'docs', parentFolder: ['root']),
+        fileJson(
+            id: 'f1',
+            name: 'a.txt',
+            parentFolder: ['root'],
+            editedTime: '2023-11-14T22:13:20.000Z'),
+      ];
+      f.cloud.children['d1'] = [
+        fileJson(
+            id: 'f2',
+            name: 'b.txt',
+            parentFolder: ['d1'],
+            editedTime: '2023-11-14T22:13:20.000Z'),
+      ];
+      final phases = <String?>[];
+      final sub = f.engine.stateReceiver().listen((s) {
+        phases.add(s.syncPhase?.wireName);
+      });
+      await f.engine.start();
+      await sub.cancel();
+
+      // 云树可信 + checkpoint 已持久化
+      expect(f.engine.cloudTreeIsTrusted(), isTrue);
+      // 占位符已创建
+      final aStat = await FileStat.stat(p.join(f.mountDir.path, 'a.txt'));
+      expect(aStat.type, FileSystemEntityType.file);
+      final bStat = await FileStat.stat(p.join(f.mountDir.path, 'docs', 'b.txt'));
+      expect(bStat.type, FileSystemEntityType.file);
+      // 基线：文件 CLOUD_ONLY（占位）；目录 SYNCED（CreateFolder 口径）
+      final rows = await items();
+      expect(rows.length, 3);
+      final byPath = {for (final r in rows) r.path: r.status};
+      expect(byPath['docs'], SyncItemStatus.Synced);
+      expect(byPath['a.txt'], SyncItemStatus.CloudOnly);
+      expect(byPath['docs/b.txt'], SyncItemStatus.CloudOnly);
+      // 经历了启动索引阶段
+      expect(phases, contains('indexing-startup'));
+    } finally {
+      await f.tearDown();
+    }
+  });
+
+  test('watcher 触发：本地新文件 → 上传并结算 SYNCED 基线', () async {
+    final f = await _buildEngine();
+    try {
+      f.cloud.children['root'] = const [];
+      await f.engine.start();
+      // 本地新建文件，触发 local-watcher 周期
+      await File(p.join(f.mountDir.path, 'new.txt')).writeAsString('hello');
+      f.engine.requestCycleBackground('local-watcher');
+      // 等待基线收敛
+      final deadline = DateTime.now().add(const Duration(seconds: 10));
+      while (true) {
+        final rows = await items();
+        if (rows.any((r) =>
+            r.path == 'new.txt' && r.status == SyncItemStatus.Synced)) {
+          break;
+        }
+        if (DateTime.now().isAfter(deadline)) {
+          fail('new.txt 未在超时内同步');
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      }
+      expect(f.ops.executeCalls, greaterThanOrEqualTo(1));
+    } finally {
+      await f.tearDown();
+    }
+  });
+
+  test('poll 触发：定时云端刷新（增量 changes 被周期调用）', () async {
+    final f = await _buildEngine(pollInterval: const Duration(milliseconds: 150));
+    try {
+      f.cloud.children['root'] = const [];
+      await f.engine.start();
+      final before = f.cloud.changesCalls;
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+      expect(f.cloud.changesCalls, greaterThanOrEqualTo(before + 2));
+    } finally {
+      await f.tearDown();
+    }
+  });
+
+  test('防重入：并发触发合并为单次全量 BFS', () async {
+    final f = await _buildEngine();
+    try {
+      f.cloud.children['root'] = const [];
+      await f.engine.start();
+      final listBefore = f.cloud.listCalls;
+      f.cloud.listGate = Completer<void>();
+      // 两个触发源并发（manual-full + auto-incremental）
+      final f1 = f.engine.runSyncCycle('manual-refresh');
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      final f2 = f.engine.runSyncCycle('auto-cloud-refresh');
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      f.cloud.listGate!.complete();
+      f.cloud.listGate = null;
+      await f1;
+      await f2;
+      // 合并后仅一次全量 BFS（root 列表调用 +1）
+      expect(f.cloud.listCalls, listBefore + 1);
+    } finally {
+      await f.tearDown();
+    }
+  });
+
+  test('未信 checkpoint 禁删：云端刷新失败撤销信任，本地文件不删不传', () async {
+    final f = await _buildEngine();
+    try {
+      f.cloud.children['root'] = [
+        fileJson(
+            id: 'f1',
+            name: 'keep.txt',
+            parentFolder: ['root'],
+            editedTime: '2023-11-14T22:13:20.000Z'),
+      ];
+      await f.engine.start();
+      expect(f.engine.cloudTreeIsTrusted(), isTrue);
+      // 云端删除 + 全部端点故障 → 增量失败回退全量也失败 → 不可信
+      f.cloud.children['root'] = const [];
+      f.cloud.failChanges = true;
+      f.cloud.failList = true;
+      await expectLater(
+        f.engine.runSyncCycle('auto-cloud-refresh'),
+        throwsA(isA<AppError>()),
+      );
+      expect(f.engine.cloudTreeIsTrusted(), isFalse);
+      // 本地占位/基线必须在（未信禁删）
+      final aStat =
+          await FileStat.stat(p.join(f.mountDir.path, 'keep.txt'));
+      expect(aStat.type, FileSystemEntityType.file);
+      expect(await items(), isNotEmpty);
+      // 恢复端点 → 增量回放 Removed → 可信后正常收敛（云端已删 → 删除本地占位）
+      f.cloud.failChanges = false;
+      f.cloud.failList = false;
+      f.cloud.pendingChanges = [
+        {
+          'category': 'drive#change',
+          'type': 'File',
+          'fileId': 'f1',
+          'deleted': true,
+        },
+      ];
+      await f.engine.runSyncCycle('auto-cloud-refresh');
+      expect(f.engine.cloudTreeIsTrusted(), isTrue);
+      final deadline = DateTime.now().add(const Duration(seconds: 10));
+      while (true) {
+        final type = await FileSystemEntity.type(
+            p.join(f.mountDir.path, 'keep.txt'),
+            followLinks: false);
+        if (type == FileSystemEntityType.notFound) break;
+        if (DateTime.now().isAfter(deadline)) {
+          fail('可信后云端删除未收敛到本地');
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      }
+    } finally {
+      await f.tearDown();
+    }
+  });
+
+  test('连续 300 次增量强制全量 BFS', () async {
+    final f = await _buildEngine();
+    try {
+      f.cloud.children['root'] = const [];
+      await f.engine.start();
+      // 常规增量：getStartCursor 不再调用
+      final startBefore = f.cloud.getStartCursorCalls;
+      await f.engine.runSyncCycle('auto-cloud-refresh');
+      expect(f.cloud.getStartCursorCalls, startBefore);
+      expect(f.engine.cloudIndex.incrementalSinceFull, 1);
+      // 达到阈值 → 强制全量
+      f.engine.cloudIndex.incrementalSinceFull = 300;
+      await f.engine.runSyncCycle('auto-cloud-refresh');
+      expect(f.cloud.getStartCursorCalls, startBefore + 1);
+      expect(f.engine.cloudIndex.incrementalSinceFull, 0);
+    } finally {
+      await f.tearDown();
+    }
+  });
+
+  test('增量回放：Modified 新增云端文件 → 下一周期创建占位', () async {
+    final f = await _buildEngine();
+    try {
+      f.cloud.children['root'] = const [];
+      await f.engine.start();
+      // 服务端新增文件（changes 增量 + list 结果同步更新供全量兜底）
+      f.cloud.children['root'] = [
+        fileJson(
+            id: 'f9',
+            name: 'inc.txt',
+            parentFolder: ['root'],
+            editedTime: '2023-11-14T22:13:20.000Z'),
+      ];
+      f.cloud.pendingChanges = [
+        {
+          'category': 'drive#change',
+          'type': 'File',
+          'fileId': 'f9',
+          'deleted': false,
+          'file': fileJson(
+              id: 'f9',
+              name: 'inc.txt',
+              parentFolder: ['root'],
+              editedTime: '2023-11-14T22:13:20.000Z'),
+        },
+      ];
+      await f.engine.runSyncCycle('auto-cloud-refresh');
+      final deadline = DateTime.now().add(const Duration(seconds: 10));
+      while (true) {
+        final rows = await items();
+        if (rows.any((r) =>
+            r.path == 'inc.txt' && r.status == SyncItemStatus.CloudOnly)) {
+          break;
+        }
+        if (DateTime.now().isAfter(deadline)) {
+          fail('增量新增文件未创建占位');
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      }
+    } finally {
+      await f.tearDown();
+    }
+  });
+}

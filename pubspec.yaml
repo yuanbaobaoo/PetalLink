@@ -1,0 +1,62 @@
+name: petal_link
+description: "PetalLink - 华为云盘 macOS 桌面客户端"
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.12.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # 状态管理 + 路由 + DI
+  get: ^4.6.6
+
+  # 网络
+  dio: ^5.9.0
+
+  # 本地持久化
+  sqflite: ^2.4.2
+  path_provider: ^2.1.5
+
+  # 安全存储 (Token)
+  flutter_secure_storage: ^9.2.4
+
+  # macOS 桌面集成
+  window_manager: ^0.4.3
+  system_tray: ^2.0.3
+
+  # 文件操作
+  file_picker: ^8.1.7
+  path: ^1.9.1
+
+  # 工具
+  logger: ^2.6.2
+  crypto: ^3.0.6
+  intl: ^0.20.2
+  url_launcher: ^6.3.1
+  package_info_plus: ^8.3.0
+  http: ^1.3.0
+  cryptography: ^2.9.0
+  flutter_svg: ^2.3.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  build_runner: ^2.4.14
+  # 单元测试用 SQLite FFI 后端（DatabaseService 测试）
+  sqflite_common_ffi: ^2.3.4+4
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/icons/
+    # 应用 Logo（MateAppLogo，对齐 CMP resources/assets/logo.png）
+    - assets/logo.png
+    # 菜单栏模板图标（托盘，对齐 Rust assets/menubar-icon.png）
+    - assets/menubar-icon.png
+    # OAuth 凭据（构建期打入应用包，对齐 Rust build.rs 从 .env 注入）
+    - .env

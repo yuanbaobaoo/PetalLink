@@ -1,0 +1,6 @@
+#include "../../Flutter/Flutter-Debug.xcconfig"
+#include "Warnings.xcconfig"
+
+// Dev 环境：独立 bundle ID + Dev 后缀，避免与正式版冲突
+PRODUCT_NAME = PetalLink Dev
+PRODUCT_BUNDLE_IDENTIFIER = io.github.yuanbaobaoo.PetalLink-dev

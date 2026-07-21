@@ -1,0 +1,6 @@
+#include "../../Flutter/Flutter-Release.xcconfig"
+#include "Warnings.xcconfig"
+
+// Release 环境：正式 bundle ID，与 Tauri 原版一致
+PRODUCT_NAME = PetalLink
+PRODUCT_BUNDLE_IDENTIFIER = io.github.yuanbaobaoo.PetalLink
