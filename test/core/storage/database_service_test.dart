@@ -88,10 +88,10 @@ void main() {
   }
 
   group('DatabaseService 新库建表（schema v5 终态）', () {
-    test('user_version 为 6', () async {
+    test('user_version 为 7', () async {
       final db = await DatabaseService.instance.database;
       final rows = await db.rawQuery('PRAGMA user_version');
-      expect(rows.first.values.first, 6);
+      expect(rows.first.values.first, 7);
     });
 
     test('v6 新增 local_inode_map 与 free_up_staging 表（inode 方案）', () async {
@@ -201,6 +201,34 @@ void main() {
       ]));
     });
 
+    test('幻影 v6 旧库（sync_cursor 无 config/inode）→ v7 自愈补齐',
+        () async {
+      // 开发期另一套 v6 schema：与 inode v6 版本号相撞，
+      // 不触发 onUpgrade 时永远缺 config/inode 表（2026-07-21 启动事故）
+      final old = await databaseFactoryFfi.openDatabase(dbPath,
+          options: OpenDatabaseOptions(version: 6, onCreate: (db, v) async {
+        await db.execute(
+            'CREATE TABLE sync_items (file_id TEXT NOT NULL, local_path TEXT NOT NULL, name TEXT NOT NULL DEFAULT "", PRIMARY KEY (file_id, local_path))');
+        await db.execute(
+            'CREATE TABLE transfer_queue (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)');
+        await db.execute(
+            'CREATE TABLE sync_cursor (id INTEGER PRIMARY KEY, cursor TEXT)');
+      }));
+      await old.close();
+
+      final db = await DatabaseService.instance.database;
+
+      final version = await db.rawQuery('PRAGMA user_version');
+      expect(version.first.values.first, 7);
+      final tables = (await db.rawQuery(
+              "SELECT name FROM sqlite_master WHERE type='table'"))
+          .map((r) => r['name'] as String)
+          .toSet();
+      expect(tables, containsAll(['config', 'local_inode_map', 'free_up_staging']));
+      // 旧数据保留
+      expect(tables, contains('sync_cursor'));
+    });
+
     test('config 键值表可用（对应 Rust config.json）', () async {
       final db = await DatabaseService.instance.database;
       await db.insert('config', {'key': 'k1', 'value': 'v1'});
@@ -220,11 +248,11 @@ void main() {
     test('分步升级补齐全部列与索引', () async {
       await _createRustV1Database(dbPath);
 
-      // 触发懒初始化（onUpgrade 1 → 6）
+      // 触发懒初始化（onUpgrade 1 → 7）
       final db = await DatabaseService.instance.database;
 
       final version = await db.rawQuery('PRAGMA user_version');
-      expect(version.first.values.first, 6);
+      expect(version.first.values.first, 7);
 
       // v6 两张 inode 表随升级补齐
       final tables = (await db.rawQuery(

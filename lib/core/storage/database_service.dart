@@ -31,7 +31,7 @@ class DatabaseService {
   static DatabaseService get instance => _instance;
 
   /// 数据库结构版本（对齐 Rust SCHEMA_VERSION）
-  static const int schemaVersion = 6;
+  static const int schemaVersion = 7;
 
   /// 数据库文件名（对齐 Rust DB_FILE_NAME）
   static const String dbFileName = 'petal_link.db';
@@ -179,6 +179,7 @@ class DatabaseService {
       )
     ''');
 
+    await _createIndexes(db);
     await _createV6Tables(db);
   }
 
@@ -210,8 +211,6 @@ class DatabaseService {
           created_at     INTEGER NOT NULL
       )
     ''');
-
-    await _createIndexes(db);
   }
 
   /// 创建全部索引（对齐 Rust create_all 与 v5 索引）。
@@ -264,6 +263,18 @@ class DatabaseService {
       // v6 只建表，不动旧数据（docs/design/10 §3.3：
       // 不回填历史 inode，首次扫描自动填充；不删除旧 xattr）
       await _createV6Tables(db);
+    }
+    if (oldVersion < 7) {
+      // v7 兜底自愈：开发期曾存在另一套 v6 schema（sync_cursor 无
+      // config/inode 表），与 inode v6 版本号相撞导致旧库永远跳过
+      // 迁移。全部 CREATE IF NOT EXISTS，幂等补齐。
+      await _createV6Tables(db);
+      await db.execute('''
+        CREATE TABLE IF NOT EXISTS config (
+            key   TEXT PRIMARY KEY,
+            value TEXT
+        )
+      ''');
     }
 
     // config 表为 Flutter 侧新增，旧库升级时补齐
