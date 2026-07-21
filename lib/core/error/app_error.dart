@@ -6,7 +6,7 @@ import 'package:dio/dio.dart';
 /// 统一异常类型 —— Service 层抛出这些类型，UI 层据此渲染友好提示。
 ///
 /// 严格对齐 Rust 原版 `src/error.rs` 的 [AppError]：
-/// kinds = Auth / Token / DriveApi / Config / QuotaExceeded / Generic。
+/// kinds = Auth / Token / DriveApi / Config / quotaExceeded / Generic。
 ///
 /// 安全：所有序列化/toString 输出均不泄露 token，错误消息只包含用户可读的中文描述。
 sealed class AppError implements Exception {

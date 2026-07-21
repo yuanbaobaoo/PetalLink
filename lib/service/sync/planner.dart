@@ -38,7 +38,7 @@ class DbSnapshotEntry {
     this.localMtime,
     this.localSize,
     this.cloudEditedTime,
-    this.status = SyncItemStatus.Synced,
+    this.status = SyncItemStatus.synced,
     this.isFolder = false,
   });
 
@@ -163,7 +163,7 @@ class SyncPlanner {
         // 启动恢复期 + DELETED tombstone → 跳过（不重建）
         if (dbExists &&
             snap.isStartupResume &&
-            db.status == SyncItemStatus.Deleted) {
+            db.status == SyncItemStatus.deleted) {
           return null;
         }
         // 否则本地缺失 → 创建文件夹
@@ -246,7 +246,7 @@ class SyncPlanner {
         // 绝不能走 BackupBeforeCloudDelete / DeleteFromLocal（数据丢失）。
         // FAILED 状态的占位项不再自动重试，留给用户手动重试。
         if (db.fileId.startsWith(pendingFileIdPrefix)) {
-          if (db.status == SyncItemStatus.Failed) {
+          if (db.status == SyncItemStatus.failed) {
             return null;
           }
           return SyncAction(
@@ -336,7 +336,7 @@ class SyncPlanner {
       // 启动恢复期 / 无 DB：检查是否是用户主动删除的 tombstone
       if (dbExists &&
           snap.isStartupResume &&
-          db.status == SyncItemStatus.Deleted) {
+          db.status == SyncItemStatus.deleted) {
         return SyncAction(
           actionType: SyncActionType.skip,
           relativePath: relPath,

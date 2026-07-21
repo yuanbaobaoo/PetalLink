@@ -39,10 +39,10 @@ void main() {
   TransferTask task({
     int id = 1,
     String name = 'file.txt',
-    TransferDirection direction = TransferDirection.Upload,
+    TransferDirection direction = TransferDirection.upload,
     int transferred = 0,
     int totalSize = 100,
-    TransferState state = TransferState.Running,
+    TransferState state = TransferState.running,
     int createdAt = 0,
   }) {
     return TransferTask(
@@ -79,7 +79,7 @@ void main() {
         task(
             id: 8,
             name: 'b.txt',
-            direction: TransferDirection.Download,
+            direction: TransferDirection.download,
             transferred: 10,
             totalSize: 40),
       ]);
@@ -115,13 +115,13 @@ void main() {
 
     test('状态行：方向标签映射与百分比边界', () {
       expect(TrayService.transferStatusLine(
-          task(direction: TransferDirection.Upload, transferred: 1, totalSize: 3)),
+          task(direction: TransferDirection.upload, transferred: 1, totalSize: 3)),
           '正在上传…33%');
       expect(TrayService.transferStatusLine(
-          task(direction: TransferDirection.Delete, transferred: 0, totalSize: 0)),
+          task(direction: TransferDirection.delete, transferred: 0, totalSize: 0)),
           '正在删除…0%');
       expect(TrayService.transferStatusLine(
-          task(direction: TransferDirection.DownloadUpdate, transferred: 200, totalSize: 100)),
+          task(direction: TransferDirection.downloadUpdate, transferred: 200, totalSize: 100)),
           '正在更新…100%');
     });
   });

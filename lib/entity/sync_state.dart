@@ -1,4 +1,4 @@
-import '../types/enums.dart';
+import 'package:petal_link/types/enums.dart';
 
 /// copyWith 的「保持原值」哨兵（区分「不传」与「显式置 null」）
 const Object _keep = Object();

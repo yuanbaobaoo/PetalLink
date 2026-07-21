@@ -77,18 +77,18 @@ class _TransferPopoverState extends State<TransferPopover> {
     final tasks = widget.tasks;
 
     final processing = tasks.where((t) {
-      return t.state == TransferState.Running ||
-          t.state == TransferState.VerifyingRemote ||
-          t.state == TransferState.Pending;
+      return t.state == TransferState.running ||
+          t.state == TransferState.verifyingRemote ||
+          t.state == TransferState.pending;
     }).length;
     final waiting = tasks.where((t) {
-      return t.state == TransferState.WaitingForNetwork ||
-          t.state == TransferState.BackingOff ||
-          t.state == TransferState.RestartRequired;
+      return t.state == TransferState.waitingForNetwork ||
+          t.state == TransferState.backingOff ||
+          t.state == TransferState.restartRequired;
     }).length;
     final completed =
-        tasks.where((t) => t.state == TransferState.Completed).length;
-    final failed = tasks.where((t) => t.state == TransferState.Failed).length;
+        tasks.where((t) => t.state == TransferState.completed).length;
+    final failed = tasks.where((t) => t.state == TransferState.failed).length;
 
     return Align(
       alignment: Alignment.topRight,
@@ -239,23 +239,23 @@ class _TransferPopoverState extends State<TransferPopover> {
 /// v2：中性灰由硬编码改为语义色（[neutral] 传 textSecondary，浅色下与原值一致）。
 _StateMeta _stateMeta(TransferState state, MateSemanticColors colors) {
   return switch (state) {
-    TransferState.Pending =>
+    TransferState.pending =>
       (icon: 'clock', label: '等待调度', color: colors.textSecondary, spin: false),
-    TransferState.Running =>
+    TransferState.running =>
       (icon: 'sync', label: '传输中', color: colors.brand, spin: true),
-    TransferState.WaitingForNetwork =>
+    TransferState.waitingForNetwork =>
       (icon: 'clock', label: '等待网络', color: colors.warning, spin: false),
-    TransferState.BackingOff =>
+    TransferState.backingOff =>
       (icon: 'clock', label: '等待重试', color: colors.warning, spin: false),
-    TransferState.VerifyingRemote =>
+    TransferState.verifyingRemote =>
       (icon: 'sync', label: '核验远端', color: colors.brand, spin: true),
-    TransferState.RestartRequired =>
+    TransferState.restartRequired =>
       (icon: 'refresh', label: '等待重新规划', color: colors.warning, spin: false),
-    TransferState.Completed =>
+    TransferState.completed =>
       (icon: 'check', label: '已完成', color: colors.success, spin: false),
-    TransferState.Failed =>
+    TransferState.failed =>
       (icon: 'x', label: '失败', color: colors.error, spin: false),
-    TransferState.Canceled =>
+    TransferState.canceled =>
       (icon: 'x', label: '已取消', color: colors.textSecondary, spin: false),
   };
 }
@@ -263,9 +263,9 @@ _StateMeta _stateMeta(TransferState state, MateSemanticColors colors) {
 /// 方向图标（对标原 Vue dirIcon）
 String _dirIcon(TransferDirection direction) {
   return switch (direction) {
-    TransferDirection.Download => 'download',
-    TransferDirection.DownloadUpdate => 'refresh',
-    TransferDirection.Delete => 'trash',
+    TransferDirection.download => 'download',
+    TransferDirection.downloadUpdate => 'refresh',
+    TransferDirection.delete => 'trash',
     _ => 'transfer',
   };
 }
@@ -273,22 +273,22 @@ String _dirIcon(TransferDirection direction) {
 /// 方向标签（对标原 Vue DIR_LABEL）
 String _dirLabel(TransferDirection direction) {
   return switch (direction) {
-    TransferDirection.Upload => '上传',
-    TransferDirection.Download => '下载',
-    TransferDirection.DownloadUpdate => '下载',
-    TransferDirection.Delete => '删除',
+    TransferDirection.upload => '上传',
+    TransferDirection.download => '下载',
+    TransferDirection.downloadUpdate => '下载',
+    TransferDirection.delete => '删除',
   };
 }
 
 /// 进度条颜色（对标原 Vue progressColor；等待类传 textPlaceholder 语义色）
 Color _progressColor(TransferState state, MateSemanticColors colors) {
   return switch (state) {
-    TransferState.Completed => colors.success,
-    TransferState.Failed => colors.error,
-    TransferState.Pending ||
-    TransferState.WaitingForNetwork ||
-    TransferState.BackingOff ||
-    TransferState.RestartRequired =>
+    TransferState.completed => colors.success,
+    TransferState.failed => colors.error,
+    TransferState.pending ||
+    TransferState.waitingForNetwork ||
+    TransferState.backingOff ||
+    TransferState.restartRequired =>
       colors.textPlaceholder,
     _ => colors.brand,
   };
@@ -297,9 +297,9 @@ Color _progressColor(TransferState state, MateSemanticColors colors) {
 /// 是否可重试（对标原 Vue canRetryTransferTask：
 /// Failed/RestartRequired + upload/download 方向，delete 不可）
 bool _canRetry(TransferTask task) {
-  final stateOk = task.state == TransferState.Failed ||
-      task.state == TransferState.RestartRequired;
-  final dirOk = task.direction == TransferDirection.Upload ||
+  final stateOk = task.state == TransferState.failed ||
+      task.state == TransferState.restartRequired;
+  final dirOk = task.direction == TransferDirection.upload ||
       task.direction.isDownload;
   return stateOk && dirOk;
 }
@@ -377,18 +377,18 @@ class _TransferTaskRow extends StatelessWidget {
 
     // v2 方向色块配色：上传 brandLighter/brand；下载 infoBg/info；删除 bgFill/textSecondary
     final (dirBg, dirFg) = switch (task.direction) {
-      TransferDirection.Download ||
-      TransferDirection.DownloadUpdate =>
+      TransferDirection.download ||
+      TransferDirection.downloadUpdate =>
         (colors.infoBg, colors.info),
-      TransferDirection.Delete => (colors.bgFill, colors.textSecondary),
+      TransferDirection.delete => (colors.bgFill, colors.textSecondary),
       _ => (colors.brandLighter, colors.brand),
     };
 
-    final showError = (task.state == TransferState.Failed ||
-            task.state == TransferState.RestartRequired) &&
+    final showError = (task.state == TransferState.failed ||
+            task.state == TransferState.restartRequired) &&
         task.errorMessage != null;
     final showProgress =
-        task.direction != TransferDirection.Delete && task.totalSize > 0;
+        task.direction != TransferDirection.delete && task.totalSize > 0;
 
     return Column(
       children: [
@@ -430,7 +430,7 @@ class _TransferTaskRow extends StatelessWidget {
                       children: [
                         MateTag(
                           label: _dirLabel(task.direction),
-                          theme: task.direction == TransferDirection.Upload
+                          theme: task.direction == TransferDirection.upload
                               ? MateTagTheme.primary
                               : MateTagTheme.normal,
                           size: MateTagSize.small,
@@ -483,7 +483,7 @@ class _TransferTaskRow extends StatelessWidget {
                           ),
                         ],
                       )
-                    else if (task.direction == TransferDirection.Delete)
+                    else if (task.direction == TransferDirection.delete)
                       Text(
                         '删除操作',
                         style: typography.transfer.deleteOperation.copyWith(

@@ -88,10 +88,27 @@ void main() {
   }
 
   group('DatabaseService 新库建表（schema v5 终态）', () {
-    test('user_version 为 5', () async {
+    test('user_version 为 6', () async {
       final db = await DatabaseService.instance.database;
       final rows = await db.rawQuery('PRAGMA user_version');
-      expect(rows.first.values.first, 5);
+      expect(rows.first.values.first, 6);
+    });
+
+    test('v6 新增 local_inode_map 与 free_up_staging 表（inode 方案）', () async {
+      final db = await DatabaseService.instance.database;
+      final tables = (await db.rawQuery(
+              "SELECT name FROM sqlite_master WHERE type='table'"))
+          .map((r) => r['name'] as String)
+          .toSet();
+      expect(tables, contains('local_inode_map'));
+      expect(tables, contains('free_up_staging'));
+      // local_inode_map：inode 单列主键 + 两个二级索引
+      final indexes = (await db.rawQuery(
+              "SELECT name FROM sqlite_master WHERE type='index'"))
+          .map((r) => r['name'] as String)
+          .toSet();
+      expect(indexes, contains('idx_inode_map_path'));
+      expect(indexes, contains('idx_inode_map_fid'));
     });
 
     test('sync_items 列逐字段对齐 Rust', () async {
@@ -199,15 +216,23 @@ void main() {
     });
   });
 
-  group('DatabaseService 迁移（Rust v1 → v5）', () {
+  group('DatabaseService 迁移（Rust v1 → v6）', () {
     test('分步升级补齐全部列与索引', () async {
       await _createRustV1Database(dbPath);
 
-      // 触发懒初始化（onUpgrade 1 → 5）
+      // 触发懒初始化（onUpgrade 1 → 6）
       final db = await DatabaseService.instance.database;
 
       final version = await db.rawQuery('PRAGMA user_version');
-      expect(version.first.values.first, 5);
+      expect(version.first.values.first, 6);
+
+      // v6 两张 inode 表随升级补齐
+      final tables = (await db.rawQuery(
+              "SELECT name FROM sqlite_master WHERE type='table'"))
+          .map((r) => r['name'] as String)
+          .toSet();
+      expect(tables, contains('local_inode_map'));
+      expect(tables, contains('free_up_staging'));
 
       final tq = await columnNames('transfer_queue');
       expect(

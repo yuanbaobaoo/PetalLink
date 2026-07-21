@@ -19,8 +19,8 @@ void main() {
         expect(config.debounceSec, 3);
         expect(config.skipPatterns,
             ['.DS_Store', '.tmp', '~\$*', '.Trash']);
-        expect(config.sortField, SortField.Name);
-        expect(config.sortOrder, SortOrder.Ascending);
+        expect(config.sortField, SortField.name);
+        expect(config.sortOrder, SortOrder.ascending);
       });
     });
 
@@ -35,8 +35,8 @@ void main() {
           pollIntervalSec: 900,
           debounceSec: 5,
           skipPatterns: ['.git', 'node_modules'],
-          sortField: SortField.ModifiedTime,
-          sortOrder: SortOrder.Descending,
+          sortField: SortField.modifiedTime,
+          sortOrder: SortOrder.descending,
         );
 
         final json = config.toJson();
@@ -92,8 +92,8 @@ void main() {
           'sort_order': 'sideways',
         });
 
-        expect(config.sortField, SortField.Name);
-        expect(config.sortOrder, SortOrder.Ascending);
+        expect(config.sortField, SortField.name);
+        expect(config.sortOrder, SortOrder.ascending);
       });
     });
 
@@ -202,11 +202,11 @@ void main() {
 
         final copy = config.copyWith(
           concurrency: 10,
-          sortOrder: SortOrder.Descending,
+          sortOrder: SortOrder.descending,
         );
 
         expect(copy.concurrency, 10);
-        expect(copy.sortOrder, SortOrder.Descending);
+        expect(copy.sortOrder, SortOrder.descending);
         expect(copy.pollIntervalSec, 60);
         expect(copy.skipPatterns, config.skipPatterns);
       });
@@ -215,11 +215,11 @@ void main() {
 
   group('SortField / SortOrder', () {
     test('wireName 对齐 Rust serde camelCase', () {
-      expect(SortField.Name.wireName, 'name');
-      expect(SortField.Size.wireName, 'size');
-      expect(SortField.ModifiedTime.wireName, 'modifiedTime');
-      expect(SortOrder.Ascending.wireName, 'ascending');
-      expect(SortOrder.Descending.wireName, 'descending');
+      expect(SortField.name.wireName, 'name');
+      expect(SortField.size.wireName, 'size');
+      expect(SortField.modifiedTime.wireName, 'modifiedTime');
+      expect(SortOrder.ascending.wireName, 'ascending');
+      expect(SortOrder.descending.wireName, 'descending');
     });
 
     test('fromWireName 往返与未知值', () {

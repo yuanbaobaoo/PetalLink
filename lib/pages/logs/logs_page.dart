@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:intl/intl.dart';
@@ -55,7 +57,7 @@ class _LogsPageState extends State<LogsPage> {
               child: Row(
                 children: [
                   Transform.rotate(
-                    angle: 3.141592653589793, // 180°：arrow 图标朝左
+                    angle: math.pi, // 180°：arrow 图标朝左
                     child: MateButton(
                       variant: MateButtonVariant.icon,
                       icon: 'arrow',

@@ -91,7 +91,7 @@ void main() {
           indexingScannedFolders: 10,
           indexingDiscoveredItems: 200,
           contentChanged: true,
-          syncPhase: SyncPhase.SyncingManual,
+          syncPhase: SyncPhase.syncingManual,
         );
 
         final json = state.toJson();
@@ -125,7 +125,7 @@ void main() {
         expect(restored.indexingScannedFolders, 10);
         expect(restored.indexingDiscoveredItems, 200);
         expect(restored.contentChanged, isTrue);
-        expect(restored.syncPhase, SyncPhase.SyncingManual);
+        expect(restored.syncPhase, SyncPhase.syncingManual);
       });
 
       test('syncPhase 为 null 时不输出键（对齐 skip_serializing_if）', () {
@@ -158,14 +158,14 @@ void main() {
         const state = SyncGlobalState(
           revision: 1,
           lastSyncTime: 1000,
-          syncPhase: SyncPhase.IndexingStartup,
+          syncPhase: SyncPhase.indexingStartup,
         );
 
         final copy = state.copyWith(revision: 2, total: 10);
         expect(copy.revision, 2);
         expect(copy.total, 10);
         expect(copy.lastSyncTime, 1000);
-        expect(copy.syncPhase, SyncPhase.IndexingStartup);
+        expect(copy.syncPhase, SyncPhase.indexingStartup);
 
         final cleared = state.copyWith(lastSyncTime: null, syncPhase: null);
         expect(cleared.lastSyncTime, isNull);

@@ -1,8 +1,8 @@
+// ignore_for_file: prefer_initializing_formals — 公开命名参数映射私有字段
+
 import 'dart:convert';
 
 import 'package:dio/dio.dart';
-
-// ignore_for_file: prefer_initializing_formals — 公开命名参数映射私有字段
 
 import 'package:petal_link/core/error/app_error.dart';
 import 'package:petal_link/core/error/app_result.dart';
@@ -26,7 +26,6 @@ import 'package:petal_link/core/logger/logger.dart';
 ///   baseUrl: 'https://driveapis.cloud.huawei.com.cn/drive/v1',
 ///   tokenProvider: () async => authService.accessToken,
 ///   refreshTokenProvider: () async => authService.refresh(),
-///   onAuthExpired: () => authService.logout(),
 /// );
 /// final result = await client.get('/files');
 /// ```
@@ -34,15 +33,11 @@ class MateHttpClient {
   final String _baseUrl;
   final Future<String> Function() _tokenProvider;
   final Future<String?> Function() _refreshTokenProvider;
-  final void Function() _onAuthExpired;
 
   late final Dio _client;
 
   /// 401 刷新 singleflight 锁：非 null 表示正在刷新，并发 401 等待同一个 Future
   Future<String?>? _refreshFuture;
-
-  /// 标记是否已触发 onAuthExpired，避免重复调用
-  bool _authExpiredCalled = false;
 
   /// 连接超时（对齐 Rust connect_timeout 15s）
   static const Duration connectTimeout = Duration(seconds: 15);
@@ -60,12 +55,10 @@ class MateHttpClient {
     required String baseUrl,
     required Future<String> Function() tokenProvider,
     required Future<String?> Function() refreshTokenProvider,
-    required void Function() onAuthExpired,
     Dio? dio,
   })  : _baseUrl = baseUrl,
         _tokenProvider = tokenProvider,
-        _refreshTokenProvider = refreshTokenProvider,
-        _onAuthExpired = onAuthExpired {
+        _refreshTokenProvider = refreshTokenProvider {
     _client = dio ?? _createDio();
     if (dio != null) {
       // 注入的 Dio（测试 seam）同样挂 Bearer 注入拦截器
@@ -117,7 +110,11 @@ class MateHttpClient {
     return future.whenComplete(() => _refreshFuture = null);
   }
 
-  /// 执行 token 刷新（对齐 Rust refresher().refresh()）
+  /// 执行 token 刷新（对齐 Rust refresher().refresh()）。
+  ///
+  /// 失败仅返回 null（由 onError 归一化为 TokenError 向上传播）；
+  /// HTTP 层不自动登出——对齐 Rust：错误传播给调用方，登录态清理
+  /// 由启动恢复路径负责（restore 刷新失败才 logout）。
   Future<String?> _doRefresh() async {
     try {
       AppLogger.i('收到 401，刷新 token 后重放');
@@ -127,26 +124,16 @@ class MateHttpClient {
         return newToken;
       }
       AppLogger.e('Token 刷新失败：返回空 token');
-      _fireAuthExpired();
       return null;
     } catch (e, st) {
       AppLogger.e('Token 刷新异常', e, st);
-      _fireAuthExpired();
       return null;
-    }
-  }
-
-  /// 触发 onAuthExpired（最多一次）
-  void _fireAuthExpired() {
-    if (!_authExpiredCalled) {
-      _authExpiredCalled = true;
-      _onAuthExpired();
     }
   }
 
   /// 触发 singleflight 强制刷新（供裸请求 401 手动重放使用）。
   ///
-  /// 返回非 null token 表示刷新成功；返回 null 表示刷新失败（已触发登出回调）。
+  /// 返回非 null token 表示刷新成功；返回 null 表示刷新失败（错误向上传播）。
   /// 对齐 Rust `refresher().refresh()`。
   Future<String?> Function() get forceRefreshToken => _handle401;
 
@@ -524,14 +511,24 @@ class _MateAuthInterceptor extends Interceptor {
       handler.next(options);
       return;
     }
+    // 对齐 Rust build_authed：token 获取失败或未登录（空 token）时
+    // 请求直接失败，绝不发出无认证请求
     try {
       final token = await tokenProvider();
-      if (token.isNotEmpty) {
-        options.headers['Authorization'] = 'Bearer $token';
+      if (token.isEmpty) {
+        throw AppError.tokenNotLoggedIn();
       }
+      options.headers['Authorization'] = 'Bearer $token';
     } catch (e) {
-      // token 获取失败不阻塞请求（由服务端返回 401 触发刷新流程）
-      AppLogger.e('获取 token 失败', e);
+      AppLogger.e('获取 token 失败，请求未发出', e);
+      handler.reject(
+        DioException(
+          requestOptions: options,
+          error: e is AppError ? e : AppError.generic('$e'),
+          type: DioExceptionType.unknown,
+        ),
+      );
+      return;
     }
     handler.next(options);
   }

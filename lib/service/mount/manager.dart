@@ -4,7 +4,8 @@
 ///
 /// # 占位符策略（v2, Files-On-Demand-lite）
 /// - 占位文件使用**真实文件名**（无后缀），0 字节。
-/// - 状态通过 xattr 3 个键追踪：[xattrFileId] / [xattrState] / [xattrSize]。
+/// - 状态通过 xattr state 键追踪（inode 方案，docs/design/10 §2.1：
+///   fileId/size xattr 已废弃，文件身份由 local_inode_map 承担）。
 /// - Finder 灰标（label index 7）= 未下载；无标签 = 已下载。
 /// - xattr 是数据源头（source of truth），Finder label 仅视觉反馈。
 /// - 0 字节且非占位 → 拒绝删除（保护用户空文件如 .gitkeep）
@@ -26,16 +27,18 @@ import 'package:petal_link/entity/sync_item.dart';
 import 'package:petal_link/service/mount/mount_path.dart';
 import 'package:petal_link/service/mount/skip.dart';
 import 'package:petal_link/service/mount/xattr_service.dart';
+import 'package:petal_link/service/sync/identity/inode_identity.dart';
 import 'package:petal_link/types/enums.dart';
 
 /// xattr 键：云端文件 ID
+/// 旧版 fileId xattr 键（docs/design/10 §6.5：不再写入，仅在迁移兼容
+/// 路径读取——owner 核验回退与旧 free-up 现场恢复；后续版本移除）
 const String xattrFileId = 'com.hwcloud.fileId';
 
 /// xattr 键：占位状态（placeholder / downloaded）
 const String xattrState = 'com.hwcloud.state';
 
 /// xattr 键：文件大小
-const String xattrSize = 'com.hwcloud.size';
 
 /// 释放空间事务暂存文件携带的原始相对路径，用于进程退出后的恢复。
 const String xattrFreeUpRelativePath = 'com.hwcloud.freeUpRelativePath';
@@ -82,6 +85,10 @@ class LocalFileEntry {
   /// 是否占位符（0 字节且 xattr state=placeholder）
   final bool isPlaceholder;
 
+  /// 文件系统 inode（inode 身份方案，docs/design/10；
+  /// 由 [MountManager.inodeBatchProvider] 批量填充，未注入时为 null）
+  final int? inode;
+
   const LocalFileEntry({
     required this.absolutePath,
     required this.relativePath,
@@ -89,7 +96,19 @@ class LocalFileEntry {
     required this.mtime,
     required this.isFolder,
     required this.isPlaceholder,
+    this.inode,
   });
+
+  /// 附带 inode 的副本（扫描后批量填充用）
+  LocalFileEntry withInode(int inode) => LocalFileEntry(
+        absolutePath: absolutePath,
+        relativePath: relativePath,
+        size: size,
+        mtime: mtime,
+        isFolder: isFolder,
+        isPlaceholder: isPlaceholder,
+        inode: inode,
+      );
 
   @override
   String toString() =>
@@ -109,11 +128,50 @@ class MountManager {
 
   final XattrService _xattr;
 
+  /// 批量 inode 查询（生产：原生 lstat 批量通道；测试注入 fake）。
+  ///
+  /// 为 null 时扫描不填充 inode（行为与注入前一致）。
+  final Future<Map<String, int>> Function(List<String> paths)?
+      inodeBatchProvider;
+
+  /// inode 身份映射（docs/design/10；引擎装配时注入共享实例）
+  InodeIdentityStore identity = SqfliteInodeIdentityStore(DatabaseService.instance);
+
   MountManager(
     this.mountDir, {
     XattrService? xattr,
     this.db,
-  }) : _xattr = xattr ?? ChannelXattrService();
+    this.inodeBatchProvider,
+    InodeIdentityStore? identity,
+  })  : _xattr = xattr ?? ChannelXattrService(),
+        identity = identity ??
+            SqfliteInodeIdentityStore(DatabaseService.instance);
+
+  /// 经批量通道取本地文件 inode 的身份（无 provider/无记录 → null）。
+  Future<String?> inodeOwnerOf(String localPath) async {
+    final provider = inodeBatchProvider;
+    if (provider == null) return null;
+    final inodes = await provider([localPath]);
+    final inode = inodes[localPath];
+    if (inode == null) return null;
+    return (await identity.lookup(inode))?.fileId;
+  }
+
+  /// 程序自身创建/落盘文件后的身份记账（docs/design/10 §4.1 upsertMapping）。
+  Future<void> recordInodeIdentity(String localPath, String fileId) async {
+    final provider = inodeBatchProvider;
+    if (provider == null) return;
+    try {
+      final inodes = await provider([localPath]);
+      final inode = inodes[localPath];
+      if (inode != null) {
+        final rel = MountPath.relativePathFromMount(mountDir, localPath);
+        await identity.upsert(inode, rel, fileId);
+      }
+    } catch (e) {
+      AppLogger.w('inode 身份记账失败（忽略）: $e');
+    }
+  }
 
   /// xattr 读写入口（供 free_up 等同层模块复用）
   XattrService get xattr => _xattr;
@@ -162,7 +220,9 @@ class MountManager {
         throw AppError.generic('占位目标已存在且不是普通文件');
       }
       final state = await _xattr.get(localPath, xattrState);
-      final owner = await _xattr.get(localPath, xattrFileId);
+      // 属主核验：inode 映射优先，xattr 为过渡期回退（阶段 5 移除回退）
+      var owner = await inodeOwnerOf(localPath);
+      owner ??= await _xattr.get(localPath, xattrFileId);
       if ((state == stateDownloaded || state == statePlaceholder) &&
           owner == fileId) {
         return;
@@ -225,25 +285,18 @@ class MountManager {
       rethrow;
     }
     await setFinderLabel(localPath, true); // 灰标失败不阻断（仅 Finder 无灰标）
+    // 身份记账（docs/design/10 §4.9：占位创建 → DB 写 inode 映射）
+    await recordInodeIdentity(localPath, fileId);
   }
 
-  /// 写占位的 3 个状态 xattr（fileId/state/size）。
+  /// 写占位的 state xattr（inode 方案唯一占位键，docs/design/10 §4.9；
+  /// 文件身份经 [recordInodeIdentity] 写入 local_inode_map）。
   Future<void> _writePlaceholderXattrs(
       String localPath, String fileId, int size) async {
-    try {
-      await _xattr.set(localPath, xattrFileId, fileId);
-    } catch (e) {
-      throw AppError.generic('写 xattr fileId 失败：$e');
-    }
     try {
       await _xattr.set(localPath, xattrState, statePlaceholder);
     } catch (e) {
       throw AppError.generic('写 xattr state 失败：$e');
-    }
-    try {
-      await _xattr.set(localPath, xattrSize, size.toString());
-    } catch (e) {
-      throw AppError.generic('写 xattr size 失败：$e');
     }
   }
 
@@ -256,18 +309,6 @@ class MountManager {
       throw AppError.generic('更新 xattr 失败：$e');
     }
     await setFinderLabel(localPath, false); // 清除灰标（尽力）
-  }
-
-  /// 为已下载文件写入 fileId xattr。
-  ///
-  /// 下载完成（先删占位再下载 → 新 inode，占位时的 fileId xattr 随之丢失）后补写，
-  /// 使本地文件与占位文件一样可被 xattr 识别。对齐 Rust `set_file_id_xattr`。
-  Future<void> setFileIdXattr(String localPath, String fileId) async {
-    try {
-      await _xattr.set(localPath, xattrFileId, fileId);
-    } catch (e) {
-      throw AppError.generic('写 fileId xattr 失败：$e');
-    }
   }
 
   /// 下载前处理可能被用户修改过的占位文件
@@ -320,7 +361,8 @@ class MountManager {
   /// 备份副本改名后调用：让副本被视为全新本地文件（对齐 Rust
   /// `clear_placeholder_xattr`；单项移除失败不阻断）。
   Future<void> clearPlaceholderXattr(String localPath) async {
-    for (final key in [xattrFileId, xattrState, xattrSize, finderInfoXattr]) {
+    // state + FinderInfo 为现行键；fileId 为旧版键（存在即清，迁移兼容）
+    for (final key in [xattrState, finderInfoXattr, xattrFileId]) {
       try {
         await _xattr.remove(localPath, key);
       } catch (_) {
@@ -373,6 +415,23 @@ class MountManager {
       await _scanRecursive(mountDir, skipPatterns, entries);
     } catch (e) {
       throw AppError.generic('扫描目录失败：$e');
+    }
+    // 两阶段扫描（docs/design/10 §4.2）：遍历后批量填充 inode
+    final provider = inodeBatchProvider;
+    if (provider != null && entries.isNotEmpty) {
+      try {
+        final inodes =
+            await provider([for (final e in entries) e.absolutePath]);
+        return [
+          for (final e in entries)
+            inodes[e.absolutePath] != null
+                ? e.withInode(inodes[e.absolutePath]!)
+                : e,
+        ];
+      } catch (e) {
+        // inode 采集失败不阻断扫描（本轮无 inode 数据，退化为路径配对）
+        AppLogger.w('批量 inode 查询失败（本轮无 inode 数据）: $e');
+      }
     }
     return entries;
   }
@@ -583,7 +642,7 @@ class MountManager {
       } else {
         // 未配置挂载目录：仅从 DB 状态判定
         status =
-            record.status == SyncItemStatus.Synced ? 'synced' : 'not_synced';
+            record.status == SyncItemStatus.synced ? 'synced' : 'not_synced';
       }
       result[fileId] = status;
     }
@@ -597,11 +656,38 @@ class MountManager {
 
   /// 收敛上次进程在“原文件暂存 → 占位符/DB 结算”之间退出留下的文件。
   /// 数据库已提交且占位符身份匹配时完成释放；其余情况优先恢复原内容。
+  ///
+  /// 恢复记录来源（docs/design/10 §4.8）：`free_up_staging` 表为主，
+  /// 旧版 xattr 暂存文件（迁移前现场）为兼容回退。
   Future<int> recoverInterruptedFreeUp(Database db) async {
+    var recovered = 0;
+    final handledStagingPaths = <String>{};
+
+    // 1. DB 恢复记录（新来源）
+    final rows = await db.query('free_up_staging');
+    for (final row in rows) {
+      final stagingName = row['staging_name'] as String? ?? '';
+      final relativePath = row['relative_path'] as String? ?? '';
+      final fileId = row['file_id'] as String? ?? '';
+      if (stagingName.isEmpty || relativePath.isEmpty || fileId.isEmpty) {
+        await db.delete('free_up_staging',
+            where: 'staging_name = ?', whereArgs: [stagingName]);
+        continue;
+      }
+      final stagingPath = p.join(
+          p.dirname(p.join(mountDir, relativePath)), stagingName);
+      handledStagingPaths.add(stagingPath);
+      await _recoverOneFreeUpStaging(db, stagingPath, relativePath, fileId);
+      recovered++;
+      await db.delete('free_up_staging',
+          where: 'staging_name = ?', whereArgs: [stagingName]);
+    }
+
+    // 2. 旧版 xattr 现场（迁移兼容一轮：仅处理 DB 未覆盖的暂存文件）
     final stagingPaths = <String>[];
     await _collectFreeUpStaging(mountDir, stagingPaths);
-    var recovered = 0;
     for (final stagingPath in stagingPaths) {
+      if (handledStagingPaths.contains(stagingPath)) continue;
       final relativePath =
           await _xattr.get(stagingPath, xattrFreeUpRelativePath);
       final fileId = await _xattr.get(stagingPath, xattrFileId);
@@ -610,54 +696,70 @@ class MountManager {
         recovered++;
         continue;
       }
-      final String target;
-      try {
-        target = MountPath.safeJoinUnder(mountDir, relativePath);
-        if (p.dirname(target) != p.dirname(stagingPath)) {
-          throw AppError.config('释放空间恢复目标不在原目录');
-        }
-      } catch (_) {
-        await _surfaceFreeUpRecovery(stagingPath);
-        recovered++;
-        continue;
-      }
-      final record = await findByFileId(db, fileId);
-      final baseline =
-          (record != null && record.localPath == relativePath) ? record : null;
-      final targetType =
-          await FileSystemEntity.type(target, followLinks: false);
-      if (targetType != FileSystemEntityType.notFound &&
-          await isPlaceholderFile(target)) {
-        final owner = await _xattr.get(target, xattrFileId);
-        final committed = owner == fileId &&
-            baseline != null &&
-            baseline.status == SyncItemStatus.CloudOnly &&
-            baseline.localSize == 0;
-        if (committed) {
-          try {
-            await File(stagingPath).delete();
-          } catch (e) {
-            throw AppError.generic('完成释放空间恢复清理失败：$e');
-          }
-        } else {
-          try {
-            await File(target).delete();
-          } catch (e) {
-            throw AppError.generic('移除未提交占位符失败：$e');
-          }
-          await _restoreFreeUpStaging(
-              db, stagingPath, target, fileId, relativePath);
-        }
-      } else if (targetType == FileSystemEntityType.notFound) {
-        await _restoreFreeUpStaging(
-            db, stagingPath, target, fileId, relativePath);
-      } else {
-        // 原路径已有用户内容或无法可靠读取时，不覆盖；把旧内容显式恢复为副本。
-        await _surfaceFreeUpRecovery(stagingPath);
-      }
+      await _recoverOneFreeUpStaging(db, stagingPath, relativePath, fileId);
       recovered++;
     }
     return recovered;
+  }
+
+  /// 收敛单个暂存项（DB 记录与旧 xattr 现场共用恢复逻辑）。
+  Future<void> _recoverOneFreeUpStaging(
+    Database db,
+    String stagingPath,
+    String relativePath,
+    String fileId,
+  ) async {
+    // 暂存文件已不存在（清理窗口崩溃）→ 无需恢复，记录由调用方清理
+    if (await FileSystemEntity.type(stagingPath, followLinks: false) ==
+        FileSystemEntityType.notFound) {
+      return;
+    }
+    final String target;
+    try {
+      target = MountPath.safeJoinUnder(mountDir, relativePath);
+      if (p.dirname(target) != p.dirname(stagingPath)) {
+        throw AppError.config('释放空间恢复目标不在原目录');
+      }
+    } catch (_) {
+      await _surfaceFreeUpRecovery(stagingPath);
+      return;
+    }
+    final record = await findByFileId(db, fileId);
+    final baseline =
+        (record != null && record.localPath == relativePath) ? record : null;
+    final targetType =
+        await FileSystemEntity.type(target, followLinks: false);
+    if (targetType != FileSystemEntityType.notFound &&
+        await isPlaceholderFile(target)) {
+      // 属主核验：inode 映射优先，xattr 过渡回退（docs/design/10 §4.8）
+      var owner = await inodeOwnerOf(target);
+      owner ??= await _xattr.get(target, xattrFileId);
+      final committed = owner == fileId &&
+          baseline != null &&
+          baseline.status == SyncItemStatus.cloudOnly &&
+          baseline.localSize == 0;
+      if (committed) {
+        try {
+          await File(stagingPath).delete();
+        } catch (e) {
+          throw AppError.generic('完成释放空间恢复清理失败：$e');
+        }
+      } else {
+        try {
+          await File(target).delete();
+        } catch (e) {
+          throw AppError.generic('移除未提交占位符失败：$e');
+        }
+        await _restoreFreeUpStaging(
+            db, stagingPath, target, fileId, relativePath);
+      }
+    } else if (targetType == FileSystemEntityType.notFound) {
+      await _restoreFreeUpStaging(
+          db, stagingPath, target, fileId, relativePath);
+    } else {
+      // 原路径已有用户内容或无法可靠读取时，不覆盖；把旧内容显式恢复为副本。
+      await _surfaceFreeUpRecovery(stagingPath);
+    }
   }
 
   /// 递归收集释放空间暂存项，并跳过符号链接目录。
@@ -712,7 +814,7 @@ class MountManager {
       await db.update(
         'sync_items',
         {
-          'status': SyncItemStatus.Synced.code,
+          'status': SyncItemStatus.synced.code,
           'local_size': metadata.size,
           'local_mtime': localMtime,
           'error_message': null,
@@ -745,7 +847,6 @@ class MountManager {
         xattrFreeUpRelativePath,
         xattrFileId,
         xattrState,
-        xattrSize,
       ]) {
         try {
           await _xattr.remove(target, key);

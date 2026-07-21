@@ -19,6 +19,7 @@ import 'package:petal_link/core/storage/database_service.dart';
 import 'package:petal_link/entity/drive_file.dart';
 import 'package:petal_link/entity/sync_item.dart';
 import 'package:petal_link/service/mount/manager.dart';
+import 'package:petal_link/service/sync/identity/inode_identity.dart';
 import 'package:petal_link/service/mount/mount_path.dart';
 import 'package:petal_link/types/enums.dart';
 
@@ -88,9 +89,24 @@ class PathRecovery {
     required DatabaseService db,
     required MountManager mount,
     int Function()? nowMs,
+    InodeIdentityStore? identity,
   })  : _db = db,
         _mount = mount,
+        _identity = identity ?? SqfliteInodeIdentityStore(db),
         _nowMs = nowMs ?? (() => DateTime.now().millisecondsSinceEpoch);
+
+  /// inode 身份映射（docs/design/10 §4.5：owner 核验的数据源）
+  final InodeIdentityStore _identity;
+
+  /// 经批量通道取本地文件 inode 的身份（无 provider/无记录 → null）。
+  Future<String?> _ownerOf(String absPath) async {
+    final provider = _mount.inodeBatchProvider;
+    if (provider == null) return null;
+    final inodes = await provider([absPath]);
+    final inode = inodes[absPath];
+    if (inode == null) return null;
+    return (await _identity.lookup(inode))?.fileId;
+  }
 
   /// 恢复已核验的远端路径变更（对齐 Rust
   /// `recover_verified_remote_path_changes`）。
@@ -261,7 +277,8 @@ class PathRecovery {
     if (oldExists && newExists) {
       throw AppError.generic('路径恢复拒绝：源和目标同时存在，拒绝覆盖');
     } else if (oldExists) {
-      final owner = await _mount.xattr.get(oldAbs, xattrFileId);
+      // 本地身份核验（inode 映射，docs/design/10 §4.5：取代 xattr owner 核验）
+      final owner = await _ownerOf(oldAbs);
       if (owner != record.fileId) {
         // 本地身份无法确认 → 交回既有同步逻辑
         return _RecoverOutcome.unmarked;
@@ -269,7 +286,7 @@ class PathRecovery {
       _verifyLocalType(oldType, record);
       localAlreadyMoved = false;
     } else if (newExists) {
-      final owner = await _mount.xattr.get(newAbs, xattrFileId);
+      final owner = await _ownerOf(newAbs);
       if (owner != record.fileId) {
         throw AppError.generic('路径恢复拒绝：目标被其他本地内容占用');
       }
@@ -411,10 +428,10 @@ class PathRecovery {
         'AND (file_id = ? OR relative_path = ? OR relative_path = ? '
         'OR substr(relative_path, 1, ?) = ? OR substr(relative_path, 1, ?) = ?)',
         [
-          TransferState.Canceled.code,
+          TransferState.canceled.code,
           '路径恢复已使旧重规划任务失效',
           _nowMs(),
-          TransferState.RestartRequired.code,
+          TransferState.restartRequired.code,
           '',
           root.fileId,
           oldRoot,
@@ -445,12 +462,12 @@ class PathRecovery {
       'AND (file_id = ? OR relative_path = ? OR relative_path = ? '
       'OR substr(relative_path, 1, ?) = ? OR substr(relative_path, 1, ?) = ?)',
       [
-        TransferState.Pending.code,
-        TransferState.Running.code,
-        TransferState.WaitingForNetwork.code,
-        TransferState.BackingOff.code,
-        TransferState.VerifyingRemote.code,
-        TransferState.RestartRequired.code,
+        TransferState.pending.code,
+        TransferState.running.code,
+        TransferState.waitingForNetwork.code,
+        TransferState.backingOff.code,
+        TransferState.verifyingRemote.code,
+        TransferState.restartRequired.code,
         '',
         fileId,
         oldRoot,

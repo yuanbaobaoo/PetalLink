@@ -297,10 +297,10 @@ class TrayService {
   /// 状态行文案：`{方向标签}…{pct}%`（U+2026；对齐 Rust build_menu）
   static String transferStatusLine(TransferTask task) {
     final label = switch (task.direction) {
-      TransferDirection.Upload => '正在上传',
-      TransferDirection.Download => '正在下载',
-      TransferDirection.DownloadUpdate => '正在更新',
-      TransferDirection.Delete => '正在删除',
+      TransferDirection.upload => '正在上传',
+      TransferDirection.download => '正在下载',
+      TransferDirection.downloadUpdate => '正在更新',
+      TransferDirection.delete => '正在删除',
     };
     final pct = task.totalSize > 0
         ? (task.transferred * 100 ~/ task.totalSize).clamp(0, 100)

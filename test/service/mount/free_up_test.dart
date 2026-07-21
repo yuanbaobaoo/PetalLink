@@ -8,6 +8,7 @@ import 'package:petal_link/service/mount/manager.dart';
 import 'package:petal_link/types/enums.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
+import 'proc_inode.dart';
 import 'proc_xattr.dart';
 
 /// 测试用云端核验门面。
@@ -89,6 +90,7 @@ void main() {
       tempDir.path,
       xattr: xattr,
       db: DatabaseService.instance,
+      inodeBatchProvider: procInodeBatch,
     );
     gate = FakeGate();
     service = FreeUpService(
@@ -131,7 +133,7 @@ void main() {
       'local_size': size,
       'local_mtime': mtime,
       'cloud_edited_time': cloudEditedTime,
-      'status': SyncItemStatus.Synced.code,
+      'status': SyncItemStatus.synced.code,
     });
 
     gate.cloud[relPath] = fileId;
@@ -252,11 +254,11 @@ void main() {
       await seedSyncedFile();
       final db = await DatabaseService.instance.database;
       await db.insert('transfer_queue', {
-        'direction': TransferDirection.Upload.code,
+        'direction': TransferDirection.upload.code,
         'file_id': 'fid1',
         'name': 'a.bin',
         'total_size': 100,
-        'state': TransferState.Running.code,
+        'state': TransferState.running.code,
         'created_at': 1,
         'relative_path': 'a.bin',
       });
@@ -270,11 +272,11 @@ void main() {
       await seedSyncedFile();
       final db = await DatabaseService.instance.database;
       await db.insert('transfer_queue', {
-        'direction': TransferDirection.Upload.code,
+        'direction': TransferDirection.upload.code,
         'file_id': 'fid1',
         'name': 'a.bin',
         'total_size': 100,
-        'state': TransferState.Completed.code,
+        'state': TransferState.completed.code,
         'created_at': 1,
         'relative_path': 'a.bin',
       });
@@ -294,13 +296,13 @@ void main() {
       // 原位置为占位符
       final file = File(abs('a.bin'));
       expect(file.lengthSync(), 0);
-      expect(await xattr.get(abs('a.bin'), xattrFileId), 'fid1');
+      expect(await xattr.get(abs('a.bin'), xattrFileId), isNull);
       expect(await xattr.get(abs('a.bin'), xattrState), statePlaceholder);
-      expect(await xattr.get(abs('a.bin'), xattrSize), '100');
+      expect(await xattr.get(abs('a.bin'), 'com.hwcloud.size'), isNull);
 
       // DB 已结算为 CloudOnly + local_size=0
       final row = await baselineRow('fid1');
-      expect(row!['status'], SyncItemStatus.CloudOnly.code);
+      expect(row!['status'], SyncItemStatus.cloudOnly.code);
       expect(row['local_size'], 0);
 
       // 无暂存残留
@@ -389,7 +391,7 @@ void main() {
     test('基线非 Synced → not_synced', () async {
       await seedSyncedFile();
       final db = await DatabaseService.instance.database;
-      await db.update('sync_items', {'status': SyncItemStatus.Syncing.code});
+      await db.update('sync_items', {'status': SyncItemStatus.syncing.code});
       expect(await service.checkSafeFreeUp('a.bin', 'fid1'), 'not_synced');
     });
 
@@ -409,7 +411,7 @@ void main() {
   group('FreeUpService.listFreeableInFolder', () {
     Future<void> insertRow(String fileId, String localPath,
         {bool isFolder = false,
-        SyncItemStatus status = SyncItemStatus.Synced,
+        SyncItemStatus status = SyncItemStatus.synced,
         int localSize = 10}) async {
       final db = await DatabaseService.instance.database;
       await db.insert('sync_items', {
@@ -427,7 +429,7 @@ void main() {
       await insertRow('f1', 'a.txt');
       await insertRow('f2', 'docs/b.txt');
       await insertRow('f3', 'docs', isFolder: true);
-      await insertRow('f4', 'c.txt', status: SyncItemStatus.CloudOnly);
+      await insertRow('f4', 'c.txt', status: SyncItemStatus.cloudOnly);
 
       final items = await service.listFreeableInFolder('');
       expect(items.map((e) => e.fileId), containsAll(['f1', 'f2']));
@@ -476,6 +478,9 @@ void main() {
       expect(result.freedCount, 2);
       expect(result.freedBytes, 150);
       expect(result.errors, isEmpty);
+      // 释放成功后 free_up_staging 恢复记录已全部清理（docs/design/10 §4.8）
+      final db = await DatabaseService.instance.database;
+      expect(await db.query('free_up_staging'), isEmpty);
     });
   });
 }

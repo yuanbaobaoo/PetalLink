@@ -27,8 +27,9 @@ class UpdateManifest {
   /// 更新包（DMG）下载地址
   final String url;
 
-  /// 更新包 SHA-256（hex，安装前强制校验）
-  final String sha256;
+  /// 更新包 SHA-256（hex）。可为 null：标准 Tauri 清单只有 signature
+  /// 无 sha256 字段；缺失时跳过哈希校验，由安装期签名四重校验兜底
+  final String? sha256;
 
   /// minisign 签名（Tauri 格式携带；当前不校验，保留字段）
   final String? signature;
@@ -39,7 +40,7 @@ class UpdateManifest {
   const UpdateManifest({
     required this.version,
     required this.url,
-    required this.sha256,
+    this.sha256,
     this.notes = '',
     this.signature,
     this.pubDate = '',
@@ -107,6 +108,13 @@ class UpdateService {
   final String? _executableOverride;
   final int? _pidOverride;
 
+  /// 期望的 Apple Team ID（安装期四重校验之一，对齐 CMP
+  /// `JvmUpdateService.expectedTeamId`）。
+  ///
+  /// 构建期经 `--dart-define=PETALLINK_UPDATE_TEAM_ID=...` 注入；
+  /// 空值时拒绝安装（对齐 CMP：正式更新未配置 Team ID 拒绝安装）。
+  final String expectedTeamId;
+
   UpdateService({
     http.Client? httpClient,
     String? endpoint,
@@ -115,13 +123,16 @@ class UpdateService {
     ProcRunner? runner,
     String? currentExecutable,
     int? currentPid,
+    String? expectedTeamId,
   })  : _http = httpClient ?? http.Client(),
         _endpoint = endpoint ?? updateEndpoint,
         _currentVersion = currentVersion ?? '0.0.0',
         _updatesDirOverride = updatesDir,
         _runner = runner ?? defaultProcRunner,
         _executableOverride = currentExecutable,
-        _pidOverride = currentPid;
+        _pidOverride = currentPid,
+        expectedTeamId = expectedTeamId ??
+            const String.fromEnvironment('PETALLINK_UPDATE_TEAM_ID');
 
   // ═══════════════════════════════════════════════════════════════════
   // 检查更新
@@ -220,14 +231,21 @@ class UpdateService {
       // 原子改名（同目录 rename 即原子）
       await File(part).rename(target);
 
-      // SHA-256 校验（不匹配删包）
-      final digest = await sha256.bind(File(target).openRead()).first;
-      final hex = digest.toString();
-      // 忽略大小写比较（对齐 CMP equalsIgnoreCase）
-      if (hex.toLowerCase() != manifest.sha256.toLowerCase()) {
-        await File(target).delete();
-        return Err(GenericError(
-            message: '更新包 SHA-256 不匹配（期望 ${manifest.sha256}，实际 $hex）'));
+      // SHA-256 校验（不匹配删包；清单未携带 sha256 时跳过，
+      // 由安装期 codesign/spctl/Team ID 四重校验兜底）
+      final expectedHash = manifest.sha256;
+      if (expectedHash != null) {
+        final digest = await sha256.bind(File(target).openRead()).first;
+        final hex = digest.toString();
+        // 忽略大小写比较（对齐 CMP equalsIgnoreCase）
+        if (hex.toLowerCase() != expectedHash.toLowerCase()) {
+          await File(target).delete();
+          return Err(GenericError(
+              message:
+                  '更新包 SHA-256 不匹配（期望 $expectedHash，实际 $hex）'));
+        }
+      } else {
+        AppLogger.w('更新清单未携带 SHA-256，跳过哈希校验（安装期签名校验兜底）');
       }
 
       AppLogger.i('更新包已就绪: $target');
@@ -306,7 +324,13 @@ class UpdateService {
               GenericError(message: '提取更新失败：${ditto.stderr.trim()}'));
         }
 
-        // 5. 后台替换脚本（等本进程退出后换入 + 重开；失败回滚）
+        // 5. 签名校验（对齐 CMP verifyApp 四重校验：codesign --verify
+        //    --deep --strict、spctl --assess、Team ID 匹配、SHA-256 已在
+        //    下载期完成）——必须在替换脚本启动之前通过
+        final verify = await _verifyApp(stagedApp);
+        if (verify != null) return Err(verify);
+
+        // 6. 后台替换脚本（等本进程退出后换入 + 重开；失败回滚）
         final incoming = p.join(parent, '.$appName.incoming');
         final backup = p.join(parent, '.$appName.backup');
         final script = p.join(stageDir, 'install-update.sh');
@@ -333,6 +357,43 @@ class UpdateService {
       AppLogger.e('安装更新异常', e, st);
       return Err(GenericError(message: '安装更新失败：$e'));
     }
+  }
+
+  /// 安装包签名四重校验（对齐 CMP `JvmUpdateService.verifyApp`）。
+  ///
+  /// 依次为：codesign --verify --deep --strict（签名有效）、
+  /// spctl --assess（Gatekeeper/notarization）、Team ID 匹配；
+  /// 第四重 SHA-256 在下载期已完成。通过返回 null，失败返回错误。
+  Future<AppError?> _verifyApp(String appPath) async {
+    // 对齐 CMP：正式更新未配置 Team ID 拒绝安装
+    if (expectedTeamId.isEmpty) {
+      return const GenericError(message: '正式更新未配置 Apple Team ID，拒绝安装');
+    }
+    final codesign = await _runner('/usr/bin/codesign',
+        ['--verify', '--deep', '--strict', '--verbose=2', appPath]);
+    if (codesign.exitCode != 0) {
+      return GenericError(
+          message: '更新应用代码签名无效：${codesign.stderr.trim()}');
+    }
+    final spctl = await _runner('/usr/sbin/spctl',
+        ['--assess', '--type', 'execute', '--verbose=2', appPath]);
+    if (spctl.exitCode != 0) {
+      return GenericError(
+          message: '更新应用未通过 Gatekeeper/notarization：${spctl.stderr.trim()}');
+    }
+    // codesign -dv 的详情输出在 stderr
+    final details = await _runner(
+        '/usr/bin/codesign', ['-dv', '--verbose=4', appPath]);
+    final output = '${details.stdout}\n${details.stderr}';
+    final match =
+        RegExp(r'^TeamIdentifier=(.+)$', multiLine: true).firstMatch(output);
+    final team = match?.group(1)?.trim();
+    if (team != expectedTeamId) {
+      return GenericError(
+          message: '更新应用 Team ID 不匹配（期望 $expectedTeamId，实际 ${team ?? "缺失"}）');
+    }
+    AppLogger.i('更新应用签名校验通过（Team ID: $team）');
+    return null;
   }
 
   /// 目录可写探测：写测试文件再删（对齐 Rust 挂载目录可写探测思路）
@@ -382,7 +443,9 @@ exit 1
   /// 解析并校验更新清单（对齐 CMP `validateManifest`）。
   ///
   /// 兼容 Tauri updater 平台映射格式与 CMP 扁平格式；
-  /// 版本非法 / url 非 https / sha256 缺失或格式非法时抛 [GenericError]。
+  /// 版本非法 / url 非 https / sha256 存在但格式非法时抛 [GenericError]。
+  /// sha256 缺失不视为非法（标准 Tauri 清单只有 signature），
+  /// 解析为 null，由安装期签名四重校验兜底。
   static UpdateManifest parseManifest(
     Map<String, dynamic> json, {
     String? platformKey,
@@ -395,7 +458,7 @@ exit 1
     final pubDate = json['pub_date'] as String? ?? '';
 
     String url = '';
-    String sha256 = '';
+    String sha256Raw = '';
     String? signature;
     final platforms = json['platforms'];
     if (platforms is Map) {
@@ -408,20 +471,26 @@ exit 1
       final entry = platforms[key];
       if (entry is Map) {
         url = entry['url'] as String? ?? '';
-        sha256 = entry['sha256'] as String? ?? '';
+        sha256Raw = entry['sha256'] as String? ?? '';
         signature = entry['signature'] as String?;
       }
     } else {
       url = json['url'] as String? ?? '';
-      sha256 = json['sha256'] as String? ?? '';
+      sha256Raw = json['sha256'] as String? ?? '';
       signature = json['signature'] as String?;
     }
 
     if (!url.startsWith('https://')) {
       throw GenericError(message: '更新包地址必须是 https://');
     }
-    if (!RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(sha256)) {
-      throw GenericError(message: '更新清单缺少有效的 SHA-256');
+    // sha256 可缺失（null）；存在则必须是 64 位 hex
+    final String? sha256;
+    if (sha256Raw.isEmpty) {
+      sha256 = null;
+    } else if (RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(sha256Raw)) {
+      sha256 = sha256Raw;
+    } else {
+      throw GenericError(message: '更新清单 SHA-256 格式非法');
     }
 
     return UpdateManifest(

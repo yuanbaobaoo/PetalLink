@@ -17,7 +17,7 @@ enum NetworkTransition {
 /// 网络守卫（单例）—— 断网/睡眠时暂停一切同步操作。
 ///
 /// 严格对齐 Rust 原版 `src/core/net_guard.rs`：
-/// - 维护全局 Online/Offline 状态，同步引擎各入口通过 [isOnline] 快速查询；
+/// - 维护全局 online/offline 状态，同步引擎各入口通过 [isOnline] 快速查询；
 ///   定时器循环通过 [waitUntilOnline] 阻塞等待网络恢复
 /// - 网络判定：每 30s 向华为 API 域名做轻量 TCP connect 探测（443 端口，3s 超时）
 /// - 迟滞切换：一次探测失败即离线；恢复在线要求连续两次探测成功，
@@ -120,7 +120,7 @@ class NetGuard {
   /// 接收探测样本，更新稳定状态机；状态真实变化时广播转换。
   ///
   /// 迟滞逻辑（对齐 Rust NetworkStateMachine.observe）：
-  /// - 失败样本：立即离线（在线时发布 Offline 边沿）
+  /// - 失败样本：立即离线（在线时发布 offline 边沿）
   /// - 成功样本：离线状态下累计连续成功，达 [_requiredSuccesses] 次才恢复在线
   @visibleForTesting
   void observeProbeResult(bool probeSucceeded) {

@@ -60,12 +60,12 @@ const String _activeTransferWhere =
     'remote_result_file_id IS NOT NULL AND trim(remote_result_file_id) <> ?))';
 
 final List<Object?> _activeTransferArgs = [
-  TransferState.Pending.code,
-  TransferState.Running.code,
-  TransferState.WaitingForNetwork.code,
-  TransferState.BackingOff.code,
-  TransferState.VerifyingRemote.code,
-  TransferState.RestartRequired.code,
+  TransferState.pending.code,
+  TransferState.running.code,
+  TransferState.waitingForNetwork.code,
+  TransferState.backingOff.code,
+  TransferState.verifyingRemote.code,
+  TransferState.restartRequired.code,
   '',
 ];
 
@@ -158,9 +158,11 @@ void addRescueFolderRecreations(
   required Map<String, int> recentlyDeletedPaths,
   required String mountDir,
 }) {
+  // 已有动作的路径全集（对齐 Rust：所有动作类型，不只 CreateFolder）——
+  // 祖先目录已被任何动作覆盖时不再追加救援重建
   final existing = actions
-      .where((a) => a.actionType == SyncActionType.createFolder)
       .map((a) => a.relativePath)
+      .whereType<String>()
       .toSet();
   final rescues = <String>{};
   const rescueTypes = {

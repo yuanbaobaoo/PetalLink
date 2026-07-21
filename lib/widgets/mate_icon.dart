@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
-import '../app/theme/mate_theme.dart';
+import 'package:petal_link/app/theme/mate_theme.dart';
 
 // =============================================================================
 // MateIcon —— 矢量图标组件（对标 CMP components/MateIcon.kt）。

@@ -16,7 +16,9 @@ import 'package:petal_link/service/mount/manager.dart';
 import 'package:petal_link/service/sync/engine.dart';
 import 'package:petal_link/service/sync/engine/action_filters.dart';
 import 'package:petal_link/service/sync/engine/coordination.dart';
+import 'package:petal_link/service/sync/identity/detect_moves.dart';
 import 'package:petal_link/service/sync/path_recovery.dart';
+import 'package:petal_link/core/logger/logger.dart';
 import 'package:petal_link/service/sync/planner.dart';
 import 'package:petal_link/service/sync/sync_actions.dart';
 import 'package:petal_link/types/enums.dart';
@@ -50,7 +52,43 @@ mixin EngineReconciliation on SyncEngineBase {
       throw AppError.config('挂载管理器未配置');
     }
     final entries = await m.scanLocal(skipPatterns);
+    // inode 移动检测（docs/design/10 §4.3）：先于映射更新读取旧映射
+    lastScanMoves = await detectMoves(entries, identity);
+    await _updateInodeIdentity(entries);
     return {for (final e in entries) e.relativePath: e};
+  }
+
+  /// inode 身份映射更新（docs/design/10 阶段 1：仅写不读）。
+  ///
+  /// 有 DB 基线（非 pending/非墓碑）的扫描条目 → upsert(inode, rel, fileId)；
+  /// 随后按本轮见到的 inode 集合 purge 陈旧记录。采集失败不阻断扫描。
+  Future<void> _updateInodeIdentity(List<LocalFileEntry> entries) async {
+    try {
+      final withInode = entries.where((e) => e.inode != null).toList();
+      // provider 未注入（无 inode 来源）时跳过；provider 在但目录为空
+      // 时照常 purge（陈旧记录应随扫描清空）
+      if (withInode.isEmpty && mount?.inodeBatchProvider == null) return;
+      final db = await this.db.database;
+      final rows = await db.query('sync_items',
+          columns: ['local_path', 'file_id', 'status']);
+      final fileIdByPath = <String, String>{
+        for (final r in rows)
+          if ((r['file_id'] as String).isNotEmpty &&
+              !(r['file_id'] as String).startsWith(pendingFileIdPrefix) &&
+              (r['status'] as int) != SyncItemStatus.deleted.code)
+            r['local_path'] as String: r['file_id'] as String,
+      };
+      for (final e in withInode) {
+        final fid = fileIdByPath[e.relativePath];
+        if (fid != null) {
+          await identity.upsert(e.inode!, e.relativePath, fid);
+        }
+      }
+      await identity.purgeMissing(withInode.map((e) => e.inode!).toSet());
+    } catch (e) {
+      // 阶段 1 数据采集失败不影响同步主流程
+      AppLogger.w('inode 身份映射更新失败（忽略）: $e');
+    }
   }
 
   /// 加载 DB 基线快照（relPath → 快照；重复 local_path 报错拒绝规划）。
@@ -98,10 +136,10 @@ mixin EngineReconciliation on SyncEngineBase {
       final existing = dbSnapshot[rel];
       if (existing != null) {
         // DELETED tombstone 复活（本地仍存在 = 删除未生效或被重建）
-        if (existing.status == SyncItemStatus.Deleted) {
+        if (existing.status == SyncItemStatus.deleted) {
           final next = localEntry.isPlaceholder
-              ? SyncItemStatus.CloudOnly
-              : SyncItemStatus.Synced;
+              ? SyncItemStatus.cloudOnly
+              : SyncItemStatus.synced;
           await db.update('sync_items', {'status': next.code},
               where: 'local_path = ?', whereArgs: [rel]);
         }
@@ -125,50 +163,40 @@ mixin EngineReconciliation on SyncEngineBase {
             localMtime: localEntry.mtime,
             cloudEditedTime: cloudFile.editedTime?.millisecondsSinceEpoch,
             lastSyncTime: nowMs(),
-            status: SyncItemStatus.Synced,
+            status: SyncItemStatus.synced,
           ));
         }
         continue;
       }
 
-      // 文件：必须凭 xattr fileId 身份补基线
+      // 文件：凭 inode 映射身份补基线（docs/design/10 §4.4，
+      // 取代 xattr fileId 三层关卡——复制产生新 inode，结构上
+      // 不可能"同一身份多处出现"，无需任何消歧）
       final status = localEntry.isPlaceholder
-          ? SyncItemStatus.CloudOnly
-          : SyncItemStatus.Synced;
-      final String? xattrIdRaw;
-      try {
-        xattrIdRaw = await m.xattr.get(localEntry.absolutePath, xattrFileId);
-      } catch (_) {
-        continue;
-      }
-      if (xattrIdRaw == null || xattrIdRaw.isEmpty) {
-        continue; // 本地新文件交 planner
-      }
-      final xattrId = xattrIdRaw;
-      if (isBlockedPathIdentity(rel, xattrId, blocked)) continue;
+          ? SyncItemStatus.cloudOnly
+          : SyncItemStatus.synced;
+      final inode = localEntry.inode;
+      if (inode == null) continue; // 无 inode 数据 → 交 planner
+      final identityRec = await identity.lookup(inode);
+      if (identityRec == null) continue; // 本地新文件交 planner
+      final fid = identityRec.fileId;
+      if (isBlockedPathIdentity(rel, fid, blocked)) continue;
       // 云树同路径不存在 → 禁止制造已同步基线
       if (cloudFile == null) continue;
-      // 复制文件（xattr 与云树 id 不一致）交 planner
-      if (cloudFile.id != xattrId) continue;
+      // 同路径云端身份不一致 → 交 planner
+      if (cloudFile.id != fid) continue;
 
       // 同 fileId 旧路径记录存在 → 迁移（改名/移动收敛）
-      final oldPath = pathById[xattrId];
+      final oldPath = pathById[fid];
       if (oldPath != null && oldPath != rel) {
-        final oldAbs = '${m.mountDir}/$oldPath';
-        final oldType =
-            await FileSystemEntity.type(oldAbs, followLinks: false);
-        if (oldType != FileSystemEntityType.notFound) {
-          // 无法证明旧路径已消失（复制/歧义），拒绝迁移
-          continue;
-        }
         final db2 = await this.db.database;
         await db2.transaction((txn) async {
           final oldRows = await txn.query('sync_items',
               where: 'file_id = ? AND local_path <> ?',
-              whereArgs: [xattrId, rel]);
+              whereArgs: [fid, rel]);
           await txn.delete('sync_items',
               where: 'file_id = ? AND local_path <> ?',
-              whereArgs: [xattrId, rel]);
+              whereArgs: [fid, rel]);
           // 保留旧记录的内容字段（不把目标当前 mtime/size 误记为已同步）
           final old = oldRows.isNotEmpty
               ? SyncItem.fromRow(oldRows.first)
@@ -176,7 +204,7 @@ mixin EngineReconciliation on SyncEngineBase {
           await txn.insert(
             'sync_items',
             SyncItem(
-              fileId: xattrId,
+              fileId: fid,
               localPath: rel,
               parentFolderId: cloudFile.parentId,
               name: cloudFile.name,
@@ -200,7 +228,7 @@ mixin EngineReconciliation on SyncEngineBase {
 
       // 补新基线
       await baselineStore.upsert(SyncItem(
-        fileId: xattrId,
+        fileId: fid,
         localPath: rel,
         name: rel.split('/').last,
         isFolder: false,
@@ -230,8 +258,8 @@ mixin EngineReconciliation on SyncEngineBase {
         'SELECT 1 FROM transfer_queue tq WHERE tq.relative_path = ? '
         'AND tq.state NOT IN (?, ?))';
     final nonTerminal = [
-      TransferState.Completed.code,
-      TransferState.Canceled.code,
+      TransferState.completed.code,
+      TransferState.canceled.code,
     ];
 
     await db.transaction((txn) async {
@@ -240,7 +268,7 @@ mixin EngineReconciliation on SyncEngineBase {
 
       // 第一遍：FAILED 复核
       for (final record in records) {
-        if (record.status != SyncItemStatus.Failed) continue;
+        if (record.status != SyncItemStatus.failed) continue;
         if (isBlockedPathIdentity(record.localPath, record.fileId, blocked)) {
           continue;
         }
@@ -269,10 +297,10 @@ mixin EngineReconciliation on SyncEngineBase {
               localEntry.mtime,
               cloudFile.editedTime?.millisecondsSinceEpoch,
               nowMs(),
-              SyncItemStatus.Synced.code,
+              SyncItemStatus.synced.code,
               record.fileId,
               record.localPath,
-              SyncItemStatus.Failed.code,
+              SyncItemStatus.failed.code,
               record.localPath,
               ...nonTerminal,
             ],
@@ -299,10 +327,10 @@ mixin EngineReconciliation on SyncEngineBase {
             'WHERE file_id = ? AND local_path = ? AND status = ? '
             'AND $transferGuard',
             [
-              SyncItemStatus.Synced.code,
+              SyncItemStatus.synced.code,
               record.fileId,
               record.localPath,
-              SyncItemStatus.Failed.code,
+              SyncItemStatus.failed.code,
               record.localPath,
               ...nonTerminal,
             ],
@@ -339,144 +367,11 @@ mixin EngineReconciliation on SyncEngineBase {
     final db2 = await this.db.database;
     final failedRows = await db2.rawQuery(
       'SELECT COUNT(*) AS c FROM sync_items WHERE status = ?',
-      [SyncItemStatus.Failed.code],
+      [SyncItemStatus.failed.code],
     );
     final c = failedRows.first['c'];
     summary.remainingFailed = c is int ? c : int.tryParse('$c') ?? 0;
     return summary;
-  }
-
-  // ═══════════════════════════════════════════════════════════════════
-  // 改名检测（xattr fileId 识别同目录改名）
-  // ═══════════════════════════════════════════════════════════════════
-
-  /// xattr fileId 识别改名：Upload（无 fileId）/ DeleteFromLocal（孤儿占位）
-  /// → MoveInCloud（对齐 Rust `detect_renames`）。
-  @override
-  Future<void> detectRenames(
-    List<SyncAction> actions,
-    Map<String, DbSnapshotEntry> dbSnapshot,
-  ) async {
-    final m = mount;
-    if (m == null) return;
-    // fileId → (DB 路径, 条目)
-    final dbById = <String, MapEntry<String, DbSnapshotEntry>>{};
-    for (final entry in dbSnapshot.entries) {
-      dbById[entry.value.fileId] = entry;
-    }
-    // fileId → (云树路径, DriveFile)
-    final cloudById = <String, MapEntry<String, DriveFile>>{};
-    for (final entry in cloudIndex.tree.entries) {
-      cloudById[entry.value.id] = entry;
-    }
-
-    final deferredReplacementSources = <(String, String)>{};
-    final supersededCloudPaths = <(String, String)>{};
-    final renamedSources = <(String, String)>{};
-
-    for (final action in actions) {
-      final isCandidate =
-          (action.actionType == SyncActionType.upload && action.fileId == null) ||
-              (action.actionType == SyncActionType.deleteFromLocal &&
-                  action.fileId == null);
-      if (!isCandidate) continue;
-      final rel = action.relativePath;
-      final localPath = action.localPath;
-      if (rel == null || localPath == null) continue;
-
-      final String? fidRaw;
-      try {
-        fidRaw = await m.xattr.get(localPath, xattrFileId);
-      } catch (_) {
-        continue;
-      }
-      if (fidRaw == null || fidRaw.isEmpty) continue;
-      final fid = fidRaw;
-      final dbEntry = dbById[fid];
-      if (dbEntry == null) continue;
-      final oldDbPath = dbEntry.key;
-      if (oldDbPath == rel) continue;
-      final cloudEntry = cloudById[fid];
-      if (cloudEntry == null) continue;
-
-      // 旧本地路径核验（复制检测 / 占用检测）
-      final oldAbs = '${m.mountDir}/$oldDbPath';
-      final oldType =
-          await FileSystemEntity.type(oldAbs, followLinks: false);
-      if (oldType != FileSystemEntityType.notFound) {
-        final String? owner;
-        try {
-          owner = await m.xattr.get(oldAbs, xattrFileId);
-        } catch (_) {
-          continue; // 读失败 → 拒绝改名检测
-        }
-        if (owner == fid) {
-          // 复制检测：新旧路径同属一个 fileId → 新文件是副本，摘除其 fileId
-          try {
-            await m.xattr.remove(localPath, xattrFileId);
-          } catch (_) {
-            // 尽力摘除
-          }
-          continue;
-        }
-        // 旧路径已被别的文件占用 → 按移动处理，旧路径动作延期
-        deferredReplacementSources.add((oldDbPath, fid));
-      }
-
-      // 改写为 MoveInCloud
-      final cloudFile = cloudEntry.value;
-      action.fileId = fid;
-      action.cloudFile = cloudFile;
-      action.actionType = SyncActionType.moveInCloud;
-      final oldParent = oldDbPath.contains('/')
-          ? oldDbPath.substring(0, oldDbPath.lastIndexOf('/'))
-          : '';
-      final newParent =
-          rel.contains('/') ? rel.substring(0, rel.lastIndexOf('/')) : '';
-      if (oldParent == newParent) {
-        action.parentFileId = cloudFile.parentId;
-        action.reason = '同目录改名检测：$oldDbPath → $rel（fileId=$fid，先于内容同步）';
-      } else {
-        action.parentFileId = newParent.isEmpty
-            ? cloudIndex.rootFolderId
-            : cloudIndex.pathToId[newParent];
-        action.reason = '跨目录移动检测：$oldDbPath → $rel'
-            '（目标 parent=${action.parentFileId}）';
-      }
-      final cloudCurrentPath = cloudEntry.key;
-      if (cloudCurrentPath != rel) {
-        supersededCloudPaths.add((cloudCurrentPath, fid));
-      }
-      renamedSources.add((oldDbPath, fid));
-    }
-
-    if (deferredReplacementSources.isEmpty &&
-        supersededCloudPaths.isEmpty &&
-        renamedSources.isEmpty) {
-      return;
-    }
-    actions.removeWhere((action) {
-      final rel = action.relativePath;
-      final fid = action.fileId;
-      if (rel == null) return false;
-      if (fid != null && deferredReplacementSources.contains((rel, fid))) {
-        return true;
-      }
-      if (action.actionType == SyncActionType.createPlaceholder &&
-          fid != null &&
-          supersededCloudPaths.contains((rel, fid))) {
-        return true;
-      }
-      if (action.actionType == SyncActionType.deleteFromCloud) {
-        for (final (oldPath, ofid) in renamedSources) {
-          if ((rel == oldPath && fid == ofid) ||
-              rel.startsWith('$oldPath/')) {
-            return true;
-          }
-        }
-      }
-      return false;
-    });
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -505,7 +400,7 @@ mixin EngineReconciliation on SyncEngineBase {
     }
     if (record == null ||
         record.localPath != relPath ||
-        record.status != SyncItemStatus.Synced) {
+        record.status != SyncItemStatus.synced) {
       return FreeUpCheckResult.notSynced;
     }
     final m = mount;

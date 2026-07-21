@@ -98,8 +98,10 @@ class FolderSyncRunner {
       }
     }
 
-    // 3. 本地扫描（仅真实文件；0 字节占位符跳过，0 字节真实文件保留）
-    final localFiles = await _scanRealFiles(mount, destDir);
+    // 3. 本地扫描（仅真实文件；0 字节占位符跳过，0 字节真实文件保留；
+    //    skipPatterns 对齐 Rust scan_dir_for_real_files(eng.skip_patterns())）
+    final localFiles =
+        await _scanRealFiles(mount, destDir, engine.skipPatterns);
 
     // 4. 对齐（共有文件不做内容比较）
     final localNames = localFiles.keys.toSet();
@@ -180,8 +182,8 @@ class FolderSyncRunner {
       }
       final task = TransferTask(
         direction: isUpdate
-            ? TransferDirection.DownloadUpdate
-            : TransferDirection.Download,
+            ? TransferDirection.downloadUpdate
+            : TransferDirection.download,
         fileId: file.id,
         localPath: absPath,
         name: file.name,
@@ -190,8 +192,8 @@ class FolderSyncRunner {
         relativePath: fullRel,
         parentFileId: file.parentId,
         operation: isUpdate
-            ? TransferOperation.DownloadUpdate
-            : TransferOperation.Download,
+            ? TransferOperation.downloadUpdate
+            : TransferOperation.download,
         expectedCloudEditedTime: file.editedTime?.millisecondsSinceEpoch,
       );
       try {
@@ -221,14 +223,14 @@ class FolderSyncRunner {
       }
       final stat = await FileStat.stat(absPath);
       final task = TransferTask(
-        direction: TransferDirection.Upload,
+        direction: TransferDirection.upload,
         localPath: absPath,
         name: p.basename(absPath),
         totalSize: stat.size,
         createdAt: DateTime.now().millisecondsSinceEpoch,
         relativePath: fullRel,
         parentFileId: parentId,
-        operation: TransferOperation.Create,
+        operation: TransferOperation.create,
         sourceMtime: stat.modified.millisecondsSinceEpoch,
         sourceSize: stat.size,
       );
@@ -253,15 +255,20 @@ class FolderSyncRunner {
 
   /// 递归收集目录下的真实文件（subrel → 绝对路径；
   /// 跳过应排除项与 0 字节占位符，0 字节真实文件保留）。
+  ///
+  /// [skipPatterns] 必须传引擎配置的跳过模式（对齐 Rust
+  /// `scan_dir_for_real_files(..., eng.skip_patterns(), ...)`），
+  /// 否则 `.DS_Store` / `~$*` 等会被误上传。
   Future<Map<String, String>> _scanRealFiles(
     MountManager mount,
     String root,
+    List<String> skipPatterns,
   ) async {
     final out = <String, String>{};
     Future<void> walk(String current, String prefix) async {
       await for (final entity in Directory(current).list(followLinks: false)) {
         final name = p.basename(entity.path);
-        if (MountSkip.shouldSkip(name, const [])) continue;
+        if (MountSkip.shouldSkip(name, skipPatterns)) continue;
         final type =
             await FileSystemEntity.type(entity.path, followLinks: false);
         if (type == FileSystemEntityType.directory) {

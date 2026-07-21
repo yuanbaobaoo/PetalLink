@@ -1,4 +1,4 @@
-import '../types/enums.dart';
+import 'package:petal_link/types/enums.dart';
 
 /// copyWith 的「保持原值」哨兵（区分「不传」与「显式置 null」）
 const Object _keep = Object();
@@ -68,7 +68,7 @@ class SyncItem {
     this.localMtime,
     this.cloudEditedTime,
     this.lastSyncTime,
-    this.status = SyncItemStatus.Synced,
+    this.status = SyncItemStatus.synced,
     this.errorMessage,
   });
 
@@ -81,7 +81,7 @@ class SyncItem {
 
   /// 从 SQLite 查询结果构造（Map key 为列名，容忍 String 数字）。
   ///
-  /// status 未知值回退 [SyncItemStatus.Synced]（已同步基线，最安全默认）。
+  /// status 未知值回退 [SyncItemStatus.synced]（已同步基线，最安全默认）。
   factory SyncItem.fromRow(Map<String, dynamic> row) {
     return SyncItem(
       fileId: row['file_id'] as String? ?? '',
@@ -96,7 +96,7 @@ class SyncItem {
       cloudEditedTime: _tolerantInt(row['cloud_edited_time']),
       lastSyncTime: _tolerantInt(row['last_sync_time']),
       status: SyncItemStatus.fromCode(_tolerantInt(row['status']) ?? 0) ??
-          SyncItemStatus.Synced,
+          SyncItemStatus.synced,
       errorMessage: row['error_message'] as String?,
     );
   }
@@ -139,7 +139,7 @@ class SyncItem {
       cloudEditedTime: _tolerantInt(json['cloudEditedTime']),
       lastSyncTime: _tolerantInt(json['lastSyncTime']),
       status: SyncItemStatus.fromCode(_tolerantInt(json['status']) ?? 0) ??
-          SyncItemStatus.Synced,
+          SyncItemStatus.synced,
       errorMessage: json['errorMessage'] as String?,
     );
   }

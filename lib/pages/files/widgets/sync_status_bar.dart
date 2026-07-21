@@ -212,16 +212,16 @@ class FilesSyncStatusBar extends StatelessWidget {
     }
     // 空闲细分
     if (sync.uploading > 0 || sync.downloading > 0) return '同步中';
-    if (transfers.any((t) => t.state == TransferState.VerifyingRemote)) {
+    if (transfers.any((t) => t.state == TransferState.verifyingRemote)) {
       return '正在核验远端…';
     }
-    if (transfers.any((t) => t.state == TransferState.BackingOff)) {
+    if (transfers.any((t) => t.state == TransferState.backingOff)) {
       return '等待下次重试…';
     }
-    if (transfers.any((t) => t.state == TransferState.RestartRequired)) {
+    if (transfers.any((t) => t.state == TransferState.restartRequired)) {
       return '等待重新规划…';
     }
-    if (transfers.any((t) => t.state == TransferState.Pending)) {
+    if (transfers.any((t) => t.state == TransferState.pending)) {
       return '等待传输…';
     }
     if (sync.waitingNetwork > 0) return '等待网络恢复…';

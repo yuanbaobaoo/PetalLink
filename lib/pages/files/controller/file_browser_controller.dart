@@ -7,11 +7,14 @@ import 'package:petal_link/core/logger/logger.dart';
 import 'package:petal_link/entity/config_entry.dart';
 import 'package:petal_link/entity/drive_file.dart';
 import 'package:petal_link/service/config/config_service.dart';
+import 'package:petal_link/service/drive/about_service.dart';
+import 'package:petal_link/service/platform/platform_service.dart';
 import 'package:petal_link/service/drive/files_service.dart';
 import 'package:petal_link/service/drive/thumbnail_service.dart';
 import 'package:petal_link/service/mount/free_up.dart';
 import 'package:petal_link/service/mount/mount_path.dart';
 import 'package:petal_link/service/sync/sync_service.dart';
+import 'package:petal_link/pages/files/widgets/file_format.dart';
 import 'package:petal_link/widgets/index.dart';
 
 export 'package:petal_link/entity/config_entry.dart' show SortField;
@@ -74,7 +77,7 @@ class FileBrowserState {
     this.files = const [],
     this.nextCursor,
     this.query = '',
-    this.sortField = SortField.Name,
+    this.sortField = SortField.name,
     this.ascending = true,
     this.loading = false,
     this.directoryChildren = const {},
@@ -102,11 +105,11 @@ class FileBrowserState {
       // 同类型内排序
       int result;
       switch (sortField) {
-        case SortField.Name:
+        case SortField.name:
           result = a.name.toLowerCase().compareTo(b.name.toLowerCase());
-        case SortField.Size:
+        case SortField.size:
           result = a.size.compareTo(b.size);
-        case SortField.ModifiedTime:
+        case SortField.modifiedTime:
           result = (a.editedTime ?? _epoch).compareTo(b.editedTime ?? _epoch);
       }
       return ascending ? result : -result;
@@ -164,15 +167,22 @@ class FileBrowserController extends GetxController {
     FilesService? filesService,
     ThumbnailService? thumbnailService,
     SyncService? syncService,
-    ConfigService? configService,
-  })  : _filesServiceOverride = filesService,
+    ConfigService? configService,AboutService? aboutService, PlatformService? platformService, })  : _filesServiceOverride = filesService,
         _thumbnailServiceOverride = thumbnailService,
         _syncServiceOverride = syncService,
+        _aboutServiceOverride = aboutService,
+        _platformServiceOverride = platformService,
         _configServiceOverride = configService;
 
   final FilesService? _filesServiceOverride;
   final ThumbnailService? _thumbnailServiceOverride;
   final SyncService? _syncServiceOverride;
+
+  /// 配额服务覆盖（测试注入）
+  final AboutService? _aboutServiceOverride;
+
+  /// 平台服务覆盖（测试注入）
+  final PlatformService? _platformServiceOverride;
   final ConfigService? _configServiceOverride;
 
   FilesService get _filesService =>
@@ -181,6 +191,12 @@ class FileBrowserController extends GetxController {
       _thumbnailServiceOverride ?? Get.find<ThumbnailService>();
   SyncService get _syncService =>
       _syncServiceOverride ?? Get.find<SyncService>();
+
+  AboutService get _aboutService =>
+      _aboutServiceOverride ?? Get.find<AboutService>();
+
+  PlatformService get _platformService =>
+      _platformServiceOverride ?? Get.find<PlatformService>();
   ConfigService get _configService =>
       _configServiceOverride ?? Get.find<ConfigService>();
 
@@ -198,6 +214,9 @@ class FileBrowserController extends GetxController {
 
   /// 挂载目录绝对路径（~ 已展开；未配置为空串）
   final RxString mountDir = ''.obs;
+
+  /// 配额文本（账号卡；如 "36.5 GB / 200 GB"，加载失败为 null 不显示）
+  final RxnString quotaText = RxnString();
 
   /// 常驻错误横幅文案（空串 = 无；对齐 CMP MainScreen errorMessage）
   final RxString errorMessage = ''.obs;
@@ -222,6 +241,29 @@ class FileBrowserController extends GetxController {
 
   /// 目录树懒加载分页上限（对齐 CMP loadTreeChildren pages < 20）
   static const int _treeLoadMaxPages = 20;
+
+  /// 加载配额文本（失败静默，quotaText 保持 null）
+  Future<void> loadQuota() async {
+    try {
+      final result = await _aboutService.get();
+      if (result.isErr) return;
+      final about = (result as Ok).value;
+      quotaText.value =
+          '${formatFileSize(about.usedSpace)} / ${formatFileSize(about.userCapacity)}';
+    } catch (e) {
+      AppLogger.d('加载配额失败: $e');
+    }
+  }
+
+  /// 在 Finder 中打开挂载目录（未配置时置错误提示）
+  void openInFinder() {
+    final dir = mountDir.value;
+    if (dir.isEmpty) {
+      errorMessage.value = '尚未配置同步目录';
+      return;
+    }
+    _platformService.openInFinder(dir);
+  }
 
   // ═══════════════════════════════════════════════════════════════════
   // 文件加载（requestId 乱序保护）

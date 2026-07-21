@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
-import '../app/theme/mate_theme.dart';
+import 'package:petal_link/app/theme/mate_theme.dart';
+import 'package:petal_link/app/theme/mate_tokens.dart';
 import 'mate_icon.dart';
 
 // =============================================================================
@@ -467,7 +468,7 @@ class _StepperButtonState extends State<_StepperButton> {
               boxShadow: active
                   ? [
                       BoxShadow(
-                        color: Colors.black.withAlpha(20),
+                        color: MateColors.controlShadowSoft,
                         blurRadius: controls.stepperButtonShadowElevation * 2,
                         offset: Offset(0, controls.stepperButtonShadowElevation),
                       ),
@@ -593,7 +594,7 @@ class MateSwitch extends StatelessWidget {
                     shape: BoxShape.circle,
                     boxShadow: [
                       BoxShadow(
-                        color: Colors.black.withAlpha(40),
+                        color: MateColors.controlShadowStrong,
                         blurRadius: controls.switchKnobShadowElevation * 2,
                         offset: Offset(0, controls.switchKnobShadowElevation / 2),
                       ),

@@ -25,7 +25,7 @@ class _FakeAuthController extends AuthController {
   @override
   Future<bool> login([String server = '']) async {
     loginCalls++;
-    state.value = const AuthState(status: AuthStatus.Authorizing);
+    state.value = const AuthState(status: AuthStatus.authorizing);
     return true;
   }
 }
@@ -97,7 +97,7 @@ void main() {
     await tester.pump();
 
     // 认证状态置为 Error → 页面显示错误横幅（带重新授权动作）
-    auth.state.value = const AuthState(status: AuthStatus.Error);
+    auth.state.value = const AuthState(status: AuthStatus.error);
     await tester.pump();
     expect(find.text('授权失败，请重试'), findsOneWidget);
     expect(find.text('重新授权'), findsOneWidget);

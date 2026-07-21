@@ -8,6 +8,7 @@ import 'package:petal_link/service/mount/manager.dart';
 import 'package:petal_link/types/enums.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
+import 'proc_inode.dart';
 import 'proc_xattr.dart';
 
 void main() {
@@ -30,6 +31,7 @@ void main() {
       tempDir.path,
       xattr: xattr,
       db: DatabaseService.instance,
+      inodeBatchProvider: procInodeBatch,
     );
   });
 
@@ -53,7 +55,7 @@ void main() {
     int? localSize,
     int? localMtime,
     int? cloudEditedTime,
-    SyncItemStatus status = SyncItemStatus.Synced,
+    SyncItemStatus status = SyncItemStatus.synced,
   }) async {
     final db = await DatabaseService.instance.database;
     await db.insert('sync_items', {
@@ -70,15 +72,18 @@ void main() {
   }
 
   group('MountManager.createPlaceholderIfNeeded', () {
-    test('创建 0 字节占位 + 3 个状态 xattr + Finder 灰标', () async {
+    test('创建 0 字节占位 + state xattr + Finder 灰标（inode 方案只写 state）',
+        () async {
       await mount.createPlaceholderIfNeeded('docs/a.txt', 'fid1', 1234);
 
       final file = File(abs('docs/a.txt'));
       expect(file.existsSync(), isTrue);
       expect(file.lengthSync(), 0);
-      expect(await xattr.get(abs('docs/a.txt'), xattrFileId), 'fid1');
+      // inode 方案（docs/design/10 §2.1）：占位只写 state xattr，
+      // fileId/size 不再写入（身份由 local_inode_map 承担）
+      expect(await xattr.get(abs('docs/a.txt'), xattrFileId), isNull);
       expect(await xattr.get(abs('docs/a.txt'), xattrState), statePlaceholder);
-      expect(await xattr.get(abs('docs/a.txt'), xattrSize), '1234');
+      expect(await xattr.get(abs('docs/a.txt'), 'com.hwcloud.size'), isNull);
       // FinderInfo byte[9]=0x02（灰标）
       final finderInfo = await xattr.getBytes(abs('docs/a.txt'), finderInfoXattr);
       expect(finderInfo, isNotNull);
@@ -148,11 +153,12 @@ void main() {
     test('目标不存在 → 创建成功', () async {
       await mount.createPlaceholderStrict('new/x.bin', 'fid2', 88);
       expect(File(abs('new/x.bin')).lengthSync(), 0);
-      expect(await xattr.get(abs('new/x.bin'), xattrFileId), 'fid2');
+      expect(await xattr.get(abs('new/x.bin'), xattrState), statePlaceholder);
+      expect(await xattr.get(abs('new/x.bin'), xattrFileId), isNull);
     });
   });
 
-  group('MountManager.markDownloaded / setFileIdXattr', () {
+  group('MountManager.markDownloaded', () {
     test('markDownloaded 更新状态并清除灰标', () async {
       await mount.createPlaceholderIfNeeded('d.txt', 'fid1', 10);
       await mount.markDownloaded(abs('d.txt'));
@@ -161,11 +167,6 @@ void main() {
       expect(await xattr.getBytes(abs('d.txt'), finderInfoXattr), isNull);
     });
 
-    test('setFileIdXattr 补写 fileId', () async {
-      File(abs('e.txt')).writeAsStringSync('x');
-      await mount.setFileIdXattr(abs('e.txt'), 'fid9');
-      expect(await xattr.get(abs('e.txt'), xattrFileId), 'fid9');
-    });
   });
 
   group('MountManager.backupModifiedPlaceholderIfNeeded', () {
@@ -199,11 +200,39 @@ void main() {
       // 备份的占位 xattr 已清（rename 后 xattr 随文件走，由 clearPlaceholderXattr 移除）
       expect(await xattr.get(backup, xattrFileId), isNull);
       expect(await xattr.get(backup, xattrState), isNull);
-      expect(await xattr.get(backup, xattrSize), isNull);
+      expect(await xattr.get(backup, 'com.hwcloud.size'), isNull);
     });
   });
 
   group('MountManager.scanLocal', () {
+    test('inodeBatchProvider 注入时批量填充 inode（docs/design/10 阶段1）',
+        () async {
+      File(abs('a.txt')).writeAsStringSync('12345');
+      File(abs('sub/b.txt')).createSync(recursive: true);
+      File(abs('sub/b.txt')).writeAsStringSync('x');
+      final m = MountManager(
+        tempDir.path,
+        xattr: xattr,
+        inodeBatchProvider: (paths) async =>
+            {for (var i = 0; i < paths.length; i++) paths[i]: 9000 + i},
+      );
+
+      final entries = await m.scanLocal(const []);
+
+      expect(entries, isNotEmpty);
+      for (final e in entries) {
+        expect(e.inode, isNotNull);
+        expect(e.inode, greaterThanOrEqualTo(9000));
+      }
+    });
+
+    test('inodeBatchProvider 缺失时 inode 为 null（行为不变）', () async {
+      File(abs('a.txt')).writeAsStringSync('1');
+      final bare = MountManager(tempDir.path, xattr: xattr);
+      final entries = await bare.scanLocal(const []);
+      expect(entries.single.inode, isNull);
+    });
+
     test('递归收集并跳过内部项 / 符号链接', () async {
       // 普通文件
       File(abs('a.txt')).writeAsStringSync('12345');
@@ -327,13 +356,13 @@ void main() {
           name: 'a.txt',
           size: 100,
           localSize: 0,
-          status: SyncItemStatus.CloudOnly);
+          status: SyncItemStatus.cloudOnly);
       expect(await mount.checkFileLocalStatus('fid1'), 'placeholder');
     });
 
     test('已下载文件 → synced', () async {
       File(abs('b.txt')).writeAsStringSync('hello');
-      await mount.setFileIdXattr(abs('b.txt'), 'fid2');
+      await xattr.set(abs('b.txt'), xattrFileId, 'fid2');
       await xattr.set(abs('b.txt'), xattrState, stateDownloaded);
       await insertBaseline(
           fileId: 'fid2', localPath: 'b.txt', name: 'b.txt', size: 5);
@@ -361,7 +390,7 @@ void main() {
           fileId: 'fid1',
           localPath: 'a.txt',
           name: 'a.txt',
-          status: SyncItemStatus.CloudOnly);
+          status: SyncItemStatus.cloudOnly);
       File(abs('b.txt')).writeAsStringSync('hi');
       await insertBaseline(fileId: 'fid2', localPath: 'b.txt', name: 'b.txt');
       await insertBaseline(
@@ -384,7 +413,7 @@ void main() {
           fileId: 'fid2',
           localPath: 'b.txt',
           name: 'b.txt',
-          status: SyncItemStatus.CloudOnly);
+          status: SyncItemStatus.cloudOnly);
       final result = await noMount.batchFileLocalStatus(['fid1', 'fid2']);
       expect(result, {'fid1': 'synced', 'fid2': 'not_synced'});
     });
@@ -401,6 +430,53 @@ void main() {
       return staging;
     }
 
+    /// 构造 DB 恢复记录的暂存文件（free_up_staging 表，docs/design/10 §4.8）。
+    Future<String> createDbStaging(String name, String relPath, String fileId,
+        [String content = 'staged content']) async {
+      final staging = abs(name);
+      File(staging).writeAsStringSync(content);
+      final db = await DatabaseService.instance.database;
+      await db.insert('free_up_staging', {
+        'staging_name': name,
+        'relative_path': relPath,
+        'file_id': fileId,
+        'created_at': 1,
+      });
+      return staging;
+    }
+
+    test('DB 恢复记录：未提交 → 恢复原文件并清理记录（无 xattr 标记）',
+        () async {
+      final staging = await createDbStaging(
+          '.hwcloud_freeup-1-db', 'db.txt', 'fid-db', 'db original');
+      await insertBaseline(
+          fileId: 'fid-db', localPath: 'db.txt', name: 'db.txt');
+
+      final db = await DatabaseService.instance.database;
+      final recovered = await mount.recoverInterruptedFreeUp(db);
+
+      expect(recovered, 1);
+      expect(File(staging).existsSync(), isFalse);
+      expect(File(abs('db.txt')).readAsStringSync(), 'db original');
+      // DB 恢复记录已清理
+      expect(await db.query('free_up_staging'), isEmpty);
+    });
+
+    test('DB 恢复记录：暂存文件已缺失（清理窗口）→ 仅清理记录', () async {
+      final db = await DatabaseService.instance.database;
+      await db.insert('free_up_staging', {
+        'staging_name': '.hwcloud_freeup-1-gone',
+        'relative_path': 'gone.txt',
+        'file_id': 'fid-gone',
+        'created_at': 1,
+      });
+
+      final recovered = await mount.recoverInterruptedFreeUp(db);
+
+      expect(recovered, 1);
+      expect(await db.query('free_up_staging'), isEmpty);
+    });
+
     test('已提交（占位+CloudOnly 基线）→ 清理暂存', () async {
       final staging = await createStaging(
           '.hwcloud_freeup-1-aa', 'a.txt', 'fid1', 'original');
@@ -411,7 +487,7 @@ void main() {
           localPath: 'a.txt',
           name: 'a.txt',
           localSize: 0,
-          status: SyncItemStatus.CloudOnly);
+          status: SyncItemStatus.cloudOnly);
 
       final db = await DatabaseService.instance.database;
       final recovered = await mount.recoverInterruptedFreeUp(db);
@@ -435,7 +511,7 @@ void main() {
       expect(File(abs('b.txt')).readAsStringSync(), 'original content');
       // 基线恢复 Synced + 本地大小
       final record = await MountManager.findByFileId(db, 'fid2');
-      expect(record!.status, SyncItemStatus.Synced);
+      expect(record!.status, SyncItemStatus.synced);
       expect(record.localSize, 16);
       // 恢复标记已清
       expect(await xattr.get(abs('b.txt'), xattrFreeUpRelativePath), isNull);

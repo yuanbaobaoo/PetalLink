@@ -229,7 +229,7 @@ class TaskRunner {
   Future<AppResult<TransferTask>> enqueue(TransferTask task) async {
     if (task.id != 0 ||
         task.stateRevision != 0 ||
-        task.state != TransferState.Pending) {
+        task.state != TransferState.pending) {
       await _publishSnapshot();
       return Err(const GenericError(
           message: '新传输意图必须是 id=0/revision=0 的 Pending 任务'));
@@ -246,9 +246,25 @@ class TaskRunner {
   /// 仅接受 Failed 状态；转 Pending 前先做静态与后端前置校验，
   /// 校验拒绝持久化到目标态（Failed/RestartRequired），不盲目重放。
   Future<AppResult<void>> retry(int taskId) async {
+    final prepared = await prepareRetry(taskId);
+    if (prepared.isErr) return Err((prepared as Err).error);
+    final pending = (prepared as Ok<TransferTask>).value;
+    // 对齐 Rust retry 内联 run_expected(pending, run_backend_preflight=false)：
+    // 后端前置校验已在 prepareRetry 执行过一次，不再重复。
+    _track(pending, () => _runExpected(pending, runBackendPreflight: false));
+    await _pumpLoop();
+    return const Ok(null);
+  }
+
+  /// 重试准备（对齐 Rust `prepare_retry`）：
+  /// 加载 → Failed 校验 → 静态/后端前置校验 → revision 复查 → 转 Pending。
+  ///
+  /// 成功返回 Pending 任务行；调用方随后用 [runPreparedAndAwait]
+  /// 驱动执行并等待结果（对齐 Rust `retry_transfer` 的 spawn run_prepared）。
+  Future<AppResult<TransferTask>> prepareRetry(int taskId) async {
     final loaded = await _transferService.getTaskById(taskId);
     final task = loaded.unwrapOr(null);
-    if (task == null || task.state != TransferState.Failed) {
+    if (task == null || task.state != TransferState.failed) {
       await _publishSnapshot();
       return Err(const GenericError(message: '任务不存在或非失败状态'));
     }
@@ -276,14 +292,14 @@ class TaskRunner {
     // 接受重试：revision 复查后转 Pending（对齐 accept_retry_after_preflight）
     final fresh = (await _transferService.getTaskById(taskId)).unwrapOr(null);
     if (fresh == null ||
-        fresh.state != TransferState.Failed ||
+        fresh.state != TransferState.failed ||
         fresh.stateRevision != task.stateRevision) {
       await _publishSnapshot();
       return Err(const GenericError(message: '传输任务状态已变化，请刷新后重试'));
     }
     final pending = await _transition(
       fresh,
-      TransferState.Pending,
+      TransferState.pending,
       TransferPatch.clearingError(attemptCount: fresh.attemptCount + 1),
     );
     if (pending == null) {
@@ -295,11 +311,17 @@ class TaskRunner {
     } catch (e) {
       AppLogger.w('任务 $taskId retry 后 SYNCING 回写失败（忽略）: $e');
     }
-    // 对齐 Rust retry 内联 run_expected(pending, run_backend_preflight=false)：
-    // 后端前置校验已在上方执行过一次，不再重复（上传稳定性检查不会跑两遍）。
-    _track(pending, () => _runExpected(pending, runBackendPreflight: false));
-    await _pumpLoop();
-    return const Ok(null);
+    return Ok(pending);
+  }
+
+  /// 驱动已就绪的 Pending 任务执行并等待 outcome
+  /// （对齐 Rust `run_prepared`：执行含 outcome 修正的完整结算）。
+  Future<TaskExecutionOutcome> runPreparedAndAwait(int taskId) async {
+    final task = (await _transferService.getTaskById(taskId)).unwrapOr(null);
+    if (task == null || task.state != TransferState.pending) {
+      throw AppError.generic('任务 $taskId 不存在或不在 Pending 状态');
+    }
+    return _runAndAwaitOutcome(task);
   }
 
   /// 是否存在 Pending/Running 任务（对齐 Rust `transfer_has_active` 命令）。
@@ -326,7 +348,7 @@ class TaskRunner {
   ) async {
     if (task.id != 0 ||
         task.stateRevision != 0 ||
-        task.state != TransferState.Pending) {
+        task.state != TransferState.pending) {
       await _publishSnapshot();
       return Err(const GenericError(
           message: '新传输意图必须是 id=0/revision=0 的 Pending 任务'));
@@ -350,8 +372,8 @@ class TaskRunner {
     // 1. 在途写优先：Running/VerifyingRemote
     final inflight = blocking
         .where((t) =>
-            t.state == TransferState.Running ||
-            t.state == TransferState.VerifyingRemote)
+            t.state == TransferState.running ||
+            t.state == TransferState.verifyingRemote)
         .firstOrNull;
     if (inflight != null) {
       if (_sameTransferIntent(inflight, task)) {
@@ -372,7 +394,7 @@ class TaskRunner {
     // 2. 歧义重启提升（在 pathTasks 全体上找，不限 blocking）
     final ambiguous = pathTasks
         .where((t) =>
-            t.state == TransferState.RestartRequired &&
+            t.state == TransferState.restartRequired &&
             _hasAmbiguousRemoteWriteResult(t))
         .firstOrNull;
     if (ambiguous != null) {
@@ -410,7 +432,7 @@ class TaskRunner {
 
     // 5. 普通 RestartRequired 重规划
     final restart = pathTasks
-        .where((t) => t.state == TransferState.RestartRequired)
+        .where((t) => t.state == TransferState.restartRequired)
         .firstOrNull;
     if (restart != null) {
       final replanned = await _replanTask(restart, task);
@@ -424,7 +446,7 @@ class TaskRunner {
 
     // 6. Failed 路径屏障（保留可见错误供显式重试）
     final failed = pathTasks
-        .where((t) => t.state == TransferState.Failed)
+        .where((t) => t.state == TransferState.failed)
         .firstOrNull;
     if (failed != null) {
       return Ok(EnqueuedTaskOutcome(
@@ -446,17 +468,17 @@ class TaskRunner {
   /// 阻塞态判定（对齐 Rust `is_path_blocking_state`；
   /// 不含 RestartRequired/Completed/Failed/Canceled）。
   bool _isPathBlockingState(TransferState state) {
-    return state == TransferState.Pending ||
-        state == TransferState.Running ||
-        state == TransferState.WaitingForNetwork ||
-        state == TransferState.BackingOff ||
-        state == TransferState.VerifyingRemote;
+    return state == TransferState.pending ||
+        state == TransferState.running ||
+        state == TransferState.waitingForNetwork ||
+        state == TransferState.backingOff ||
+        state == TransferState.verifyingRemote;
   }
 
   /// 歧义远端写入判定：Create/Update 且已持久化远端结果 ID。
   bool _hasAmbiguousRemoteWriteResult(TransferTask task) {
-    return (task.operation == TransferOperation.Create ||
-            task.operation == TransferOperation.Update) &&
+    return (task.operation == TransferOperation.create ||
+            task.operation == TransferOperation.update) &&
         _hasPersistedRemoteResult(task);
   }
 
@@ -472,20 +494,20 @@ class TaskRunner {
       return false;
     }
     switch (left.operation) {
-      case TransferOperation.Create:
-      case TransferOperation.Update:
+      case TransferOperation.create:
+      case TransferOperation.update:
         if (left.parentFileId != right.parentFileId ||
             left.sourceMtime != right.sourceMtime ||
             left.sourceSize != right.sourceSize) {
           return false;
         }
-        if (left.operation == TransferOperation.Update &&
+        if (left.operation == TransferOperation.update &&
             left.expectedCloudEditedTime != right.expectedCloudEditedTime) {
           return false;
         }
         return true;
-      case TransferOperation.Download:
-      case TransferOperation.DownloadUpdate:
+      case TransferOperation.download:
+      case TransferOperation.downloadUpdate:
         return left.parentFileId == right.parentFileId &&
             left.expectedCloudEditedTime == right.expectedCloudEditedTime;
       default:
@@ -496,12 +518,12 @@ class TaskRunner {
   /// 活动态 → 调度去向（对齐 Rust `active_task_disposition`）。
   TaskDisposition _dispositionForState(TransferState state) {
     return switch (state) {
-      TransferState.Pending => TaskDisposition.pending,
-      TransferState.Running => TaskDisposition.running,
-      TransferState.WaitingForNetwork => TaskDisposition.waitingForNetwork,
-      TransferState.BackingOff => TaskDisposition.backingOff,
-      TransferState.VerifyingRemote => TaskDisposition.verifyingRemote,
-      TransferState.RestartRequired => TaskDisposition.restartRequired,
+      TransferState.pending => TaskDisposition.pending,
+      TransferState.running => TaskDisposition.running,
+      TransferState.waitingForNetwork => TaskDisposition.waitingForNetwork,
+      TransferState.backingOff => TaskDisposition.backingOff,
+      TransferState.verifyingRemote => TaskDisposition.verifyingRemote,
+      TransferState.restartRequired => TaskDisposition.restartRequired,
       _ => TaskDisposition.completed,
     };
   }
@@ -514,12 +536,12 @@ class TaskRunner {
     TransferTask replacement,
   ) async {
     var cur = current;
-    if (cur.state != TransferState.RestartRequired) {
+    if (cur.state != TransferState.restartRequired) {
       final restarted = await _transition(
         cur,
-        TransferState.RestartRequired,
+        TransferState.restartRequired,
         const TransferPatch(
-          errorKind: SetPatch(TransferErrorKind.LocalChanged),
+          errorKind: SetPatch(TransferErrorKind.localChanged),
           errorMessage: SetPatch('新的 planner intent 已取代尚未执行的旧任务'),
           nextRetryAt: ClearPatch(),
           finishedAt: ClearPatch(),
@@ -531,7 +553,7 @@ class TaskRunner {
     final sessionUrl = replacement.sessionUrl;
     final pending = await _transition(
       cur,
-      TransferState.Pending,
+      TransferState.pending,
       TransferPatch(
         errorKind: const ClearPatch(),
         errorMessage: const ClearPatch(),
@@ -603,7 +625,7 @@ class TaskRunner {
     final active = (await _transferService.getActiveTasks()).unwrapOr([]);
     var promoted = 0;
     for (final task in active) {
-      if (task.state == TransferState.RestartRequired &&
+      if (task.state == TransferState.restartRequired &&
           _hasAmbiguousRemoteWriteResult(task)) {
         final result = await _promoteRestartToVerifying(task);
         if (result != null) promoted++;
@@ -612,78 +634,112 @@ class TaskRunner {
     return promoted;
   }
 
-  /// 恢复到期远端核验（对齐 Rust `resume_verifying`；返回核验后到达
-  /// Completed 的任务数）。
-  Future<int> resumeVerifying() async {
-    if (!_isOnline()) return 0;
+  /// 恢复到期远端核验（对齐 Rust `resume_verifying`）。
+  ///
+  /// 返回恢复汇总：到达 Completed 的任务数 + 核验确认的云端写入结果
+  /// （对齐 Rust `TaskRecoverySummary`；引擎据此把恢复结果提交 live
+  /// 云树与 checkpoint）。
+  Future<TaskRecoverySummary> resumeVerifying() async {
+    final summary = TaskRecoverySummary();
+    if (!_isOnline()) return summary;
     final now = _nowMs();
     final active = (await _transferService.getActiveTasks()).unwrapOr([]);
-    final scheduled = <TransferTask>[];
+    final jobs = <(TransferTask, Future<TaskExecutionOutcome?>)>[];
     for (final task in active) {
-      if (task.state != TransferState.VerifyingRemote) continue;
+      if (task.state != TransferState.verifyingRemote) continue;
       if (_inFlight.containsKey(task.id)) continue;
       final rel = task.relativePath;
       if (rel != null && _activePaths.contains(rel)) continue;
       final dueAt = task.nextRetryAt;
       if (dueAt != null && dueAt > now) continue;
-      _track(task, () => _resumeVerifyingTask(task));
-      scheduled.add(task);
+      final completer = Completer<TaskExecutionOutcome?>();
+      _track(task, () async {
+        try {
+          completer.complete(await _resumeVerifyingTask(task));
+        } catch (e) {
+          // 对齐 Rust：单任务失败 warn 后继续处理其他任务
+          AppLogger.w('任务 ${task.id} 远端核验恢复失败: $e');
+          completer.complete(null);
+        }
+      });
+      jobs.add((task, completer.future));
     }
-    return _awaitAndCountCompleted(scheduled);
+    for (final (task, future) in jobs) {
+      _recordRecovered(summary, task, await future);
+    }
+    return summary;
   }
 
   /// 恢复等待网络任务（对齐 Rust `resume_waiting`）。
-  Future<int> resumeWaiting() async {
-    if (!_isOnline()) return 0;
+  Future<TaskRecoverySummary> resumeWaiting() async {
+    final summary = TaskRecoverySummary();
+    if (!_isOnline()) return summary;
     final active = (await _transferService.getActiveTasks()).unwrapOr([]);
-    final scheduled = <TransferTask>[];
+    final jobs = <(TransferTask, Future<TaskExecutionOutcome?>)>[];
     for (final task in active) {
-      if (task.state != TransferState.WaitingForNetwork) continue;
+      if (task.state != TransferState.waitingForNetwork) continue;
       if (_inFlight.containsKey(task.id)) continue;
       final rel = task.relativePath;
       if (rel != null && _activePaths.contains(rel)) continue;
-      _track(task, () => _runExpected(task));
-      scheduled.add(task);
+      jobs.add((task, _scheduleAndObserve(task)));
     }
-    return _awaitAndCountCompleted(scheduled);
+    for (final (task, future) in jobs) {
+      _recordRecovered(summary, task, await future);
+    }
+    return summary;
   }
 
   /// 恢复到期退避任务（对齐 Rust `resume_due_backoff`）。
-  Future<int> resumeDueBackoff() async {
-    if (!_isOnline()) return 0;
+  Future<TaskRecoverySummary> resumeDueBackoff() async {
+    final summary = TaskRecoverySummary();
+    if (!_isOnline()) return summary;
     final now = _nowMs();
     final active = (await _transferService.getActiveTasks()).unwrapOr([]);
-    final scheduled = <TransferTask>[];
+    final jobs = <(TransferTask, Future<TaskExecutionOutcome?>)>[];
     for (final task in active) {
-      if (task.state != TransferState.BackingOff) continue;
+      if (task.state != TransferState.backingOff) continue;
       if (_inFlight.containsKey(task.id)) continue;
       final rel = task.relativePath;
       if (rel != null && _activePaths.contains(rel)) continue;
       final dueAt = task.nextRetryAt;
       if (dueAt != null && dueAt > now) continue;
-      _track(task, () => _runExpected(task));
-      scheduled.add(task);
+      jobs.add((task, _scheduleAndObserve(task)));
     }
-    return _awaitAndCountCompleted(scheduled);
+    for (final (task, future) in jobs) {
+      _recordRecovered(summary, task, await future);
+    }
+    return summary;
   }
 
-  /// 等待调度任务收尾并统计到达 Completed 的数量。
-  Future<int> _awaitAndCountCompleted(List<TransferTask> scheduled) async {
-    if (scheduled.isEmpty) return 0;
-    final futures = <Future<void>>[
-      for (final task in scheduled)
-        if (_inFlight[task.id] != null) _inFlight[task.id]!,
-    ];
-    if (futures.isNotEmpty) {
-      await Future.wait(futures, eagerError: false);
+  /// 调度执行并观察 outcome（watcher 模式；异常归一为 null，
+  /// 对齐 Rust warn-and-continue）。
+  Future<TaskExecutionOutcome?> _scheduleAndObserve(TransferTask task) {
+    final completer = Completer<TaskExecutionOutcome>();
+    _outcomeWatchers[task.id] = completer;
+    _track(task, () => _runExpected(task));
+    return completer.future.then<TaskExecutionOutcome?>(
+      (outcome) => outcome,
+      onError: (_) => null,
+    ).whenComplete(() => _outcomeWatchers.remove(task.id));
+  }
+
+  /// 汇总单个恢复任务（对齐 Rust `record_recovered_task`）：
+  /// 仅 Completed 计数；携带云端元数据且有相对路径时记录恢复文件。
+  void _recordRecovered(
+    TaskRecoverySummary summary,
+    TransferTask task,
+    TaskExecutionOutcome? outcome,
+  ) {
+    if (outcome == null || outcome.disposition != TaskDisposition.completed) {
+      return;
     }
-    var completed = 0;
-    for (final task in scheduled) {
-      final fresh = (await _transferService.getTaskById(task.id))
-          .unwrapOr(null);
-      if (fresh?.state == TransferState.Completed) completed++;
+    summary.completed++;
+    final rel = task.relativePath;
+    final file = outcome.cloudFile;
+    if (rel != null && file != null) {
+      summary.recoveredCloudFiles
+          .add(RecoveredCloudFile(relativePath: rel, file: file));
     }
-    return completed;
   }
 
   /// BackingOff/VerifyingRemote 的最小 next_retry_at（backoff 调度器用，
@@ -692,8 +748,8 @@ class TaskRunner {
     final active = (await _transferService.getActiveTasks()).unwrapOr([]);
     int? min;
     for (final task in active) {
-      if (task.state != TransferState.BackingOff &&
-          task.state != TransferState.VerifyingRemote) {
+      if (task.state != TransferState.backingOff &&
+          task.state != TransferState.verifyingRemote) {
         continue;
       }
       final at = task.nextRetryAt;
@@ -780,7 +836,7 @@ class TaskRunner {
     // 1. 到期远端核验（对齐 resume_verifying：离线整体跳过；next_retry_at 空视为到期）
     if (online) {
       for (final task in active) {
-        if (task.state != TransferState.VerifyingRemote) continue;
+        if (task.state != TransferState.verifyingRemote) continue;
         if (!idle(task) || pathBusy(task)) continue;
         final dueAt = task.nextRetryAt;
         if (dueAt != null && dueAt > now) continue;
@@ -799,20 +855,20 @@ class TaskRunner {
 
     if (online) {
       for (final task in active) {
-        if (task.state != TransferState.WaitingForNetwork) continue;
+        if (task.state != TransferState.waitingForNetwork) continue;
         if (!idle(task) || pathBusy(task)) continue;
         _track(task, () => _runExpected(task));
         return true;
       }
       for (final task in active) {
-        if (task.state != TransferState.BackingOff || !due(task)) continue;
+        if (task.state != TransferState.backingOff || !due(task)) continue;
         if (!idle(task) || pathBusy(task)) continue;
         _track(task, () => _runExpected(task));
         return true;
       }
     }
     for (final task in active) {
-      if (task.state != TransferState.Pending) continue;
+      if (task.state != TransferState.pending) continue;
       if (!idle(task) || pathBusy(task)) continue;
       // 离线时也准入：执行链按 Rust 语义转 WaitingForNetwork
       _track(task, () => _runExpected(task));
@@ -858,16 +914,16 @@ class TaskRunner {
     bool runBackendPreflight = true,
   }) async {
     final state = current.state;
-    if (state != TransferState.Pending &&
-        state != TransferState.WaitingForNetwork &&
-        state != TransferState.BackingOff) {
+    if (state != TransferState.pending &&
+        state != TransferState.waitingForNetwork &&
+        state != TransferState.backingOff) {
       AppLogger.w('任务 ${current.id} 状态 ${state.name} 不可执行');
       _failOutcome(current.id,
           AppError.generic('任务状态 ${state.name} 不可执行'));
       await _publishSnapshot();
       return;
     }
-    if (state == TransferState.BackingOff && current.nextRetryAt == null) {
+    if (state == TransferState.backingOff && current.nextRetryAt == null) {
       await _persistPreflightRejection(
         current,
         const PreflightFailure.validation('退避任务缺少 next_retry_at，拒绝立即重放'),
@@ -881,7 +937,7 @@ class TaskRunner {
       await _validateStatic(current);
     } on PreflightFailure catch (failure) {
       await _persistPreflightRejection(current, failure);
-      if (failure.target == TransferState.Failed) {
+      if (failure.target == TransferState.failed) {
         _failOutcome(current.id, AppError.generic(failure.message));
       } else {
         _completeOutcome(
@@ -893,11 +949,11 @@ class TaskRunner {
     }
     // 在线门控（离线：Pending → WaitingForNetwork；其余停留）
     if (!_isOnline()) {
-      if (state == TransferState.Pending) {
+      if (state == TransferState.pending) {
         await _transitionFailure(
           current,
-          TransferState.WaitingForNetwork,
-          TransferErrorKind.Network,
+          TransferState.waitingForNetwork,
+          TransferErrorKind.network,
           '网络不可用，等待恢复',
         );
         _completeOutcome(
@@ -914,7 +970,7 @@ class TaskRunner {
       return;
     }
     // 退避到期检查（对齐 Rust notify_rejection：早退也发布一次快照）
-    if (state == TransferState.BackingOff &&
+    if (state == TransferState.backingOff &&
         (current.nextRetryAt ?? 0) > _nowMs()) {
       _completeOutcome(
           current.id,
@@ -936,7 +992,7 @@ class TaskRunner {
             message: failure.message,
           ),
         );
-        if (failure.target == TransferState.Failed) {
+        if (failure.target == TransferState.failed) {
           _failOutcome(current.id, AppError.generic(failure.message));
         } else {
           _completeOutcome(
@@ -966,13 +1022,21 @@ class TaskRunner {
         _failOutcome(running.id, AppError.generic('传输任务状态已变化'));
         return;
       }
-      await _settleOutcome(running, outcome);
-      _completeOutcome(running.id, outcome);
+      // 对齐 Rust execution.rs：结算可能把任务落库为
+      // VerifyingRemote/RestartRequired，必须按落库状态修正 outcome 再
+      // 上报，否则引擎会按原始 completed 误结算基线
+      final corrected = await _settleOutcome(running, outcome);
+      if (corrected == null) {
+        // 非法成功核验目标（对齐 Rust 返回 Err）
+        _failOutcome(running.id, AppError.generic('非法成功核验目标状态'));
+        return;
+      }
+      _completeOutcome(running.id, corrected);
     } on TaskRestartRequired catch (e) {
       await _transitionFailure(
         running,
-        TransferState.RestartRequired,
-        TransferErrorKind.LocalChanged,
+        TransferState.restartRequired,
+        TransferErrorKind.localChanged,
         e.message,
       );
       _completeOutcome(
@@ -992,7 +1056,7 @@ class TaskRunner {
         (await _transferService.getTaskById(running.id)).unwrapOr(null);
     if (fresh == null ||
         fresh.stateRevision != running.stateRevision ||
-        fresh.state != TransferState.Running) {
+        fresh.state != TransferState.running) {
       AppLogger.d('任务 ${running.id} 状态已变化，忽略过期回调');
       return false;
     }
@@ -1014,12 +1078,12 @@ class TaskRunner {
     var promotedAny = false;
     for (final candidate in active) {
       if (candidate.id == current.id || candidate.relativePath != rel) continue;
-      if (candidate.state == TransferState.Running ||
-          candidate.state == TransferState.VerifyingRemote) {
+      if (candidate.state == TransferState.running ||
+          candidate.state == TransferState.verifyingRemote) {
         AppLogger.d('任务 ${current.id} 被同路径活动意图 ${candidate.id} 阻塞');
         return null;
       }
-      if (candidate.state == TransferState.RestartRequired &&
+      if (candidate.state == TransferState.restartRequired &&
           _hasPersistedRemoteResult(candidate)) {
         await _promoteRestartToVerifying(
           candidate,
@@ -1032,7 +1096,7 @@ class TaskRunner {
     if (promotedAny) return null;
     return _transition(
       current,
-      TransferState.Running,
+      TransferState.running,
       const TransferPatch.clearingError(),
     );
   }
@@ -1042,7 +1106,12 @@ class TaskRunner {
   // ═══════════════════════════════════════════════════════════════════
 
   /// 按后端执行结果结算（成功核验 / 延迟状态持久化）。
-  Future<void> _settleOutcome(
+  ///
+  /// 返回**按落库状态修正后**的 outcome（对齐 Rust execution.rs 的
+  /// `output.disposition` 改写）：任务被迁移为 VerifyingRemote /
+  /// RestartRequired 时，上报的 disposition 同步修正，引擎不得按原始
+  /// completed 结算。返回 null 表示非法成功核验目标（对齐 Rust Err）。
+  Future<TaskExecutionOutcome?> _settleOutcome(
     TransferTask running,
     TaskExecutionOutcome outcome,
   ) async {
@@ -1053,14 +1122,16 @@ class TaskRunner {
         } on PreflightFailure catch (failure) {
           // 上传且远端已返回资源 ID → 禁止直接重放，进入核验
           final remoteId = outcome.cloudFile?.id;
-          final isUpload = running.operation == TransferOperation.Create ||
-              running.operation == TransferOperation.Update;
+          final isUpload = running.operation == TransferOperation.create ||
+              running.operation == TransferOperation.update;
+          final TransferState target;
           if (isUpload && remoteId != null && remoteId.trim().isNotEmpty) {
+            target = TransferState.verifyingRemote;
             await _transition(
               running,
-              TransferState.VerifyingRemote,
+              TransferState.verifyingRemote,
               TransferPatch(
-                errorKind: const SetPatch(TransferErrorKind.RemoteAmbiguous),
+                errorKind: const SetPatch(TransferErrorKind.remoteAmbiguous),
                 errorMessage:
                     SetPatch('${failure.message}；远端已返回资源 ID，禁止直接重放'),
                 remoteResultFileId: SetPatch(remoteId),
@@ -1069,6 +1140,7 @@ class TaskRunner {
           } else {
             // 对齐 Rust execution.rs：finished_at 保持 Keep；
             // 远端已返回资源 ID 时仍持久化 remote_result_file_id
+            target = failure.target;
             await _transition(
               running,
               failure.target,
@@ -1081,15 +1153,26 @@ class TaskRunner {
               ),
             );
           }
-          return;
+          // 按落库状态修正 outcome（对齐 Rust output.disposition 改写）
+          return switch (target) {
+            TransferState.verifyingRemote => TaskExecutionOutcome(
+                cloudFile: outcome.cloudFile,
+                disposition: TaskDisposition.verifyingRemote,
+              ),
+            TransferState.restartRequired => TaskExecutionOutcome(
+                cloudFile: outcome.cloudFile,
+                disposition: TaskDisposition.restartRequired,
+              ),
+            _ => null, // Failed 等非法成功核验目标：对齐 Rust 返回 Err
+          };
         }
-        await _settleSuccess(running, outcome);
+        return _settleSuccess(running, outcome);
       case TaskDisposition.verifyingRemote:
         await _transition(
           running,
-          TransferState.VerifyingRemote,
+          TransferState.verifyingRemote,
           TransferPatch(
-            errorKind: const SetPatch(TransferErrorKind.RemoteAmbiguous),
+            errorKind: const SetPatch(TransferErrorKind.remoteAmbiguous),
             errorMessage:
                 const SetPatch('远端写入已返回资源 ID，但完整元数据尚未确认'),
             nextRetryAt: SetPatch(_nowMs() + verifyInitialDelayMs),
@@ -1098,24 +1181,27 @@ class TaskRunner {
                 : const KeepPatch(),
           ),
         );
+        return outcome;
       case TaskDisposition.waitingForNetwork:
         await _transition(
           running,
-          TransferState.WaitingForNetwork,
+          TransferState.waitingForNetwork,
           const TransferPatch(
-            errorKind: SetPatch(TransferErrorKind.Network),
+            errorKind: SetPatch(TransferErrorKind.network),
             errorMessage: SetPatch('后端请求等待网络恢复'),
           ),
         );
+        return outcome;
       case TaskDisposition.restartRequired:
         await _transition(
           running,
-          TransferState.RestartRequired,
+          TransferState.restartRequired,
           const TransferPatch(
-            errorKind: SetPatch(TransferErrorKind.LocalChanged),
+            errorKind: SetPatch(TransferErrorKind.localChanged),
             errorMessage: SetPatch('本地源已变化，需要重新规划'),
           ),
         );
+        return outcome;
       case TaskDisposition.pending ||
             TaskDisposition.running ||
             TaskDisposition.blockedByActiveIntent ||
@@ -1125,6 +1211,8 @@ class TaskRunner {
           AppError.generic(
               '后端返回缺少可持久化恢复条件的状态 ${outcome.disposition.name}'),
         );
+        // _settleError 已自行完结 watcher，返回值不再被消费
+        return outcome;
     }
   }
 
@@ -1134,8 +1222,8 @@ class TaskRunner {
     if (operation == null) {
       await _transitionFailure(
         running,
-        TransferState.Failed,
-        TransferErrorKind.Validation,
+        TransferState.failed,
+        TransferErrorKind.validation,
         '任务缺少 operation',
       );
       return;
@@ -1161,24 +1249,24 @@ class TaskRunner {
     }
     final (state, nextRetryAt) = switch (classified.decision) {
       WaitForNetworkDecision() => (
-          TransferState.WaitingForNetwork,
+          TransferState.waitingForNetwork,
           const ClearPatch<int>(),
         ),
       BackoffDecision(:final nextRetryAt) => (
-          TransferState.BackingOff,
+          TransferState.backingOff,
           SetPatch<int>(nextRetryAt),
         ),
       VerifyRemoteDecision() => (
-          TransferState.VerifyingRemote,
+          TransferState.verifyingRemote,
           SetPatch<int>(_nowMs() + verifyInitialDelayMs),
         ),
       // DriveClient 负责唯一一次带认证重放；首次 401 不由 runner 盲目重放
       RefreshAuthDecision() => (
-          TransferState.Failed,
+          TransferState.failed,
           const ClearPatch<int>(),
         ),
       FailDecision() => (
-          TransferState.Failed,
+          TransferState.failed,
           const ClearPatch<int>(),
         ),
     };
@@ -1189,13 +1277,13 @@ class TaskRunner {
         errorKind: SetPatch(classified.kind),
         errorMessage: SetPatch('$error'),
         nextRetryAt: nextRetryAt,
-        finishedAt: state == TransferState.Failed
+        finishedAt: state == TransferState.failed
             ? SetPatch(_nowMs())
             : const ClearPatch(),
         attemptCount: attempts,
       ),
     );
-    if (state == TransferState.Failed) {
+    if (state == TransferState.failed) {
       // 永久失败：sync_items FAILED 回写（仅旧状态白名单覆盖）
       if (updated != null) {
         try {
@@ -1215,21 +1303,22 @@ class TaskRunner {
 
   /// 原子完成任务结算（对齐 Rust `settle_success` 的任务行部分；
   /// sync_items 基线结算属引擎任务接缝）。
-  Future<void> _settleSuccess(
+  Future<TaskExecutionOutcome> _settleSuccess(
     TransferTask running,
     TaskExecutionOutcome outcome,
   ) async {
     final operation = running.operation;
     if (operation == null) {
       await _settleError(running, AppError.generic('任务缺少 operation'));
-      return;
+      // _settleError 已自行完结 watcher，返回值不再被消费
+      return outcome;
     }
     final String? resultFileId = switch (operation) {
-      TransferOperation.Create ||
-      TransferOperation.Update =>
+      TransferOperation.create ||
+      TransferOperation.update =>
         outcome.cloudFile?.id,
-      TransferOperation.Download ||
-      TransferOperation.DownloadUpdate =>
+      TransferOperation.download ||
+      TransferOperation.downloadUpdate =>
         running.fileId,
       _ => outcome.cloudFile?.id ?? running.fileId,
     };
@@ -1243,38 +1332,46 @@ class TaskRunner {
         AppLogger.w('任务 ${running.id} 基线结算失败，进入恢复路径: $e');
         const message = '后端已完成，但本地同步基线结算失败';
         switch (operation) {
-          case TransferOperation.Create:
-          case TransferOperation.Update:
+          case TransferOperation.create:
+          case TransferOperation.update:
             await _transition(
               running,
-              TransferState.VerifyingRemote,
+              TransferState.verifyingRemote,
               TransferPatch(
-                errorKind: const SetPatch(TransferErrorKind.RemoteAmbiguous),
+                errorKind: const SetPatch(TransferErrorKind.remoteAmbiguous),
                 errorMessage: const SetPatch(message),
                 remoteResultFileId: outcome.cloudFile != null
                     ? SetPatch(outcome.cloudFile!.id)
                     : const KeepPatch(),
               ),
             );
-          case TransferOperation.Download:
-          case TransferOperation.DownloadUpdate:
+            // 按落库状态修正 outcome（对齐 Rust recover_success_settlement_failure）
+            return TaskExecutionOutcome(
+              cloudFile: outcome.cloudFile,
+              disposition: TaskDisposition.verifyingRemote,
+            );
+          case TransferOperation.download:
+          case TransferOperation.downloadUpdate:
             await _transition(
               running,
-              TransferState.RestartRequired,
+              TransferState.restartRequired,
               const TransferPatch(
-                errorKind: SetPatch(TransferErrorKind.Unknown),
+                errorKind: SetPatch(TransferErrorKind.unknown),
                 errorMessage: SetPatch(message),
               ),
             );
+            return TaskExecutionOutcome(
+              cloudFile: outcome.cloudFile,
+              disposition: TaskDisposition.restartRequired,
+            );
           default:
-            break;
+            return outcome;
         }
-        return;
       }
     }
     final completed = await _transition(
       running,
-      TransferState.Completed,
+      TransferState.completed,
       TransferPatch.clearingError(
         finishedAt: SetPatch(_nowMs()),
         remoteResultFileId: resultFileId != null
@@ -1283,38 +1380,47 @@ class TaskRunner {
         transferred: running.totalSize,
       ),
     );
-    if (completed != null) return;
+    if (completed != null) return outcome;
     // Completed 迁移失败（CAS 冲突或 DB 错误）：
     // 对齐 Rust recover_success_settlement_failure——后端已完成但结算未落地，
     // 上传禁止盲目重放（转远端核验），下载回 planner 重新规划。
     const message = '后端已完成，但本地同步基线结算失败（迁移被拒绝或写入失败）';
     switch (operation) {
-      case TransferOperation.Create:
-      case TransferOperation.Update:
+      case TransferOperation.create:
+      case TransferOperation.update:
         await _transition(
           running,
-          TransferState.VerifyingRemote,
+          TransferState.verifyingRemote,
           TransferPatch(
-            errorKind: const SetPatch(TransferErrorKind.RemoteAmbiguous),
+            errorKind: const SetPatch(TransferErrorKind.remoteAmbiguous),
             errorMessage: const SetPatch(message),
             remoteResultFileId: outcome.cloudFile != null
                 ? SetPatch(outcome.cloudFile!.id)
                 : const KeepPatch(),
           ),
         );
-      case TransferOperation.Download:
-      case TransferOperation.DownloadUpdate:
+        return TaskExecutionOutcome(
+          cloudFile: outcome.cloudFile,
+          disposition: TaskDisposition.verifyingRemote,
+        );
+      case TransferOperation.download:
+      case TransferOperation.downloadUpdate:
         await _transition(
           running,
-          TransferState.RestartRequired,
+          TransferState.restartRequired,
           const TransferPatch(
-            errorKind: SetPatch(TransferErrorKind.Unknown),
+            errorKind: SetPatch(TransferErrorKind.unknown),
             errorMessage: SetPatch(message),
           ),
+        );
+        return TaskExecutionOutcome(
+          cloudFile: outcome.cloudFile,
+          disposition: TaskDisposition.restartRequired,
         );
       default:
         // Flutter 扩展操作：迁移失败时任务滞留 Running，由启动恢复收敛
         AppLogger.w('任务 ${running.id} 完成结算迁移失败，滞留 Running 等待启动恢复');
+        return outcome;
     }
   }
 
@@ -1328,8 +1434,8 @@ class TaskRunner {
       throw const PreflightFailure.validation('成功核验缺少 operation');
     }
     switch (operation) {
-      case TransferOperation.Create:
-      case TransferOperation.Update:
+      case TransferOperation.create:
+      case TransferOperation.update:
         final cloud = outcome.cloudFile;
         if (cloud == null) {
           throw const PreflightFailure.remoteAmbiguous('上传结果缺少远端资源');
@@ -1339,12 +1445,12 @@ class TaskRunner {
             cloud.name != running.name ||
             cloud.editedTime == null ||
             cloud.size != (running.sourceSize ?? -1) ||
-            (operation == TransferOperation.Update &&
+            (operation == TransferOperation.update &&
                 running.fileId != cloud.id)) {
           throw const PreflightFailure.remoteAmbiguous('上传结果元数据不完整或大小不一致');
         }
-      case TransferOperation.Download:
-      case TransferOperation.DownloadUpdate:
+      case TransferOperation.download:
+      case TransferOperation.downloadUpdate:
         final localPath = running.localPath;
         if (localPath == null) {
           throw const PreflightFailure.validation('成功核验缺少本地路径');
@@ -1357,10 +1463,10 @@ class TaskRunner {
             stat.size != running.totalSize) {
           throw const PreflightFailure.localChanged('下载结果大小或云端版本不匹配');
         }
-      case TransferOperation.Delete ||
-            TransferOperation.Move ||
-            TransferOperation.Rename ||
-            TransferOperation.CreateFolder:
+      case TransferOperation.delete ||
+            TransferOperation.move ||
+            TransferOperation.rename ||
+            TransferOperation.createFolder:
         // Flutter 扩展操作：files API 已完成写后验证（身份/名称/recycled）
         break;
     }
@@ -1371,7 +1477,10 @@ class TaskRunner {
   // ═══════════════════════════════════════════════════════════════════
 
   /// 核验并结算一个远端结果不确定的任务。
-  Future<void> _resumeVerifyingTask(TransferTask task) async {
+  /// 返回结算后的修正 outcome（Completed 时供恢复汇总记录）；
+  /// 未决/歧义/失败返回 null（对齐 Rust resume_verifying_task 的
+  /// Option 语义）。
+  Future<TaskExecutionOutcome?> _resumeVerifyingTask(TransferTask task) async {
     final RemoteVerification verification;
     try {
       verification = await _operations.verifyRemote(task);
@@ -1380,13 +1489,13 @@ class TaskRunner {
       AppLogger.w('任务 ${task.id} 远端写入核验暂不可用，保留歧义状态: $e');
       await _patchInState(
         task,
-        TransferState.VerifyingRemote,
+        TransferState.verifyingRemote,
         TransferPatch(
           errorMessage: SetPatch('远端核验暂不可用：$e'),
           nextRetryAt: SetPatch(_nowMs() + verifyUnavailableDelayMs),
         ),
       );
-      return;
+      return null;
     }
     switch (verification) {
       case RemoteCommitted(:final file):
@@ -1401,30 +1510,30 @@ class TaskRunner {
             errorKind: SetPatch(failure.kind),
             errorMessage:
                 SetPatch('远端写入已确认，但结果仍无法安全结算：${failure.message}'),
-            nextRetryAt: failure.target == TransferState.VerifyingRemote
+            nextRetryAt: failure.target == TransferState.verifyingRemote
                 ? SetPatch(_nowMs() + verifyAmbiguousDelayMs)
                 : const ClearPatch(),
             remoteResultFileId: SetPatch(file.id),
           );
-          if (failure.target == TransferState.VerifyingRemote) {
-            await _patchInState(task, TransferState.VerifyingRemote, patch);
+          if (failure.target == TransferState.verifyingRemote) {
+            await _patchInState(task, TransferState.verifyingRemote, patch);
           } else {
             await _transition(task, failure.target, patch);
           }
-          return;
+          return null;
         }
-        await _settleSuccess(task, outcome);
+        return _settleSuccess(task, outcome);
       case RemoteNotCommitted():
         final sessionExpired =
-            task.errorKind == TransferErrorKind.SessionExpired;
+            task.errorKind == TransferErrorKind.sessionExpired;
         final restart = await _transition(
           task,
-          TransferState.RestartRequired,
+          TransferState.restartRequired,
           TransferPatch(
             errorKind: SetPatch(
               sessionExpired
-                  ? TransferErrorKind.SessionExpired
-                  : TransferErrorKind.RemoteAmbiguous,
+                  ? TransferErrorKind.sessionExpired
+                  : TransferErrorKind.remoteAmbiguous,
             ),
             errorMessage: SetPatch(
               sessionExpired
@@ -1437,27 +1546,29 @@ class TaskRunner {
             clearUploadSession: sessionExpired,
           ),
         );
-        if (restart == null) return;
+        if (restart == null) return null;
         // 转 Pending 后由调度泵重新执行（对齐 Rust 链式 run_expected）
         await _transition(
           restart,
-          TransferState.Pending,
+          TransferState.pending,
           const TransferPatch.clearingError(),
         );
+        return null;
       case RemoteAmbiguous(:final message):
         // 保留会话过期标记，直至确定远端不存在结果
-        final kind = task.errorKind == TransferErrorKind.SessionExpired
-            ? TransferErrorKind.SessionExpired
-            : TransferErrorKind.RemoteAmbiguous;
+        final kind = task.errorKind == TransferErrorKind.sessionExpired
+            ? TransferErrorKind.sessionExpired
+            : TransferErrorKind.remoteAmbiguous;
         await _patchInState(
           task,
-          TransferState.VerifyingRemote,
+          TransferState.verifyingRemote,
           TransferPatch(
             errorKind: SetPatch(kind),
             errorMessage: SetPatch(message),
             nextRetryAt: SetPatch(_nowMs() + verifyAmbiguousDelayMs),
           ),
         );
+        return null;
     }
   }
 
@@ -1471,7 +1582,7 @@ class TaskRunner {
 
     // 1. 含远端结果 ID 的 RestartRequired → VerifyingRemote（promote_ambiguous_restarts）
     for (final task in active) {
-      if (task.state == TransferState.RestartRequired &&
+      if (task.state == TransferState.restartRequired &&
           _hasPersistedRemoteResult(task)) {
         await _promoteRestartToVerifying(task);
       }
@@ -1480,7 +1591,7 @@ class TaskRunner {
     // 2. Pending + Running 行按同路径分组收敛（最新一条胜出）
     final tasks = active
         .where((t) =>
-            t.state == TransferState.Pending || t.state == TransferState.Running)
+            t.state == TransferState.pending || t.state == TransferState.running)
         .toList()
       ..sort((a, b) {
         final byCreated = b.createdAt.compareTo(a.createdAt);
@@ -1499,9 +1610,9 @@ class TaskRunner {
     for (final samePath in grouped.values) {
       final hasRunningRemoteWrite = samePath.any(
         (t) =>
-            t.state == TransferState.Running &&
-            (t.operation == TransferOperation.Create ||
-                t.operation == TransferOperation.Update),
+            t.state == TransferState.running &&
+            (t.operation == TransferOperation.create ||
+                t.operation == TransferOperation.update),
       );
       if (hasRunningRemoteWrite) {
         for (final task in samePath) {
@@ -1528,41 +1639,41 @@ class TaskRunner {
 
   /// 抑制启动期同路径旧任务（对齐 suppress_startup_duplicate）。
   Future<void> _suppressStartupDuplicate(TransferTask task) async {
-    if (task.state == TransferState.Running &&
-        (task.operation == TransferOperation.Create ||
-            task.operation == TransferOperation.Update)) {
+    if (task.state == TransferState.running &&
+        (task.operation == TransferOperation.create ||
+            task.operation == TransferOperation.update)) {
       await _transitionFailure(
         task,
-        TransferState.VerifyingRemote,
-        TransferErrorKind.RemoteAmbiguous,
+        TransferState.verifyingRemote,
+        TransferErrorKind.remoteAmbiguous,
         '启动恢复发现同路径多个活动任务；旧远端写入等待核验',
       );
       return;
     }
     await _transitionFailure(
       task,
-      TransferState.RestartRequired,
-      task.state == TransferState.Running
-          ? TransferErrorKind.SessionExpired
-          : TransferErrorKind.LocalChanged,
+      TransferState.restartRequired,
+      task.state == TransferState.running
+          ? TransferErrorKind.sessionExpired
+          : TransferErrorKind.localChanged,
       '启动恢复仅保留同路径最新任务，旧任务等待重新规划',
     );
   }
 
   /// 恢复单个启动期任务行（Pending 交给调度器；Running 按操作分流）。
   Future<void> _recoverStartupTask(TransferTask task) async {
-    if (task.state == TransferState.Pending) return;
+    if (task.state == TransferState.pending) return;
     switch (task.operation) {
-      case TransferOperation.Create:
-      case TransferOperation.Update:
+      case TransferOperation.create:
+      case TransferOperation.update:
         await _transitionFailure(
           task,
-          TransferState.VerifyingRemote,
-          TransferErrorKind.RemoteAmbiguous,
+          TransferState.verifyingRemote,
+          TransferErrorKind.remoteAmbiguous,
           '进程中断时远端写入结果不确定，等待核验',
         );
-      case TransferOperation.Download:
-      case TransferOperation.DownloadUpdate:
+      case TransferOperation.download:
+      case TransferOperation.downloadUpdate:
         try {
           await _validateStatic(task);
         } on PreflightFailure catch (failure) {
@@ -1573,15 +1684,15 @@ class TaskRunner {
         final durable = await _durableDownloadOffset(task);
         final restart = await _transitionFailure(
           task,
-          TransferState.RestartRequired,
-          TransferErrorKind.SessionExpired,
+          TransferState.restartRequired,
+          TransferErrorKind.sessionExpired,
           '进程中断，保留已验证下载断点并重新建立 Range 请求',
         );
         if (restart == null) return;
         // 对齐 Rust recovery.rs：Pending 补丁清错误但保留 next_retry_at（Keep）
         await _transition(
           restart,
-          TransferState.Pending,
+          TransferState.pending,
           TransferPatch(
             errorKind: const ClearPatch(),
             errorMessage: const ClearPatch(),
@@ -1590,28 +1701,28 @@ class TaskRunner {
             resumeOffset: durable,
           ),
         );
-      case TransferOperation.Delete ||
-            TransferOperation.Move ||
-            TransferOperation.Rename ||
-            TransferOperation.CreateFolder:
+      case TransferOperation.delete ||
+            TransferOperation.move ||
+            TransferOperation.rename ||
+            TransferOperation.createFolder:
         // Flutter 扩展操作：files API 写后验证保证可安全重放
         final restart = await _transitionFailure(
           task,
-          TransferState.RestartRequired,
-          TransferErrorKind.SessionExpired,
+          TransferState.restartRequired,
+          TransferErrorKind.sessionExpired,
           '进程中断，远端写操作重新调度',
         );
         if (restart == null) return;
         await _transition(
           restart,
-          TransferState.Pending,
+          TransferState.pending,
           const TransferPatch.clearingError(),
         );
       case null:
         await _transitionFailure(
           task,
-          TransferState.Failed,
-          TransferErrorKind.Validation,
+          TransferState.failed,
+          TransferErrorKind.validation,
           '中断任务缺少合法 operation',
         );
     }
@@ -1747,7 +1858,7 @@ class TaskRunner {
       TransferPatch(
         errorKind: SetPatch(kind),
         errorMessage: SetPatch(message),
-        finishedAt: state == TransferState.Failed
+        finishedAt: state == TransferState.failed
             ? SetPatch(_nowMs())
             : const ClearPatch(),
       ),
@@ -1781,9 +1892,9 @@ class TaskRunner {
     PreflightFailure failure,
   ) async {
     final patch = failure.patch(nowMs: _nowMs());
-    if (task.state == TransferState.Failed &&
-        failure.target == TransferState.Failed) {
-      await _patchInState(task, TransferState.Failed, patch);
+    if (task.state == TransferState.failed &&
+        failure.target == TransferState.failed) {
+      await _patchInState(task, TransferState.failed, patch);
       return;
     }
     await _transition(task, failure.target, patch);
@@ -1800,9 +1911,9 @@ class TaskRunner {
   }) {
     return _transition(
       task,
-      TransferState.VerifyingRemote,
+      TransferState.verifyingRemote,
       TransferPatch(
-        errorKind: const SetPatch(TransferErrorKind.RemoteAmbiguous),
+        errorKind: const SetPatch(TransferErrorKind.remoteAmbiguous),
         errorMessage: SetPatch(message),
         nextRetryAt: const ClearPatch(),
         finishedAt: const ClearPatch(),

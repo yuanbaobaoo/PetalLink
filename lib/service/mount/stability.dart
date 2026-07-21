@@ -101,7 +101,7 @@ class StabilityChecker {
     await _sleep(const Duration(seconds: sizeStableWindowSecs));
     final size2 = await _fileSize(path);
     if (size1 != size2) {
-      // 对齐 Rust：size 不稳定时也检查编辑阈值（>5min 升级为 Editing）
+      // 对齐 Rust：size 不稳定时也检查编辑阈值（>5min 升级为 editing）
       return _trackUnstable(path);
     }
 

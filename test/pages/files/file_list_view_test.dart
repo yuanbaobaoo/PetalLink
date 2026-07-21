@@ -29,7 +29,7 @@ Widget _wrap(Widget child) {
 }
 
 DriveFile _folder(String id, String name) =>
-    DriveFile(id: id, name: name, category: FileCategory.Folder);
+    DriveFile(id: id, name: name, category: FileCategory.folder);
 
 DriveFile _file(String id, String name,
         {int size = 0, String? mimeType, DateTime? edited}) =>
@@ -148,15 +148,15 @@ void main() {
 
       await tester.tap(find.text('名称'));
       await tester.pump();
-      expect(cb.sorts, [SortField.Name]);
+      expect(cb.sorts, [SortField.name]);
 
       await tester.tap(find.text('大小'));
       await tester.pump();
-      expect(cb.sorts, [SortField.Name, SortField.Size]);
+      expect(cb.sorts, [SortField.name, SortField.size]);
 
       await tester.tap(find.text('修改时间'));
       await tester.pump();
-      expect(cb.sorts, [SortField.Name, SortField.Size, SortField.ModifiedTime]);
+      expect(cb.sorts, [SortField.name, SortField.size, SortField.modifiedTime]);
     });
   });
 

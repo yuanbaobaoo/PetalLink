@@ -1,8 +1,2 @@
 # 参考 xe-cloud-app-x 模式：使用 flutter_lints 默认规则
 include: package:flutter_lints/flutter.yaml
-
-analyzer:
-  errors:
-    # 项目编码规范（ai/coding-rules.md §三.5）要求枚举值 PascalCase，
-    # 与 flutter_lints 默认的 lowerCamelCase 冲突，按项目规范关闭此规则。
-    constant_identifier_names: ignore

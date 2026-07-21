@@ -12,6 +12,8 @@ import 'package:petal_link/entity/transfer_task.dart';
 import 'package:petal_link/service/drive/drive_endpoints.dart';
 import 'package:petal_link/service/drive/drive_http.dart';
 import 'package:petal_link/service/drive/files_service.dart';
+import 'package:petal_link/service/mount/manager.dart';
+import 'package:petal_link/service/mount/xattr_service.dart';
 import 'package:petal_link/types/enums.dart';
 
 // ignore_for_file: prefer_initializing_formals — 公开命名参数映射私有字段
@@ -103,17 +105,30 @@ class LocalDestinationSnapshot {
 ///   416/Range 不匹配只允许安全回退一次到 offset=0
 /// - 最终长度/sha256/远端版本复核、flush 落盘后才原子 rename
 ///
-/// 与 Rust 的一处说明性差异：占位符 xattr 属主核验依赖 mount 层
-/// （`xattr::get`），该层在 Flutter 移植中尚未落地；当前实现退化为
-/// 「不存在或 0 字节常规文件」检查，待 mount 任务补齐。
+/// 占位落点核验对齐 Rust `verify_local_destination`：占位属主（state ==
+/// placeholder 且 owner fileId 匹配）核验需注入 [XattrService]（生产经
+/// GlobalBinding 注入 ChannelXattrService）；未注入时退化为
+/// 「不存在或 0 字节常规文件」检查。
 class DownloadService {
   final MateHttpClient _client;
 
   /// Drive API base
   final String _driveBase;
 
-  DownloadService(this._client, {String driveBase = driveApiBase})
-      : _driveBase = driveBase;
+  /// xattr 读写（占位属主核验；为空时退化为仅「0 字节常规文件」检查）
+  final XattrService? _xattr;
+
+  /// inode 属主查询（docs/design/10；占位属主核验优先数据源，
+  /// 未注入或查不到时回退 xattr fileId——过渡期为新旧占位兼容）
+  final Future<String?> Function(String path)? _inodeOwnerProvider;
+
+  DownloadService(this._client,
+      {String driveBase = driveApiBase,
+      XattrService? xattr,
+      Future<String?> Function(String path)? inodeOwnerProvider})
+      : _driveBase = driveBase,
+        _xattr = xattr,
+        _inodeOwnerProvider = inodeOwnerProvider;
 
   /// 下载文件到 [destPath]；版本由 API 每次从云端读取并校验
   /// （对齐 Rust `download`）。
@@ -157,8 +172,8 @@ class DownloadService {
       if (operation == null) {
         throw AppError.generic('任务缺少 operation');
       }
-      if (operation != TransferOperation.Download &&
-          operation != TransferOperation.DownloadUpdate) {
+      if (operation != TransferOperation.download &&
+          operation != TransferOperation.downloadUpdate) {
         throw AppError.generic('该 operation 不支持传输执行');
       }
       final localPath = task.localPath;
@@ -174,7 +189,7 @@ class DownloadService {
       }
 
       final LocalDestinationSnapshot? snapshot;
-      if (operation == TransferOperation.DownloadUpdate) {
+      if (operation == TransferOperation.downloadUpdate) {
         final mtime = task.sourceMtime;
         if (mtime == null) {
           throw AppError.generic('更新下载缺少本地目标修改时间快照');
@@ -196,7 +211,7 @@ class DownloadService {
         size: task.totalSize >= 0 ? task.totalSize : null,
         destinationSnapshot: snapshot,
         placeholderFileId:
-            operation == TransferOperation.Download ? fileId : null,
+            operation == TransferOperation.download ? fileId : null,
       );
 
       await _downloadWithExpectation(
@@ -498,7 +513,7 @@ class DownloadService {
       throw AppError.generic('下载期间云端文件发生变化，已丢弃旧断点并等待重新下载');
     }
 
-    _verifyLocalDestination(destPath, expectation);
+    await _verifyLocalDestination(destPath, expectation);
 
     // POSIX rename 在同一文件系统内原子替换旧目标；失败时保留 .tmp 供重试。
     try {
@@ -511,8 +526,8 @@ class DownloadService {
   }
 
   /// 安装前确认本地目标仍为空缺、原快照或本文件的未改占位符。
-  void _verifyLocalDestination(
-      String destPath, DownloadExpectation? expectation) {
+  Future<void> _verifyLocalDestination(
+      String destPath, DownloadExpectation? expectation) async {
     final exp = expectation;
     if (exp == null) return;
 
@@ -545,11 +560,22 @@ class DownloadService {
     if (placeholderId != null) {
       final stat = lstat();
       if (stat.type == FileSystemEntityType.notFound) return;
-      // 说明性差异：Rust 还核验占位符 xattr 属主（mount 层），Flutter 移植的
-      // mount 层未落地，当前退化为「0 字节常规文件」检查。
+      // 对齐 Rust verify_local_destination：占位属主核验
+      // （state == placeholder 且 owner fileId 匹配才允许覆盖）；
+      // 属主数据源：inode 映射优先（docs/design/10），xattr 过渡回退
+      final xattr = _xattr;
+      final isPlaceholder = xattr != null &&
+          (await xattr.get(destPath, xattrState)) == statePlaceholder;
+      String? owner;
+      final inodeOwner = _inodeOwnerProvider;
+      if (inodeOwner != null) {
+        owner = await inodeOwner(destPath);
+      }
+      owner ??= xattr != null ? await xattr.get(destPath, xattrFileId) : null;
       if (stat.type == FileSystemEntityType.link ||
           stat.type != FileSystemEntityType.file ||
-          stat.size != 0) {
+          stat.size != 0 ||
+          (xattr != null && (!isPlaceholder || owner != placeholderId))) {
         throw AppError.generic('下载期间目标路径出现用户内容，已拒绝覆盖并保留下载临时文件');
       }
     }

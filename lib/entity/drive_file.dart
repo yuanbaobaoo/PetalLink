@@ -12,47 +12,47 @@ const Object _keep = Object();
 /// 真正的类型在 mimeType。文件夹：`application/vnd.huawei-apps.folder`。
 enum FileCategory {
   /// 文件夹
-  Folder,
+  folder,
 
   /// 音频
-  Audio,
+  audio,
 
   /// 视频
-  Video,
+  video,
 
   /// 图片
-  Image,
+  image,
 
   /// 文档
-  Document,
+  document,
 
   /// 安装包
-  Package,
+  package,
 
   /// 压缩包
-  Archive,
+  archive,
 
   /// 可执行文件
-  Executable,
+  executable,
 
   /// 未分类
-  None;
+  unknown;
 
   /// 基于 mimeType 判断文件分类（对齐 Rust `FileCategory::from_mime_type`）。
   static FileCategory fromMimeType(String? mimeType) {
     final m = mimeType?.toLowerCase();
-    if (m == null) return FileCategory.None;
+    if (m == null) return FileCategory.unknown;
 
     // 文件夹（华为/Google Drive 兼容的四种写法）
     if (m == 'application/vnd.huawei-apps.folder' ||
         m == 'application/vnd.huawei-app.folder' ||
         m == 'application/vnd.google-apps.folder' ||
         m == 'application/x-folder') {
-      return FileCategory.Folder;
+      return FileCategory.folder;
     }
-    if (m.startsWith('image/')) return FileCategory.Image;
-    if (m.startsWith('video/')) return FileCategory.Video;
-    if (m.startsWith('audio/')) return FileCategory.Audio;
+    if (m.startsWith('image/')) return FileCategory.image;
+    if (m.startsWith('video/')) return FileCategory.video;
+    if (m.startsWith('audio/')) return FileCategory.audio;
     // 文档类
     if (m.startsWith('text/') ||
         m.contains('pdf') ||
@@ -63,7 +63,7 @@ enum FileCategory {
         m.contains('excel') ||
         m.contains('presentation') ||
         m.contains('powerpoint')) {
-      return FileCategory.Document;
+      return FileCategory.document;
     }
     // 压缩包
     if (m.contains('zip') ||
@@ -72,7 +72,7 @@ enum FileCategory {
         m.contains('tar') ||
         m.contains('gzip') ||
         m.contains('x-tar')) {
-      return FileCategory.Archive;
+      return FileCategory.archive;
     }
     // 安装包
     if (m.contains('apk') ||
@@ -80,15 +80,15 @@ enum FileCategory {
         m.contains('pkg') ||
         m.contains('debian') ||
         m.contains('rpm')) {
-      return FileCategory.Package;
+      return FileCategory.package;
     }
     // 可执行
     if (m.contains('executable') ||
         m.contains('x-msdownload') ||
         m.endsWith('x-mach-binary')) {
-      return FileCategory.Executable;
+      return FileCategory.executable;
     }
-    return FileCategory.None;
+    return FileCategory.unknown;
   }
 }
 
@@ -132,7 +132,7 @@ class DriveFile {
   const DriveFile({
     required this.id,
     required this.name,
-    this.category = FileCategory.None,
+    this.category = FileCategory.unknown,
     this.size = 0,
     this.parentFolder,
     this.description,
@@ -144,7 +144,7 @@ class DriveFile {
   });
 
   /// 是否文件夹（对齐 Rust `is_folder`）
-  bool get isFolder => category == FileCategory.Folder;
+  bool get isFolder => category == FileCategory.folder;
 
   /// 云端父目录 ID（取 [parentFolder] 第一个；无父目录时为 null）
   String? get parentId =>

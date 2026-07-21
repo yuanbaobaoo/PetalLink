@@ -26,7 +26,7 @@ Widget _wrap(Widget child) {
 }
 
 DriveFile _folder(String id, String name) =>
-    DriveFile(id: id, name: name, category: FileCategory.Folder);
+    DriveFile(id: id, name: name, category: FileCategory.folder);
 
 void main() {
   group('FilesSidebar', () {

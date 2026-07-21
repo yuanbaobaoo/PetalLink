@@ -69,8 +69,8 @@ void main() {
         pollIntervalSec: 120,
         debounceSec: 5,
         skipPatterns: ['.git'],
-        sortField: SortField.Size,
-        sortOrder: SortOrder.Descending,
+        sortField: SortField.size,
+        sortOrder: SortOrder.descending,
       ));
 
       final loaded = await service.configLoad();
@@ -80,8 +80,8 @@ void main() {
       expect(loaded.pollIntervalSec, 120);
       expect(loaded.debounceSec, 5);
       expect(loaded.skipPatterns, ['.git']);
-      expect(loaded.sortField, SortField.Size);
-      expect(loaded.sortOrder, SortOrder.Descending);
+      expect(loaded.sortField, SortField.size);
+      expect(loaded.sortOrder, SortOrder.descending);
     });
 
     test('校验失败 → ConfigError（并发数越界）', () async {

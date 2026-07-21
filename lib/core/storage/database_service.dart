@@ -31,7 +31,7 @@ class DatabaseService {
   static DatabaseService get instance => _instance;
 
   /// 数据库结构版本（对齐 Rust SCHEMA_VERSION）
-  static const int schemaVersion = 5;
+  static const int schemaVersion = 6;
 
   /// 数据库文件名（对齐 Rust DB_FILE_NAME）
   static const String dbFileName = 'petal_link.db';
@@ -98,9 +98,11 @@ class DatabaseService {
       onUpgrade: _onUpgrade,
       onConfigure: (db) async {
         // 启用 WAL 模式，提升并发读性能
-        await db.execute('PRAGMA journal_mode=WAL');
+        // 注意：PRAGMA journal_mode 返回结果行，sqflite_darwin 的
+        // execute() 对带返回值的语句报 Code=0 错误，必须用 rawQuery
+        await db.rawQuery('PRAGMA journal_mode=WAL');
         // 启用外键约束
-        await db.execute('PRAGMA foreign_keys=ON');
+        await db.rawQuery('PRAGMA foreign_keys=ON');
       },
     );
   }
@@ -177,6 +179,38 @@ class DatabaseService {
       )
     ''');
 
+    await _createV6Tables(db);
+  }
+
+  /// v6：inode 身份识别两张表（docs/design/10 §3；纯增量，不回填）
+  Future<void> _createV6Tables(Database db) async {
+    // 文件身份映射（替代 com.hwcloud.fileId xattr）
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS local_inode_map (
+          inode         INTEGER NOT NULL,
+          relative_path TEXT    NOT NULL,
+          file_id       TEXT    NOT NULL,
+          scanned_at    INTEGER NOT NULL,
+          PRIMARY KEY (inode)
+      )
+    ''');
+    await db.execute(
+        'CREATE INDEX IF NOT EXISTS idx_inode_map_path ON local_inode_map(relative_path)');
+    await db.execute(
+        'CREATE INDEX IF NOT EXISTS idx_inode_map_fid ON local_inode_map(file_id)');
+
+    // 释放空间事务（替代 com.hwcloud.freeUpRelativePath xattr）
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS free_up_staging (
+          staging_name   TEXT    NOT NULL PRIMARY KEY,
+          relative_path  TEXT    NOT NULL,
+          file_id        TEXT    NOT NULL,
+          source_mtime   INTEGER,
+          source_size    INTEGER,
+          created_at     INTEGER NOT NULL
+      )
+    ''');
+
     await _createIndexes(db);
   }
 
@@ -225,6 +259,11 @@ class DatabaseService {
     }
     if (oldVersion < 5) {
       await _upgradeToV5(db);
+    }
+    if (oldVersion < 6) {
+      // v6 只建表，不动旧数据（docs/design/10 §3.3：
+      // 不回填历史 inode，首次扫描自动填充；不删除旧 xattr）
+      await _createV6Tables(db);
     }
 
     // config 表为 Flutter 侧新增，旧库升级时补齐

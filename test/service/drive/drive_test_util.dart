@@ -13,13 +13,11 @@ MateHttpClient buildTestClient(
   FakeHttpAdapter adapter, {
   String token = 'test-token',
   Future<String?> Function()? refreshTokenProvider,
-  void Function()? onAuthExpired,
 }) {
   return MateHttpClient(
     baseUrl: '',
     tokenProvider: () async => token,
     refreshTokenProvider: refreshTokenProvider ?? () async => null,
-    onAuthExpired: onAuthExpired ?? () {},
     dio: adapter.createDio(),
   );
 }

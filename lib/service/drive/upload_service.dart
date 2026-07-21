@@ -193,8 +193,8 @@ class UploadService {
       if (localPath == null || localPath.isEmpty) {
         throw AppError.generic('任务缺少本地路径');
       }
-      if (operation != TransferOperation.Create &&
-          operation != TransferOperation.Update) {
+      if (operation != TransferOperation.create &&
+          operation != TransferOperation.update) {
         throw AppError.generic('该 operation 不支持传输执行');
       }
       if (isOnline != null && !isOnline()) {
@@ -209,7 +209,7 @@ class UploadService {
           : (ratio) => onProgress(
               (ratio.clamp(0.0, 1.0) * task.totalSize).toInt());
 
-      if (operation == TransferOperation.Update) {
+      if (operation == TransferOperation.update) {
         final fileId = task.fileId;
         if (fileId == null || fileId.isEmpty) {
           throw AppError.generic('更新上传任务缺少 fileId');
@@ -315,6 +315,16 @@ class UploadService {
       throw _remoteAmbiguity(
           '小文件上传返回 2xx，但文件身份/名称/长度不完整或不匹配', sent.authReplayed);
     }
+    // 对齐 CMP UploadApi.uploadSmall：请求指定父目录时，
+    // 响应必须恰好一个父目录且与请求一致（防落错目录后误结算基线）
+    if (parentId != null && parentId.trim().isNotEmpty) {
+      final parents = file.parentFolder;
+      if (parents == null || parents.length != 1 || parents.first != parentId) {
+        throw _remoteAmbiguity(
+            '小文件上传响应父目录不一致（期望 $parentId，实际 ${parents ?? "缺失"}）',
+            sent.authReplayed);
+      }
+    }
     AppLogger.i('小文件上传成功: $fileName (${file.id})');
     return file;
   }
@@ -350,6 +360,13 @@ class UploadService {
     if (file == null) {
       throw _remoteAmbiguity(
           'PATCH 更新返回 2xx，但文件身份/名称/长度不完整或不匹配', sent.authReplayed);
+    }
+    // 对齐 CMP uploadSmallUpdate：返回 fileId 必须与目标一致，
+    // 否则会把基线结算到错误的云端文件上
+    if (file.id != fileId) {
+      throw _remoteAmbiguity(
+          'PATCH 更新返回了不同 fileId（期望 $fileId，实际 ${file.id}）',
+          sent.authReplayed);
     }
     return file;
   }

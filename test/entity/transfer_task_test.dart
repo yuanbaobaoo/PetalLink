@@ -6,13 +6,13 @@ import 'package:petal_link/types/enums.dart';
 TransferTask _fullTask() {
   return const TransferTask(
     id: 42,
-    direction: TransferDirection.DownloadUpdate,
+    direction: TransferDirection.downloadUpdate,
     fileId: 'file-1',
     localPath: '/Users/x/sync/dir/a.txt',
     name: 'a.txt',
     totalSize: 2048,
     transferred: 1024,
-    state: TransferState.BackingOff,
+    state: TransferState.backingOff,
     errorMessage: '网络抖动',
     createdAt: 1750000000000,
     finishedAt: 1750000060000,
@@ -22,13 +22,13 @@ TransferTask _fullTask() {
     sessionUrl: 'https://upload.example.com/session/abc',
     relativePath: 'dir/a.txt',
     parentFileId: 'parent-1',
-    operation: TransferOperation.DownloadUpdate,
+    operation: TransferOperation.downloadUpdate,
     sourceMtime: 1749999900000,
     sourceSize: 2048,
     expectedCloudEditedTime: 1749999950000,
     attemptCount: 3,
     nextRetryAt: 1750000100000,
-    errorKind: TransferErrorKind.Network,
+    errorKind: TransferErrorKind.network,
     remoteResultFileId: 'remote-1',
     stateRevision: 7,
   );
@@ -95,8 +95,8 @@ void main() {
         expect(restored.sessionUrl, isNull);
         expect(restored.operation, isNull);
         expect(restored.errorKind, isNull);
-        expect(restored.state, TransferState.Pending);
-        expect(restored.direction, TransferDirection.Upload);
+        expect(restored.state, TransferState.pending);
+        expect(restored.direction, TransferDirection.upload);
       });
 
       test('fromRow 容忍 String 数字', () {
@@ -115,12 +115,12 @@ void main() {
         });
 
         expect(task.id, 42);
-        expect(task.direction, TransferDirection.Download);
+        expect(task.direction, TransferDirection.download);
         expect(task.totalSize, 2048);
-        expect(task.state, TransferState.Failed);
+        expect(task.state, TransferState.failed);
         expect(task.resumeOffset, 512);
         expect(task.attemptCount, 3);
-        expect(task.errorKind, TransferErrorKind.SessionExpired);
+        expect(task.errorKind, TransferErrorKind.sessionExpired);
         expect(task.stateRevision, 7);
       });
 
@@ -133,8 +133,8 @@ void main() {
           'error_kind': 99,
         });
 
-        expect(task.direction, TransferDirection.Upload);
-        expect(task.state, TransferState.Pending);
+        expect(task.direction, TransferDirection.upload);
+        expect(task.state, TransferState.pending);
         expect(task.operation, isNull);
         expect(task.errorKind, isNull);
       });
@@ -175,12 +175,12 @@ void main() {
         const running = TransferTask(
           name: 'a',
           createdAt: 0,
-          state: TransferState.Running,
+          state: TransferState.running,
         );
         const done = TransferTask(
           name: 'a',
           createdAt: 0,
-          state: TransferState.Completed,
+          state: TransferState.completed,
         );
 
         expect(running.isActive, isTrue);
@@ -192,11 +192,11 @@ void main() {
         const task = TransferTask(
           name: 'a',
           createdAt: 0,
-          state: TransferState.Running,
+          state: TransferState.running,
         );
 
-        expect(task.canTransitionTo(TransferState.Completed), isTrue);
-        expect(task.canTransitionTo(TransferState.Pending), isFalse);
+        expect(task.canTransitionTo(TransferState.completed), isTrue);
+        expect(task.canTransitionTo(TransferState.pending), isFalse);
       });
     });
 
@@ -206,10 +206,10 @@ void main() {
 
         final copy = task.copyWith(
           transferred: 2048,
-          state: TransferState.Completed,
+          state: TransferState.completed,
         );
         expect(copy.transferred, 2048);
-        expect(copy.state, TransferState.Completed);
+        expect(copy.state, TransferState.completed);
         expect(copy.sessionUrl, task.sessionUrl);
 
         final cleared = task.copyWith(sessionUrl: null, errorKind: null);

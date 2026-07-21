@@ -33,7 +33,7 @@
 2. **Controller 后缀**：`AuthController`, `FileBrowserController`
 3. **Service 后缀**：`AuthService`, `FilesService`
 4. **State 后缀**：状态类用 `State` 后缀（`LoginState`, `SyncState`）
-5. **枚举值**：PascalCase，每个值加短中文注释
+5. **枚举值**：lowerCamelCase（Effective Dart 官方规范；PascalCase 是 Java/Kotlin 规范，本项目为 Dart 不适用），每个值加短中文注释
 
 ## 四、设计 Token（严禁硬编码）
 

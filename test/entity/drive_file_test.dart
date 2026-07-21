@@ -10,21 +10,21 @@ void main() {
         'application/vnd.google-apps.folder',
         'application/x-folder',
       ]) {
-        expect(FileCategory.fromMimeType(mime), FileCategory.Folder,
+        expect(FileCategory.fromMimeType(mime), FileCategory.folder,
             reason: '$mime 应识别为 Folder');
       }
     });
 
     test('大小写不敏感', () {
       expect(FileCategory.fromMimeType('APPLICATION/VND.HUAWEI-APPS.FOLDER'),
-          FileCategory.Folder);
-      expect(FileCategory.fromMimeType('IMAGE/PNG'), FileCategory.Image);
+          FileCategory.folder);
+      expect(FileCategory.fromMimeType('IMAGE/PNG'), FileCategory.image);
     });
 
     test('image/ video/ audio/ 前缀', () {
-      expect(FileCategory.fromMimeType('image/png'), FileCategory.Image);
-      expect(FileCategory.fromMimeType('video/mp4'), FileCategory.Video);
-      expect(FileCategory.fromMimeType('audio/mpeg'), FileCategory.Audio);
+      expect(FileCategory.fromMimeType('image/png'), FileCategory.image);
+      expect(FileCategory.fromMimeType('video/mp4'), FileCategory.video);
+      expect(FileCategory.fromMimeType('audio/mpeg'), FileCategory.audio);
     });
 
     test('文档类关键字', () {
@@ -36,7 +36,7 @@ void main() {
         'application/vnd.ms-excel',
         'application/vnd.ms-powerpoint',
       ]) {
-        expect(FileCategory.fromMimeType(mime), FileCategory.Document,
+        expect(FileCategory.fromMimeType(mime), FileCategory.document,
             reason: '$mime 应识别为 Document');
       }
     });
@@ -49,7 +49,7 @@ void main() {
         'application/x-tar',
         'application/gzip',
       ]) {
-        expect(FileCategory.fromMimeType(mime), FileCategory.Archive,
+        expect(FileCategory.fromMimeType(mime), FileCategory.archive,
             reason: '$mime 应识别为 Archive');
       }
     });
@@ -57,26 +57,26 @@ void main() {
     test('安装包关键字', () {
       // 对齐 Rust contains 匹配：apk / dmg / pkg / debian / rpm
       expect(FileCategory.fromMimeType('application/x-dmg'),
-          FileCategory.Package);
+          FileCategory.package);
       expect(FileCategory.fromMimeType('application/x-rpm'),
-          FileCategory.Package);
+          FileCategory.package);
       expect(
           FileCategory.fromMimeType(
               'application/vnd.debian.binary-package'),
-          FileCategory.Package);
+          FileCategory.package);
     });
 
     test('可执行关键字', () {
       expect(FileCategory.fromMimeType('application/x-msdownload'),
-          FileCategory.Executable);
+          FileCategory.executable);
       expect(FileCategory.fromMimeType('application/x-mach-binary'),
-          FileCategory.Executable);
+          FileCategory.executable);
     });
 
     test('null / 未知 → None', () {
-      expect(FileCategory.fromMimeType(null), FileCategory.None);
+      expect(FileCategory.fromMimeType(null), FileCategory.unknown);
       expect(FileCategory.fromMimeType('application/octet-stream'),
-          FileCategory.None);
+          FileCategory.unknown);
     });
   });
 
@@ -97,7 +97,7 @@ void main() {
 
       expect(file.id, 'file-123');
       expect(file.name, '报告.pdf');
-      expect(file.category, FileCategory.Document);
+      expect(file.category, FileCategory.document);
       expect(file.size, 1024);
       expect(file.parentFolder, ['parent-1', 'parent-2']);
       expect(file.parentId, 'parent-1');
@@ -125,7 +125,7 @@ void main() {
       });
 
       expect(file.isFolder, isTrue);
-      expect(file.category, FileCategory.Folder);
+      expect(file.category, FileCategory.folder);
     });
 
     test('size 容忍 String 数字', () {

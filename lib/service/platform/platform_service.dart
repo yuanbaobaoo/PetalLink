@@ -149,6 +149,29 @@ class PlatformService {
     }
   }
 
+  /// 批量获取文件 inode（原生 lstat 批量通道；失败路径跳过不报错）。
+  ///
+  /// 扫描场景专用（docs/design/10 §4.2 两阶段扫描）——避免万级文件
+  /// 逐次 MethodChannel 往返。
+  Future<AppResult<Map<String, int>>> getInodeBatch(List<String> paths) async {
+    try {
+      final raw = await _channel.invokeMapMethod<String, dynamic>(
+          'getInodeBatch', {'paths': paths});
+      if (raw == null) {
+        return const Err(GenericError(message: '批量获取 inode 失败'));
+      }
+      return Ok({
+        for (final e in raw.entries)
+          if (e.value is int) e.key: e.value as int,
+      });
+    } on PlatformException catch (e) {
+      return Err(GenericError(message: '批量获取 inode 失败：${e.message}'));
+    } catch (e, st) {
+      AppLogger.e('getInodeBatch 异常', e, st);
+      return Err(GenericError(message: e.toString()));
+    }
+  }
+
   // ═══════════════════════════════════════════════════════════════════
   // 激活策略（对齐 src/platform/activation.rs）
   // ═══════════════════════════════════════════════════════════════════

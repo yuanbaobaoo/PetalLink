@@ -1,8 +1,8 @@
+// ignore_for_file: prefer_initializing_formals — 公开命名参数映射私有字段
+
 import 'dart:convert';
 
 import 'package:dio/dio.dart';
-
-// ignore_for_file: prefer_initializing_formals — 公开命名参数映射私有字段
 
 import 'package:petal_link/core/error/app_error.dart';
 import 'package:petal_link/core/logger/logger.dart';

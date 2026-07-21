@@ -104,8 +104,8 @@ mixin EnginePublication on SyncEngineBase {
   }) async {
     final db = await this.db.database;
     final states = <int>[
-      if (includeCompleted) TransferState.Completed.code,
-      if (includeFailed) TransferState.Failed.code,
+      if (includeCompleted) TransferState.completed.code,
+      if (includeFailed) TransferState.failed.code,
     ];
     if (states.isNotEmpty) {
       final placeholders = states.map((_) => '?').join(',');

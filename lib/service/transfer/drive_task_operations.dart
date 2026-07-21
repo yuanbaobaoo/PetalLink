@@ -82,8 +82,8 @@ class DriveTaskOperations implements TaskOperations {
   @override
   Future<void> preflight(TransferTask task) async {
     final operation = task.operation;
-    if (operation != TransferOperation.Create &&
-        operation != TransferOperation.Update) {
+    if (operation != TransferOperation.create &&
+        operation != TransferOperation.update) {
       return;
     }
     final localPath = task.localPath;
@@ -95,7 +95,7 @@ class DriveTaskOperations implements TaskOperations {
     } on AppError catch (e) {
       throw BackendPreflightFailure.restartRequired(e.message);
     }
-    if (operation == TransferOperation.Update &&
+    if (operation == TransferOperation.update &&
         task.totalSize > UploadService.smallLargeThreshold) {
       throw const BackendPreflightFailure.restartRequired(
           '现有云端文件超过 20 MiB，Huawei 当前接口不支持安全替换；已保留远端原文件');
@@ -146,11 +146,11 @@ class DriveTaskOperations implements TaskOperations {
       throw AppError.generic('任务缺少 operation');
     }
     switch (operation) {
-      case TransferOperation.Create:
-      case TransferOperation.Update:
+      case TransferOperation.create:
+      case TransferOperation.update:
         return _executeUpload(task, operation, progress);
-      case TransferOperation.Download:
-      case TransferOperation.DownloadUpdate:
+      case TransferOperation.download:
+      case TransferOperation.downloadUpdate:
         final result = await _downloadService.downloadForTask(
           task,
           onProgress: progress.onDownloadProgress,
@@ -158,11 +158,11 @@ class DriveTaskOperations implements TaskOperations {
         );
         result.unwrap();
         return const TaskExecutionOutcome();
-      case TransferOperation.Delete:
+      case TransferOperation.delete:
         final fileId = _requireFileId(task, '删除任务缺少 fileId');
         (await _filesService.deleteVerified(fileId)).unwrap();
         return const TaskExecutionOutcome();
-      case TransferOperation.Move:
+      case TransferOperation.move:
         final fileId = _requireFileId(task, '移动任务缺少 fileId');
         final parentId = task.parentFileId;
         if (parentId == null || parentId.isEmpty) {
@@ -173,11 +173,11 @@ class DriveTaskOperations implements TaskOperations {
             (await _filesService.update(fileId, newParentFolder: parentId))
                 .unwrap();
         return TaskExecutionOutcome(cloudFile: moved);
-      case TransferOperation.Rename:
+      case TransferOperation.rename:
         final fileId = _requireFileId(task, '重命名任务缺少 fileId');
         final renamed = (await _filesService.rename(fileId, task.name)).unwrap();
         return TaskExecutionOutcome(cloudFile: renamed);
-      case TransferOperation.CreateFolder:
+      case TransferOperation.createFolder:
         final created =
             (await _filesService.createFolder(task.name, parentId: task.parentFileId))
                 .unwrap();
@@ -201,7 +201,7 @@ class DriveTaskOperations implements TaskOperations {
     } on AppError catch (e) {
       throw TaskRestartRequired(e.message);
     }
-    if (operation == TransferOperation.Update) {
+    if (operation == TransferOperation.update) {
       final fileId = _requireFileId(task, '更新上传任务缺少 fileId');
       final current = (await _filesService.get(fileId)).unwrap();
       final currentEdited = current.editedTime?.millisecondsSinceEpoch;
@@ -267,9 +267,9 @@ class DriveTaskOperations implements TaskOperations {
   Future<RemoteVerification> verifyRemote(TransferTask task) async {
     final operation = task.operation;
     switch (operation) {
-      case TransferOperation.Create:
+      case TransferOperation.create:
         return _verifyCreate(task);
-      case TransferOperation.Update:
+      case TransferOperation.update:
         return _verifyUpdate(task);
       default:
         return const RemoteAmbiguous('该任务不是可核验的上传写入');

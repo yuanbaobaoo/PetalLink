@@ -30,12 +30,12 @@ void main() {
 
   Future<TransferTask> enqueueTask(TransferService service) async {
     final result = await service.enqueue(TransferTask(
-      direction: TransferDirection.Upload,
+      direction: TransferDirection.upload,
       fileId: 'fid1',
       localPath: '/tmp/a.bin',
       name: 'a.bin',
       totalSize: 1000,
-      operation: TransferOperation.Create,
+      operation: TransferOperation.create,
       createdAt: DateTime.now().millisecondsSinceEpoch,
     ));
     return result.unwrap();

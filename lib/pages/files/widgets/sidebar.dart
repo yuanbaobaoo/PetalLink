@@ -134,7 +134,7 @@ class FilesSidebar extends StatelessWidget {
                 folder: const DriveFile(
                   id: '',
                   name: '全部文件',
-                  category: FileCategory.Folder,
+                  category: FileCategory.folder,
                 ),
                 depth: 0,
                 selectedId: selectedFolderId,

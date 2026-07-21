@@ -18,7 +18,7 @@ class AuthState {
   final int? expiresAt;
 
   const AuthState({
-    this.status = AuthStatus.Init,
+    this.status = AuthStatus.init,
     this.accessToken,
     this.refreshToken,
     this.accountName,
@@ -26,7 +26,7 @@ class AuthState {
   });
 
   /// 初始状态
-  factory AuthState.init() => const AuthState(status: AuthStatus.Init);
+  factory AuthState.init() => const AuthState(status: AuthStatus.init);
 
   /// 已登录状态
   factory AuthState.authorized({
@@ -36,7 +36,7 @@ class AuthState {
     int? expiresAt,
   }) {
     return AuthState(
-      status: AuthStatus.Authorized,
+      status: AuthStatus.authorized,
       accessToken: accessToken,
       refreshToken: refreshToken,
       accountName: accountName,
@@ -46,15 +46,15 @@ class AuthState {
 
   /// 未登录状态
   factory AuthState.unauthorized() =>
-      const AuthState(status: AuthStatus.Unauthorized);
+      const AuthState(status: AuthStatus.unauthorized);
 
   /// 是否已登录
-  bool get isAuthorized => status == AuthStatus.Authorized;
+  bool get isAuthorized => status == AuthStatus.authorized;
 
   /// 从 JSON 恢复
   factory AuthState.fromJson(Map<String, dynamic> json) {
     return AuthState(
-      status: AuthStatus.Authorized,
+      status: AuthStatus.authorized,
       accessToken: json['accessToken'] as String?,
       refreshToken: json['refreshToken'] as String?,
       accountName: json['accountName'] as String?,

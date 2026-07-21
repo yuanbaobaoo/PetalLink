@@ -305,6 +305,12 @@ class MateColors {
   /// 通用对话框遮罩色（黑 0.36）。
   static const Color overlayDialogScrim = Color(0x5C000000);
 
+  /// 控件阴影色（浅，黑 0.08）——步进按钮等浮起控件。
+  static const Color controlShadowSoft = Color(0x14000000);
+
+  /// 控件阴影色（深，黑 0.16）——开关旋钮等强浮起控件。
+  static const Color controlShadowStrong = Color(0x29000000);
+
   // ------ Flutter 平台补充（CMP 无对应项，供 ThemeData/滚动条使用） ------
   /// 滚动条滑块色。
   static const Color scrollbarThumb = Color(0x33000000);

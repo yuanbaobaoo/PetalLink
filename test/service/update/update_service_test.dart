@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:petal_link/core/error/app_error.dart';
 import 'package:petal_link/core/error/app_result.dart';
+import 'package:petal_link/service/platform/launch_at_login.dart';
 import 'package:petal_link/service/update/update_service.dart';
 
 void main() {
@@ -119,14 +120,7 @@ void main() {
       );
     });
 
-    test('sha256 缺失或格式非法 → 抛错', () {
-      expect(
-        () => UpdateService.parseManifest({
-          'version': '1.2.0',
-          'url': 'https://example.com/a.dmg',
-        }),
-        throwsA(isA<GenericError>()),
-      );
+    test('sha256 格式非法 → 抛错', () {
       expect(
         () => UpdateService.parseManifest({
           'version': '1.2.0',
@@ -135,6 +129,17 @@ void main() {
         }),
         throwsA(isA<GenericError>()),
       );
+    });
+
+    test('sha256 缺失 → 允许解析为 null（对齐 Tauri 标准清单仅有 signature）',
+        () {
+      final manifest = UpdateService.parseManifest({
+        'version': '1.2.0',
+        'url': 'https://example.com/a.dmg',
+        'signature': 'minisign-content',
+      });
+      expect(manifest.sha256, isNull);
+      expect(manifest.signature, 'minisign-content');
     });
   });
 
@@ -290,6 +295,124 @@ void main() {
         sha256: 'a' * 64,
       ));
       expect(result.isErr, isTrue);
+    });
+
+    test('sha256 缺失 → 跳过哈希校验直接落盘（安装期由签名校验兜底）',
+        () async {
+      final payload = utf8.encode('dmg-bytes');
+      final client = MockClient((request) async {
+        return http.Response.bytes(payload, 200);
+      });
+      final service = UpdateService(
+        httpClient: client,
+        updatesDir: tempDir.path,
+      );
+      final result = await service.downloadAndStage(const UpdateManifest(
+        version: '1.1.0',
+        url: 'https://example.com/PetalLink.dmg',
+      ));
+      expect(result.isOk, isTrue);
+      expect(await File((result as Ok<String>).value).readAsBytes(), payload);
+    });
+  });
+
+  group('UpdateService.installAndRelaunch 签名校验（对齐 CMP verifyApp 四重校验）', () {
+    late Directory tempDir;
+    late String executable;
+    late String dmgPath;
+
+    /// 装配假 .app / DMG / 挂载点，返回可注入 fake runner 的服务工厂
+    UpdateService serviceWith({
+      required String expectedTeamId,
+      bool codesignOk = true,
+      bool spctlOk = true,
+      String teamIdOutput = 'TeamIdentifier=TEAM123',
+      List<String>? recorded,
+    }) {
+      Future<ProcResult> runner(String exe, List<String> args) async {
+        recorded?.add('$exe ${args.join(' ')}');
+        if (exe.contains('codesign') && args.contains('--verify')) {
+          return ProcResult(exitCode: codesignOk ? 0 : 1, stderr: 'invalid');
+        }
+        if (exe.contains('spctl')) {
+          return ProcResult(exitCode: spctlOk ? 0 : 1, stderr: 'rejected');
+        }
+        if (exe.contains('codesign') && args.contains('-dv')) {
+          // codesign -dv 详情输出在 stderr（真实行为）
+          return ProcResult(exitCode: 0, stderr: teamIdOutput);
+        }
+        // hdiutil / ditto / chmod 默认成功
+        return const ProcResult(exitCode: 0);
+      }
+
+      return UpdateService(
+        updatesDir: tempDir.path,
+        runner: runner,
+        currentExecutable: executable,
+        currentPid: 999999,
+        expectedTeamId: expectedTeamId,
+      );
+    }
+
+    setUp(() async {
+      tempDir = Directory.systemTemp.createTempSync('update_install_test');
+      executable = '${tempDir.path}/My.app/Contents/MacOS/My';
+      await Directory('${tempDir.path}/My.app/Contents/MacOS')
+          .create(recursive: true);
+      await File(executable).writeAsString('bin');
+      dmgPath = '${tempDir.path}/pkg/PetalLink.dmg';
+      await Directory('${tempDir.path}/pkg/mnt/Test.app')
+          .create(recursive: true);
+      await File(dmgPath).writeAsString('dmg');
+    });
+
+    tearDown(() {
+      if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
+    });
+
+    test('未配置 Team ID → 拒绝安装（对齐 CMP 空值拒绝）', () async {
+      final service = serviceWith(expectedTeamId: '');
+      final result = await service.installAndRelaunch(dmgPath);
+      expect(result.isErr, isTrue);
+      expect((result as Err).error.message, contains('Team ID'));
+    });
+
+    test('codesign --verify 失败 → Err', () async {
+      final service =
+          serviceWith(expectedTeamId: 'TEAM123', codesignOk: false);
+      final result = await service.installAndRelaunch(dmgPath);
+      expect(result.isErr, isTrue);
+      expect((result as Err).error.message, contains('代码签名'));
+    });
+
+    test('spctl 未通过 Gatekeeper → Err', () async {
+      final service = serviceWith(expectedTeamId: 'TEAM123', spctlOk: false);
+      final result = await service.installAndRelaunch(dmgPath);
+      expect(result.isErr, isTrue);
+      expect((result as Err).error.message, contains('Gatekeeper'));
+    });
+
+    test('Team ID 不匹配 → Err', () async {
+      final service = serviceWith(
+          expectedTeamId: 'TEAM123', teamIdOutput: 'TeamIdentifier=OTHER');
+      final result = await service.installAndRelaunch(dmgPath);
+      expect(result.isErr, isTrue);
+      expect((result as Err).error.message, contains('Team ID'));
+    });
+
+    test('校验顺序：codesign/spctl 在替换脚本启动之前执行', () async {
+      final recorded = <String>[];
+      final service = serviceWith(
+          expectedTeamId: 'TEAM123', spctlOk: false, recorded: recorded);
+      await service.installAndRelaunch(dmgPath);
+      final codesignIdx =
+          recorded.indexWhere((c) => c.contains('codesign --verify'));
+      final dittoIdx = recorded.indexWhere((c) => c.contains('ditto'));
+      expect(codesignIdx, greaterThan(-1));
+      expect(dittoIdx, greaterThan(-1));
+      // 校验发生在提取（ditto）之后、且失败时不会启动安装脚本
+      expect(codesignIdx, greaterThan(dittoIdx));
+      expect(recorded.any((c) => c.contains('chmod')), isFalse);
     });
   });
 }

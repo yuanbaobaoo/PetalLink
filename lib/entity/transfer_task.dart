@@ -1,4 +1,4 @@
-import '../types/enums.dart';
+import 'package:petal_link/types/enums.dart';
 
 /// copyWith 的「保持原值」哨兵（区分「不传」与「显式置 null」）
 const Object _keep = Object();
@@ -91,13 +91,13 @@ class TransferTask {
 
   const TransferTask({
     this.id = 0,
-    this.direction = TransferDirection.Upload,
+    this.direction = TransferDirection.upload,
     this.fileId,
     this.localPath,
     required this.name,
     this.totalSize = 0,
     this.transferred = 0,
-    this.state = TransferState.Pending,
+    this.state = TransferState.pending,
     this.errorMessage,
     required this.createdAt,
     this.finishedAt,
@@ -146,14 +146,14 @@ class TransferTask {
       id: _tolerantInt(row['id']) ?? 0,
       direction:
           TransferDirection.fromCode(_tolerantInt(row['direction']) ?? 0) ??
-              TransferDirection.Upload,
+              TransferDirection.upload,
       fileId: row['file_id'] as String?,
       localPath: row['local_path'] as String?,
       name: row['name'] as String? ?? '',
       totalSize: _tolerantInt(row['total_size']) ?? 0,
       transferred: _tolerantInt(row['transferred']) ?? 0,
       state: TransferState.fromCode(_tolerantInt(row['state']) ?? 0) ??
-          TransferState.Pending,
+          TransferState.pending,
       errorMessage: row['error_message'] as String?,
       createdAt: _tolerantInt(row['created_at']) ?? 0,
       finishedAt: _tolerantInt(row['finished_at']),

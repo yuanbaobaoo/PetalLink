@@ -359,16 +359,16 @@ class _FileListViewState extends State<FileListView> {
             Expanded(
               child: FileListHeaderCell(
                 title: '名称',
-                active: widget.browser.sortField == SortField.Name,
+                active: widget.browser.sortField == SortField.name,
                 ascending: widget.browser.ascending,
-                onClick: () => widget.onSort(SortField.Name),
+                onClick: () => widget.onSort(SortField.name),
               ),
             ),
             SizedBox(
               width: _sizeWidth,
               child: FileListHeaderCell(
                 title: '大小',
-                active: widget.browser.sortField == SortField.Size,
+                active: widget.browser.sortField == SortField.size,
                 ascending: widget.browser.ascending,
                 resizable: true,
                 onResize: (delta) {
@@ -379,14 +379,14 @@ class _FileListViewState extends State<FileListView> {
                     );
                   });
                 },
-                onClick: () => widget.onSort(SortField.Size),
+                onClick: () => widget.onSort(SortField.size),
               ),
             ),
             SizedBox(
               width: _timeWidth,
               child: FileListHeaderCell(
                 title: '修改时间',
-                active: widget.browser.sortField == SortField.ModifiedTime,
+                active: widget.browser.sortField == SortField.modifiedTime,
                 ascending: widget.browser.ascending,
                 resizable: true,
                 onResize: (delta) {
@@ -397,7 +397,7 @@ class _FileListViewState extends State<FileListView> {
                     );
                   });
                 },
-                onClick: () => widget.onSort(SortField.ModifiedTime),
+                onClick: () => widget.onSort(SortField.modifiedTime),
               ),
             ),
             // v2 列宽：状态 72 / 操作 44

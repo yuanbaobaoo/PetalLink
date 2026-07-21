@@ -137,15 +137,15 @@ class StatusAggregator {
       '(SELECT COUNT(*) FROM transfer_queue WHERE state = ?) '
       'AS transfer_failed',
       [
-        SyncItemStatus.Failed.code,
-        SyncItemStatus.Conflict.code,
-        TransferState.Running.code,
-        TransferDirection.Upload.code,
-        TransferState.Running.code,
-        TransferDirection.Download.code,
-        TransferDirection.DownloadUpdate.code,
-        TransferState.WaitingForNetwork.code,
-        TransferState.Failed.code,
+        SyncItemStatus.failed.code,
+        SyncItemStatus.conflict.code,
+        TransferState.running.code,
+        TransferDirection.upload.code,
+        TransferState.running.code,
+        TransferDirection.download.code,
+        TransferDirection.downloadUpdate.code,
+        TransferState.waitingForNetwork.code,
+        TransferState.failed.code,
       ],
     );
     final row = rows.first;
@@ -160,7 +160,7 @@ class StatusAggregator {
       'sync_items',
       columns: ['local_path', 'error_message'],
       where: 'status = ?',
-      whereArgs: [SyncItemStatus.Failed.code],
+      whereArgs: [SyncItemStatus.failed.code],
       orderBy: 'local_path ASC',
       limit: SyncGlobalState.maxFailedItems,
     );

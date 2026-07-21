@@ -88,6 +88,15 @@ class MainFlutterWindow: NSWindow {
           return
         }
         Self.getInodeInfo(path: path, result: result)
+      case "getInodeBatch":
+        guard let args = call.arguments as? [String: Any],
+          let paths = args["paths"] as? [String]
+        else {
+          result(FlutterError(
+            code: "BAD_ARGS", message: "getInodeBatch 需要 paths 参数", details: nil))
+          return
+        }
+        Self.getInodeBatch(paths: paths, result: result)
       case "setActivationPolicy":
         guard let args = call.arguments as? [String: Any],
           let policy = args["policy"] as? String
@@ -271,6 +280,18 @@ class MainFlutterWindow: NSWindow {
       "mtimeMs": Int64(st.st_mtimespec.tv_sec) * 1000
         + Int64(st.st_mtimespec.tv_nsec) / 1_000_000,
     ])
+  }
+
+  /// 批量 inode 查询（lstat；失败路径跳过——扫描场景容忍个别失效）。
+  private static func getInodeBatch(paths: [String], result: FlutterResult) {
+    var out: [String: Int64] = [:]
+    for path in paths {
+      var st = stat()
+      if path.withCString({ lstat($0, &st) }) == 0 {
+        out[path] = Int64(st.st_ino)
+      }
+    }
+    result(out)
   }
 
   // ============================================================

@@ -63,7 +63,7 @@ class TransferService {
           taskId,
           if (expectedRevision != null) ...[
             expectedRevision,
-            TransferState.Running.code,
+            TransferState.running.code,
           ],
         ],
       );
@@ -113,7 +113,7 @@ class TransferService {
           taskId,
           if (expectedRevision != null) ...[
             expectedRevision,
-            TransferState.Running.code,
+            TransferState.running.code,
           ],
         ],
       );
@@ -232,7 +232,7 @@ class TransferService {
       final db = await _db.database;
       final rows = await db.rawQuery(
         'SELECT COUNT(*) AS c FROM transfer_queue WHERE state IN (?, ?)',
-        [TransferState.Pending.code, TransferState.Running.code],
+        [TransferState.pending.code, TransferState.running.code],
       );
       final count = rows.first['c'];
       return Ok(count is int ? count : int.tryParse('$count') ?? 0);
@@ -386,7 +386,7 @@ class TransferService {
       final db = await _db.database;
       final rows = await db.query('transfer_queue',
           where: 'state = ?',
-          whereArgs: [TransferState.Failed.code],
+          whereArgs: [TransferState.failed.code],
           orderBy: 'created_at ASC');
       return Ok(rows.map(TransferTask.fromRow).toList());
     } catch (e, st) {
@@ -432,7 +432,7 @@ class TransferService {
           replacement.expectedCloudEditedTime,
           replacement.attemptCount,
           current.id,
-          TransferState.Pending.code,
+          TransferState.pending.code,
           current.stateRevision,
         ],
       );
@@ -453,18 +453,18 @@ class TransferService {
   /// Canceled 行由历史修剪统一处理，均不在本命令清除范围内。
   /// 返回清除的任务数量。
   Future<AppResult<int>> clearCompleted() {
-    return _clearByStates(const [TransferState.Completed], '已完成');
+    return _clearByStates(const [TransferState.completed], '已完成');
   }
 
   /// 清除已失败的任务（对齐 Rust `transfer_clear_failed`：仅删 Failed）。
   Future<AppResult<int>> clearFailed() {
-    return _clearByStates(const [TransferState.Failed], '已失败');
+    return _clearByStates(const [TransferState.failed], '已失败');
   }
 
   /// 清除已结束的任务（对齐 Rust `transfer_clear_finished`：Completed + Failed）。
   Future<AppResult<int>> clearFinished() {
     return _clearByStates(
-        const [TransferState.Completed, TransferState.Failed], '已结束');
+        const [TransferState.completed, TransferState.failed], '已结束');
   }
 
   /// 按状态集合删除传输历史。

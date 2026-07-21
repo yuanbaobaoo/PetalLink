@@ -11,7 +11,10 @@ import 'package:petal_link/entity/transfer_task.dart';
 import 'package:petal_link/service/drive/download_service.dart';
 import 'package:petal_link/types/enums.dart';
 
+import 'package:petal_link/service/mount/manager.dart';
+
 import '../auth/fake_http.dart';
+import '../mount/proc_xattr.dart';
 import 'drive_test_util.dart';
 
 void main() {
@@ -354,12 +357,12 @@ void main() {
 
   group('DownloadService.downloadForTask（执行器级）', () {
     TransferTask buildTask({
-      TransferOperation operation = TransferOperation.Download,
+      TransferOperation operation = TransferOperation.download,
       int totalSize = 5,
     }) {
       return TransferTask(
         id: 1,
-        direction: TransferDirection.Download,
+        direction: TransferDirection.download,
         fileId: fileId,
         localPath: destPath,
         name: 'file.bin',
@@ -403,7 +406,7 @@ void main() {
       final service = DownloadService(
           buildTestClient(FakeHttpAdapter((req) => metadataResponse(5))));
       final result = await service.downloadForTask(
-          buildTask(operation: TransferOperation.Create));
+          buildTask(operation: TransferOperation.create));
       expect(result.isErr, isTrue);
     });
 
@@ -414,6 +417,76 @@ void main() {
           .downloadForTask(buildTask(), isOnline: () => false);
       expect(result.isErr, isTrue);
       expect((result as Err).error, isA<DriveApiError>());
+    });
+  });
+
+  group('DownloadService 占位属主核验（对齐 Rust verify_local_destination）', () {
+    DownloadService serviceWithXattr(FakeHttpAdapter adapter, ProcXattrService x) {
+      return DownloadService(buildTestClient(adapter), xattr: x);
+    }
+
+    test('占位目标缺 state xattr（用户 0 字节文件）→ 拒绝覆盖', () async {
+      // 目标：0 字节普通文件但无占位标记（用户文件，如 .gitkeep）
+      await File(destPath).writeAsBytes(const []);
+      final adapter = FakeHttpAdapter((req) {
+        if (req.uri.query == 'fields=*') return metadataResponse(5);
+        return contentResponse('hello'.codeUnits);
+      });
+      final x = ProcXattrService();
+      final service = serviceWithXattr(adapter, x);
+
+      final result = await service.downloadWithExpectation(
+        fileId,
+        destPath,
+        expectation: const DownloadExpectation(placeholderFileId: fileId),
+      );
+
+      expect(result.isErr, isTrue);
+      expect((result as Err).error.message, contains('用户内容'));
+      // 用户文件未被覆盖
+      expect(await File(destPath).readAsBytes(), isEmpty);
+    });
+
+    test('占位属主 fileId 不匹配 → 拒绝覆盖', () async {
+      await File(destPath).writeAsBytes(const []);
+      final x = ProcXattrService();
+      await x.set(destPath, xattrState, statePlaceholder);
+      await x.set(destPath, xattrFileId, 'other-fid');
+      final adapter = FakeHttpAdapter((req) {
+        if (req.uri.query == 'fields=*') return metadataResponse(5);
+        return contentResponse('hello'.codeUnits);
+      });
+      final service = serviceWithXattr(adapter, x);
+
+      final result = await service.downloadWithExpectation(
+        fileId,
+        destPath,
+        expectation: const DownloadExpectation(placeholderFileId: fileId),
+      );
+
+      expect(result.isErr, isTrue);
+      expect((result as Err).error.message, contains('用户内容'));
+    });
+
+    test('合法占位（state + owner 匹配）→ 正常安装', () async {
+      await File(destPath).writeAsBytes(const []);
+      final x = ProcXattrService();
+      await x.set(destPath, xattrState, statePlaceholder);
+      await x.set(destPath, xattrFileId, fileId);
+      final adapter = FakeHttpAdapter((req) {
+        if (req.uri.query == 'fields=*') return metadataResponse(5);
+        return contentResponse('hello'.codeUnits);
+      });
+      final service = serviceWithXattr(adapter, x);
+
+      final result = await service.downloadWithExpectation(
+        fileId,
+        destPath,
+        expectation: const DownloadExpectation(placeholderFileId: fileId),
+      );
+
+      expect(result.isOk, isTrue);
+      expect(await File(destPath).readAsString(), 'hello');
     });
   });
 }

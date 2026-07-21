@@ -8,22 +8,16 @@ import 'package:petal_link/app/sync/sync_controller.dart';
 import 'package:petal_link/app/theme/mate_theme.dart';
 import 'package:petal_link/app/transfer/transfer_controller.dart';
 import 'package:petal_link/app/update/update_controller.dart';
-import 'package:petal_link/core/error/app_result.dart';
-import 'package:petal_link/core/logger/logger.dart';
 import 'package:petal_link/entity/sync_state.dart';
 import 'package:petal_link/pages/files/controller/file_browser_controller.dart';
 import 'package:petal_link/pages/files/widgets/app_bar.dart';
 import 'package:petal_link/pages/files/widgets/breadcrumb.dart';
-import 'package:petal_link/pages/files/widgets/file_format.dart';
 import 'package:petal_link/pages/files/widgets/file_list_view.dart';
 import 'package:petal_link/pages/files/widgets/search_results.dart';
 import 'package:petal_link/pages/files/widgets/sidebar.dart';
 import 'package:petal_link/pages/files/widgets/sync_setup_banner.dart';
 import 'package:petal_link/pages/files/widgets/sync_status_bar.dart';
 import 'package:petal_link/pages/files/widgets/transfer_popover.dart';
-import 'package:petal_link/service/drive/about_service.dart';
-import 'package:petal_link/service/platform/platform_service.dart';
-import 'package:petal_link/service/sync/sync_service.dart';
 import 'package:petal_link/widgets/index.dart';
 
 /// 文件浏览主页面（对标 CMP MainScreen.kt 装配层；原 Vue MainPage.vue）。
@@ -52,16 +46,12 @@ class _FilesPageState extends State<FilesPage> {
   /// Worker 列表（dispose 统一释放）
   final List<Worker> _workers = [];
 
-  /// 同步权威快照（直接订阅 SyncService.stateStream；
-  /// SyncUIState 共享文件未携带 uploading/failed 等分桶计数，故页面自行订阅）
-  final Rx<SyncGlobalState> _snapshot = const SyncGlobalState().obs;
-  StreamSubscription<SyncGlobalState>? _snapshotSub;
+  /// 同步权威快照（经 [SyncController.rawSnapshot] 观察；
+  /// 不再自行订阅 SyncService.stateStream，避免双重订阅）
+  Rx<SyncGlobalState> get _snapshot => _sync.rawSnapshot;
 
   /// 配置是否已加载（setupPhase 的 loading 判定）
   bool _configLoaded = false;
-
-  /// 配额文本（账号卡；如 "36.5 GB / 200 GB"）
-  String? _quotaText;
 
   /// 搜索关键词：仅回车提交才触发远端搜索；输入过程只更新本地显示
   final TextEditingController _searchController = TextEditingController();
@@ -75,19 +65,12 @@ class _FilesPageState extends State<FilesPage> {
   void initState() {
     super.initState();
     _browser = Get.put(FileBrowserController());
-    _sync = _findOrPut<SyncController>(SyncController());
-    _transfer = _findOrPut<TransferController>(TransferController());
-    _update = _findOrPut<UpdateController>(UpdateController());
-    _auth = _findOrPut<AuthController>(AuthController());
-
-    // 订阅引擎权威快照流（revision 单调由服务层保证）
-    try {
-      _snapshotSub = Get.find<SyncService>().stateStream.listen((snapshot) {
-        _snapshot.value = snapshot;
-      });
-    } catch (e) {
-      AppLogger.d('SyncService 未注册，快照订阅跳过: $e');
-    }
+    // 全局控制器均由 GlobalBinding permanent 注册（启动必存在），
+    // 直接 find——find-or-put 兜底会掩盖注册顺序缺陷并产生孤儿实例
+    _sync = Get.find<SyncController>();
+    _transfer = Get.find<TransferController>();
+    _update = Get.find<UpdateController>();
+    _auth = Get.find<AuthController>();
 
     // 目录内容变更 → 刷新当前目录 + 重读挂载配置（对齐 Vue sidebarRefresh 订阅）
     _workers.add(ever(_sync.sidebarRefresh, (_) {
@@ -100,52 +83,20 @@ class _FilesPageState extends State<FilesPage> {
       await _browser.reloadMountConfig();
       if (mounted) setState(() => _configLoaded = true);
       await _browser.loadFiles();
-      await _loadQuota();
-      await _loadInitialSnapshot();
+      await _browser.loadQuota();
+      // 晚启动补偿：经控制器拉取一次当前快照
+      await _sync.refreshStatus();
     });
-  }
-
-  static T _findOrPut<T>(T instance) {
-    try {
-      return Get.find<T>();
-    } catch (_) {
-      return Get.put(instance);
-    }
   }
 
   @override
   void dispose() {
-    _snapshotSub?.cancel();
     for (final w in _workers) {
       w.dispose();
     }
     _searchController.dispose();
     Get.delete<FileBrowserController>();
     super.dispose();
-  }
-
-  /// 主动拉取一次当前同步快照（晚启动补偿）
-  Future<void> _loadInitialSnapshot() async {
-    try {
-      _snapshot.value = await Get.find<SyncService>().getState();
-    } catch (e) {
-      AppLogger.d('获取同步快照失败（引擎可能未启动）: $e');
-    }
-  }
-
-  /// 加载配额文本（账号卡；失败静默不显示配额行）
-  Future<void> _loadQuota() async {
-    try {
-      final result = await Get.find<AboutService>().get();
-      if (result.isErr || !mounted) return;
-      final about = (result as Ok).value;
-      setState(() {
-        _quotaText =
-            '${formatFileSize(about.usedSpace)} / ${formatFileSize(about.userCapacity)}';
-      });
-    } catch (e) {
-      AppLogger.d('加载配额失败: $e');
-    }
   }
 
   /// 派生同步目录配置阶段（对标 CMP deriveSetupPhase）
@@ -196,7 +147,7 @@ class _FilesPageState extends State<FilesPage> {
                   .map((b) => b.id ?? '')
                   .toSet(),
               userName: auth.accountName,
-              quotaText: _quotaText,
+              quotaText: _browser.quotaText.value,
               updateDownloading: update.phase == UpdatePhase.downloading,
               updateDownloadProgress: update.downloadProgress,
               updateAvailableVersion: update.phase == UpdatePhase.available
@@ -266,14 +217,7 @@ class _FilesPageState extends State<FilesPage> {
         onRefresh: _manualRefresh,
         onToggleTransfer: () =>
             setState(() => _showTransferPopover = !_showTransferPopover),
-        onOpenFinder: () {
-          final dir = _browser.mountDir.value;
-          if (dir.isEmpty) {
-            _browser.errorMessage.value = '尚未配置同步目录';
-            return;
-          }
-          Get.find<PlatformService>().openInFinder(dir);
-        },
+        onOpenFinder: _browser.openInFinder,
         onOpenSettings: () => Get.toNamed('/settings'),
       );
     });

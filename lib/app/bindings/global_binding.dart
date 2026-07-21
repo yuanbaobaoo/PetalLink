@@ -25,6 +25,7 @@ import 'package:petal_link/service/drive/upload_service.dart';
 import 'package:petal_link/service/mount/file_hasher.dart';
 import 'package:petal_link/service/mount/manager.dart';
 import 'package:petal_link/service/mount/stability.dart';
+import 'package:petal_link/service/mount/xattr_service.dart';
 import 'package:petal_link/service/platform/platform_service.dart';
 import 'package:petal_link/service/platform/tray_service.dart';
 import 'package:petal_link/service/sync/cloud_tree.dart';
@@ -62,7 +63,7 @@ class GlobalBinding {
             // 临期自动刷新（对齐 Rust ensure_valid_access_token）
             return await authService.ensureValidAccessToken();
           } catch (_) {
-            // 未登录 / 刷新失败 → 空 token（不注入 Bearer，等 401 流程）
+            // 未登录 / 刷新失败 → 空 token（拦截器拒绝请求，不发出无认证请求）
             return '';
           }
         },
@@ -74,32 +75,18 @@ class GlobalBinding {
             return null;
           }
         },
-        onAuthExpired: () {
-          Get.find<AuthController>().logout();
-        },
       ),
       permanent: true,
     );
 
     // ============================================
-    // 控制器 — 全局状态管理
-    // ============================================
-
-    /// 认证控制器
-    Get.put(AuthController(), permanent: true);
-
-    /// 同步控制器
-    Get.put(SyncController(), permanent: true);
-
-    /// 传输控制器
-    Get.put(TransferController(), permanent: true);
-
-    /// 更新控制器
-    Get.put(UpdateController(), permanent: true);
-
-    // ============================================
     // 服务层 — API 与业务逻辑
     // ============================================
+    //
+    // 注意：控制器（AuthController/SyncController/TransferController/
+    // UpdateController）注册于全部服务之后——它们的构造/onInit 会立即
+    // Get.find 依赖的服务（2026-07-21 启动实测：SyncController 先于
+    // SyncService 注册导致 "SyncService" not found 未捕获异常）。
 
     /// 安全存储（用于配置服务的敏感数据）
     final secureStorage = const FlutterSecureStorage();
@@ -153,9 +140,17 @@ class GlobalBinding {
       permanent: true,
     );
 
-    /// 下载服务
+    /// 下载服务（下载落点占位属主核验，对齐 Rust verify_local_destination；
+    /// 属主数据源：inode 映射优先、xattr 过渡回退）
     Get.put(
-      DownloadService(Get.find<MateHttpClient>()),
+      DownloadService(
+        Get.find<MateHttpClient>(),
+        xattr: ChannelXattrService(),
+        inodeOwnerProvider: (path) =>
+            Get.isRegistered<MountManager>()
+                ? Get.find<MountManager>().inodeOwnerOf(path)
+                : Future.value(null),
+      ),
       permanent: true,
     );
 
@@ -254,6 +249,12 @@ class GlobalBinding {
         netGuard: Get.find<NetGuard>(),
         taskRunner: Get.find<TaskRunner>(),
         isLoggedIn: () => authService.isLoggedIn(),
+        // inode 批量查询（docs/design/10 阶段 1：原生 lstat 批量通道，
+        // 失败归一为空映射——本轮退化为路径配对，不阻断扫描）
+        inodeBatchProvider: (paths) async {
+          final r = await Get.find<PlatformService>().getInodeBatch(paths);
+          return r.unwrapOr({});
+        },
         onMountRegistered: (mount) {
           if (Get.isRegistered<MountManager>()) {
             Get.delete<MountManager>(force: true);
@@ -269,6 +270,22 @@ class GlobalBinding {
       permanent: true,
     );
 
+    // ============================================
+    // 控制器 — 全局状态管理（必须在全部服务注册之后）
+    // ============================================
+
+    /// 认证控制器（onInit 恢复登录态，依赖 AuthService/SyncService）
+    Get.put(AuthController(), permanent: true);
+
+    /// 同步控制器（onInit 订阅 SyncService 状态流）
+    Get.put(SyncController(), permanent: true);
+
+    /// 传输控制器（构造即解析 TransferService/TaskRunner）
+    Get.put(TransferController(), permanent: true);
+
+    /// 更新控制器（构造即解析 UpdateService）
+    Get.put(UpdateController(), permanent: true);
+
     /// 托盘服务（菜单栏图标 + 活动传输菜单；对齐 Rust tray.rs）
     ///
     /// 菜单数据源：transfer_queue 中 Pending/Running 任务按创建时间升序
@@ -280,8 +297,8 @@ class GlobalBinding {
         if (result.isErr) return const <TransferTask>[];
         final tasks = (result as Ok<List<TransferTask>>).value
             .where((t) =>
-                t.state == TransferState.Pending ||
-                t.state == TransferState.Running)
+                t.state == TransferState.pending ||
+                t.state == TransferState.running)
             .toList()
           ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
         return tasks;

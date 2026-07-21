@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -16,6 +17,7 @@ import 'package:petal_link/service/mount/manager.dart';
 import 'package:petal_link/service/sync/baseline_store.dart';
 import 'package:petal_link/service/sync/engine.dart';
 import 'package:petal_link/service/sync/engine/executor.dart';
+import 'package:petal_link/service/sync/sync_actions.dart';
 import 'package:petal_link/service/sync/status_aggregator.dart';
 import 'package:petal_link/service/transfer/task_runner.dart';
 import 'package:petal_link/service/transfer/task_runner_contracts.dart';
@@ -25,6 +27,9 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import '../auth/fake_http.dart';
 import '../drive/drive_test_util.dart';
+import 'package:petal_link/service/sync/identity/inode_identity.dart';
+
+import '../mount/proc_inode.dart';
 import '../mount/proc_xattr.dart';
 
 /// 引擎周期测试（对齐 Rust engine/cycle.rs + cache.rs）：
@@ -77,8 +82,37 @@ class _CloudFake {
         final parent = match?.group(1) ?? 'root';
         return jsonResponse(fileListPageJson(children[parent] ?? const []));
       }
+      if (path.contains('/files/') && request.method == 'PATCH') {
+        // 云端 rename/move：更新 children 并返回更新后的 File
+        final id = path.split('/files/').last;
+        final body = jsonDecode(request.body) as Map<String, dynamic>;
+        final newName = body['fileName'] as String?;
+        final newParent =
+            (body['parentFolder'] as List?)?.cast<String>();
+        for (final entry in children.entries) {
+          final idx = entry.value.indexWhere((f) => f['id'] == id);
+          if (idx < 0) continue;
+          final f = Map<String, dynamic>.of(entry.value[idx]);
+          entry.value.removeAt(idx);
+          if (newName != null) f['fileName'] = newName;
+          if (newParent != null) f['parentFolder'] = newParent;
+          children
+              .putIfAbsent((f['parentFolder'] as List).first as String,
+                  () => [])
+              .add(f);
+          return jsonResponse(f);
+        }
+        return jsonResponse(
+            {'error': {'code': 'notFound'}}, status: 404);
+      }
       if (path.contains('/files/')) {
-        // GET /files/{id}：一律 404（verifyDeleted → true）
+        // GET /files/{id}：存在返回 File，否则 404（verifyDeleted → true）
+        final id = path.split('/files/').last;
+        for (final entry in children.entries) {
+          for (final f in entry.value) {
+            if (f['id'] == id) return jsonResponse(f);
+          }
+        }
         return jsonResponse(
             {'error': {'code': 'notFound'}}, status: 404);
       }
@@ -96,8 +130,8 @@ class _FakeOps extends TaskOperations {
     TaskProgressCallbacks progress,
   ) async {
     executeCalls++;
-    if (task.operation == TransferOperation.Download ||
-        task.operation == TransferOperation.DownloadUpdate) {
+    if (task.operation == TransferOperation.download ||
+        task.operation == TransferOperation.downloadUpdate) {
       // 模拟下载落盘（供基线结算 stat）
       await File(task.localPath!).writeAsString('cloud');
     }
@@ -165,6 +199,7 @@ Future<_Fixture> _buildEngine({
     f.mountDir.path,
     xattr: ProcXattrService(),
     db: DatabaseService.instance,
+    inodeBatchProvider: procInodeBatch,
   );
   final baselineStore = SyncBaselineStore(
     db: DatabaseService.instance,
@@ -255,9 +290,9 @@ void main() {
       final rows = await items();
       expect(rows.length, 3);
       final byPath = {for (final r in rows) r.path: r.status};
-      expect(byPath['docs'], SyncItemStatus.Synced);
-      expect(byPath['a.txt'], SyncItemStatus.CloudOnly);
-      expect(byPath['docs/b.txt'], SyncItemStatus.CloudOnly);
+      expect(byPath['docs'], SyncItemStatus.synced);
+      expect(byPath['a.txt'], SyncItemStatus.cloudOnly);
+      expect(byPath['docs/b.txt'], SyncItemStatus.cloudOnly);
       // 经历了启动索引阶段
       expect(phases, contains('indexing-startup'));
     } finally {
@@ -278,7 +313,7 @@ void main() {
       while (true) {
         final rows = await items();
         if (rows.any((r) =>
-            r.path == 'new.txt' && r.status == SyncItemStatus.Synced)) {
+            r.path == 'new.txt' && r.status == SyncItemStatus.synced)) {
           break;
         }
         if (DateTime.now().isAfter(deadline)) {
@@ -434,7 +469,7 @@ void main() {
       while (true) {
         final rows = await items();
         if (rows.any((r) =>
-            r.path == 'inc.txt' && r.status == SyncItemStatus.CloudOnly)) {
+            r.path == 'inc.txt' && r.status == SyncItemStatus.cloudOnly)) {
           break;
         }
         if (DateTime.now().isAfter(deadline)) {
@@ -442,6 +477,228 @@ void main() {
         }
         await Future<void>.delayed(const Duration(milliseconds: 50));
       }
+    } finally {
+      await f.tearDown();
+    }
+  });
+
+  test('retryTransfer 成功后回插 live 云树（对齐 Rust retry_transfer）', () async {
+    final f = await _buildEngine();
+    try {
+      await f.engine.start();
+      // 造一个 Failed 上传任务（真实源文件满足静态校验）
+      final rel = 'retry.bin';
+      final file = File(p.join(f.mountDir.path, rel));
+      await file.writeAsBytes(List<int>.filled(64, 7), flush: true);
+      final stat = await file.stat();
+      final transferService = TransferService(DatabaseService.instance);
+      final enqueued = (await transferService.enqueue(TransferTask(
+        direction: TransferDirection.upload,
+        localPath: file.path,
+        name: rel,
+        totalSize: stat.size,
+        relativePath: rel,
+        operation: TransferOperation.create,
+        sourceMtime: stat.modified.millisecondsSinceEpoch,
+        sourceSize: stat.size,
+        createdAt: 1,
+      )))
+          .unwrap();
+      final db = await DatabaseService.instance.database;
+      await db.update(
+        'transfer_queue',
+        {
+          'state': TransferState.failed.code,
+          'state_revision': enqueued.stateRevision + 1,
+        },
+        where: 'id = ?',
+        whereArgs: [enqueued.id],
+      );
+
+      await f.engine.retryTransfer(enqueued.id);
+
+      // 后台执行收敛到 Completed
+      final deadline = DateTime.now().add(const Duration(seconds: 10));
+      while (true) {
+        final rows = await db
+            .query('transfer_queue', where: 'id = ?', whereArgs: [enqueued.id]);
+        if (rows.first['state'] == TransferState.completed.code) break;
+        if (DateTime.now().isAfter(deadline)) fail('重试任务未收敛到 Completed');
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      }
+      // 关键断言：成功的 cloudFile 必须回插 live 云树 + pathToId
+      // （修复前 runner.retry fire-and-forget，云树无回插）
+      expect(f.engine.cloudIndex.tree[rel], isNotNull);
+      expect(f.engine.cloudIndex.pathToId[rel],
+          f.engine.cloudIndex.tree[rel]!.id);
+    } finally {
+      await f.tearDown();
+    }
+  });
+
+  test('scanLocal 后写入 inode 映射并清理陈旧记录（docs/design/10 阶段1）',
+      () async {
+    final f = await _buildEngine();
+    try {
+      final identity = MemoryInodeIdentityStore();
+      f.engine.identity = identity;
+      // 本地文件 + DB 基线
+      final file = File(p.join(f.mountDir.path, 'a.txt'));
+      await file.writeAsString('hello');
+      final db = await DatabaseService.instance.database;
+      await db.insert('sync_items', {
+        'file_id': 'fid-a',
+        'local_path': 'a.txt',
+        'name': 'a.txt',
+        'is_folder': 0,
+        'size': 5,
+        'status': 0,
+      });
+
+      await f.engine.scanLocal();
+
+      // 有基线的文件 → 映射已写入（fake provider 由 fixture mount 注入）
+      final all = identity.debugAll;
+      expect(all, isNotEmpty);
+      expect(all.values.any((r) => r.relativePath == 'a.txt' && r.fileId == 'fid-a'),
+          isTrue);
+
+      // 文件删除后重扫 → 陈旧记录被 purge
+      await file.delete();
+      await f.engine.scanLocal();
+      expect(
+          identity.debugAll.values.any((r) => r.relativePath == 'a.txt'),
+          isFalse);
+    } finally {
+      await f.tearDown();
+    }
+  });
+
+  test('本地 mv 已同步文件 → inode 检测为 MoveInCloud（非删+传）', () async {
+    final f = await _buildEngine();
+    try {
+      f.engine.identity = MemoryInodeIdentityStore();
+      f.cloud.children['root'] = [
+        fileJson(
+            id: 'f1',
+            name: 'a.txt',
+            parentFolder: ['root'],
+            editedTime: '2023-11-14T22:13:20.000Z'),
+      ];
+      await f.engine.start();
+      // 等占位创建完成（a.txt 落基线 CloudOnly）
+      final db = await DatabaseService.instance.database;
+      final deadline = DateTime.now().add(const Duration(seconds: 10));
+      while (true) {
+        final rows = await items();
+        if (rows.any(
+            (r) => r.path == 'a.txt' && r.status == SyncItemStatus.cloudOnly)) {
+          break;
+        }
+        if (DateTime.now().isAfter(deadline)) fail('占位 a.txt 未落基线');
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      }
+      // 填充 inode 映射（占位 a.txt inode → f1）
+      await f.engine.scanLocal();
+
+      // 用户 mv 占位符
+      await File(p.join(f.mountDir.path, 'a.txt'))
+          .rename(p.join(f.mountDir.path, 'b.txt'));
+      await f.engine.runSyncCycle('local-watcher');
+
+      // 基线重键到 b.txt（fileId 不变），旧路径行消失
+      final rows = await items();
+      expect(rows.any((r) => r.path == 'b.txt' && r.status != SyncItemStatus.failed),
+          isTrue);
+      expect(rows.any((r) => r.path == 'a.txt'), isFalse);
+      // live 云树同步更新
+      expect(f.engine.cloudIndex.tree['b.txt'], isNotNull);
+      expect(f.engine.cloudIndex.tree['a.txt'], isNull);
+      // 远端执行了 rename（PATCH），而不是上传
+      expect(f.cloud.children['root']!.any((c) => c['fileName'] == 'b.txt'),
+          isTrue);
+      final uploads = await db.query('transfer_queue',
+          where: 'direction = ?', whereArgs: [TransferDirection.upload.code]);
+      expect(uploads, isEmpty);
+    } finally {
+      await f.tearDown();
+    }
+  });
+
+  test('本地 cp 已同步文件 → 副本作为新文件上传（新 inode）', () async {
+    final f = await _buildEngine();
+    try {
+      f.engine.identity = MemoryInodeIdentityStore();
+      // 云端 + 本地 + 基线三方一致的已同步真实文件
+      const edited = '2023-11-14T22:13:20.000Z';
+      final editedMs = DateTime.parse(edited).toUtc().millisecondsSinceEpoch;
+      f.cloud.children['root'] = [
+        fileJson(
+            id: 'f1',
+            name: 'a.txt',
+            size: 5,
+            parentFolder: ['root'],
+            editedTime: edited),
+      ];
+      final aFile = File(p.join(f.mountDir.path, 'a.txt'));
+      await aFile.writeAsString('hello', flush: true);
+      final aStat = await aFile.stat();
+      final db = await DatabaseService.instance.database;
+      await db.insert('sync_items', {
+        'file_id': 'f1',
+        'local_path': 'a.txt',
+        'name': 'a.txt',
+        'is_folder': 0,
+        'size': 5,
+        'local_size': 5,
+        'local_mtime': aStat.modified.millisecondsSinceEpoch,
+        'cloud_edited_time': editedMs,
+        'status': 0,
+      });
+      await f.engine.start();
+      await f.engine.scanLocal();
+
+      // 用户 cp 真实文件（副本 xattr 跟随但 inode 是新的）
+      await aFile.copy(p.join(f.mountDir.path, 'c.txt'));
+      await f.engine.runSyncCycle('local-watcher');
+
+      // 原件不受影响
+      final rows = await items();
+      expect(rows.any((r) => r.path == 'a.txt'), isTrue);
+      // 副本进入上传队列（作为新文件），未被误判为移动
+      final uploads = await db.query('transfer_queue',
+          where: 'direction = ?', whereArgs: [TransferDirection.upload.code]);
+      expect(uploads.any((u) => u['relative_path'] == 'c.txt'), isTrue);
+      expect(f.engine.cloudIndex.tree['c.txt'], isNull);
+    } finally {
+      await f.tearDown();
+    }
+  });
+
+  test('applyResults 内存发布优先 result.cloudFile（对齐 Rust results.rs）',
+      () async {
+    final f = await _buildEngine();
+    try {
+      await Directory(p.join(f.mountDir.path, 'newdir')).create(recursive: true);
+      final resultFile = DriveFile(
+        id: 'new-folder-id',
+        name: 'newdir',
+        size: 0,
+        parentFolder: ['root'],
+        editedTime:
+            DateTime.fromMillisecondsSinceEpoch(1700000000000, isUtc: true),
+      );
+      final action = SyncAction(
+        actionType: SyncActionType.createFolder,
+        relativePath: 'newdir',
+      );
+      await f.engine.applyResults(
+          [action], [ActionResult.ok(cloudFile: resultFile)]);
+
+      // 修复前内存发布只看 cloudIndex.tree / action.cloudFile，
+      // 丢失 result.cloudFile → live 云树缺条目
+      expect(f.engine.cloudIndex.tree['newdir']?.id, 'new-folder-id');
+      expect(f.engine.cloudIndex.pathToId['newdir'], 'new-folder-id');
     } finally {
       await f.tearDown();
     }

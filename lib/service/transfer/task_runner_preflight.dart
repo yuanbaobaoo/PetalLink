@@ -2,8 +2,8 @@
 ///
 /// 在任务进入 Running 前校验可安全重放的静态条件：
 /// 路径屏障、本地源快照、断点会话完整性、下载目标安全性。
-/// 校验失败持久化为 [TransferState.Failed]（Validation）或
-/// [TransferState.RestartRequired]（LocalChanged，需回 planner 重新规划）。
+/// 校验失败持久化为 [TransferState.failed]（Validation）或
+/// [TransferState.restartRequired]（LocalChanged，需回 planner 重新规划）。
 library;
 
 import 'dart:io';
@@ -38,30 +38,30 @@ class PreflightFailure implements Exception {
   /// 构造静态校验失败（永久失败）
   const PreflightFailure.validation(String message)
       : this(
-          target: TransferState.Failed,
-          kind: TransferErrorKind.Validation,
+          target: TransferState.failed,
+          kind: TransferErrorKind.validation,
           message: message,
         );
 
   /// 构造本地内容变化失败（需重新规划）
   const PreflightFailure.localChanged(String message)
       : this(
-          target: TransferState.RestartRequired,
-          kind: TransferErrorKind.LocalChanged,
+          target: TransferState.restartRequired,
+          kind: TransferErrorKind.localChanged,
           message: message,
         );
 
   /// 构造远端结果不确定失败（等待核验）
   const PreflightFailure.remoteAmbiguous(String message)
       : this(
-          target: TransferState.VerifyingRemote,
-          kind: TransferErrorKind.RemoteAmbiguous,
+          target: TransferState.verifyingRemote,
+          kind: TransferErrorKind.remoteAmbiguous,
           message: message,
         );
 
   /// 生成前置校验失败补丁（对齐 Rust `PreflightFailure::patch`）。
   TransferPatch patch({required int nowMs}) {
-    final finished = target == TransferState.Failed;
+    final finished = target == TransferState.failed;
     return TransferPatch(
       errorKind: SetPatch(kind),
       errorMessage: SetPatch(message),
@@ -120,16 +120,16 @@ Future<TransferOperation> validateStaticTask(
   bool hasNonempty(String? value) => value != null && value.trim().isNotEmpty;
 
   switch (operation) {
-    case TransferOperation.Create:
-    case TransferOperation.Update:
-      if (task.direction != TransferDirection.Upload) {
+    case TransferOperation.create:
+    case TransferOperation.update:
+      if (task.direction != TransferDirection.upload) {
         throw const PreflightFailure.validation('上传 operation 与 direction 不一致');
       }
-      if (operation == TransferOperation.Create && hasNonempty(task.fileId)) {
+      if (operation == TransferOperation.create && hasNonempty(task.fileId)) {
         throw const PreflightFailure.validation('Create 任务不能携带 fileId');
       }
       final fileId = task.fileId;
-      if (operation == TransferOperation.Update &&
+      if (operation == TransferOperation.update &&
           !(fileId != null &&
               fileId.trim().isNotEmpty &&
               !fileId.startsWith(pendingFileIdPrefix))) {
@@ -153,8 +153,8 @@ Future<TransferOperation> validateStaticTask(
           task.totalSize != actualSize) {
         throw const PreflightFailure.localChanged('本地上传源已变化，需要重新规划');
       }
-    case TransferOperation.Download:
-      if (task.direction != TransferDirection.Download) {
+    case TransferOperation.download:
+      if (task.direction != TransferDirection.download) {
         throw const PreflightFailure.validation('Download operation 与 direction 不一致');
       }
       if (!hasNonempty(task.fileId)) {
@@ -177,8 +177,8 @@ Future<TransferOperation> validateStaticTask(
           throw const PreflightFailure.localChanged('下载目标已出现本地内容，需要重新规划');
         }
       }
-    case TransferOperation.DownloadUpdate:
-      if (task.direction != TransferDirection.DownloadUpdate) {
+    case TransferOperation.downloadUpdate:
+      if (task.direction != TransferDirection.downloadUpdate) {
         throw const PreflightFailure.validation(
             'DownloadUpdate operation 与 direction 不一致');
       }
@@ -206,10 +206,10 @@ Future<TransferOperation> validateStaticTask(
         throw const PreflightFailure.localChanged(
             '更新下载目标已变化或缺少版本快照，需要重新规划');
       }
-    case TransferOperation.Delete:
-    case TransferOperation.Move:
-    case TransferOperation.Rename:
-    case TransferOperation.CreateFolder:
+    case TransferOperation.delete:
+    case TransferOperation.move:
+    case TransferOperation.rename:
+    case TransferOperation.createFolder:
       // Flutter 扩展操作（Rust 原版不产生此类任务行）：
       // 远端写操作无本地路径屏障，仅校验必需字段；
       // files API 均带写后验证，可安全重放。
@@ -225,25 +225,25 @@ void _validateRemoteOperation(
   bool Function(String?) hasNonempty,
 ) {
   switch (operation) {
-    case TransferOperation.Delete:
+    case TransferOperation.delete:
       if (!hasNonempty(task.fileId)) {
         throw const PreflightFailure.validation('删除任务缺少 fileId');
       }
-    case TransferOperation.Move:
+    case TransferOperation.move:
       if (!hasNonempty(task.fileId)) {
         throw const PreflightFailure.validation('移动任务缺少 fileId');
       }
       if (!hasNonempty(task.parentFileId)) {
         throw const PreflightFailure.validation('移动任务缺少目标 parentId');
       }
-    case TransferOperation.Rename:
+    case TransferOperation.rename:
       if (!hasNonempty(task.fileId)) {
         throw const PreflightFailure.validation('重命名任务缺少 fileId');
       }
       if (task.name.trim().isEmpty) {
         throw const PreflightFailure.validation('重命名任务缺少新名称');
       }
-    case TransferOperation.CreateFolder:
+    case TransferOperation.createFolder:
       if (task.name.trim().isEmpty) {
         throw const PreflightFailure.validation('新建文件夹任务缺少名称');
       }

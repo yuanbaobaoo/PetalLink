@@ -72,7 +72,6 @@ class _FakeAboutService extends AboutService {
           baseUrl: '',
           tokenProvider: () async => '',
           refreshTokenProvider: () async => null,
-          onAuthExpired: () {},
         ));
 
   @override

@@ -2,7 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
-import '../app/theme/mate_theme.dart';
+import 'package:petal_link/app/theme/mate_theme.dart';
 import 'mate_button.dart';
 import 'mate_icon.dart';
 

@@ -36,7 +36,7 @@ DriveFile cloudFile(
   return DriveFile(
     id: id,
     name: name,
-    category: isFolder ? FileCategory.Folder : FileCategory.Document,
+    category: isFolder ? FileCategory.folder : FileCategory.document,
     size: size,
     parentFolder: parentId != null ? [parentId] : null,
     editedTime: editedMs != null
@@ -50,7 +50,7 @@ DbSnapshotEntry dbEntry(
   int? localMtime = 1700000000000,
   int? localSize = 100,
   int? cloudEditedTime = 1700000000000,
-  SyncItemStatus status = SyncItemStatus.Synced,
+  SyncItemStatus status = SyncItemStatus.synced,
   bool isFolder = false,
 }) {
   return DbSnapshotEntry(
@@ -213,7 +213,7 @@ void main() {
         local: {'a.txt': localEntry('a.txt')},
         db: {
           'a.txt': dbEntry('$pendingFileIdPrefix${'a.txt'}',
-              status: SyncItemStatus.Failed),
+              status: SyncItemStatus.failed),
         },
       ));
       expect(actions, isEmpty);
@@ -249,7 +249,7 @@ void main() {
     test('启动恢复期 + tombstone → 跳过（不重建）', () {
       final actions = planner.plan(snap(
         cloud: {'a.txt': cloudFile('f1', 'a.txt', editedMs: 1700000000000)},
-        db: {'a.txt': dbEntry('f1', status: SyncItemStatus.Deleted)},
+        db: {'a.txt': dbEntry('f1', status: SyncItemStatus.deleted)},
         startup: true,
       ));
       expect(actions, isEmpty);

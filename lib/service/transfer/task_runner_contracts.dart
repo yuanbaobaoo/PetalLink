@@ -92,8 +92,8 @@ class BackendPreflightFailure {
   /// 构造需要重新规划的本地变化错误。
   const BackendPreflightFailure.restartRequired(String message)
       : this(
-          kind: TransferErrorKind.LocalChanged,
-          target: TransferState.RestartRequired,
+          kind: TransferErrorKind.localChanged,
+          target: TransferState.restartRequired,
           message: message,
         );
 }
@@ -115,7 +115,7 @@ final class TaskAppError extends TaskExecutionError {
 }
 
 /// 本地源已变化，需回 planner 重新规划（对齐 Rust
-/// `TaskExecutionError::RestartRequired`）
+/// `TaskExecutionError::restartRequired`）
 final class TaskRestartRequired extends TaskExecutionError {
   /// 重新规划原因
   final String message;
@@ -128,7 +128,7 @@ final class TaskRestartRequired extends TaskExecutionError {
 
 /// 执行期进度回写通道（对齐 Rust `TaskProgressReporter` 的回调面）。
 ///
-/// 由 TaskRunner 按 Running 修订号构造并传入执行器：
+/// 由 TaskRunner 按 running 修订号构造并传入执行器：
 /// - [onProgress] 上传可见进度（节流持久化）
 /// - [onDownloadProgress] 下载可见进度与断点（节流持久化）
 /// - [onResume] 上传会话身份与断点（不节流，必须落库）
@@ -162,7 +162,7 @@ class TaskProgressCallbacks {
 ///
 /// 由操作执行适配层实现（生产：`DriveTaskOperations`；测试：fake）。
 abstract class TaskOperations {
-  /// 在任务进入 Running 前执行本地与远程静态校验。
+  /// 在任务进入 running 前执行本地与远程静态校验。
   ///
   /// 默认通过；拒绝时抛 [BackendPreflightFailure] 携带目标状态与错误分类。
   Future<void> preflight(TransferTask task) async {}
@@ -187,11 +187,31 @@ abstract class TaskOperations {
 class EnqueuedTaskOutcome {
   /// 承载该意图的任务 id（去重/重规划/屏障时可能不是新插入的行）
   final int taskId;
-
   /// 执行或准入后的调度去向
   final TaskExecutionOutcome outcome;
 
   const EnqueuedTaskOutcome({required this.taskId, required this.outcome});
+}
+
+/// 恢复任务确认的云端写入结果（对齐 Rust `RecoveredCloudFile`）。
+class RecoveredCloudFile {
+  /// 任务持久化的规范相对路径
+  final String relativePath;
+
+  /// 经后端校验的完整云端元数据
+  final DriveFile file;
+
+  const RecoveredCloudFile({required this.relativePath, required this.file});
+}
+
+/// 在线恢复入口的汇总（对齐 Rust `TaskRecoverySummary`）：
+/// 本轮到达 completed 的任务数 + 需发布到云树检查点的远端写入结果。
+class TaskRecoverySummary {
+  /// 本轮已进入 completed 的任务数量
+  int completed = 0;
+
+  /// 需同步发布到云树检查点的远端写入结果
+  final List<RecoveredCloudFile> recoveredCloudFiles = [];
 }
 
 /// TaskRunner 向同步引擎暴露的基线结算钩子（对齐 Rust
@@ -245,7 +265,7 @@ class TransferQueueSnapshot {
   /// 全部传输任务（created_at 倒序，与 TransferService.getAllTasks 一致）
   final List<TransferTask> tasks;
 
-  /// 活跃任务数（Running + VerifyingRemote，占用传输槽位）
+  /// 活跃任务数（running + verifyingRemote，占用传输槽位）
   final int activeCount;
 
   const TransferQueueSnapshot({

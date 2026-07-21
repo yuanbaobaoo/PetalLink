@@ -29,6 +29,7 @@ import 'package:petal_link/service/drive/upload_service.dart';
 import 'package:petal_link/service/mount/manager.dart';
 import 'package:petal_link/service/sync/conflict.dart';
 import 'package:petal_link/service/sync/engine/coordination.dart';
+import 'package:petal_link/service/sync/identity/inode_identity.dart';
 import 'package:petal_link/service/sync/sync_actions.dart';
 import 'package:petal_link/service/transfer/task_runner.dart';
 import 'package:petal_link/service/transfer/task_runner_contracts.dart';
@@ -36,6 +37,20 @@ import 'package:petal_link/types/enums.dart';
 
 /// 同步动作执行器。
 class SyncExecutor {
+  /// inode 身份映射（引擎 setExecutor 时注入共享实例；docs/design/10）
+  InodeIdentityStore identity =
+      SqfliteInodeIdentityStore(DatabaseService.instance);
+
+  /// 经批量通道取本地文件 inode 的身份（无 provider/无记录 → null）。
+  Future<String?> _ownerOf(MountManager m, String localPath) async {
+    final provider = m.inodeBatchProvider;
+    if (provider == null) return null;
+    final inodes = await provider([localPath]);
+    final inode = inodes[localPath];
+    if (inode == null) return null;
+    return (await identity.lookup(inode))?.fileId;
+  }
+
   /// 文件 API
   final FilesService filesApi;
 
@@ -188,9 +203,9 @@ class SyncExecutor {
     final TransferDirection direction;
     if (isUpload) {
       operation = action.fileId != null
-          ? TransferOperation.Update
-          : TransferOperation.Create;
-      direction = TransferDirection.Upload;
+          ? TransferOperation.update
+          : TransferOperation.create;
+      direction = TransferDirection.upload;
     } else {
       // 本地已是普通文件且非空占位 → 更新下载
       final type = await FileSystemEntity.type(localPath, followLinks: false);
@@ -203,17 +218,17 @@ class SyncExecutor {
         isUpdate = !isPlaceholder;
       }
       operation = isUpdate
-          ? TransferOperation.DownloadUpdate
-          : TransferOperation.Download;
+          ? TransferOperation.downloadUpdate
+          : TransferOperation.download;
       direction = isUpdate
-          ? TransferDirection.DownloadUpdate
-          : TransferDirection.Download;
+          ? TransferDirection.downloadUpdate
+          : TransferDirection.download;
     }
 
     // 源快照（Create/Update/DownloadUpdate 取本地 metadata）
     int? sourceMtime;
     int? sourceSize;
-    if (operation != TransferOperation.Download) {
+    if (operation != TransferOperation.download) {
       final stat = await FileStat.stat(localPath);
       if (stat.type != FileSystemEntityType.file) {
         throw AppError.generic('传输源不存在或不是普通文件：$localPath');
@@ -292,7 +307,7 @@ class SyncExecutor {
         name: cloud.name,
         size: cloud.size,
         cloudEditedTime: cloud.editedTime?.millisecondsSinceEpoch,
-        status: SyncItemStatus.CloudOnly,
+        status: SyncItemStatus.cloudOnly,
       ).toRow(),
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
@@ -337,10 +352,10 @@ class SyncExecutor {
         parentFileId == null) {
       return const ActionResult.defer('云端移动缺少必要事实，等待重新规划');
     }
-    // 本地身份复核
+    // 本地身份复核（inode 映射，docs/design/10 §4.5：取代 xattr owner 核验）
     final String? owner;
     try {
-      owner = await m.xattr.get(localPath, xattrFileId);
+      owner = await _ownerOf(m, localPath);
     } catch (_) {
       return const ActionResult.defer('本地路径或 fileId 已变化');
     }
@@ -665,12 +680,12 @@ class SyncExecutor {
         'SELECT id FROM transfer_queue WHERE state IN (?, ?, ?) '
         'ORDER BY id DESC LIMIT ?)',
         [
-          TransferState.Completed.code,
-          TransferState.Failed.code,
-          TransferState.Canceled.code,
-          TransferState.Completed.code,
-          TransferState.Failed.code,
-          TransferState.Canceled.code,
+          TransferState.completed.code,
+          TransferState.failed.code,
+          TransferState.canceled.code,
+          TransferState.completed.code,
+          TransferState.failed.code,
+          TransferState.canceled.code,
           keep,
         ],
       );

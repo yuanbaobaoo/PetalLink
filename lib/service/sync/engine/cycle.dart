@@ -17,6 +17,7 @@ import 'package:petal_link/service/sync/engine.dart';
 import 'package:petal_link/service/sync/engine/action_filters.dart';
 import 'package:petal_link/service/sync/engine/cache.dart';
 import 'package:petal_link/service/sync/engine/coordination.dart';
+import 'package:petal_link/service/sync/identity/detect_moves.dart';
 import 'package:petal_link/service/sync/path_recovery.dart';
 import 'package:petal_link/service/sync/planner.dart';
 import 'package:petal_link/service/sync/sync_actions.dart';
@@ -245,10 +246,10 @@ mixin EngineCycle on SyncEngineBase {
       await updateRuntimeAndBroadcast((r) {
         r.isRunning = true;
         r.syncPhase ??= switch (triggeredBy) {
-          'local-watcher' => SyncPhase.SyncingLocal,
-          'manual-refresh' => SyncPhase.SyncingManual,
-          'retry-failed' || 'retry-replan' => SyncPhase.SyncingRetry,
-          'startup-resume' => SyncPhase.SyncingStartup,
+          'local-watcher' => SyncPhase.syncingLocal,
+          'manual-refresh' => SyncPhase.syncingManual,
+          'retry-failed' || 'retry-replan' => SyncPhase.syncingRetry,
+          'startup-resume' => SyncPhase.syncingStartup,
           _ => null,
         };
       });
@@ -337,6 +338,7 @@ mixin EngineCycle on SyncEngineBase {
           db: db,
           mount: m,
           nowMs: nowMs,
+          identity: identity,
         ).recoverVerifiedRemotePathChanges(
           Map<String, DriveFile>.of(cloudIndex.tree),
           (oldPath, newPath) async {
@@ -375,14 +377,22 @@ mixin EngineCycle on SyncEngineBase {
         var completedRecoveries = 0;
         final r = taskRunner;
         if (r != null) {
+          // 对齐 Rust cycle.rs：每个恢复阶段的 recovered_cloud_files
+          // 都提交 live 云树与 checkpoint（修复前丢弃，云树与基线短暂不一致）
           cycleObserver('verify-remote');
-          completedRecoveries += await r.resumeVerifying();
+          final verifying = await r.resumeVerifying();
+          completedRecoveries += verifying.completed;
+          await commitRecoveryCheckpoint(verifying.recoveredCloudFiles);
           ensureCycleActive();
           cycleObserver('resume-waiting');
-          completedRecoveries += await r.resumeWaiting();
+          final waiting = await r.resumeWaiting();
+          completedRecoveries += waiting.completed;
+          await commitRecoveryCheckpoint(waiting.recoveredCloudFiles);
           ensureCycleActive();
           cycleObserver('resume-due');
-          completedRecoveries += await r.resumeDueBackoff();
+          final due = await r.resumeDueBackoff();
+          completedRecoveries += due.completed;
+          await commitRecoveryCheckpoint(due.recoveredCloudFiles);
           ensureCycleActive();
         }
         if (completedRecoveries > 0) {
@@ -465,7 +475,8 @@ mixin EngineCycle on SyncEngineBase {
       // 过滤链（顺序固定）
       filterSkippedPaths(actions, skipPatterns);
       if (trusted) {
-        await detectRenames(actions, dbSnapshot);
+        // inode 移动合并（docs/design/10 §4.3，取代旧 xattr detectRenames）
+        applyDetectedMoves(actions, lastScanMoves, cloudIndex);
       }
       final activeTasks = await queryActiveTransfers(await db.database);
       filterActiveTransferActions(actions, activeTasks, dbSnapshot);

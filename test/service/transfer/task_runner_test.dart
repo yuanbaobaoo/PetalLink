@@ -127,7 +127,7 @@ void main() {
   Future<TransferTask> makeUploadTask(
     String rel, {
     int size = 100,
-    TransferOperation operation = TransferOperation.Create,
+    TransferOperation operation = TransferOperation.create,
     String? fileId,
   }) async {
     final file = File(p.join(mountDir.path, rel));
@@ -135,7 +135,7 @@ void main() {
     await file.writeAsBytes(List<int>.filled(size, 7), flush: true);
     final stat = await file.stat();
     return TransferTask(
-      direction: TransferDirection.Upload,
+      direction: TransferDirection.upload,
       fileId: fileId,
       localPath: file.path,
       name: p.basename(rel),
@@ -156,14 +156,14 @@ void main() {
     String fileId = 'cloud-id',
   }) {
     return TransferTask(
-      direction: TransferDirection.Download,
+      direction: TransferDirection.download,
       fileId: fileId,
       localPath: p.join(mountDir.path, rel),
       name: p.basename(rel),
       totalSize: size,
       relativePath: rel,
       parentFileId: p.dirname(rel) == '.' ? null : 'parent-id',
-      operation: TransferOperation.Download,
+      operation: TransferOperation.download,
       expectedCloudEditedTime: 1690000000000,
       createdAt: createdSeq++,
     );
@@ -278,7 +278,7 @@ void main() {
       await runner.idle;
 
       final stored = await row(task.id);
-      expect(stored.state, TransferState.Completed);
+      expect(stored.state, TransferState.completed);
       expect(stored.transferred, stored.totalSize);
       expect(stored.finishedAt, isNotNull);
       expect(stored.remoteResultFileId, 'fid-${task.id}');
@@ -297,7 +297,7 @@ void main() {
       await runner.idle;
 
       final stored = await row(task.id);
-      expect(stored.state, TransferState.Completed);
+      expect(stored.state, TransferState.completed);
       expect(stored.remoteResultFileId, 'cloud-id');
       expect(File(task.localPath!).lengthSync(), task.totalSize);
       await runner.dispose();
@@ -313,8 +313,8 @@ void main() {
       await runner.idle;
 
       final stored = await row(task.id);
-      expect(stored.state, TransferState.Failed);
-      expect(stored.errorKind, TransferErrorKind.Validation);
+      expect(stored.state, TransferState.failed);
+      expect(stored.errorKind, TransferErrorKind.validation);
       expect(stored.finishedAt, isNotNull);
       expect(ops.executedOrder, [task.id]);
       await runner.dispose();
@@ -332,8 +332,8 @@ void main() {
       await runner.idle;
 
       final stored = await row(task.id);
-      expect(stored.state, TransferState.RestartRequired);
-      expect(stored.errorKind, TransferErrorKind.LocalChanged);
+      expect(stored.state, TransferState.restartRequired);
+      expect(stored.errorKind, TransferErrorKind.localChanged);
       expect(ops.executedOrder, isEmpty);
       await runner.dispose();
     });
@@ -349,8 +349,8 @@ void main() {
       await runner.idle;
 
       final stored = await row(task.id);
-      expect(stored.state, TransferState.WaitingForNetwork);
-      expect(stored.errorKind, TransferErrorKind.Network);
+      expect(stored.state, TransferState.waitingForNetwork);
+      expect(stored.errorKind, TransferErrorKind.network);
       expect(ops.executedOrder, isEmpty);
       await runner.dispose();
     });
@@ -396,7 +396,7 @@ void main() {
       gates[ids[2]]!.complete();
       await runner.idle;
       for (final id in ids) {
-        expect((await row(id)).state, TransferState.Completed);
+        expect((await row(id)).state, TransferState.completed);
       }
       await runner.dispose();
     });
@@ -433,8 +433,8 @@ void main() {
       await runner.idle;
 
       var stored = await row(task.id);
-      expect(stored.state, TransferState.BackingOff);
-      expect(stored.errorKind, TransferErrorKind.Server);
+      expect(stored.state, TransferState.backingOff);
+      expect(stored.errorKind, TransferErrorKind.server);
       expect(stored.attemptCount, 1);
       expect(stored.nextRetryAt, nowMs + 1000);
 
@@ -442,7 +442,7 @@ void main() {
       await runner.debugTick();
       await runner.idle;
       stored = await row(task.id);
-      expect(stored.state, TransferState.BackingOff);
+      expect(stored.state, TransferState.backingOff);
       expect(stored.attemptCount, 2);
       expect(stored.nextRetryAt, nowMs + 2000);
 
@@ -450,7 +450,7 @@ void main() {
       await runner.debugTick();
       await runner.idle;
       stored = await row(task.id);
-      expect(stored.state, TransferState.BackingOff);
+      expect(stored.state, TransferState.backingOff);
       expect(stored.attemptCount, 3);
       expect(stored.nextRetryAt, nowMs + 4000);
       expect(ops.executedOrder, [task.id, task.id, task.id]);
@@ -465,14 +465,14 @@ void main() {
 
       await runner.start();
       await runner.idle;
-      expect((await row(task.id)).state, TransferState.BackingOff);
+      expect((await row(task.id)).state, TransferState.backingOff);
 
       // 仅推进 500ms（未到期）→ tick 不再执行
       nowMs += 500;
       await runner.debugTick();
       await runner.idle;
       expect(ops.executedOrder, [task.id]);
-      expect((await row(task.id)).state, TransferState.BackingOff);
+      expect((await row(task.id)).state, TransferState.backingOff);
       await runner.dispose();
     });
 
@@ -487,8 +487,8 @@ void main() {
       await runner.idle;
 
       final stored = await row(task.id);
-      expect(stored.state, TransferState.BackingOff);
-      expect(stored.errorKind, TransferErrorKind.RateLimit);
+      expect(stored.state, TransferState.backingOff);
+      expect(stored.errorKind, TransferErrorKind.rateLimit);
       expect(stored.nextRetryAt, nowMs + 120000);
       expect(stored.attemptCount, 1);
       await runner.dispose();
@@ -502,19 +502,19 @@ void main() {
 
       await runner.start();
       await runner.idle;
-      expect((await row(task.id)).state, TransferState.BackingOff);
+      expect((await row(task.id)).state, TransferState.backingOff);
 
       nowMs += 1000;
       await runner.debugTick();
       await runner.idle;
-      expect((await row(task.id)).state, TransferState.BackingOff);
+      expect((await row(task.id)).state, TransferState.backingOff);
 
       nowMs += 2000;
       await runner.debugTick();
       await runner.idle;
       final stored = await row(task.id);
-      expect(stored.state, TransferState.Failed);
-      expect(stored.errorKind, TransferErrorKind.RateLimit);
+      expect(stored.state, TransferState.failed);
+      expect(stored.errorKind, TransferErrorKind.rateLimit);
       expect(stored.finishedAt, isNotNull);
       expect(ops.executedOrder.length, 3);
       await runner.dispose();
@@ -524,8 +524,8 @@ void main() {
       final ops = _FakeOperations();
       final task = await seed(await makeUploadTask('nb.bin'));
       // 种入 BackingOff 且 nextRetryAt 为空
-      await service.transition(task.id, TransferState.Pending, TransferState.Running);
-      await service.transition(task.id, TransferState.Running, TransferState.BackingOff);
+      await service.transition(task.id, TransferState.pending, TransferState.running);
+      await service.transition(task.id, TransferState.running, TransferState.backingOff);
 
       final runner = createRunner(ops);
       await runner.start();
@@ -533,8 +533,8 @@ void main() {
       await runner.idle;
 
       final stored = await row(task.id);
-      expect(stored.state, TransferState.Failed);
-      expect(stored.errorKind, TransferErrorKind.Validation);
+      expect(stored.state, TransferState.failed);
+      expect(stored.errorKind, TransferErrorKind.validation);
       expect(ops.executedOrder, isEmpty);
       await runner.dispose();
     });
@@ -565,8 +565,8 @@ void main() {
       await runner.idle;
 
       var stored = await row(task.id);
-      expect(stored.state, TransferState.WaitingForNetwork);
-      expect(stored.errorKind, TransferErrorKind.Network);
+      expect(stored.state, TransferState.waitingForNetwork);
+      expect(stored.errorKind, TransferErrorKind.network);
       expect(stored.attemptCount, 0);
       expect(reportCount, 1);
 
@@ -577,7 +577,7 @@ void main() {
       await eventually(() => ops.executedOrder.length == 2, reason: '恢复后重跑');
       await runner.idle;
       stored = await row(task.id);
-      expect(stored.state, TransferState.Completed);
+      expect(stored.state, TransferState.completed);
 
       await netCtrl.close();
       await runner.dispose();
@@ -594,8 +594,8 @@ void main() {
       await runner.idle;
 
       final stored = await row(task.id);
-      expect(stored.state, TransferState.VerifyingRemote);
-      expect(stored.errorKind, TransferErrorKind.RemoteAmbiguous);
+      expect(stored.state, TransferState.verifyingRemote);
+      expect(stored.errorKind, TransferErrorKind.remoteAmbiguous);
       expect(stored.nextRetryAt, nowMs + 3000);
       await runner.dispose();
     });
@@ -609,7 +609,7 @@ void main() {
 
       await runner.start();
       await runner.idle;
-      expect((await row(task.id)).state, TransferState.VerifyingRemote);
+      expect((await row(task.id)).state, TransferState.verifyingRemote);
 
       // 离线：到期也不核验
       online = false;
@@ -631,7 +631,7 @@ void main() {
       await runner.idle;
 
       final stored = await row(task.id);
-      expect(stored.state, TransferState.Completed);
+      expect(stored.state, TransferState.completed);
       expect(stored.remoteResultFileId, 'fid-remote');
       await runner.dispose();
     });
@@ -652,7 +652,7 @@ void main() {
       await runner.idle;
 
       final stored = await row(task.id);
-      expect(stored.state, TransferState.VerifyingRemote);
+      expect(stored.state, TransferState.verifyingRemote);
       expect(stored.errorMessage, contains('远端核验暂不可用'));
       expect(stored.nextRetryAt, nowMs + 15000);
       await runner.dispose();
@@ -678,8 +678,8 @@ void main() {
       await runner.idle;
 
       var stored = await row(task.id);
-      expect(stored.state, TransferState.VerifyingRemote);
-      expect(stored.errorKind, TransferErrorKind.SessionExpired);
+      expect(stored.state, TransferState.verifyingRemote);
+      expect(stored.errorKind, TransferErrorKind.sessionExpired);
       // 会话已持久化（onResume 不节流立即落库）
       expect(stored.sessionUrl, 'https://session.url/x');
       expect(stored.resumeOffset, 512);
@@ -696,7 +696,7 @@ void main() {
       await runner.idle;
 
       stored = await row(task.id);
-      expect(stored.state, TransferState.Completed);
+      expect(stored.state, TransferState.completed);
       expect(ops.executedOrder, [task.id, task.id]);
       // 重跑读取的任务行已清掉失效会话
       expect(replayed, isNotNull);
@@ -724,8 +724,8 @@ void main() {
       await runner.idle;
 
       final stored = await row(task.id);
-      expect(stored.state, TransferState.VerifyingRemote);
-      expect(stored.errorKind, TransferErrorKind.RemoteAmbiguous);
+      expect(stored.state, TransferState.verifyingRemote);
+      expect(stored.errorKind, TransferErrorKind.remoteAmbiguous);
       expect(stored.nextRetryAt, nowMs + 60000);
       await runner.dispose();
     });
@@ -739,7 +739,7 @@ void main() {
     test('中断 Running 上传 → VerifyingRemote；核验 Committed 后结算', () async {
       final ops = _FakeOperations();
       final task = await seed(await makeUploadTask('q.bin'));
-      await service.transition(task.id, TransferState.Pending, TransferState.Running);
+      await service.transition(task.id, TransferState.pending, TransferState.running);
 
       final runner = createRunner(ops);
       ops.verifyResults.add((t) => RemoteCommitted(DriveFile(
@@ -755,7 +755,7 @@ void main() {
 
       // 恢复后 next_retry_at 为空视为到期，启动泵内立即核验并结算
       final stored = await row(task.id);
-      expect(stored.state, TransferState.Completed);
+      expect(stored.state, TransferState.completed);
       expect(stored.remoteResultFileId, 'fid-crashed');
       expect(ops.executedOrder, isEmpty);
       await runner.dispose();
@@ -764,7 +764,7 @@ void main() {
     test('中断 Running 下载：断点取 .tmp 磁盘真值并续跑', () async {
       final ops = _FakeOperations()..defaultBehavior = downloadOk;
       final task = await seed(makeDownloadTask('r.bin', size: 100));
-      await service.transition(task.id, TransferState.Pending, TransferState.Running);
+      await service.transition(task.id, TransferState.pending, TransferState.running);
       // 磁盘残留 40 字节断点
       await File(tmpPath(task.localPath!)).writeAsBytes(List<int>.filled(40, 5));
 
@@ -779,7 +779,7 @@ void main() {
       await runner.idle;
 
       final stored = await row(task.id);
-      expect(stored.state, TransferState.Completed);
+      expect(stored.state, TransferState.completed);
       // 重启后 Pending 行携带 durable 断点
       expect(resumed, isNotNull);
       expect(resumed!.resumeOffset, 40);
@@ -796,12 +796,12 @@ void main() {
       await file.writeAsBytes(List<int>.filled(100, 7), flush: true);
       final stat = await file.stat();
       TransferTask intent() => TransferTask(
-            direction: TransferDirection.Upload,
+            direction: TransferDirection.upload,
             localPath: file.path,
             name: rel,
             totalSize: stat.size,
             relativePath: rel,
-            operation: TransferOperation.Create,
+            operation: TransferOperation.create,
             sourceMtime: stat.modified.millisecondsSinceEpoch,
             sourceSize: stat.size,
             createdAt: createdSeq++,
@@ -815,9 +815,9 @@ void main() {
 
       final olderRow = await row(older.id);
       final newerRow = await row(newer.id);
-      expect(olderRow.state, TransferState.RestartRequired);
-      expect(olderRow.errorKind, TransferErrorKind.LocalChanged);
-      expect(newerRow.state, TransferState.Completed);
+      expect(olderRow.state, TransferState.restartRequired);
+      expect(olderRow.errorKind, TransferErrorKind.localChanged);
+      expect(newerRow.state, TransferState.completed);
       expect(ops.executedOrder, [newer.id]);
       await runner.dispose();
     });
@@ -825,22 +825,22 @@ void main() {
     test('中断任务缺少 operation → Failed（Validation）', () async {
       final ops = _FakeOperations();
       final task = await seed(TransferTask(
-        direction: TransferDirection.Upload,
+        direction: TransferDirection.upload,
         localPath: p.join(mountDir.path, 's.bin'),
         name: 's.bin',
         totalSize: 100,
         relativePath: 's.bin',
         createdAt: createdSeq++,
       ));
-      await service.transition(task.id, TransferState.Pending, TransferState.Running);
+      await service.transition(task.id, TransferState.pending, TransferState.running);
 
       final runner = createRunner(ops);
       await runner.start();
       await runner.idle;
 
       final stored = await row(task.id);
-      expect(stored.state, TransferState.Failed);
-      expect(stored.errorKind, TransferErrorKind.Validation);
+      expect(stored.state, TransferState.failed);
+      expect(stored.errorKind, TransferErrorKind.validation);
       await runner.dispose();
     });
 
@@ -848,9 +848,9 @@ void main() {
       final ops = _FakeOperations();
       final task = await seed(await makeUploadTask('t.bin'));
       // Pending→Running→RestartRequired（携带 remote_result_file_id）
-      await service.transition(task.id, TransferState.Pending, TransferState.Running);
+      await service.transition(task.id, TransferState.pending, TransferState.running);
       await service.transition(
-          task.id, TransferState.Running, TransferState.RestartRequired);
+          task.id, TransferState.running, TransferState.restartRequired);
       final db = await DatabaseService.instance.database;
       await db.update(
         'transfer_queue',
@@ -864,8 +864,8 @@ void main() {
       await runner.idle;
 
       final stored = await row(task.id);
-      expect(stored.state, TransferState.VerifyingRemote);
-      expect(stored.errorKind, TransferErrorKind.RemoteAmbiguous);
+      expect(stored.state, TransferState.verifyingRemote);
+      expect(stored.errorKind, TransferErrorKind.remoteAmbiguous);
       await runner.dispose();
     });
   });
@@ -895,7 +895,7 @@ void main() {
       await flush();
       // 直接读库验证进度落库（Running 期间）
       var stored = await row(task.id);
-      expect(stored.state, TransferState.Running);
+      expect(stored.state, TransferState.running);
       expect(stored.resumeOffset, 70);
       expect(stored.sessionUrl, 'https://session.url/u');
       expect(stored.serverId, 'srv');
@@ -903,7 +903,7 @@ void main() {
       gate.complete();
       await runner.idle;
       stored = await row(task.id);
-      expect(stored.state, TransferState.Completed);
+      expect(stored.state, TransferState.completed);
       expect(stored.transferred, stored.totalSize);
 
       // 迟到回调（旧 revision + 非 Running）不得落库
@@ -936,7 +936,7 @@ void main() {
       expect(executed, isNotNull);
       expect(executed!.resumeOffset, 512);
       expect(executed!.sessionUrl, 'https://session.url/resume');
-      expect((await row(task.id)).state, TransferState.Completed);
+      expect((await row(task.id)).state, TransferState.completed);
       await runner.dispose();
     });
 
@@ -950,8 +950,8 @@ void main() {
       await runner.idle;
 
       final stored = await row(task.id);
-      expect(stored.state, TransferState.Failed);
-      expect(stored.errorKind, TransferErrorKind.Validation);
+      expect(stored.state, TransferState.failed);
+      expect(stored.errorKind, TransferErrorKind.validation);
       expect(ops.executedOrder, isEmpty);
       await runner.dispose();
     });
@@ -971,7 +971,7 @@ void main() {
       expect(badId.isErr, isTrue);
 
       final badState =
-          await runner.enqueue(task.copyWith(state: TransferState.Running));
+          await runner.enqueue(task.copyWith(state: TransferState.running));
       expect(badState.isErr, isTrue);
       await runner.dispose();
     });
@@ -985,7 +985,7 @@ void main() {
 
       await runner.start();
       await runner.idle;
-      expect((await row(task.id)).state, TransferState.Failed);
+      expect((await row(task.id)).state, TransferState.failed);
       expect(ops.preflightCalls[task.id], 1);
 
       ops.behaviors[task.id] = (t, p) async => uploadOk(t);
@@ -994,7 +994,7 @@ void main() {
       await runner.idle;
 
       final stored = await row(task.id);
-      expect(stored.state, TransferState.Completed);
+      expect(stored.state, TransferState.completed);
       expect(stored.attemptCount, 1);
       // 初始 1 次 + retry 内 1 次；链路内不重复（对齐 run_backend_preflight=false）
       expect(ops.preflightCalls[task.id], 2);
@@ -1010,7 +1010,7 @@ void main() {
 
       await runner.start();
       await runner.idle;
-      expect((await row(task.id)).state, TransferState.Completed);
+      expect((await row(task.id)).state, TransferState.completed);
 
       final result = await runner.retry(task.id);
       expect(result.isErr, isTrue);
@@ -1080,4 +1080,143 @@ void main() {
       await runner.dispose();
     });
   });
+
+  group('成功结算 outcome 修正（对齐 Rust execution.rs disposition 改写）', () {
+    /// onTaskCommitted 抛错的钩子（模拟基线结算失败）
+    SyncTaskHooks failingCommitHooks() => _FailingCommitHooks();
+
+    test('成功核验失败（缺远端资源）→ outcome 修正为 verifyingRemote', () async {
+      final ops = _FakeOperations()
+        ..defaultBehavior = (t, p) async => const TaskExecutionOutcome();
+      final runner = createRunner(ops);
+      final task = await makeUploadTask('verify-fix.bin');
+
+      final result = await runner.enqueueAndRun(task);
+      expect(result.isOk, isTrue);
+      final wrapped = result.unwrap();
+      // 落库状态与上报 outcome 必须一致（修正前：DB=VerifyingRemote 但
+      // outcome 仍报 completed，引擎会按成功误结算基线）
+      final stored = await row(wrapped.taskId);
+      expect(stored.state, TransferState.verifyingRemote);
+      expect(wrapped.outcome.disposition, TaskDisposition.verifyingRemote);
+      await runner.dispose();
+    });
+
+    test('基线结算失败 → outcome 修正为 verifyingRemote（不上报 completed）',
+        () async {
+      final ops = _FakeOperations()
+        ..defaultBehavior = (t, p) async => uploadOk(t);
+      final runner = createRunner(ops);
+      runner.setSyncHooks(failingCommitHooks());
+      final task = await makeUploadTask('commit-fail.bin');
+
+      final result = await runner.enqueueAndRun(task);
+      expect(result.isOk, isTrue);
+      final wrapped = result.unwrap();
+      final stored = await row(wrapped.taskId);
+      expect(stored.state, TransferState.verifyingRemote);
+      expect(wrapped.outcome.disposition, TaskDisposition.verifyingRemote);
+      await runner.dispose();
+    });
+
+    test('基线结算成功 → outcome 保持 completed（回归保护）', () async {
+      final ops = _FakeOperations()
+        ..defaultBehavior = (t, p) async => uploadOk(t);
+      final runner = createRunner(ops);
+      runner.setSyncHooks(_NoopHooks());
+      final task = await makeUploadTask('commit-ok.bin');
+
+      final result = await runner.enqueueAndRun(task);
+      expect(result.isOk, isTrue);
+      final wrapped = result.unwrap();
+      expect(wrapped.outcome.disposition, TaskDisposition.completed);
+      expect((await row(wrapped.taskId)).state, TransferState.completed);
+      await runner.dispose();
+    });
+  });
+
+  group('恢复汇总（对齐 Rust TaskRecoverySummary）', () {
+    test('resumeVerifying 返回 completed 计数与 recoveredCloudFiles', () async {
+      final ops = _FakeOperations();
+      final runner = createRunner(ops);
+      final task = await seed(await makeUploadTask('rv.bin'));
+      // 直接进入 VerifyingRemote（模拟中断后待核验）
+      final db = await DatabaseService.instance.database;
+      await db.update(
+        'transfer_queue',
+        {'state': TransferState.verifyingRemote.code},
+        where: 'id = ?',
+        whereArgs: [task.id],
+      );
+      ops.verifyResults.add((t) => RemoteCommitted(DriveFile(
+            id: 'fid-rv',
+            name: t.name,
+            size: t.totalSize,
+            createdTime: DateTime.fromMillisecondsSinceEpoch(nowMs),
+            editedTime: DateTime.fromMillisecondsSinceEpoch(nowMs),
+          )));
+
+      final summary = await runner.resumeVerifying();
+
+      expect(summary.completed, 1);
+      expect(summary.recoveredCloudFiles, hasLength(1));
+      expect(summary.recoveredCloudFiles.single.relativePath, 'rv.bin');
+      expect(summary.recoveredCloudFiles.single.file.id, 'fid-rv');
+      await runner.dispose();
+    });
+
+    test('resumeWaiting 返回 completed 计数与 recoveredCloudFiles', () async {
+      final ops = _FakeOperations()
+        ..defaultBehavior = (t, p) async => uploadOk(t);
+      final runner = createRunner(ops);
+      final task = await seed(await makeUploadTask('rw.bin'));
+      final db = await DatabaseService.instance.database;
+      await db.update(
+        'transfer_queue',
+        {'state': TransferState.waitingForNetwork.code},
+        where: 'id = ?',
+        whereArgs: [task.id],
+      );
+
+      final summary = await runner.resumeWaiting();
+
+      expect(summary.completed, 1);
+      expect(summary.recoveredCloudFiles.single.relativePath, 'rw.bin');
+      expect(summary.recoveredCloudFiles.single.file.id, 'fid-${task.id}');
+      await runner.dispose();
+    });
+  });
+}
+
+/// onTaskCommitted 恒失败的钩子
+class _FailingCommitHooks implements SyncTaskHooks {
+  @override
+  Future<void> onTaskCommitted(
+          TransferTask running, TaskExecutionOutcome outcome) =>
+      throw StateError('模拟基线结算失败');
+
+  @override
+  Future<void> onTaskFailed(TransferTask failed, String message) async {}
+
+  @override
+  Future<void> onRetryAccepted(TransferTask pending) async {}
+
+  @override
+  Future<void> onTaskReplanned(TransferTask task) async {}
+}
+
+/// 全成功空钩子
+class _NoopHooks implements SyncTaskHooks {
+  @override
+  Future<void> onTaskCommitted(
+      TransferTask running, TaskExecutionOutcome outcome) async {}
+
+  @override
+  Future<void> onTaskFailed(TransferTask failed, String message) async {}
+
+  @override
+  Future<void> onRetryAccepted(TransferTask pending) async {}
+
+  @override
+  Future<void> onTaskReplanned(TransferTask task) async {}
 }

@@ -43,15 +43,15 @@ void main() {
 
   group('9 种 syncPhase 文案', () {
     final cases = <SyncPhase, String>{
-      SyncPhase.IndexingStartup: '正在读取云端索引（首次）…',
-      SyncPhase.IndexingManual: '正在读取云端索引…',
-      SyncPhase.IndexingAutoFull: '正在读取云端索引（全量纠偏）…',
-      SyncPhase.QueryingChanges: '正在查询云端变更…',
-      SyncPhase.SyncingAutoIncremental: '正在同步云端变更…',
-      SyncPhase.SyncingLocal: '正在同步本地变更…',
-      SyncPhase.SyncingManual: '正在同步…',
-      SyncPhase.SyncingRetry: '正在重试失败项…',
-      SyncPhase.SyncingStartup: '正在同步（启动恢复）…',
+      SyncPhase.indexingStartup: '正在读取云端索引（首次）…',
+      SyncPhase.indexingManual: '正在读取云端索引…',
+      SyncPhase.indexingAutoFull: '正在读取云端索引（全量纠偏）…',
+      SyncPhase.queryingChanges: '正在查询云端变更…',
+      SyncPhase.syncingAutoIncremental: '正在同步云端变更…',
+      SyncPhase.syncingLocal: '正在同步本地变更…',
+      SyncPhase.syncingManual: '正在同步…',
+      SyncPhase.syncingRetry: '正在重试失败项…',
+      SyncPhase.syncingStartup: '正在同步（启动恢复）…',
     };
 
     for (final entry in cases.entries) {
@@ -94,10 +94,10 @@ void main() {
 
     testWidgets('传输细分：核验远端/退避/重规划/等待传输', (tester) async {
       final cases = <TransferState, String>{
-        TransferState.VerifyingRemote: '正在核验远端…',
-        TransferState.BackingOff: '等待下次重试…',
-        TransferState.RestartRequired: '等待重新规划…',
-        TransferState.Pending: '等待传输…',
+        TransferState.verifyingRemote: '正在核验远端…',
+        TransferState.backingOff: '等待下次重试…',
+        TransferState.restartRequired: '等待重新规划…',
+        TransferState.pending: '等待传输…',
       };
       for (final entry in cases.entries) {
         await tester.pumpWidget(_wrap(FilesSyncStatusBar(

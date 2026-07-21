@@ -11,10 +11,10 @@ import 'package:petal_link/service/drive/files_service.dart';
 /// 变更类型（对齐 Rust `ChangeKind`）。
 enum ChangeKind {
   /// 官方 `deleted=true` 硬删除，或真机兼容的 trashDone/recycled 软删除
-  Removed,
+  removed,
 
   /// 文件新增或元数据修改
-  Modified,
+  modified,
 }
 
 /// 单条严格解析后的变更（对齐 Rust `Change`）。
@@ -211,13 +211,13 @@ class ChangesService {
     final recycled = parsedFile?.recycled ?? false;
     final softDeleted = changeType == 'trashDone' || recycled;
     final kind =
-        (deleted || softDeleted) ? ChangeKind.Removed : ChangeKind.Modified;
+        (deleted || softDeleted) ? ChangeKind.removed : ChangeKind.modified;
 
     final file = parsedFile?.file;
-    if (kind == ChangeKind.Modified && file == null) {
+    if (kind == ChangeKind.modified && file == null) {
       throw _protocolError('非删除 change 缺少可完整解析的 file：$fileId');
     }
-    if (kind == ChangeKind.Modified && file!.parentFolder?.length != 1) {
+    if (kind == ChangeKind.modified && file!.parentFolder?.length != 1) {
       throw _protocolError('非删除 change 必须且只能有一个 parentFolder：$fileId');
     }
 

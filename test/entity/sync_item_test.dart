@@ -16,7 +16,7 @@ SyncItem _fullItem() {
     localMtime: 1750000000000,
     cloudEditedTime: 1750000100000,
     lastSyncTime: 1750000200000,
-    status: SyncItemStatus.Synced,
+    status: SyncItemStatus.synced,
     errorMessage: null,
   );
 }
@@ -57,14 +57,14 @@ void main() {
           localPath: 'dir',
           name: 'dir',
           isFolder: true,
-          status: SyncItemStatus.Conflict,
+          status: SyncItemStatus.conflict,
           errorMessage: '本地与云端同时修改',
         );
 
         final restored = SyncItem.fromRow(item.toRow());
 
         expect(restored.isFolder, isTrue);
-        expect(restored.status, SyncItemStatus.Conflict);
+        expect(restored.status, SyncItemStatus.conflict);
         expect(restored.errorMessage, '本地与云端同时修改');
       });
 
@@ -84,7 +84,7 @@ void main() {
         expect(item.size, 2048);
         expect(item.localSize, 2047);
         expect(item.localMtime, 1750000000000);
-        expect(item.status, SyncItemStatus.Conflict);
+        expect(item.status, SyncItemStatus.conflict);
       });
 
       test('fromRow 未知 status 码回退 Synced', () {
@@ -95,7 +95,7 @@ void main() {
           'status': 6, // 空缺值
         });
 
-        expect(item.status, SyncItemStatus.Synced);
+        expect(item.status, SyncItemStatus.synced);
       });
 
       test('Deleted=7 tombstone 状态正确解析', () {
@@ -106,14 +106,14 @@ void main() {
           'status': 7,
         });
 
-        expect(item.status, SyncItemStatus.Deleted);
+        expect(item.status, SyncItemStatus.deleted);
       });
     });
 
     group('fromJson / toJson 往返', () {
       test('全字段往返保持一致（camelCase 键）', () {
         final item = _fullItem().copyWith(
-          status: SyncItemStatus.Syncing,
+          status: SyncItemStatus.syncing,
           errorMessage: '同步中',
         );
 
@@ -126,7 +126,7 @@ void main() {
         final restored = SyncItem.fromJson(json);
         expect(restored.fileId, item.fileId);
         expect(restored.localPath, item.localPath);
-        expect(restored.status, SyncItemStatus.Syncing);
+        expect(restored.status, SyncItemStatus.syncing);
         expect(restored.errorMessage, '同步中');
         expect(restored.localSize, item.localSize);
       });
@@ -142,7 +142,7 @@ void main() {
           fileId: 'pending:dir/a.txt',
           localPath: 'dir/a.txt',
           name: 'a.txt',
-          status: SyncItemStatus.Failed,
+          status: SyncItemStatus.failed,
         );
         const normal = SyncItem(
           fileId: 'file-123',
@@ -159,8 +159,8 @@ void main() {
       test('替换字段并可显式清空可空字段', () {
         final item = _fullItem();
 
-        final copy = item.copyWith(status: SyncItemStatus.Failed, size: 4096);
-        expect(copy.status, SyncItemStatus.Failed);
+        final copy = item.copyWith(status: SyncItemStatus.failed, size: 4096);
+        expect(copy.status, SyncItemStatus.failed);
         expect(copy.size, 4096);
         expect(copy.sha256, item.sha256);
 

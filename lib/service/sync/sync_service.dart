@@ -86,6 +86,10 @@ class SyncService {
   /// xattr 实现（测试注入；默认原生通道）
   final XattrService? _xattr;
 
+  /// 批量 inode 查询（docs/design/10 阶段 1；生产为原生 lstat 批量通道）
+  final Future<Map<String, int>> Function(List<String> paths)?
+      _inodeBatchProvider;
+
   /// 状态聚合器（进程级）
   final StatusAggregator _aggregator;
 
@@ -123,6 +127,8 @@ class SyncService {
     void Function()? onMountUnregistered,
     XattrService? xattr,
     StatusAggregator? aggregator,
+    Future<Map<String, int>> Function(List<String> paths)?
+        inodeBatchProvider,
   })  : _db = db,
         _config = config,
         _filesApi = filesApi,
@@ -135,7 +141,8 @@ class SyncService {
         _onMountRegistered = onMountRegistered,
         _onMountUnregistered = onMountUnregistered,
         _xattr = xattr,
-        _aggregator = aggregator ?? StatusAggregator.process;
+        _aggregator = aggregator ?? StatusAggregator.process,
+        _inodeBatchProvider = inodeBatchProvider;
 
   // ═══════════════════════════════════════════════════════════════════
   // 对外流
@@ -187,7 +194,12 @@ class SyncService {
       return;
     }
 
-    final mount = MountManager(mountDir, xattr: _xattr, db: _db);
+    final mount = MountManager(
+      mountDir,
+      xattr: _xattr,
+      db: _db,
+      inodeBatchProvider: _inodeBatchProvider,
+    );
     await mount.ensureMountDir();
     _mountManager = mount;
     _onMountRegistered?.call(mount);
@@ -373,7 +385,7 @@ class SyncService {
         out[fileId] = 'folder';
       } else {
         out[fileId] =
-            record.status == SyncItemStatus.Synced ? 'synced' : 'not_synced';
+            record.status == SyncItemStatus.synced ? 'synced' : 'not_synced';
       }
     }
     return out;
@@ -512,8 +524,8 @@ class SyncService {
       final isUpdate = snapshot != null;
       final task = TransferTask(
         direction: isUpdate
-            ? TransferDirection.DownloadUpdate
-            : TransferDirection.Download,
+            ? TransferDirection.downloadUpdate
+            : TransferDirection.download,
         fileId: fileId,
         localPath: dest,
         name: p.basename(dest),
@@ -522,8 +534,8 @@ class SyncService {
         relativePath: destRel,
         parentFileId: remote?.parentId ?? record?.parentFolderId,
         operation: isUpdate
-            ? TransferOperation.DownloadUpdate
-            : TransferOperation.Download,
+            ? TransferOperation.downloadUpdate
+            : TransferOperation.download,
         sourceMtime: snapshot?.mtimeMs,
         sourceSize: snapshot?.size,
         expectedCloudEditedTime: editedMs,

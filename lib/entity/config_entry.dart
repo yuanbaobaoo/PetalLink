@@ -1,17 +1,17 @@
 import 'dart:io';
 
-import '../core/error/app_error.dart';
+import 'package:petal_link/core/error/app_error.dart';
 
 /// 同步状态展示排序字段（对齐 Rust `SortField`）
 enum SortField {
   /// 按文件名
-  Name('name'),
+  name('name'),
 
   /// 按大小
-  Size('size'),
+  size('size'),
 
   /// 按修改时间
-  ModifiedTime('modifiedTime');
+  modifiedTime('modifiedTime');
 
   /// 序列化值（camelCase，对齐 Rust serde rename_all=camelCase）
   final String wireName;
@@ -31,10 +31,10 @@ enum SortField {
 /// 列表排序方向（对齐 Rust `SortOrder`）
 enum SortOrder {
   /// 升序
-  Ascending('ascending'),
+  ascending('ascending'),
 
   /// 降序
-  Descending('descending');
+  descending('descending');
 
   /// 序列化值（camelCase，对齐 Rust serde rename_all=camelCase）
   final String wireName;
@@ -111,8 +111,8 @@ class AppConfig {
     this.pollIntervalSec = 60,
     this.debounceSec = 3,
     this.skipPatterns = defaultSkipPatterns,
-    this.sortField = SortField.Name,
-    this.sortOrder = SortOrder.Ascending,
+    this.sortField = SortField.name,
+    this.sortOrder = SortOrder.ascending,
   });
 
   /// 展开 ~ 为真实 home 路径（对齐 Rust `expanded_mount_dir`）

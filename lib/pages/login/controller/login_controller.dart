@@ -23,7 +23,7 @@ class LoginState {
   final String? errorMessage;
 
   const LoginState({
-    this.status = AuthStatus.Init,
+    this.status = AuthStatus.init,
     this.secretConfigured = false,
     this.errorMessage,
   });
@@ -46,7 +46,7 @@ class LoginState {
   }
 
   /// 是否正在授权中（对标 CMP `loggingIn`）
-  bool get isAuthorizing => status == AuthStatus.Authorizing;
+  bool get isAuthorizing => status == AuthStatus.authorizing;
 
   /// 是否可发起登录
   bool get canLogin => secretConfigured && !isAuthorizing;
@@ -105,26 +105,26 @@ class LoginController extends GetxController {
   void _subscribeToAuthChanges() {
     _authSub = _authController.state.listen((authState) {
       switch (authState.status) {
-        case AuthStatus.Authorized:
-          state.value = state.value.copyWith(status: AuthStatus.Authorized);
-        case AuthStatus.Error:
+        case AuthStatus.authorized:
+          state.value = state.value.copyWith(status: AuthStatus.authorized);
+        case AuthStatus.error:
           state.value = state.value.copyWith(
-            status: AuthStatus.Error,
+            status: AuthStatus.error,
             errorMessage: '授权失败，请重试',
           );
-        case AuthStatus.Authorizing:
+        case AuthStatus.authorizing:
           state.value = state.value.copyWith(
-            status: AuthStatus.Authorizing,
+            status: AuthStatus.authorizing,
             clearError: true,
           );
-        case AuthStatus.Unauthorized:
+        case AuthStatus.unauthorized:
           // 授权中被打回未登录 → 用户取消，回到可点击登录的初始态
-          if (state.value.status == AuthStatus.Authorizing) {
-            state.value = state.value.copyWith(status: AuthStatus.Init);
+          if (state.value.status == AuthStatus.authorizing) {
+            state.value = state.value.copyWith(status: AuthStatus.init);
           }
-        case AuthStatus.Init:
-          if (state.value.status != AuthStatus.Authorized) {
-            state.value = state.value.copyWith(status: AuthStatus.Init);
+        case AuthStatus.init:
+          if (state.value.status != AuthStatus.authorized) {
+            state.value = state.value.copyWith(status: AuthStatus.init);
           }
       }
     });
@@ -151,14 +151,14 @@ class LoginController extends GetxController {
     await refreshSecretConfig();
     if (!state.value.secretConfigured) {
       state.value = state.value.copyWith(
-        status: AuthStatus.Error,
+        status: AuthStatus.error,
         errorMessage: '请先配置 OAuth 密钥（client_id / client_secret）',
       );
       return;
     }
 
     state.value = state.value.copyWith(
-      status: AuthStatus.Authorizing,
+      status: AuthStatus.authorizing,
       clearError: true,
     );
 
@@ -171,7 +171,7 @@ class LoginController extends GetxController {
     AppLogger.i('用户取消登录');
     _authController.cancelLogin();
     state.value = state.value.copyWith(
-      status: AuthStatus.Init,
+      status: AuthStatus.init,
       clearError: true,
     );
   }
@@ -180,7 +180,7 @@ class LoginController extends GetxController {
   void dismissError() {
     _authController.dismissError();
     state.value = state.value.copyWith(
-      status: AuthStatus.Init,
+      status: AuthStatus.init,
       clearError: true,
     );
   }

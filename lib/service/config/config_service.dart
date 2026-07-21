@@ -140,9 +140,9 @@ class ConfigService {
           _parseInt(all['debounce_sec']) ?? const AppConfig().debounceSec,
       skipPatterns: _parsePatterns(all['skip_patterns']),
       sortField:
-          SortField.fromWireName(all['sort_field']) ?? SortField.Name,
+          SortField.fromWireName(all['sort_field']) ?? SortField.name,
       sortOrder:
-          SortOrder.fromWireName(all['sort_order']) ?? SortOrder.Ascending,
+          SortOrder.fromWireName(all['sort_order']) ?? SortOrder.ascending,
     );
   }
 

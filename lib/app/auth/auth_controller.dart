@@ -31,9 +31,6 @@ class AuthController extends GetxController {
   /// 认证状态（响应式）
   final Rx<AuthState> state = AuthState.init().obs;
 
-  /// 服务器地址（保留兼容；华为端点为固定常量，见 [AuthConstants]）
-  final Rx<String> serverUrl = ''.obs;
-
   @override
   void onInit() {
     super.onInit();
@@ -79,12 +76,12 @@ class AuthController extends GetxController {
   /// 防重复：authorizing 中 return（对标 CMP login() 防重复）。
   /// [server] 参数保留兼容（华为端点为固定常量，不再使用）。
   Future<bool> login([String server = '']) async {
-    if (state.value.status == AuthStatus.Authorizing) {
+    if (state.value.status == AuthStatus.authorizing) {
       AppLogger.d('login 防重复：已在授权流程中');
       return false;
     }
 
-    state.value = const AuthState(status: AuthStatus.Authorizing);
+    state.value = const AuthState(status: AuthStatus.authorizing);
 
     try {
       final token = await _authService.authorize(port: callbackPort);
@@ -105,12 +102,12 @@ class AuthController extends GetxController {
         state.value = AuthState.unauthorized();
       } else {
         AppLogger.e('OAuth 登录失败', e);
-        state.value = const AuthState(status: AuthStatus.Error);
+        state.value = const AuthState(status: AuthStatus.error);
       }
       return false;
     } catch (e, st) {
       AppLogger.e('login 异常', e, st);
-      state.value = const AuthState(status: AuthStatus.Error);
+      state.value = const AuthState(status: AuthStatus.error);
       return false;
     }
   }
@@ -118,7 +115,7 @@ class AuthController extends GetxController {
   /// 取消当前 OAuth 流程：停止回调服务器，状态回到 unauthorized。
   void cancelLogin() {
     _authService.cancelAuthorize();
-    if (state.value.status == AuthStatus.Authorizing) {
+    if (state.value.status == AuthStatus.authorizing) {
       state.value = AuthState.unauthorized();
     }
   }
@@ -175,7 +172,7 @@ class AuthController extends GetxController {
 
   /// 清除错误状态，回到 unauthorized
   void dismissError() {
-    if (state.value.status == AuthStatus.Error) {
+    if (state.value.status == AuthStatus.error) {
       state.value = AuthState.unauthorized();
     }
   }

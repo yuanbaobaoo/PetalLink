@@ -55,7 +55,7 @@ class SyncUIState {
   final bool contentChanged;
 
   const SyncUIState({
-    this.status = SyncStatus.Idle,
+    this.status = SyncStatus.idle,
     this.totalActions = 0,
     this.completedActions = 0,
     this.currentAction,
@@ -77,11 +77,11 @@ class SyncUIState {
   factory SyncUIState.fromSnapshot(SyncGlobalState s) {
     final SyncStatus status;
     if (s.isIndexing) {
-      status = SyncStatus.Scanning;
+      status = SyncStatus.scanning;
     } else if (s.isRunning || s.uploading + s.downloading > 0) {
-      status = SyncStatus.Syncing;
+      status = SyncStatus.syncing;
     } else {
-      status = SyncStatus.Idle;
+      status = SyncStatus.idle;
     }
     return SyncUIState(
       status: status,
@@ -109,7 +109,7 @@ class SyncUIState {
   }
 
   /// 是否有活跃传输
-  bool get isActive => status == SyncStatus.Syncing || status == SyncStatus.Scanning;
+  bool get isActive => status == SyncStatus.syncing || status == SyncStatus.scanning;
 
   /// 深拷贝并替换指定字段
   SyncUIState copyWith({
@@ -174,6 +174,10 @@ class SyncController extends GetxController {
   final Rx<UploadFailureNotice?> lastUploadFailure =
       Rx<UploadFailureNotice?>(null);
 
+  /// 引擎权威快照（原始 SyncGlobalState，含 uploading/failed 分桶计数；
+  /// 页面观察此字段而非重复订阅 SyncService.stateStream）
+  final Rx<SyncGlobalState> rawSnapshot = const SyncGlobalState().obs;
+
   /// 引擎快照订阅
   StreamSubscription<SyncGlobalState>? _snapshotSub;
 
@@ -187,6 +191,7 @@ class SyncController extends GetxController {
     // 订阅引擎权威快照流（revision 防乱序由 applySnapshot 兜底）
     final syncService = Get.find<SyncService>();
     _snapshotSub = syncService.stateStream.listen((snapshot) {
+      rawSnapshot.value = snapshot;
       applySnapshot(SyncUIState.fromSnapshot(snapshot));
     });
     _uploadFailureSub = syncService.uploadFailures.listen((notice) {
@@ -216,22 +221,6 @@ class SyncController extends GetxController {
   // ═══════════════════════════════════════════════════════════════════
   // 状态应用（revision 乱序保护）
   // ═══════════════════════════════════════════════════════════════════
-
-  /// 应用同步全局状态（兼容旧调用方，仅更新 status + revision）
-  ///
-  /// 对标 CMP SyncViewModel.applyState()：
-  /// - revision <= lastAppliedRevision → 拒绝（幂等 + 乱序保护）
-  void applyState(SyncStatus newStatus, int revision) {
-    if (revision <= _lastAppliedRevision) {
-      AppLogger.d('applyState 拒绝：revision $revision <= $_lastAppliedRevision');
-      return;
-    }
-    _lastAppliedRevision = revision;
-    state.value = state.value.copyWith(
-      status: newStatus,
-      revision: revision,
-    );
-  }
 
   /// 应用完整同步快照（乱序保护 + sidebarRefresh 触发）
   ///
@@ -263,15 +252,6 @@ class SyncController extends GetxController {
     return true;
   }
 
-  /// 更新网络状态（简化版：通过 SyncStatus.Offline 反映）
-  void updateNetState(bool online) {
-    if (!online && state.value.status != SyncStatus.Offline) {
-      state.value = state.value.copyWith(status: SyncStatus.Offline);
-    } else if (online && state.value.status == SyncStatus.Offline) {
-      state.value = state.value.copyWith(status: SyncStatus.Idle);
-    }
-  }
-
   // ═══════════════════════════════════════════════════════════════════
   // 同步控制
   // ═══════════════════════════════════════════════════════════════════
@@ -286,7 +266,7 @@ class SyncController extends GetxController {
       AppLogger.e('手动刷新失败', e, st);
       final rev = ++_lastAppliedRevision;
       state.value = state.value.copyWith(
-        status: SyncStatus.Error,
+        status: SyncStatus.error,
         errorMessage: '同步失败: $e',
         revision: rev,
         isIndexing: false,
@@ -294,20 +274,6 @@ class SyncController extends GetxController {
     }
   }
 
-  /// 停止同步。
-  ///
-  /// Rust 命令面无取消语义（周期天然短；shutdown 仅登出/换挂载触发），
-  /// 此处仅复位本地展示态，不中断引擎周期。
-  Future<void> stopSync() async {
-    AppLogger.i('stopSync（Rust 无周期取消命令，仅复位展示态）');
-    final rev = ++_lastAppliedRevision;
-    state.value = state.value.copyWith(
-      status: SyncStatus.Idle,
-      revision: rev,
-      isIndexing: false,
-      syncPhase: null,
-    );
-  }
 
   /// 重试全部失败任务（对齐 Rust `sync_retry_failed`）。
   Future<void> retryFailed() async {
@@ -323,6 +289,7 @@ class SyncController extends GetxController {
   Future<void> refreshStatus() async {
     try {
       final snapshot = await Get.find<SyncService>().getState();
+      rawSnapshot.value = snapshot;
       applySnapshot(SyncUIState.fromSnapshot(snapshot));
     } catch (e) {
       AppLogger.d('refreshStatus 失败（引擎可能未启动）: $e');

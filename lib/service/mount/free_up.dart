@@ -155,7 +155,7 @@ class FreeUpService {
     }
     if (record == null ||
         record.localPath != relPath ||
-        record.status != SyncItemStatus.Synced) {
+        record.status != SyncItemStatus.synced) {
       return 'not_synced';
     }
     // 5. 本地文件必须存在且与数据库基线一致；缺失文件或占位符均不可释放。
@@ -188,7 +188,7 @@ class FreeUpService {
     if (folderRelPath.isEmpty) {
       rows = await rawDb.query('sync_items',
           where: 'status = ? AND is_folder = 0',
-          whereArgs: [SyncItemStatus.Synced.code]);
+          whereArgs: [SyncItemStatus.synced.code]);
     } else {
       final prefix = '$folderRelPath/';
       rows = await rawDb.query(
@@ -196,7 +196,7 @@ class FreeUpService {
         where: 'status = ? AND is_folder = 0 '
             'AND (local_path = ? OR substr(local_path, 1, ?) = ?)',
         whereArgs: [
-          SyncItemStatus.Synced.code,
+          SyncItemStatus.synced.code,
           folderRelPath,
           prefix.length,
           prefix,
@@ -322,7 +322,7 @@ class FreeUpService {
       if (baseline == null || baseline.localPath != relPath) {
         throw AppError.generic('找不到与路径匹配的成功同步基线');
       }
-      if (baseline.status != SyncItemStatus.Synced ||
+      if (baseline.status != SyncItemStatus.synced ||
           baseline.localMtime != sourceMtime ||
           baseline.localSize != sourceSize ||
           baseline.size != size) {
@@ -372,24 +372,29 @@ class FreeUpService {
 
       // ---- 原子暂存（watcher 忽略的同目录 .hwcloud_freeup- 文件）----
       final stagingPath = await _allocateFreeUpStagingPath(lp);
+      // 恢复记录入 free_up_staging 表（docs/design/10 §4.8：取代 xattr
+      // 恢复标记——暂存与恢复记录同源，消除"文件已暂存但标记未写"窗口）
+      final stagingName = p.basename(stagingPath);
       try {
-        await mount.xattr.set(lp, xattrFreeUpRelativePath, relPath);
+        await (await db.database).insert('free_up_staging', {
+          'staging_name': stagingName,
+          'relative_path': relPath,
+          'file_id': fileId,
+          'source_mtime': sourceMtime,
+          'source_size': sourceSize,
+          'created_at': DateTime.now().millisecondsSinceEpoch,
+        });
       } catch (e) {
-        throw AppError.generic('写入释放空间恢复标记失败：$e');
-      }
-      // 持久化恢复标记（xattr 落盘后再暂存）
-      RandomAccessFile? markerRaf;
-      try {
-        markerRaf = await File(lp).open();
-        await markerRaf.flush();
-      } catch (e) {
-        throw AppError.generic('持久化释放空间恢复标记失败：$e');
-      } finally {
-        await markerRaf?.close();
+        throw AppError.generic('写入释放空间恢复记录失败：$e');
       }
       try {
         await File(lp).rename(stagingPath);
       } catch (e) {
+        // 暂存失败 → 清理恢复记录（尽力）
+        try {
+          await (await db.database).delete('free_up_staging',
+              where: 'staging_name = ?', whereArgs: [stagingName]);
+        } catch (_) {}
         throw AppError.generic('暂存待释放文件失败：$e');
       }
 
@@ -411,10 +416,10 @@ class FreeUpService {
           'WHERE file_id = ? AND local_path = ? AND status = ? '
           'AND local_mtime = ? AND local_size = ?',
           [
-            SyncItemStatus.CloudOnly.code,
+            SyncItemStatus.cloudOnly.code,
             fileId,
             relPath,
-            SyncItemStatus.Synced.code,
+            SyncItemStatus.synced.code,
             sourceMtime,
             sourceSize,
           ],
@@ -428,9 +433,11 @@ class FreeUpService {
         throw AppError.generic('释放空间后基线发生并发变化；文件恢复结果：$rollback');
       }
 
-      // ---- 清理暂存 ----
+      // ---- 清理暂存（先删文件再删记录：窗口期崩溃由恢复流程幂等收敛）----
       try {
         await File(stagingPath).delete();
+        await (await db.database).delete('free_up_staging',
+            where: 'staging_name = ?', whereArgs: [stagingName]);
       } catch (removeError) {
         String restoreMsg;
         var restored = false;
@@ -489,9 +496,11 @@ class FreeUpService {
       } catch (e) {
         throw AppError.generic('读取回滚占位状态失败：$e');
       }
+      // 属主核验：inode 映射优先，xattr 过渡回退（docs/design/10 §4.8）
       final String? owner;
       try {
-        owner = await mount.xattr.get(lp, xattrFileId);
+        owner = await mount.inodeOwnerOf(lp) ??
+            await mount.xattr.get(lp, xattrFileId);
       } catch (e) {
         throw AppError.generic('读取回滚占位身份失败：$e');
       }
@@ -510,10 +519,12 @@ class FreeUpService {
     } catch (e) {
       throw AppError.generic('恢复释放空间原文件失败：$e');
     }
+    // 恢复成功 → 清理 DB 恢复记录（尽力）
     try {
-      await mount.xattr.remove(lp, xattrFreeUpRelativePath);
+      await (await db.database).delete('free_up_staging',
+          where: 'staging_name = ?', whereArgs: [p.basename(stagingPath)]);
     } catch (_) {
-      // 尽力移除恢复标记
+      // 尽力移除恢复记录
     }
   }
 
@@ -534,11 +545,11 @@ class FreeUpService {
         'WHERE file_id = ? AND local_path = ? AND status = ? '
         'AND local_mtime = ? AND local_size = 0',
         [
-          SyncItemStatus.Synced.code,
+          SyncItemStatus.synced.code,
           sourceSize,
           fileId,
           relPath,
-          SyncItemStatus.CloudOnly.code,
+          SyncItemStatus.cloudOnly.code,
           sourceMtime,
         ],
       );
@@ -571,9 +582,9 @@ class FreeUpService {
   Future<bool> _hasActiveTransfer({required String relPath, String? fileId}) async {
     final rawDb = await db.database;
     final terminal = [
-      TransferState.Completed.code,
-      TransferState.Failed.code,
-      TransferState.Canceled.code,
+      TransferState.completed.code,
+      TransferState.failed.code,
+      TransferState.canceled.code,
     ];
     final List<Map<String, Object?>> rows;
     if (fileId == null) {

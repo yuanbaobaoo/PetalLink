@@ -165,10 +165,10 @@ class TransferController extends GetxController {
       if (t.state.isActive) {
         active++;
       }
-      if (t.state == TransferState.Completed) {
+      if (t.state == TransferState.completed) {
         completed++;
       }
-      if (t.state == TransferState.Failed) {
+      if (t.state == TransferState.failed) {
         failed++;
       }
     }
@@ -230,8 +230,8 @@ class TransferController extends GetxController {
     int active = 0, completed = 0, failed = 0;
     for (final t in tasks) {
       if (t.state.isActive) active++;
-      if (t.state == TransferState.Completed) completed++;
-      if (t.state == TransferState.Failed) failed++;
+      if (t.state == TransferState.completed) completed++;
+      if (t.state == TransferState.failed) failed++;
     }
 
     state.value = state.value.copyWith(

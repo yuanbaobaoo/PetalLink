@@ -298,6 +298,11 @@ Future<({Map<String, DriveFile> tree, Map<String, String> pathToId, String? root
       // 根目录第一层：动态发现 root folder ID
       if (node.path.isEmpty && rootFolderId == null) {
         rootFolderId = detectRootFolderId(files);
+        // 对齐 CMP BfsCloudTreeRefresher：平局/缺失 fail-closed，
+        // 不得带着未知 root 继续构建（否则整树挂在错误根下）
+        if (rootFolderId == null && files.isNotEmpty) {
+          throw AppError.generic('根目录 parentFolder 最高频平局或缺失，拒绝推断 root ID');
+        }
       }
       for (final f in files) {
         // 跳过 .hwcloud_ 前缀内部文件
@@ -356,7 +361,7 @@ void applyChangesToCandidate(
   String? rootFolderId,
 ) {
   for (final change in changes) {
-    if (change.kind == ChangeKind.Removed) {
+    if (change.kind == ChangeKind.removed) {
       final path = pathToId.entries
           .where((e) => e.value == change.fileId && e.key.isNotEmpty)
           .map((e) => e.key)

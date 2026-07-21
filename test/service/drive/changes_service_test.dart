@@ -118,7 +118,7 @@ void main() {
       final page = (await service.listChanges('300')).unwrap();
 
       final change = page.changes.single;
-      expect(change.kind, ChangeKind.Removed);
+      expect(change.kind, ChangeKind.removed);
       expect(change.fileId, 'f1');
       expect(change.file, isNull);
     });
@@ -140,7 +140,7 @@ void main() {
 
       final change =
           (await service.listChanges('300')).unwrap().changes.single;
-      expect(change.kind, ChangeKind.Removed);
+      expect(change.kind, ChangeKind.removed);
     });
 
     test('file.recycled=true 软删除 → Removed', () async {
@@ -160,7 +160,7 @@ void main() {
 
       final change =
           (await service.listChanges('300')).unwrap().changes.single;
-      expect(change.kind, ChangeKind.Removed);
+      expect(change.kind, ChangeKind.removed);
     });
 
     test('非删除 change 携带完整 file → Modified', () async {
@@ -177,7 +177,7 @@ void main() {
 
       final change =
           (await service.listChanges('300')).unwrap().changes.single;
-      expect(change.kind, ChangeKind.Modified);
+      expect(change.kind, ChangeKind.modified);
       expect(change.file!.id, 'f1');
     });
 

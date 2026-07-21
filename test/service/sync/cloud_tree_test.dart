@@ -30,7 +30,7 @@ DriveFile folder(String id, String name, {String? parentId}) =>
     DriveFile(
       id: id,
       name: name,
-      category: FileCategory.Folder,
+      category: FileCategory.folder,
       parentFolder: parentId != null ? [parentId] : null,
     );
 
@@ -241,7 +241,7 @@ void main() {
       };
       final index = {'dir': 'd1', 'dir/a.txt': 'f1', 'b.txt': 'f2', '': 'root'};
       applyChangesToCandidate(
-        [const DriveChange(kind: ChangeKind.Removed, fileId: 'd1')],
+        [const DriveChange(kind: ChangeKind.removed, fileId: 'd1')],
         tree,
         index,
         'root',
@@ -256,7 +256,7 @@ void main() {
       applyChangesToCandidate(
         [
           DriveChange(
-            kind: ChangeKind.Modified,
+            kind: ChangeKind.modified,
             fileId: 'f1',
             file: file('f1', 'a.txt', parentId: 'root'),
           ),
@@ -278,7 +278,7 @@ void main() {
       applyChangesToCandidate(
         [
           DriveChange(
-            kind: ChangeKind.Modified,
+            kind: ChangeKind.modified,
             fileId: 'd1',
             file: folder('d1', 'new', parentId: 'root'),
           ),
@@ -298,7 +298,7 @@ void main() {
         () => applyChangesToCandidate(
           [
             DriveChange(
-              kind: ChangeKind.Modified,
+              kind: ChangeKind.modified,
               fileId: 'f2',
               file: file('f2', 'a.txt', parentId: 'root'),
             ),
@@ -318,7 +318,7 @@ void main() {
         () => applyChangesToCandidate(
           [
             DriveChange(
-              kind: ChangeKind.Modified,
+              kind: ChangeKind.modified,
               fileId: 'f1',
               file: file('f1', 'a.txt', parentId: 'ghost'),
             ),
@@ -355,6 +355,26 @@ void main() {
       expect(result.tree.keys,
           containsAll(['docs', 'a.txt', 'docs/b.txt']));
       expect(result.pathToId['docs'], 'd1');
+    });
+
+    test('根目录检测平局 → fail-closed 抛错（对齐 CMP BfsCloudTreeRefresher）',
+        () async {
+      final adapter = FakeHttpAdapter((request) {
+        final qp = request.uri.queryParameters['queryParam'] ?? '';
+        if (qp.contains("'root'")) {
+          // 两个候选 parent 票数相同 → 无法推断 root ID
+          return jsonResponse(fileListPageJson([
+            fileJson(id: 'f1', name: 'a.txt', parentFolder: ['root-a']),
+            fileJson(id: 'f2', name: 'b.txt', parentFolder: ['root-b']),
+          ]));
+        }
+        throw StateError('未知请求: $qp');
+      });
+      final files = FilesService(buildTestClient(adapter));
+      await expectLater(
+        refreshCloudTree(files),
+        throwsA(isA<AppError>()),
+      );
     });
 
     test('单目录失败重试 2 次后成功', () async {

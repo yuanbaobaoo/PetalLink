@@ -92,14 +92,14 @@ void main() {
     await File(abs).writeAsString(content);
     final stat = await FileStat.stat(abs);
     return TransferTask(
-      direction: TransferDirection.Upload,
+      direction: TransferDirection.upload,
       localPath: abs,
       name: p.basename(rel),
       totalSize: stat.size,
       createdAt: nowMs,
       relativePath: rel,
       parentFileId: 'root',
-      operation: TransferOperation.Create,
+      operation: TransferOperation.create,
       sourceMtime: stat.modified.millisecondsSinceEpoch,
       sourceSize: stat.size,
     );
@@ -119,7 +119,7 @@ void main() {
       expect(ops.executeCalls, 1);
       final items = await allItems();
       expect(items.single.localPath, 'a.txt');
-      expect(items.single.status, SyncItemStatus.Synced);
+      expect(items.single.status, SyncItemStatus.synced);
       expect(items.single.fileId, 'cloud-a.txt');
     });
 
@@ -135,13 +135,13 @@ void main() {
       // 任务被调度执行（pump 触发）
       await runner.idle;
       final fresh = (await transferService.getTaskById(stored.id)).unwrapOr(null);
-      expect(fresh?.state, TransferState.Completed);
+      expect(fresh?.state, TransferState.completed);
     });
 
     test('在途写不同意图 → blockedByActiveIntent', () async {
       final intent = await newUploadIntent('a.txt');
       final running = intent.copyWith(
-        state: TransferState.Running,
+        state: TransferState.running,
         sourceMtime: intent.sourceMtime! + 999,
       );
       await transferService.enqueue(running);
@@ -155,7 +155,7 @@ void main() {
     test('歧义重启提升：RestartRequired + 远端结果 → VerifyingRemote', () async {
       final intent = await newUploadIntent('a.txt');
       final restart = intent.copyWith(
-        state: TransferState.RestartRequired,
+        state: TransferState.restartRequired,
         remoteResultFileId: 'cloud-dup',
       );
       final stored = (await transferService.enqueue(restart)).unwrap();
@@ -164,8 +164,8 @@ void main() {
       expect(result.unwrap().outcome.disposition,
           TaskDisposition.verifyingRemote);
       final fresh = (await transferService.getTaskById(stored.id)).unwrapOr(null);
-      expect(fresh?.state, TransferState.VerifyingRemote);
-      expect(fresh?.errorKind, TransferErrorKind.RemoteAmbiguous);
+      expect(fresh?.state, TransferState.verifyingRemote);
+      expect(fresh?.errorKind, TransferErrorKind.remoteAmbiguous);
       expect((await allTasks()).length, 1);
     });
 
@@ -183,15 +183,15 @@ void main() {
       // SYNCING 回写（replan 钩子）
       final items = await allItems();
       if (items.isNotEmpty) {
-        expect(items.first.status, isNot(SyncItemStatus.Failed));
+        expect(items.first.status, isNot(SyncItemStatus.failed));
       }
     });
 
     test('Failed 路径屏障：同路径 Failed 行拒绝新自动意图', () async {
       final intent = await newUploadIntent('a.txt');
       final failed = intent.copyWith(
-        state: TransferState.Failed,
-        errorKind: TransferErrorKind.Quota,
+        state: TransferState.failed,
+        errorKind: TransferErrorKind.quota,
         errorMessage: '配额不足',
       );
       await transferService.enqueue(failed);
@@ -205,13 +205,13 @@ void main() {
     test('每周期歧义重启批量提升（promoteAmbiguousRestarts）', () async {
       final intent = await newUploadIntent('a.txt');
       await transferService.enqueue(intent.copyWith(
-        state: TransferState.RestartRequired,
+        state: TransferState.restartRequired,
         remoteResultFileId: 'cloud-x',
       ));
       final other = await newUploadIntent('b.txt');
       // 无远端结果的 RestartRequired 不提升
       await transferService.enqueue(other.copyWith(
-        state: TransferState.RestartRequired,
+        state: TransferState.restartRequired,
       ));
       final promoted = await runner.promoteAmbiguousRestarts();
       expect(promoted, 1);
@@ -228,7 +228,7 @@ void main() {
             fileId: '$pendingFileIdPrefix${'a.txt'}',
             localPath: 'a.txt',
             name: 'a.txt',
-            status: SyncItemStatus.Syncing,
+            status: SyncItemStatus.syncing,
           ).toRow());
       final intent = await newUploadIntent('a.txt');
       final result = await runner.enqueueAndRun(intent);
@@ -236,7 +236,7 @@ void main() {
       final items = await allItems();
       expect(items.length, 1);
       expect(items.single.fileId, 'cloud-a.txt');
-      expect(items.single.status, SyncItemStatus.Synced);
+      expect(items.single.status, SyncItemStatus.synced);
       expect(items.single.localSize, intent.sourceSize);
       expect(items.single.localMtime, intent.sourceMtime);
     });
@@ -253,13 +253,13 @@ void main() {
             localSize: 1,
             localMtime: 1,
             cloudEditedTime: 1,
-            status: SyncItemStatus.Synced,
+            status: SyncItemStatus.synced,
           ).toRow());
       final abs = p.join(mountDir.path, 'new.txt');
       await File(abs).writeAsString('zz');
       final stat = await FileStat.stat(abs);
       final update = TransferTask(
-        direction: TransferDirection.Upload,
+        direction: TransferDirection.upload,
         fileId: 'f1',
         localPath: abs,
         name: 'new.txt',
@@ -267,7 +267,7 @@ void main() {
         createdAt: nowMs,
         relativePath: 'new.txt',
         parentFileId: 'root',
-        operation: TransferOperation.Update,
+        operation: TransferOperation.update,
         sourceMtime: stat.modified.millisecondsSinceEpoch,
         sourceSize: stat.size,
         expectedCloudEditedTime: 1,
@@ -294,7 +294,7 @@ void main() {
       final abs = p.join(mountDir.path, 'dl.txt');
       await File(abs).writeAsString('cloud-content');
       final task = TransferTask(
-        direction: TransferDirection.Download,
+        direction: TransferDirection.download,
         fileId: 'f9',
         localPath: abs,
         name: 'dl.txt',
@@ -302,7 +302,7 @@ void main() {
         createdAt: nowMs,
         relativePath: 'dl.txt',
         parentFileId: 'root',
-        operation: TransferOperation.Download,
+        operation: TransferOperation.download,
         expectedCloudEditedTime: 1700000000000,
       );
       ops.behaviors['dl.txt'] = (t) => const TaskExecutionOutcome();
@@ -310,7 +310,7 @@ void main() {
       await baselineStore.onTaskCommitted(task, const TaskExecutionOutcome());
       final items = await allItems();
       expect(items.single.fileId, 'f9');
-      expect(items.single.status, SyncItemStatus.Synced);
+      expect(items.single.status, SyncItemStatus.synced);
       expect(items.single.localSize, 13);
       expect(items.single.cloudEditedTime, 1700000000000);
     });
@@ -332,17 +332,17 @@ void main() {
     }
 
     test('onTaskFailed 仅覆盖 SYNCED/SYNCING/CLOUD_ONLY/FAILED', () async {
-      await seedItem('a', SyncItemStatus.Synced, fileId: 'fa');
-      await seedItem('b', SyncItemStatus.Syncing, fileId: 'fb');
-      await seedItem('c', SyncItemStatus.CloudOnly, fileId: 'fc');
-      await seedItem('d', SyncItemStatus.Deleted, fileId: 'fd');
-      await seedItem('e', SyncItemStatus.Conflict, fileId: 'fe');
+      await seedItem('a', SyncItemStatus.synced, fileId: 'fa');
+      await seedItem('b', SyncItemStatus.syncing, fileId: 'fb');
+      await seedItem('c', SyncItemStatus.cloudOnly, fileId: 'fc');
+      await seedItem('d', SyncItemStatus.deleted, fileId: 'fd');
+      await seedItem('e', SyncItemStatus.conflict, fileId: 'fe');
       final task = TransferTask(
         id: 1,
         fileId: 'fa',
         name: 'a',
         relativePath: 'a',
-        state: TransferState.Failed,
+        state: TransferState.failed,
         createdAt: nowMs,
       );
       await baselineStore.onTaskFailed(task, 'boom');
@@ -355,15 +355,15 @@ void main() {
         );
       }
       final items = {for (final i in await allItems()) i.localPath: i};
-      expect(items['a']?.status, SyncItemStatus.Failed);
-      expect(items['b']?.status, SyncItemStatus.Failed);
-      expect(items['c']?.status, SyncItemStatus.Failed);
-      expect(items['d']?.status, SyncItemStatus.Deleted); // 不被覆盖
-      expect(items['e']?.status, SyncItemStatus.Conflict); // 不被覆盖
+      expect(items['a']?.status, SyncItemStatus.failed);
+      expect(items['b']?.status, SyncItemStatus.failed);
+      expect(items['c']?.status, SyncItemStatus.failed);
+      expect(items['d']?.status, SyncItemStatus.deleted); // 不被覆盖
+      expect(items['e']?.status, SyncItemStatus.conflict); // 不被覆盖
     });
 
     test('onTaskFailed：fileId 缺省回退 pending: 占位', () async {
-      await seedItem('a.txt', SyncItemStatus.Syncing,
+      await seedItem('a.txt', SyncItemStatus.syncing,
           fileId: '$pendingFileIdPrefix${'a.txt'}');
       await baselineStore.onTaskFailed(
         TransferTask(
@@ -371,13 +371,13 @@ void main() {
         '空间不足',
       );
       final items = await allItems();
-      expect(items.single.status, SyncItemStatus.Failed);
+      expect(items.single.status, SyncItemStatus.failed);
       expect(items.single.errorMessage, '空间不足');
     });
 
     test('onRetryAccepted 仅从 FAILED 回写 SYNCING', () async {
-      await seedItem('a', SyncItemStatus.Failed, fileId: 'fa');
-      await seedItem('b', SyncItemStatus.Conflict, fileId: 'fb');
+      await seedItem('a', SyncItemStatus.failed, fileId: 'fa');
+      await seedItem('b', SyncItemStatus.conflict, fileId: 'fb');
       await baselineStore.onRetryAccepted(
         TransferTask(
             id: 1, fileId: 'fa', name: 'a', relativePath: 'a', createdAt: nowMs),
@@ -387,39 +387,39 @@ void main() {
             id: 2, fileId: 'fb', name: 'b', relativePath: 'b', createdAt: nowMs),
       );
       final items = {for (final i in await allItems()) i.localPath: i};
-      expect(items['a']?.status, SyncItemStatus.Syncing);
+      expect(items['a']?.status, SyncItemStatus.syncing);
       expect(items['a']?.errorMessage, isNull);
-      expect(items['b']?.status, SyncItemStatus.Conflict);
+      expect(items['b']?.status, SyncItemStatus.conflict);
     });
 
     test('RETRY 周期收尾：无 Failed 任务的 FAILED 行置回 SYNCING', () async {
-      await seedItem('a', SyncItemStatus.Failed, fileId: 'fa');
-      await seedItem('b', SyncItemStatus.Failed, fileId: 'fb');
+      await seedItem('a', SyncItemStatus.failed, fileId: 'fa');
+      await seedItem('b', SyncItemStatus.failed, fileId: 'fb');
       // b 有对应 Failed 任务 → 保留 FAILED
       final db = await DatabaseService.instance.database;
       await db.insert(
           'transfer_queue',
           TransferTask(
-            direction: TransferDirection.Upload,
+            direction: TransferDirection.upload,
             fileId: 'fb',
             name: 'b',
             relativePath: 'b',
-            state: TransferState.Failed,
+            state: TransferState.failed,
             createdAt: nowMs,
           ).toRow());
       await baselineStore.sweepFailedWithoutFailedTasks();
       final items = {for (final i in await allItems()) i.localPath: i};
-      expect(items['a']?.status, SyncItemStatus.Syncing);
-      expect(items['b']?.status, SyncItemStatus.Failed);
+      expect(items['a']?.status, SyncItemStatus.syncing);
+      expect(items['b']?.status, SyncItemStatus.failed);
     });
 
     test('resetStaleStatuses：SYNCING → SYNCED，FAILED 保留', () async {
-      await seedItem('a', SyncItemStatus.Syncing, fileId: 'fa');
-      await seedItem('b', SyncItemStatus.Failed, fileId: 'fb');
+      await seedItem('a', SyncItemStatus.syncing, fileId: 'fa');
+      await seedItem('b', SyncItemStatus.failed, fileId: 'fb');
       await baselineStore.resetStaleStatuses();
       final items = {for (final i in await allItems()) i.localPath: i};
-      expect(items['a']?.status, SyncItemStatus.Synced);
-      expect(items['b']?.status, SyncItemStatus.Failed);
+      expect(items['a']?.status, SyncItemStatus.synced);
+      expect(items['b']?.status, SyncItemStatus.failed);
     });
   });
 
@@ -430,14 +430,14 @@ void main() {
     await File(abs).writeAsString('x');
     final stat = await FileStat.stat(abs);
     final intent = TransferTask(
-      direction: TransferDirection.Upload,
+      direction: TransferDirection.upload,
       localPath: abs,
       name: 'a.txt',
       totalSize: stat.size,
       createdAt: nowMs,
       relativePath: 'a.txt',
       parentFileId: 'root',
-      operation: TransferOperation.Create,
+      operation: TransferOperation.create,
       sourceMtime: stat.modified.millisecondsSinceEpoch,
       sourceSize: stat.size,
     );
@@ -449,8 +449,8 @@ void main() {
       // outcome 以错误完结（任务未 Completed）
     }
     final tasks = await allTasks();
-    expect(tasks.single.state, TransferState.VerifyingRemote);
-    expect(tasks.single.errorKind, TransferErrorKind.RemoteAmbiguous);
+    expect(tasks.single.state, TransferState.verifyingRemote);
+    expect(tasks.single.errorKind, TransferErrorKind.remoteAmbiguous);
   });
 }
 

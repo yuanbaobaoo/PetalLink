@@ -14,7 +14,7 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 SyncItem item(
   String fileId,
   String path, {
-  SyncItemStatus status = SyncItemStatus.Synced,
+  SyncItemStatus status = SyncItemStatus.synced,
   String? error,
 }) {
   return SyncItem(
@@ -28,8 +28,8 @@ SyncItem item(
 
 TransferTask task({
   required int id,
-  TransferState state = TransferState.Running,
-  TransferDirection direction = TransferDirection.Upload,
+  TransferState state = TransferState.running,
+  TransferDirection direction = TransferDirection.upload,
 }) {
   return TransferTask(
     id: id,
@@ -89,17 +89,17 @@ void main() {
       items: [
         item('f1', 'a'),
         item('f2', 'b'),
-        item('f3', 'c', status: SyncItemStatus.Failed, error: 'boom'),
-        item('f4', 'd', status: SyncItemStatus.Conflict),
-        item('f5', 'e', status: SyncItemStatus.CloudOnly),
+        item('f3', 'c', status: SyncItemStatus.failed, error: 'boom'),
+        item('f4', 'd', status: SyncItemStatus.conflict),
+        item('f5', 'e', status: SyncItemStatus.cloudOnly),
       ],
       tasks: [
-        task(id: 1, direction: TransferDirection.Upload),
-        task(id: 2, direction: TransferDirection.Download),
-        task(id: 3, direction: TransferDirection.DownloadUpdate),
-        task(id: 4, state: TransferState.WaitingForNetwork),
-        task(id: 5, state: TransferState.Failed),
-        task(id: 6, state: TransferState.Completed),
+        task(id: 1, direction: TransferDirection.upload),
+        task(id: 2, direction: TransferDirection.download),
+        task(id: 3, direction: TransferDirection.downloadUpdate),
+        task(id: 4, state: TransferState.waitingForNetwork),
+        task(id: 5, state: TransferState.failed),
+        task(id: 6, state: TransferState.completed),
       ],
     );
     final db = await DatabaseService.instance.database;
@@ -120,7 +120,7 @@ void main() {
     final items = [
       for (var i = 0; i < 25; i++)
         item('f$i', 'p${i.toString().padLeft(2, '0')}',
-            status: SyncItemStatus.Failed),
+            status: SyncItemStatus.failed),
     ];
     // 乱序插入验证 ORDER BY
     await seed(items: items.reversed.toList());
@@ -142,7 +142,7 @@ void main() {
         indexingScannedFolders: 7,
         indexingDiscoveredItems: 42,
         editing: 2,
-        syncPhase: SyncPhase.IndexingStartup,
+        syncPhase: SyncPhase.indexingStartup,
         lastSyncTime: 1700000000000,
         contentChanged: true,
       ),
@@ -152,7 +152,7 @@ void main() {
     expect(s.indexingScannedFolders, 7);
     expect(s.indexingDiscoveredItems, 42);
     expect(s.editing, 2);
-    expect(s.syncPhase, SyncPhase.IndexingStartup);
+    expect(s.syncPhase, SyncPhase.indexingStartup);
     expect(s.contentChanged, isTrue);
     expect(s.lastSyncTime, 1700000000000);
   });

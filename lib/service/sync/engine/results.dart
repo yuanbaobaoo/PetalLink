@@ -13,6 +13,7 @@ import 'dart:io';
 import 'package:sqflite/sqflite.dart';
 
 import 'package:petal_link/core/error/app_error.dart';
+import 'package:petal_link/entity/drive_file.dart';
 import 'package:petal_link/core/logger/logger.dart';
 import 'package:petal_link/entity/sync_item.dart';
 import 'package:petal_link/service/sync/engine.dart';
@@ -117,7 +118,8 @@ mixin EngineResults on SyncEngineBase {
         actions.any((a) => a.actionType == SyncActionType.moveInCloud);
     final settledCloudDeletes = <String>{};
     final settledDeletes = <String>{};
-    final settledUpserts = <(String, String, String?)>{}; // (rel, fileId, name)
+    // (rel, fileId, 结算用云端元数据——优先 result.cloudFile，对齐 Rust results.rs)
+    final settledUpserts = <(String, String, DriveFile?)>{};
 
     await db.transaction((txn) async {
       // MoveInCloud 需要全部基线用于内容字段继承
@@ -175,7 +177,7 @@ mixin EngineResults on SyncEngineBase {
               'UPDATE sync_items SET status = ?, error_message = ? '
               'WHERE file_id = ? AND local_path = ?',
               [
-                SyncItemStatus.Failed.code,
+                SyncItemStatus.failed.code,
                 result.errorMessage ?? '同步失败',
                 fid,
                 rel,
@@ -215,9 +217,9 @@ mixin EngineResults on SyncEngineBase {
         // e. 其余成功动作（CreatePlaceholder/CreateFolder/CreateConflictCopy/
         //    MoveInCloud/放行的 Skip）
         final defaultStatus = switch (action.actionType) {
-          SyncActionType.createPlaceholder => SyncItemStatus.CloudOnly,
-          SyncActionType.createConflictCopy => SyncItemStatus.Conflict,
-          _ => SyncItemStatus.Synced,
+          SyncActionType.createPlaceholder => SyncItemStatus.cloudOnly,
+          SyncActionType.createConflictCopy => SyncItemStatus.conflict,
+          _ => SyncItemStatus.synced,
         };
         final cloudFile = result.cloudFile ?? action.cloudFile;
         final fileId = cloudFile?.id ?? action.fileId;
@@ -327,7 +329,7 @@ mixin EngineResults on SyncEngineBase {
         );
         await txn.insert('sync_items', item.toRow(),
             conflictAlgorithm: ConflictAlgorithm.replace);
-        settledUpserts.add((rel, fileId, item.name));
+        settledUpserts.add((rel, fileId, cloudFile));
       }
     });
 
@@ -340,16 +342,15 @@ mixin EngineResults on SyncEngineBase {
       cloudIndex.removeSubtree(rel);
       recentlyDeletedPaths[rel] = now;
     }
-    for (final (rel, fileId, _) in settledUpserts) {
+    for (final (rel, fileId, settledFile) in settledUpserts) {
       // 先移除同 fileId 的其他陈旧路径
       for (final stale in cloudIndex.otherPathsOf(fileId, rel)) {
         cloudIndex.remove(stale);
       }
-      final file = cloudIndex.tree[rel] ??
-          actions
-              .where((a) => a.relativePath == rel)
-              .map((a) => a.cloudFile)
-              .firstOrNull;
+      // 对齐 Rust results.rs：优先执行结果携带的权威云端元数据
+      // （result.cloudFile ?? action.cloudFile），修复前只读
+      // cloudIndex.tree / action.cloudFile，丢失 result.cloudFile
+      final file = settledFile ?? cloudIndex.tree[rel];
       if (file != null) {
         cloudIndex.insert(rel, file);
       } else {

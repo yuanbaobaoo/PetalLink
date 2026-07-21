@@ -16,16 +16,12 @@ import 'package:petal_link/service/sync/engine/coordination.dart';
 import 'package:petal_link/service/sync/path_recovery.dart';
 import 'package:petal_link/types/enums.dart';
 
-/// 任务恢复确认的远端文件（对齐 Rust `RecoveredCloudFile`）。
-class RecoveredCloudFile {
-  /// 相对路径
-  final String relativePath;
-
-  /// 云端元数据
-  final DriveFile file;
-
-  const RecoveredCloudFile({required this.relativePath, required this.file});
-}
+// RecoveredCloudFile 统一定义在 task_runner_contracts（引擎与 runner 共享），
+// 此处 import + re-export 保持既有引用路径不变。
+import 'package:petal_link/service/transfer/task_runner_contracts.dart'
+    show RecoveredCloudFile;
+export 'package:petal_link/service/transfer/task_runner_contracts.dart'
+    show RecoveredCloudFile;
 
 /// live 云树索引（引擎内存态）。
 class CloudTreeIndex {
@@ -120,7 +116,7 @@ mixin EngineCache on SyncEngineBase {
     }
     await updateRuntimeAndBroadcast((r) {
       r.isIndexing = true;
-      r.syncPhase = SyncPhase.IndexingStartup;
+      r.syncPhase = SyncPhase.indexingStartup;
     });
     try {
       await buildAndCommitFullCheckpoint();
@@ -183,7 +179,7 @@ mixin EngineCache on SyncEngineBase {
   Future<void> refreshCloudFullForCycle() async {
     await updateRuntimeAndBroadcast((r) {
       r.isIndexing = true;
-      r.syncPhase = SyncPhase.IndexingManual;
+      r.syncPhase = SyncPhase.indexingManual;
     });
     try {
       await buildAndCommitFullCheckpoint();
@@ -202,11 +198,11 @@ mixin EngineCache on SyncEngineBase {
   @override
   Future<void> refreshCloudIncrementalForCycle() async {
     await updateRuntimeAndBroadcast((r) {
-      r.syncPhase = SyncPhase.QueryingChanges;
+      r.syncPhase = SyncPhase.queryingChanges;
     });
     await tryIncrementalOrFullRefresh();
     await updateRuntimeAndBroadcast((r) {
-      r.syncPhase = SyncPhase.SyncingAutoIncremental;
+      r.syncPhase = SyncPhase.syncingAutoIncremental;
     });
   }
 
@@ -219,7 +215,7 @@ mixin EngineCache on SyncEngineBase {
       AppLogger.i('连续 ${cloudIndex.incrementalSinceFull} 次增量，强制全量 BFS');
       await updateRuntimeAndBroadcast((r) {
         r.isIndexing = true;
-        r.syncPhase = SyncPhase.IndexingAutoFull;
+        r.syncPhase = SyncPhase.indexingAutoFull;
       });
       try {
         await buildAndCommitFullCheckpoint();
@@ -262,7 +258,7 @@ mixin EngineCache on SyncEngineBase {
       cloudIndex.revokeTrust();
       await updateRuntimeAndBroadcast((r) {
         r.isIndexing = true;
-        r.syncPhase = SyncPhase.IndexingAutoFull;
+        r.syncPhase = SyncPhase.indexingAutoFull;
       });
       try {
         await buildAndCommitFullCheckpoint();
@@ -349,7 +345,7 @@ mixin EngineCache on SyncEngineBase {
     final rows = await db.query('sync_items',
         columns: ['local_path', 'file_id'],
         where: 'status = ?',
-        whereArgs: [SyncItemStatus.Deleted.code]);
+        whereArgs: [SyncItemStatus.deleted.code]);
     for (final row in rows) {
       final path = row['local_path'] as String? ?? '';
       final fileId = row['file_id'] as String? ?? '';
@@ -358,7 +354,7 @@ mixin EngineCache on SyncEngineBase {
       if (cloudIndex.tree.containsKey(path)) continue;
       await db.delete('sync_items',
           where: 'local_path = ? AND status = ?',
-          whereArgs: [path, SyncItemStatus.Deleted.code]);
+          whereArgs: [path, SyncItemStatus.deleted.code]);
     }
   }
 }

@@ -23,6 +23,8 @@ import 'package:petal_link/service/drive/files_service.dart';
 import 'package:petal_link/service/mount/local_watcher.dart';
 import 'package:petal_link/service/mount/manager.dart';
 import 'package:petal_link/service/sync/baseline_store.dart';
+import 'package:petal_link/service/sync/identity/detect_moves.dart';
+import 'package:petal_link/service/sync/identity/inode_identity.dart';
 import 'package:petal_link/service/sync/engine/cache.dart';
 import 'package:petal_link/service/sync/engine/coordination.dart';
 import 'package:petal_link/service/sync/engine/cycle.dart';
@@ -92,9 +94,14 @@ abstract class SyncEngineBase {
     this.requestNetworkFailureReporter,
     int Function()? nowMs,
     void Function(String point)? cycleObserver,
+    InodeIdentityStore? identity,
   })  : onlineCheck = onlineCheck ?? (() => true),
         nowMs = nowMs ?? (() => DateTime.now().millisecondsSinceEpoch),
-        cycleObserver = cycleObserver ?? ((_) {});
+        cycleObserver = cycleObserver ?? ((_) {}) {
+    this.identity = identity ?? SqfliteInodeIdentityStore(db);
+    // 基线结算存储共享同一身份映射实例（测试注入 Memory 时保持一致）
+    baselineStore.identity = this.identity;
+  }
 
   // ═══════════════════════════════════════════════════════════════════
   // 后期绑定（对齐 Rust set_mount / set_executor）
@@ -121,8 +128,9 @@ abstract class SyncEngineBase {
     mountDir = m.mountDir;
   }
 
-  /// 注入执行器（共享 TaskRunner 与活动门）。
+  /// 注入执行器（共享 TaskRunner 与活动门 + 身份映射实例）。
   void setExecutor(SyncExecutor exec, TaskRunner runner) {
+    exec.identity = identity;
     executor = exec;
     taskRunner = runner;
   }
@@ -133,6 +141,13 @@ abstract class SyncEngineBase {
 
   /// 云树 live 状态索引（engine/cache.dart 实现）
   late final CloudTreeIndex cloudIndex = CloudTreeIndex();
+
+  /// inode 身份映射（docs/design/10；阶段 1 仅写不读，
+  /// 阶段 2 起用于移动检测）。测试可注入 [MemoryInodeIdentityStore]。
+  late InodeIdentityStore identity;
+
+  /// 最近一轮扫描检测到的本地移动（inode 配对；cycle 在 planner 后消费）
+  List<DetectedMove> lastScanMoves = [];
 
   // ═══════════════════════════════════════════════════════════════════
   // 运行状态与发布
@@ -431,11 +446,6 @@ abstract class SyncEngineBase {
   );
 
   /// xattr fileId 识别改名
-  Future<void> detectRenames(
-    List<SyncAction> actions,
-    Map<String, DbSnapshotEntry> dbSnapshot,
-  );
-
   /// free-up 安全判定
   Future<FreeUpCheckResult> canSafelyFreeUp(String relPath, String fileId);
 

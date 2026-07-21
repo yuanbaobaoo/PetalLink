@@ -91,7 +91,7 @@ class FakeFilesService implements FilesService {
 }
 
 DriveFile _folder(String id, String name) =>
-    DriveFile(id: id, name: name, category: FileCategory.Folder);
+    DriveFile(id: id, name: name, category: FileCategory.folder);
 
 DriveFile _file(String id, String name, {int size = 0, DateTime? edited}) =>
     DriveFile(id: id, name: name, size: size, editedTime: edited);
@@ -216,15 +216,15 @@ void main() {
 
   group('排序与过滤', () {
     test('sort 同字段反转升降序，异字段重置升序', () {
-      controller.sort(SortField.Size);
-      expect(controller.state.value.sortField, SortField.Size);
+      controller.sort(SortField.size);
+      expect(controller.state.value.sortField, SortField.size);
       expect(controller.state.value.ascending, isTrue);
 
-      controller.sort(SortField.Size);
+      controller.sort(SortField.size);
       expect(controller.state.value.ascending, isFalse);
 
-      controller.sort(SortField.Name);
-      expect(controller.state.value.sortField, SortField.Name);
+      controller.sort(SortField.name);
+      expect(controller.state.value.sortField, SortField.name);
       expect(controller.state.value.ascending, isTrue);
     });
 

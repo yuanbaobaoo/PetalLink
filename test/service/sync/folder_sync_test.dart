@@ -41,8 +41,8 @@ class _FakeOps extends TaskOperations {
     TaskProgressCallbacks progress,
   ) async {
     final rel = task.relativePath ?? '';
-    if (task.operation == TransferOperation.Download ||
-        task.operation == TransferOperation.DownloadUpdate) {
+    if (task.operation == TransferOperation.download ||
+        task.operation == TransferOperation.downloadUpdate) {
       downloaded.add(rel);
       await File(task.localPath!).writeAsString('cloud-content');
       return const TaskExecutionOutcome();
@@ -184,6 +184,28 @@ void main() {
     // 上传成功后内存云树即时更新
     await Future<void>.delayed(const Duration(milliseconds: 200));
     expect(service.currentState, isNotNull);
+  });
+
+  test('本地扫描应用 skipPatterns：.DS_Store 等跳过文件不上传', () async {
+    await service.ensureEngineStarted();
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    await Directory(p.join(mountDir.path, 'docs')).create(recursive: true);
+    // 跳过文件（默认 skipPatterns：.DS_Store / .tmp / ~$* / .Trash）
+    await File(p.join(mountDir.path, 'docs', '.DS_Store'))
+        .writeAsString('junk');
+    await File(p.join(mountDir.path, 'docs', '~\$lock.docx'))
+        .writeAsString('junk');
+    await File(p.join(mountDir.path, 'docs', 'local.txt'))
+        .writeAsString('local-content');
+
+    await service.folderRecursive(folderId: 'd1', relPath: 'docs');
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+
+    // 对齐 Rust scan_dir_for_real_files(eng.skip_patterns())：
+    // .DS_Store / ~$* 不得进入上传清单
+    expect(ops.uploaded, isNot(contains('docs/.DS_Store')));
+    expect(ops.uploaded, isNot(contains('docs/~\$lock.docx')));
+    expect(ops.uploaded, contains('docs/local.txt'));
   });
 
   test('索引中拒绝 + 并发目录同步拒绝', () async {

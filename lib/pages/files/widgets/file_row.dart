@@ -30,16 +30,16 @@ String fileTypeIcon(DriveFile file) {
   final mime = file.mimeType ?? '';
   final ext =
       file.name.contains('.') ? file.name.split('.').last.toLowerCase() : '';
-  if (file.category == FileCategory.Image || mime.startsWith('image/')) {
+  if (file.category == FileCategory.image || mime.startsWith('image/')) {
     return 'image';
   }
-  if (file.category == FileCategory.Video || mime.startsWith('video/')) {
+  if (file.category == FileCategory.video || mime.startsWith('video/')) {
     return 'video';
   }
   // 表格/图表类（扩展名）→ sheet tile
   if (_sheetTileExts.contains(ext)) return 'chart';
   // 文档类（text/*、pdf、常见文档扩展名）→ doc tile
-  if (file.category == FileCategory.Document ||
+  if (file.category == FileCategory.document ||
       mime.startsWith('text/') ||
       mime == 'application/pdf' ||
       _docTileExts.contains(ext)) {

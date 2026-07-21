@@ -30,7 +30,7 @@ Widget _wrap(Widget child) {
 TransferTask _task(
   int id,
   TransferState state, {
-  TransferDirection direction = TransferDirection.Upload,
+  TransferDirection direction = TransferDirection.upload,
   String? name,
   int totalSize = 1000,
   int transferred = 500,
@@ -86,12 +86,12 @@ void main() {
 
     // 面板高度有限，9 个任务分两波渲染验证（前 6 态）
     await tester.pumpWidget(_wrap(_popover(cb, [
-      _task(1, TransferState.Pending),
-      _task(2, TransferState.Running),
-      _task(3, TransferState.WaitingForNetwork),
-      _task(4, TransferState.BackingOff),
-      _task(5, TransferState.VerifyingRemote),
-      _task(6, TransferState.RestartRequired, errorMessage: '需重新规划'),
+      _task(1, TransferState.pending),
+      _task(2, TransferState.running),
+      _task(3, TransferState.waitingForNetwork),
+      _task(4, TransferState.backingOff),
+      _task(5, TransferState.verifyingRemote),
+      _task(6, TransferState.restartRequired, errorMessage: '需重新规划'),
     ])));
     await tester.pump();
 
@@ -107,9 +107,9 @@ void main() {
 
     // 后 3 态（含 Failed 错误文案与 Canceled）
     await tester.pumpWidget(_wrap(_popover(cb, [
-      _task(7, TransferState.Completed),
-      _task(8, TransferState.Failed, errorMessage: '网络错误'),
-      _task(9, TransferState.Canceled),
+      _task(7, TransferState.completed),
+      _task(8, TransferState.failed, errorMessage: '网络错误'),
+      _task(9, TransferState.canceled),
     ])));
     await tester.pump();
 
@@ -126,12 +126,12 @@ void main() {
 
     final cb = _Callbacks();
     final tasks = [
-      _task(1, TransferState.Running),
-      _task(2, TransferState.Pending),
-      _task(3, TransferState.VerifyingRemote),
-      _task(4, TransferState.WaitingForNetwork),
-      _task(5, TransferState.Completed),
-      _task(6, TransferState.Failed, errorMessage: 'x'),
+      _task(1, TransferState.running),
+      _task(2, TransferState.pending),
+      _task(3, TransferState.verifyingRemote),
+      _task(4, TransferState.waitingForNetwork),
+      _task(5, TransferState.completed),
+      _task(6, TransferState.failed, errorMessage: 'x'),
     ];
     await tester.pumpWidget(_wrap(_popover(cb, tasks)));
     await tester.pump();
@@ -170,7 +170,7 @@ void main() {
 
     final cb = _Callbacks();
     await tester.pumpWidget(_wrap(_popover(cb, [
-      _task(1, TransferState.Completed),
+      _task(1, TransferState.completed),
     ])));
     await tester.pump();
 
@@ -211,7 +211,7 @@ void main() {
 
     final cb = _Callbacks();
     await tester.pumpWidget(_wrap(_popover(cb, [
-      _task(42, TransferState.Failed, errorMessage: '网络错误'),
+      _task(42, TransferState.failed, errorMessage: '网络错误'),
     ])));
     await tester.pump();
 
@@ -232,8 +232,8 @@ void main() {
 
     final cb = _Callbacks();
     await tester.pumpWidget(_wrap(_popover(cb, [
-      _task(7, TransferState.Failed,
-          direction: TransferDirection.Delete,
+      _task(7, TransferState.failed,
+          direction: TransferDirection.delete,
           totalSize: 0,
           errorMessage: '删除失败'),
     ])));

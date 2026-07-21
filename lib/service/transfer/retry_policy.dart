@@ -8,14 +8,14 @@ import 'package:petal_link/types/enums.dart';
 /// 判断传输操作是否可能改变云端状态（对齐 Rust `operation_modifies_remote`）。
 bool operationModifiesRemote(TransferOperation operation) {
   return switch (operation) {
-    TransferOperation.Create ||
-    TransferOperation.Update ||
-    TransferOperation.Delete ||
-    TransferOperation.Move ||
-    TransferOperation.Rename ||
-    TransferOperation.CreateFolder =>
+    TransferOperation.create ||
+    TransferOperation.update ||
+    TransferOperation.delete ||
+    TransferOperation.move ||
+    TransferOperation.rename ||
+    TransferOperation.createFolder =>
       true,
-    TransferOperation.Download || TransferOperation.DownloadUpdate => false,
+    TransferOperation.download || TransferOperation.downloadUpdate => false,
   };
 }
 
@@ -103,20 +103,20 @@ class ClassifiedRecovery {
 /// 将运行时错误映射为可持久的恢复决策（对齐 Rust `classify_transfer_error`）。
 ClassifiedRecovery classifyTransferError(AppError error, RecoveryContext context) {
   return switch (error) {
-    QuotaExceededError() => _permanent(TransferErrorKind.Quota),
+    QuotaExceededError() => _permanent(TransferErrorKind.quota),
     TokenError(tokenCode: TokenErrorCode.notLoggedIn) ||
     TokenError(tokenCode: TokenErrorCode.refreshFailed) ||
     AuthError() =>
-      _permanent(TransferErrorKind.Auth),
+      _permanent(TransferErrorKind.auth),
     DriveApiError(driveCode: DriveApiErrorCode.quotaExceeded) =>
-      _permanent(TransferErrorKind.Quota),
+      _permanent(TransferErrorKind.quota),
     DriveApiError(errorCode: 'upload_session_expired') => const ClassifiedRecovery(
-        kind: TransferErrorKind.SessionExpired,
+        kind: TransferErrorKind.sessionExpired,
         decision: VerifyRemoteDecision(),
         consumesRetryBudget: false,
       ),
     DriveApiError() => _classifyDriveApi(error, context),
-    ConfigError() || GenericError() => _permanent(TransferErrorKind.Unknown),
+    ConfigError() || GenericError() => _permanent(TransferErrorKind.unknown),
   };
 }
 
@@ -148,7 +148,7 @@ ClassifiedRecovery _classifyTransport(
   switch (transportKind) {
     case DriveTransportKind.connect:
       return const ClassifiedRecovery(
-        kind: TransferErrorKind.Network,
+        kind: TransferErrorKind.network,
         decision: WaitForNetworkDecision(),
         consumesRetryBudget: false,
       );
@@ -167,31 +167,31 @@ ClassifiedRecovery _classifyTransport(
         case DriveTransportKind.network:
         case DriveTransportKind.responseBody:
           return const ClassifiedRecovery(
-            kind: TransferErrorKind.Network,
+            kind: TransferErrorKind.network,
             decision: WaitForNetworkDecision(),
             consumesRetryBudget: false,
           );
         case DriveTransportKind.timeout:
           return const ClassifiedRecovery(
-            kind: TransferErrorKind.Timeout,
+            kind: TransferErrorKind.timeout,
             decision: WaitForNetworkDecision(),
             consumesRetryBudget: false,
           );
         case DriveTransportKind.decode:
           if (_budgetExhausted(context)) {
-            return _permanent(TransferErrorKind.Server);
+            return _permanent(TransferErrorKind.server);
           }
           return ClassifiedRecovery(
-            kind: TransferErrorKind.Server,
+            kind: TransferErrorKind.server,
             decision: BackoffDecision(_exponentialBackoffAt(context)),
             consumesRetryBudget: true,
           );
         case DriveTransportKind.request:
         case DriveTransportKind.other:
-          return _permanent(TransferErrorKind.Unknown);
+          return _permanent(TransferErrorKind.unknown);
         case DriveTransportKind.connect:
           // 已在上方提前返回
-          return _permanent(TransferErrorKind.Unknown);
+          return _permanent(TransferErrorKind.unknown);
       }
   }
 }
@@ -208,18 +208,18 @@ ClassifiedRecovery _classifyStatus(
     case 401:
       if (!authAlreadyReplayed) {
         return const ClassifiedRecovery(
-          kind: TransferErrorKind.Auth,
+          kind: TransferErrorKind.auth,
           decision: RefreshAuthDecision(),
           consumesRetryBudget: false,
         );
       }
-      return _permanent(TransferErrorKind.Auth);
+      return _permanent(TransferErrorKind.auth);
     case 429:
       if (_budgetExhausted(context)) {
-        return _permanent(TransferErrorKind.RateLimit);
+        return _permanent(TransferErrorKind.rateLimit);
       }
       return ClassifiedRecovery(
-        kind: TransferErrorKind.RateLimit,
+        kind: TransferErrorKind.rateLimit,
         decision: BackoffDecision(
           retryAfter?.nextRetryAt(context.nowMs) ??
               _exponentialBackoffAt(context),
@@ -234,26 +234,26 @@ ClassifiedRecovery _classifyStatus(
         if (operationModifiesRemote(context.operation) &&
             requestMayHaveReachedServer) {
           return const ClassifiedRecovery(
-            kind: TransferErrorKind.Server,
+            kind: TransferErrorKind.server,
             decision: VerifyRemoteDecision(),
             consumesRetryBudget: false,
           );
         }
-        return _permanent(TransferErrorKind.Server);
+        return _permanent(TransferErrorKind.server);
       }
       return ClassifiedRecovery(
-        kind: TransferErrorKind.Server,
+        kind: TransferErrorKind.server,
         decision: BackoffDecision(_exponentialBackoffAt(context)),
         consumesRetryBudget: true,
       );
     case 400:
     case 409:
     case 422:
-      return _permanent(TransferErrorKind.Validation);
+      return _permanent(TransferErrorKind.validation);
     case 403:
-      return _permanent(TransferErrorKind.Permission);
+      return _permanent(TransferErrorKind.permission);
     default:
-      return _permanent(TransferErrorKind.Unknown);
+      return _permanent(TransferErrorKind.unknown);
   }
 }
 
@@ -285,7 +285,7 @@ ClassifiedRecovery _permanent(TransferErrorKind kind) {
 /// 构造需向云端核实写入结果的歧义决策。
 ClassifiedRecovery _verifyRemote() {
   return const ClassifiedRecovery(
-    kind: TransferErrorKind.RemoteAmbiguous,
+    kind: TransferErrorKind.remoteAmbiguous,
     decision: VerifyRemoteDecision(),
     consumesRetryBudget: false,
   );

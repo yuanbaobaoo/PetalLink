@@ -53,8 +53,9 @@ void main() {
 
   /// 上传完成的 File 响应。
   Map<String, dynamic> uploadedFileJson(
-      String id, String name, int size) {
-    return fileJson(id: id, name: name, size: size);
+      String id, String name, int size,
+      {List<String>? parentFolder}) {
+    return fileJson(id: id, name: name, size: size, parentFolder: parentFolder);
   }
 
   group('UploadService.uploadSmall（multipart/related）', () {
@@ -62,7 +63,7 @@ void main() {
       await createFileWithContent('你好.txt', 'hello'.codeUnits);
       final adapter = FakeHttpAdapter((req) {
         if (req.uri.path == '/drive/v1/about') return aboutResponse();
-        return jsonResponse(uploadedFileJson('up1', '你好.txt', 5));
+        return jsonResponse(uploadedFileJson('up1', '你好.txt', 5, parentFolder: ['p1']));
       });
       final service = UploadService(buildTestClient(adapter));
 
@@ -101,6 +102,41 @@ void main() {
       final service = UploadService(buildTestClient(adapter));
 
       final result = await service.uploadSmall('${tempDir.path}/a.txt');
+
+      expect(result.isErr, isTrue);
+      final error = (result as Err).error;
+      expect(error, isA<DriveApiError>());
+      expect((error as DriveApiError).requestMayHaveReachedServer, isTrue);
+    });
+
+    test('响应父目录与请求不一致 → 远端歧义错误（对齐 CMP 父目录核验）', () async {
+      await createFileWithContent('a.txt', 'hello'.codeUnits);
+      final adapter = FakeHttpAdapter((req) {
+        if (req.uri.path == '/drive/v1/about') return aboutResponse();
+        return jsonResponse(
+            uploadedFileJson('up1', 'a.txt', 5, parentFolder: ['other-parent']));
+      });
+      final service = UploadService(buildTestClient(adapter));
+
+      final result =
+          await service.uploadSmall('${tempDir.path}/a.txt', parentId: 'p1');
+
+      expect(result.isErr, isTrue);
+      final error = (result as Err).error;
+      expect(error, isA<DriveApiError>());
+      expect((error as DriveApiError).requestMayHaveReachedServer, isTrue);
+    });
+
+    test('请求指定 parentId 但响应缺父目录 → 远端歧义错误', () async {
+      await createFileWithContent('a.txt', 'hello'.codeUnits);
+      final adapter = FakeHttpAdapter((req) {
+        if (req.uri.path == '/drive/v1/about') return aboutResponse();
+        return jsonResponse(uploadedFileJson('up1', 'a.txt', 5));
+      });
+      final service = UploadService(buildTestClient(adapter));
+
+      final result =
+          await service.uploadSmall('${tempDir.path}/a.txt', parentId: 'p1');
 
       expect(result.isErr, isTrue);
       final error = (result as Err).error;
@@ -437,14 +473,14 @@ void main() {
     /// 构造与本地文件快照一致的任务行。
     Future<TransferTask> buildTask(
       File file, {
-      TransferOperation operation = TransferOperation.Create,
+      TransferOperation operation = TransferOperation.create,
       String? sessionUrl,
       int resumeOffset = 0,
     }) async {
       final stat = await file.stat();
       return TransferTask(
         id: 1,
-        direction: TransferDirection.Upload,
+        direction: TransferDirection.upload,
         fileId: 'fid1',
         localPath: file.path,
         name: file.uri.pathSegments.last,
@@ -490,7 +526,7 @@ void main() {
 
     test('operation 非 Create/Update → 拒绝执行', () async {
       final file = await createFile('task.bin', 100);
-      final task = await buildTask(file, operation: TransferOperation.Delete);
+      final task = await buildTask(file, operation: TransferOperation.delete);
       final service = UploadService(
           buildTestClient(FakeHttpAdapter((req) => aboutResponse())));
 
@@ -542,6 +578,22 @@ void main() {
   });
 
   group('UploadService.uploadUpdate（覆盖已有文件）', () {
+    test('返回不同 fileId → 错误（对齐 CMP uploadSmallUpdate）', () async {
+      await createFileWithContent('u.txt', 'hello'.codeUnits);
+      final adapter = FakeHttpAdapter((req) {
+        if (req.uri.path == '/drive/v1/about') return aboutResponse();
+        return jsonResponse(uploadedFileJson('other-id', 'u.txt', 5));
+      });
+      final service = UploadService(buildTestClient(adapter));
+
+      final result = await service.uploadUpdate('fid1', '${tempDir.path}/u.txt');
+
+      expect(result.isErr, isTrue);
+      final error = (result as Err).error;
+      expect(error, isA<DriveApiError>());
+      expect((error as DriveApiError).requestMayHaveReachedServer, isTrue);
+    });
+
     test('PATCH multipart 到 /files/{fileId}?uploadType=multipart', () async {
       await createFileWithContent('u.txt', 'hello'.codeUnits);
       final adapter = FakeHttpAdapter((req) {

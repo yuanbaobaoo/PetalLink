@@ -26,7 +26,7 @@ enum SyncActionType {
   /// 创建冲突副本
   createConflictCopy('createConflictCopy'),
 
-  /// 跳过（仅信息性；携带 cloudFile 的 Skip 是 pending 占位收敛动作）
+  /// 跳过（仅信息性；携带 cloudFile 的 skip 是 pending 占位收敛动作）
   skip('skip'),
 
   /// 创建文件夹（本地或云端）
@@ -55,7 +55,7 @@ class SyncAction {
   /// 关联云端 fileId
   String? fileId;
 
-  /// 目标父目录 fileId（CreateFolder/MoveInCloud 用）
+  /// 目标父目录 fileId（createFolder/moveInCloud 用）
   String? parentFileId;
 
   /// 本地绝对路径
