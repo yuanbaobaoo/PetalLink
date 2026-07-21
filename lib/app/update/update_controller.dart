@@ -166,14 +166,17 @@ class UpdateController extends GetxController {
     }
   }
 
-  @override
-  void onReady() {
-    super.onReady();
-    // 启动 3s 后静默检查 + 每小时定期检查（对齐 Vue App.vue）
-    _startupTimer = Timer(startupCheckDelay, () => unawaited(silentCheck()));
-    _periodicTimer =
-        Timer.periodic(periodicCheckInterval, (_) => unawaited(periodicCheck()));
-  }
+  // 【2026-07-21 临时停用】自动检查更新：原 onReady 中的
+  // 启动 3s 静默检查 + 每小时定期检查（对齐 Vue App.vue）已停用。
+  // 更新策略待重新调整后恢复，恢复时还原以下 onReady 实现：
+  //
+  // @override
+  // void onReady() {
+  //   super.onReady();
+  //   _startupTimer = Timer(startupCheckDelay, () => unawaited(silentCheck()));
+  //   _periodicTimer =
+  //       Timer.periodic(periodicCheckInterval, (_) => unawaited(periodicCheck()));
+  // }
 
   @override
   void onClose() {

@@ -7,7 +7,8 @@ import 'package:window_manager/window_manager.dart';
 
 import 'app/app.dart';
 import 'app/bindings/global_binding.dart';
-import 'app/update/update_controller.dart';
+// 更新聚焦检查临时停用期间无需导入 UpdateController（恢复时还原）
+// import 'app/update/update_controller.dart';
 import 'core/logger/logger.dart';
 import 'service/platform/platform_service.dart';
 import 'service/platform/tray_service.dart';
@@ -77,10 +78,12 @@ class _AppLifecycleListener extends WindowListener {
   }
 
   /// 窗口聚焦：accessory → regular（对齐 ensure_regular_if_was_accessory）
-  /// + 更新聚焦检查（10 分钟节流，对齐 Vue onFocusChanged）
+  ///
+  /// 【2026-07-21 临时停用】更新聚焦检查（10 分钟节流，对齐 Vue
+  /// onFocusChanged）：随自动检查整体停用，恢复时取消下行注释。
   @override
   Future<void> onWindowFocus() async {
     await Get.find<PlatformService>().ensureRegularIfWasAccessory();
-    unawaited(Get.find<UpdateController>().checkOnFocus());
+    // unawaited(Get.find<UpdateController>().checkOnFocus());
   }
 }
