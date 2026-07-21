@@ -4,21 +4,22 @@
 
 ## 构建
 
-统一使用 `tool/build.sh`（编译期自动从 `.env` 注入凭据；追加的 `--dart-define` 可覆盖）：
+dev/release 由 Flutter 构建模式直接区分（xcconfig 已按模式配置 bundle id 与 app 名）：
 
 ```bash
-# 开发版（debug；bundle id / 数据目录为 PetalLink-dev，与正式版隔离）
-tool/build.sh dev                    # 等价 flutter build macos --debug
-tool/build.sh run                    # 等价 flutter run -d macos
+# 开发版（debug）
+#   产物: build/macos/Build/Products/Debug/PetalLink Dev.app
+#   Bundle ID: io.github.yuanbaobaoo.PetalLink-dev（数据目录同为 -dev，与正式版隔离）
+flutter run -d macos              # 直接运行
+flutter build macos --debug       # 只编译
 
 # 正式版（release）
-tool/build.sh release                # 等价 flutter build macos --release
-
-# 追加注入（覆盖 .env 同键）
-tool/build.sh release --dart-define=PETALLINK_UPDATE_TEAM_ID=XXXXXXXXXX
+#   产物: build/macos/Build/Products/Release/PetalLink.app
+#   Bundle ID: io.github.yuanbaobaoo.PetalLink（正式数据目录）
+flutter build macos --release
 ```
 
-### `.env` 支持的键（项目根目录，已 gitignore；`.env.example` 为模板）
+### 构建期配置注入（--dart-define，与 .env 并存）
 
 | 键 | 用途 |
 |---|---|
@@ -26,7 +27,15 @@ tool/build.sh release --dart-define=PETALLINK_UPDATE_TEAM_ID=XXXXXXXXXX
 | `HWCLOUD_CLIENT_SECRET` | OAuth client_secret（必填） |
 | `PETALLINK_UPDATE_TEAM_ID` | 更新器 Apple Team ID 签名校验（可选；未配置时更新安装被拒绝） |
 
+```bash
+flutter build macos --release \
+  --dart-define=HWCLOUD_CLIENT_ID=xxx \
+  --dart-define=HWCLOUD_CLIENT_SECRET=yyy \
+  --dart-define=PETALLINK_UPDATE_TEAM_ID=XXXXXXXXXX
+```
+
 凭据解析优先级：`--dart-define` > 打包 asset `.env` > 工作目录 `.env` > 进程环境变量。
+日常开发只需在项目根目录维护 `.env`（已 gitignore，`.env.example` 为模板）并打包为 asset，无需任何额外参数。
 
 ## 验证
 
