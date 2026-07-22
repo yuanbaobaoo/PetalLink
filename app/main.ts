@@ -25,6 +25,12 @@ app.use(pinia);
 
 app.mount("#app");
 
+// 仅 release 模式屏蔽 WebView 原生右键菜单（Reload / Inspect Element）；
+// dev 模式保留，方便调试。文件列表等自定义右键菜单自行 preventDefault，不受此影响。
+if (import.meta.env.PROD) {
+  document.addEventListener("contextmenu", (e) => e.preventDefault());
+}
+
 // ===== 全局事件监听（挂载后注册） =====
 // 延迟导入 stores 避免 Pinia 未就绪
 import { useSyncStore } from "@/stores/sync";

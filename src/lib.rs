@@ -278,12 +278,6 @@ pub fn run() {
                 }
             }
 
-            #[cfg(debug_assertions)]
-            {
-                if let Some(window) = app.get_webview_window("main") {
-                    window.open_devtools();
-                }
-            }
             tracing::info!("PetalLink 初始化完成");
             Ok(())
         })
