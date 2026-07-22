@@ -45,6 +45,12 @@ pub fn launch_at_login_set_enabled(enabled: bool) -> bool {
     }
 }
 
+/// 查询托盘图标当前实际可见性（运行时真实状态，而非配置文件里的目标值）。
+#[tauri::command]
+pub fn tray_is_visible() -> bool {
+    crate::platform::activation::is_tray_icon_visible()
+}
+
 /// 清空应用缓存。
 #[tauri::command]
 pub async fn app_clear_cache(app: AppHandle) -> AppResult<()> {

@@ -166,6 +166,7 @@ pub fn run() {
             // 配置命令
             commands::config_load,
             commands::config_save,
+            commands::tray_set_visible,
             commands::config_export_json,
             commands::config_import_json,
             // 传输命令
@@ -179,6 +180,7 @@ pub fn run() {
             commands::open_in_finder,
             commands::launch_at_login_is_enabled,
             commands::launch_at_login_set_enabled,
+            commands::tray_is_visible,
             commands::app_clear_cache,
             commands::logs_list,
             commands::logs_export,
@@ -278,6 +280,9 @@ pub fn run() {
                 }
             }
 
+            // 应用托盘图标可见性（配置关闭则隐藏菜单栏图标，并同步退出拦截标志）
+            platform::tray::set_tray_visible(app.handle(), config.show_tray_icon);
+
             tracing::info!("PetalLink 初始化完成");
             Ok(())
         })
@@ -287,7 +292,11 @@ pub fn run() {
     // Cmd+Q/Dock Quit → 隐藏到后台；tray 退出(code=Some)放行；关机/真退出 flush
     app.run(|handle, event| match event {
         tauri::RunEvent::ExitRequested { api, code, .. } => {
-            if !platform::activation::should_real_quit() && code.is_none() {
+            // 托盘隐藏时后台保活无退出入口，不再拦截，直接真退出
+            if !platform::activation::should_real_quit()
+                && platform::activation::is_tray_icon_visible()
+                && code.is_none()
+            {
                 api.prevent_exit();
                 if let Some(w) = handle.get_webview_window("main") {
                     let _ = w.hide();

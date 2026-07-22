@@ -15,6 +15,7 @@ export interface AppConfig {
   skip_patterns: string[];
   sort_field: string;
   sort_order: string;
+  show_tray_icon: boolean;
 }
 
 /** 加载配置 */

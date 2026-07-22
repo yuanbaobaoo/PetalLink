@@ -21,10 +21,10 @@
 | **网盘主界面** | 双栏布局（侧边栏递归目录树 + 文件列表）；面包屑导航；搜索；新建文件夹 |
 | **文件操作** | 上传（≤20MB multipart + >20MB 分片续传）、Range 断点下载、删除、重命名、移动、缩略图；写操作按 fileId 核验后才结算 |
 | **双向同步** | 本地 FSEvents + 3s debounce；华为 Changes 增量同步 + BFS 兜底；tree/path/cursor 原子可信 checkpoint；三段式稳定性检查 |
-| **后台运行** | 关闭窗口 / ⌘Q 不退出，仅隐藏 UI 层；系统菜单栏图标始终保留；同步引擎在后台持续运行 |
+| **后台运行** | 关闭窗口 / ⌘W 不退出，仅隐藏 UI 层（Dock 图标消失）；托盘图标可见时 ⌘Q 同样隐藏至后台；系统菜单栏图标可开关；同步引擎在后台持续运行 |
 | **开机自启动** | 设置页开关，LaunchAgent plist（带 `--hidden` 参数，开机只显示菜单栏图标） |
 | **冲突处理** | 自动重命名副本（60s 容忍窗口 + 副本去重 + 云端删除时保护本地修改） |
-| **配置管理** | 集中设置页：OAuth 回调地址、挂载目录、并发数（默认 6）、debounce 时长（默认 3s）、跳过文件列表 |
+| **配置管理** | 集中设置页：OAuth 回调地址、挂载目录、并发数（默认 6）、debounce 时长（默认 3s）、跳过文件列表、是否显示托盘图标 |
 | **传输队列** | 持久化状态机；上传/下载排队执行，主页删除完成后留痕可见；等待网络、退避、远端核验、需重新规划、永久失败分开展示；网络恢复自动续跑 |
 | **释放空间** | 支持文件与目录（递归子树）；执行前弹窗列出可释放文件名与大小供二次确认；逐项复核可信云树、远端 fileId、成功基线、本地 mtime/size 与活动任务，防止 TOCTOU 误删 |
 | **日志系统** | 三层输出（终端 + 滚动文件 + 环形缓冲）；日志查看导出页面 |
@@ -92,11 +92,6 @@ cargo tauri dev --config tauri.dev.conf.json
 
 前端运行在 `http://localhost:1420`（HMR 热更新），Rust 后端自动编译启动。
 
-> `--config tauri.dev.conf.json` 把 identifier 覆盖为 `...-dev`，使 dev 构建与正式安装版
-> 隔离（独立数据目录 `~/Library/Application Support/io.github.yuanbaobaoo.PetalLink-dev/`、
-> 独立单实例锁），避免数据错乱。dev 首次运行需重新登录并选一个与正式版不同的挂载目录。
-> （不加该参数会与正式安装版共用数据目录，仅在确认未安装正式版时才可省略。）
-
 ---
 
 ## 测试
@@ -134,6 +129,19 @@ HWCLOUD_TEST_FILE="<file_path>" cargo test --test upload_tester -- --ignored --n
 cd app && npm run build    # 类型检查 + Vite 打包
 ```
 
+### 开发打包（.app + DMG，带 Dev 后缀）
+
+```bash
+cargo tauri build --debug --config tauri.dev.conf.json
+```
+
+产物带 `-Dev` 后缀，与正式版共存互不影响（不生成更新包）：
+
+```
+target/debug/bundle/macos/PetalLink-Dev.app
+target/debug/bundle/dmg/PetalLink-Dev_<version>_aarch64.dmg
+```
+
 ### 生产发布（.app + DMG）
 
 ```bash
@@ -145,7 +153,7 @@ cargo tauri build
 
 ```
 target/release/bundle/macos/PetalLink.app    # macOS 应用包
-target/release/bundle/dmg/PetalLink_1.0.0_aarch64.dmg    # DMG 安装镜像 (~3.2MB)
+target/release/bundle/dmg/PetalLink_<version>_aarch64.dmg    # DMG 安装镜像 (~3.2MB)
 ```
 
 **打包配置**：
@@ -165,10 +173,11 @@ target/release/bundle/dmg/PetalLink_1.0.0_aarch64.dmg    # DMG 安装镜像 (~3.
 5. 完成后自动进入「双端对齐」模式：本地文件变更实时上传，云端的变更通过手动点「同步索引」更新
 
 **后台运行**：
-- 启动后系统菜单栏右上角出现云朵图标，鼠标悬停显示「PetalLink — 后台同步中」
-- 关闭窗口 / ⌘W / ⌘Q → **仅隐藏 UI 层**（窗口 + Dock 图标消失），同步引擎继续运行
+- 启动后系统菜单栏右上角出现云朵图标（可关闭），鼠标悬停显示「PetalLink — 后台同步中」
+- 关闭窗口 / ⌘W → **仅隐藏 UI 层**（窗口 + Dock 图标消失），同步引擎继续运行
+- 托盘可见时 ⌘Q → 同样隐藏至后台；托盘隐藏时 ⌘Q → 真正退出
 - 点击菜单栏图标 →「显示主窗口」→ UI 恢复
-- **菜单栏「退出 PetalLink」是真正终止进程的唯一路径**
+- **菜单栏「退出 PetalLink」→ 真正退出进程**
 
 ---
 

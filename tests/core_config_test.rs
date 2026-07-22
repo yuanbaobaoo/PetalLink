@@ -100,10 +100,33 @@ fn test_with_chain() {
         None,
         None,
         None,
+        None,
     );
     assert!(c2.mount_configured);
     assert_eq!(c2.concurrency, 10);
     assert!(!c.mount_configured);
+}
+
+/// 托盘图标开关：默认显示；with 链 None 保留原值、Some 覆盖。
+#[test]
+fn test_show_tray_icon_default_and_with() {
+    let c = AppConfig::default();
+    assert!(c.show_tray_icon);
+    let hidden = c.with(
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(false),
+    );
+    assert!(!hidden.show_tray_icon);
+    assert!(c.show_tray_icon);
 }
 
 /// 验证已配置的挂载目录不能为空。
@@ -150,4 +173,18 @@ fn test_export_import_roundtrip() {
     };
     let exported = ConfigStore::export_to_json(&config).unwrap();
     assert!(exported.contains("\"concurrency\": 8"));
+}
+
+/// 托盘图标开关的文件 JSON 合同：导出含 camelCase 键。
+/// （缺键默认 true 的解析路径见 config_store.rs 内单元测试；
+/// import_from_json 会落盘真实配置文件，集成测试不可调用。）
+#[test]
+fn test_show_tray_icon_json_contract() {
+    let _td = tempdir();
+    let config = AppConfig {
+        show_tray_icon: false,
+        ..AppConfig::default()
+    };
+    let exported = ConfigStore::export_to_json(&config).unwrap();
+    assert!(exported.contains("\"showTrayIcon\": false"));
 }

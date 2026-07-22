@@ -135,6 +135,7 @@ fn to_json(c: &AppConfig) -> Value {
         // 排序字段序列化为枚举名（camelCase，对齐前端）
         "sortField": sort_field_to_str(c.sort_field),
         "sortOrder": sort_order_to_str(c.sort_order),
+        "showTrayIcon": c.show_tray_icon,
     })
 }
 
@@ -189,6 +190,11 @@ fn from_json(json: &Value) -> (AppConfig, bool) {
             .unwrap_or_else(|| default.skip_patterns.clone()),
         sort_field: parse_sort_field(json.get("sortField")),
         sort_order: parse_sort_order(json.get("sortOrder")),
+        // 旧配置文件无此键 → 默认显示托盘图标
+        show_tray_icon: json
+            .get("showTrayIcon")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
     };
 
     let mut dirty = false;
@@ -249,5 +255,20 @@ fn parse_sort_order(v: Option<&Value>) -> SortOrder {
         Some("ascending") => SortOrder::Ascending,
         Some("descending") => SortOrder::Descending,
         _ => SortOrder::Ascending,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 旧配置文件无 showTrayIcon 键 → 解析默认 true；显式 false 保留。
+    #[test]
+    fn show_tray_icon_defaults_true_when_key_missing() {
+        let (config, _) = from_json(&json!({}));
+        assert!(config.show_tray_icon);
+
+        let (config, _) = from_json(&json!({ "showTrayIcon": false }));
+        assert!(!config.show_tray_icon);
     }
 }

@@ -71,6 +71,9 @@ pub struct AppConfig {
     pub sort_field: SortField,
     /// 排序方向
     pub sort_order: SortOrder,
+    /// 是否显示托盘（菜单栏）图标。默认显示。
+    /// 关闭后后台同步无托盘入口，此时 Cmd+Q/Dock 退出直接真退出。
+    pub show_tray_icon: bool,
 }
 
 impl Default for AppConfig {
@@ -90,6 +93,7 @@ impl Default for AppConfig {
                 .collect(),
             sort_field: SortField::Name,
             sort_order: SortOrder::Ascending,
+            show_tray_icon: true,
         }
     }
 }
@@ -176,6 +180,7 @@ impl AppConfig {
         skip_patterns: Option<Vec<String>>,
         sort_field: Option<SortField>,
         sort_order: Option<SortOrder>,
+        show_tray_icon: Option<bool>,
     ) -> Self {
         Self {
             oauth_redirect_uri: oauth_redirect_uri
@@ -189,6 +194,7 @@ impl AppConfig {
             skip_patterns: skip_patterns.unwrap_or_else(|| self.skip_patterns.clone()),
             sort_field: sort_field.unwrap_or(self.sort_field),
             sort_order: sort_order.unwrap_or(self.sort_order),
+            show_tray_icon: show_tray_icon.unwrap_or(self.show_tray_icon),
         }
     }
 }

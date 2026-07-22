@@ -12,6 +12,7 @@
 //! 我们 swizzle `-[NSApplication terminate:]`，在原始方法之前检查：
 //! 1. `should_real_quit()` → 托盘「退出 PetalLink」
 //! 2. 当前 Apple Event 是否为 kAEQuitApplication → 系统关机/登出
+//! 3. 托盘图标已隐藏（后台保活无退出入口）→ 直接放行
 //!    若都非 → 拦截退出，隐藏窗口 + accessory 模式，保持后台运行。
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -28,6 +29,18 @@ static REAL_QUIT: AtomicBool = AtomicBool::new(false);
 static RESTARTING: AtomicBool = AtomicBool::new(false);
 /// 当前是否处于 accessory 模式（关窗/Cmd+Q 拦截后）。供窗口获焦时判断是否需切回 regular。
 static IS_ACCESSORY: AtomicBool = AtomicBool::new(false);
+/// 托盘图标是否可见（默认可见）。托盘隐藏时后台保活失去退出入口，
+/// Cmd+Q/Dock 退出应直接放行真退出，不再拦截转后台。
+static TRAY_ICON_VISIBLE: AtomicBool = AtomicBool::new(true);
+
+/// 记录托盘图标可见性（启动时按配置初始化，切换开关时更新）。
+pub fn set_tray_icon_visible(visible: bool) {
+    TRAY_ICON_VISIBLE.store(visible, Ordering::SeqCst);
+}
+/// 托盘图标当前是否可见。
+pub fn is_tray_icon_visible() -> bool {
+    TRAY_ICON_VISIBLE.load(Ordering::SeqCst)
+}
 
 /// 标记本次退出为用户确认的真实退出。
 pub fn mark_real_quit() {
@@ -184,15 +197,16 @@ fn hide_windows_and_go_accessory() {
 /// 放行条件（任一满足即调用原始方法）：
 /// 1. `should_real_quit()` — 托盘「退出 PetalLink」
 /// 2. `is_apple_event_system_quit()` — 系统关机/登出
+/// 3. `!is_tray_icon_visible()` — 托盘图标已隐藏，后台保活无退出入口
 ///
-/// 拦截条件：Dock 右键退出 / Cmd+Q → 隐藏窗口 + accessory 模式
+/// 拦截条件：Dock 右键退出 / Cmd+Q 且托盘可见 → 隐藏窗口 + accessory 模式
 #[cfg(target_os = "macos")]
 extern "C-unwind" fn terminate_override(
     this: *mut objc2::runtime::AnyObject,
     _cmd: objc2::runtime::Sel,
     _sender: *mut objc2::runtime::AnyObject,
 ) {
-    if should_real_quit() || is_apple_event_system_quit() {
+    if should_real_quit() || is_apple_event_system_quit() || !is_tray_icon_visible() {
         // 真正退出：调用原始 terminate:
         if let Some(orig) = *ORIGINAL_TERMINATE.lock().unwrap() {
             let orig_fn: unsafe extern "C-unwind" fn(

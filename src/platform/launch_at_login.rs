@@ -31,8 +31,41 @@ fn plist_path() -> Option<PathBuf> {
 }
 
 /// 以 LaunchAgent 配置文件是否存在判断开机自启；不额外验证 bootstrap 状态。
+///
+/// 同时核对 launchd disabled 列表：用户在 系统设置 → 通用 → 登录项与扩展
+/// 里关闭后，plist 文件仍在但服务已被 BTM 禁用，此时必须返回 false，
+/// 保证 UI 开关与系统真实状态一致。
 pub fn is_enabled() -> bool {
-    plist_path().map(|p| p.exists()).unwrap_or(false)
+    plist_path().map(|p| p.exists()).unwrap_or(false) && !is_disabled_by_system()
+}
+
+/// 系统（BTM / launchd disabled 列表）是否禁用了本服务。
+/// 查询失败或列表中无本服务记录时按未禁用处理。
+fn is_disabled_by_system() -> bool {
+    let Some(uid) = current_uid() else {
+        return false;
+    };
+    let output = Command::new("launchctl")
+        .args(["print-disabled", &format!("gui/{uid}")])
+        .output();
+    let Ok(output) = output else { return false };
+    parse_disabled_entry(&String::from_utf8_lossy(&output.stdout), BUNDLE_IDENTIFIER)
+        .unwrap_or(false)
+}
+
+/// 解析 `launchctl print-disabled` 输出中指定 label 的禁用状态。
+/// 行格式：`\t"com.example.foo" => enabled|disabled`。无记录返回 None。
+fn parse_disabled_entry(output: &str, label: &str) -> Option<bool> {
+    let quoted = format!("\"{label}\"");
+    output.lines().find_map(|line| {
+        let line = line.trim();
+        if !line.contains(&quoted) {
+            return None;
+        }
+        line.rsplit("=> ")
+            .next()
+            .map(|state| state.trim() == "disabled")
+    })
 }
 
 /// 获取当前用户的 uid（供 launchctl bootstrap/bootout 用）。
@@ -222,4 +255,33 @@ pub fn set_enabled(enabled: bool) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_disabled_entry;
+
+    const SAMPLE: &str = r#"
+	disabled services = {
+		"com.docker.helper" => enabled
+		"com.apple.ManagedClientAgent.enrollagent" => disabled
+		"io.github.yuanbaobaoo.PetalLink" => disabled
+		"homebrew.mxcl.ollama" => enabled
+	}
+"#;
+
+    /// 系统设置里被关闭的服务应解析为禁用。
+    #[test]
+    fn parse_disabled_entry_detects_disabled() {
+        assert_eq!(
+            parse_disabled_entry(SAMPLE, "io.github.yuanbaobaoo.PetalLink"),
+            Some(true)
+        );
+        assert_eq!(
+            parse_disabled_entry(SAMPLE, "com.docker.helper"),
+            Some(false)
+        );
+        // 无记录 → None（按未禁用处理）
+        assert_eq!(parse_disabled_entry(SAMPLE, "com.example.missing"), None);
+    }
 }

@@ -55,6 +55,8 @@ const mountConfigured = ref(false);
 const oauthPort = ref(9999);
 // 开机自启
 const autoLaunch = ref(false);
+// 托盘图标显示
+const showTrayIcon = ref(true);
 // 保存状态
 const saving = ref(false);
 const saved = ref(false);
@@ -92,6 +94,8 @@ onMounted(async () => {
     pollIntervalSec.value = config.poll_interval_sec;
   } catch {}
   try { autoLaunch.value = await platformApi.launchAtLoginIsEnabled(); } catch {}
+  // 托盘图标以运行时实际状态为准（配置只是持久化目标值）
+  try { showTrayIcon.value = await platformApi.trayIsVisible(); } catch {}
   try { about.value = await driveApi.getAbout(); } catch {}
   try { appVersion.value = await platformApi.getAppVersion(); } catch {}
   saved.value = true;
@@ -112,6 +116,7 @@ async function handleSave(): Promise<void> {
       skip_patterns: skipPatterns.value.split(",").map(s => s.trim()).filter(s => s),
       sort_field: "name",
       sort_order: "ascending",
+      show_tray_icon: showTrayIcon.value,
     });
     saved.value = true;
     showToast("配置已保存");
@@ -142,6 +147,21 @@ async function onToggleAutoLaunch(v: boolean): Promise<void> {
   autoLaunch.value = v;
   const ok = await platformApi.launchAtLoginSetEnabled(v);
   if (!ok) { autoLaunch.value = !v; showToast("设置开机自启失败", { variant: "error" }); }
+}
+
+/**
+ * 切换托盘图标显示（立即生效 + 持久化）
+ *
+ * @param v - 是否显示
+ */
+async function onToggleTrayIcon(v: boolean): Promise<void> {
+  showTrayIcon.value = v;
+  try {
+    await platformApi.traySetVisible(v);
+  } catch {
+    showTrayIcon.value = !v;
+    showToast("设置托盘图标失败", { variant: "error" });
+  }
 }
 
 async function handleClearCache(): Promise<void> {
@@ -291,6 +311,13 @@ function fmtSize(bytes: number): string {
                 <div class="setting-desc">开机登录后自动在后台启动（仅菜单栏图标，不显示主窗口）。关闭后需手动打开 App。</div>
               </div>
               <div class="setting-control"><MateSwitch :model-value="autoLaunch" @update:model-value="onToggleAutoLaunch" /></div>
+            </div>
+            <div class="setting-row">
+              <div class="setting-row__text">
+                <div class="setting-label">显示托盘图标</div>
+                <div class="setting-desc">在菜单栏显示 PetalLink 图标（后台同步入口）。关闭后 App 仍在后台运行，此时可通过 Cmd+Q 完全退出。</div>
+              </div>
+              <div class="setting-control"><MateSwitch :model-value="showTrayIcon" @update:model-value="onToggleTrayIcon" /></div>
             </div>
             <div class="group-header">OAuth</div>
             <div class="setting-row">

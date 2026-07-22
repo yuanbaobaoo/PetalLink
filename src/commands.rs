@@ -211,6 +211,7 @@ pub fn cleanup_orphan_state() {
         None,
         None,
         None,
+        None,
     );
     let _ = ConfigStore::save(&reset);
     tracing::info!("孤儿状态已清理（DB/cloudtree/syncstate/mount_configured）");

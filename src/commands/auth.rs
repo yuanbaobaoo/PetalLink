@@ -79,6 +79,7 @@ fn reset_account_config() -> AppResult<()> {
         None,
         None,
         None,
+        None,
     );
     ConfigStore::save(&reset)
 }

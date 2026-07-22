@@ -53,7 +53,7 @@ pub fn setup(app: &AppHandle) {
         app.default_window_icon().cloned().unwrap()
     });
 
-    let _ = TrayIconBuilder::with_id(TRAY_ID)
+    match TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon)
         .icon_as_template(true) // 对齐 Flutter isTemplate=true：macOS 按明暗自动着色
         .tooltip("PetalLink — 后台同步中")
@@ -66,9 +66,12 @@ pub fn setup(app: &AppHandle) {
                 _ => {} // 传输记录项 disabled，不会触发事件
             }
         })
-        .build(app);
-
-    tracing::info!("系统托盘图标+菜单已创建");
+        .build(app)
+    {
+        Ok(_) => tracing::info!("系统托盘图标+菜单已创建"),
+        // build 失败此前被静默吞掉，菜单栏图标消失时无任何线索
+        Err(e) => tracing::error!(error = %e, "系统托盘图标创建失败"),
+    }
 }
 
 /// 构建托盘菜单（含动态「正在传输」段）。
@@ -316,6 +319,24 @@ pub fn refresh_menu(app: &AppHandle) {
 pub fn update_tooltip(app: &AppHandle, tooltip: &str) {
     if let Some(tray) = app.tray_by_id(TRAY_ID) {
         let _ = tray.set_tooltip(Some(tooltip));
+    }
+}
+
+/// 切换托盘图标可见性，并同步更新退出拦截依据的全局标志。
+///
+/// 托盘隐藏后后台保活失去退出入口，activation 层的 Cmd+Q/Dock 退出拦截
+/// 会据此放行真退出（见 `activation::is_tray_icon_visible`）。
+pub fn set_tray_visible(app: &AppHandle, visible: bool) {
+    crate::platform::activation::set_tray_icon_visible(visible);
+    match app.tray_by_id(TRAY_ID) {
+        Some(tray) => {
+            if let Err(e) = tray.set_visible(visible) {
+                tracing::error!(error = %e, visible, "切换托盘图标可见性失败");
+            } else {
+                tracing::info!(visible, "托盘图标可见性已切换");
+            }
+        }
+        None => tracing::warn!("托盘图标不存在，跳过可见性切换"),
     }
 }
 

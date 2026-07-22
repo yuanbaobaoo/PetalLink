@@ -17,6 +17,16 @@ pub fn config_load() -> AppResult<AppConfig> {
     ConfigStore::load()
 }
 
+/// 切换托盘图标显示：持久化到配置并立即生效（对齐开机自启开关的即时生效模式）。
+#[tauri::command]
+pub fn tray_set_visible(app: AppHandle, visible: bool) -> AppResult<()> {
+    let mut config = ConfigStore::load()?;
+    config.show_tray_icon = visible;
+    ConfigStore::save(&config)?;
+    crate::platform::tray::set_tray_visible(&app, visible);
+    Ok(())
+}
+
 /// 保存配置；挂载目录变化时停止旧运行时、清理缓存并重启，首次配置时启动同步引擎。
 #[tauri::command]
 pub async fn config_save(app: AppHandle, config: AppConfig) -> AppResult<()> {
@@ -28,6 +38,8 @@ pub async fn config_save(app: AppHandle, config: AppConfig) -> AppResult<()> {
         old_configured && config.mount_configured && old_abs.as_ref() != Some(&new_abs);
 
     ConfigStore::save(&config)?;
+    // 保存/导入路径也可能改托盘可见性，与运行时状态对齐
+    crate::platform::tray::set_tray_visible(&app, config.show_tray_icon);
 
     // 切换或取消挂载目录
     if old_configured && (!config.mount_configured || dir_changed) {
