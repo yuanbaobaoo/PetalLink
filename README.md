@@ -2,9 +2,9 @@
 
 # PetalLink
 
-华为云盘 Mac 客户端 —— 基于 Tauri 2.x，将华为云空间挂载到本地，双向实时同步。
+华为云盘 Mac 客户端 —— 基于 REST API， 将华为云空间挂载到本地，双向实时同步。
 
-> 华为云空间目前并不支持 macOS。PetalLink 通过华为 Drive REST API 直连，不依赖 HMS Core SDK，为 macOS 用户提供接近原生的云盘体验。
+> 华为云空间目前并不支持 macOS。PetalLink 通过华为 ACG REST API 直连，不依赖 HMS Core SDK，为 macOS 用户提供接近原生的云盘体验。
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Tauri](https://img.shields.io/badge/Tauri-2.x-FFC131?logo=tauri)](https://v2.tauri.app/)
@@ -13,23 +13,32 @@
 
 ---
 
+## 预览
+
+<div align="center">
+  <img src=".github/shot/主页 1.png" alt="主界面" width="45%" />
+  <img src=".github/shot/主页2.png" alt="主界面-文件列表" width="45%" />
+  <img src=".github/shot/主页3.png" alt="主界面-传输队列" width="45%" />
+  <img src=".github/shot/设置.png" alt="设置页面" width="45%" />
+</div>
+
+---
+
 ## 特性
 
-| 模块 | 能力 |
-|---|---|
-| **授权登录** | OAuth 2.0 + PKCE（S256）；`openid profile drive` 全盘访问；Token 自动刷新 + 机器码绑定的 `token.bin` 加密存储 |
-| **网盘主界面** | 双栏布局（侧边栏递归目录树 + 文件列表）；面包屑导航；搜索；新建文件夹 |
-| **文件操作** | 上传（≤20MB multipart + >20MB 分片续传）、Range 断点下载、删除、重命名、移动、缩略图；写操作按 fileId 核验后才结算 |
-| **双向同步** | 本地 FSEvents + 3s debounce；华为 Changes 增量同步 + BFS 兜底；tree/path/cursor 原子可信 checkpoint；三段式稳定性检查 |
-| **后台运行** | 关闭窗口 / ⌘W 不退出，仅隐藏 UI 层（Dock 图标消失）；托盘图标可见时 ⌘Q 同样隐藏至后台；系统菜单栏图标可开关；同步引擎在后台持续运行 |
-| **开机自启动** | 设置页开关，LaunchAgent plist（带 `--hidden` 参数，开机只显示菜单栏图标） |
-| **冲突处理** | 自动重命名副本（60s 容忍窗口 + 副本去重 + 云端删除时保护本地修改） |
-| **配置管理** | 集中设置页：OAuth 回调地址、挂载目录、并发数（默认 6）、debounce 时长（默认 3s）、跳过文件列表、是否显示托盘图标 |
-| **传输队列** | 持久化状态机；上传/下载排队执行，主页删除完成后留痕可见；等待网络、退避、远端核验、需重新规划、永久失败分开展示；网络恢复自动续跑 |
-| **释放空间** | 支持文件与目录（递归子树）；执行前弹窗列出可释放文件名与大小供二次确认；逐项复核可信云树、远端 fileId、成功基线、本地 mtime/size 与活动任务，防止 TOCTOU 误删 |
-| **日志系统** | 三层输出（终端 + 滚动文件 + 环形缓冲）；日志查看导出页面 |
-
-断网或频繁网络抖动时，未完成任务不会被当成永久失败：上传分片恢复前先查询服务端确认偏移，下载保留带版本身份的 `.tmp` 并用 `Range` 继续；响应丢失的创建、更新和删除先核验远端结果，禁止盲目重放。离线启动只加载 checkpoint 作为增量基线，在 Changes 追平前不会恢复上传、执行删除或进入同步规划。
+| <div style="width:75px">模块</div> | 能力 |
+|----------------------------------|---|
+| **授权登录**                         | OAuth 2.0 + PKCE（S256）；`openid profile drive` 全盘访问；Token 自动刷新 + 机器码绑定的 `token.bin` 加密存储 |
+| **网盘主界面**                        | 双栏布局（侧边栏递归目录树 + 文件列表）；面包屑导航；搜索；新建文件夹 |
+| **文件操作**                         | 上传（≤20MB multipart + >20MB 分片续传）、Range 断点下载、删除、重命名、移动、缩略图；写操作按 fileId 核验后才结算 |
+| **双向同步**                         | 本地 FSEvents + 3s debounce；华为 Changes 增量同步 + BFS 兜底；tree/path/cursor 原子可信 checkpoint；三段式稳定性检查 |
+| **后台运行**                         | 关闭窗口 / ⌘W 不退出，仅隐藏 UI 层（Dock 图标消失）；托盘图标可见时 ⌘Q 同样隐藏至后台；系统菜单栏图标可开关；同步引擎在后台持续运行 |
+| **开机自启动**                        | 设置页开关，LaunchAgent plist（带 `--hidden` 参数，开机只显示菜单栏图标） |
+| **冲突处理**                         | 自动重命名副本（60s 容忍窗口 + 副本去重 + 云端删除时保护本地修改） |
+| **配置管理**                         | 集中设置页：OAuth 回调地址、挂载目录、并发数（默认 6）、debounce 时长（默认 3s）、跳过文件列表、是否显示托盘图标 |
+| **传输队列**                         | 持久化状态机；上传/下载排队执行，主页删除完成后留痕可见；等待网络、退避、远端核验、需重新规划、永久失败分开展示；网络恢复自动续跑 |
+| **释放空间**                         | 支持文件与目录（递归子树）；执行前弹窗列出可释放文件名与大小供二次确认；逐项复核可信云树、远端 fileId、成功基线、本地 mtime/size 与活动任务，防止 TOCTOU 误删 |
+| **日志系统**                         | 三层输出（终端 + 滚动文件 + 环形缓冲）；日志查看导出页面 |
 
 ---
 
@@ -43,7 +52,7 @@
 | **HTTP** | reqwest（rustls-tls） |
 | **文件监听** | notify（macOS FSEvents） |
 | **安全存储** | `token.bin` + ChaCha20-Poly1305 AEAD（密钥由本机 IOPlatformUUID 派生） |
-| **UI 设计** | Mate 组件库 + 自建 design token v2（主色 `#0053DB`，详见 ai-context/design-rules.md） |
+| **UI 设计** | Mate 组件库 + 自建 design token |
 | **日志** | tracing + tracing-appender |
 
 ---
@@ -110,7 +119,7 @@ cargo test
 HWCLOUD_TEST_FILE="<file_path>" cargo test --test upload_tester -- --ignored --nocapture
 ```
 
-测试集中在根目录 `tests/`，覆盖以下核心合同：
+测试集中在根目录 `tests/`，覆盖以下模块：
 
 | 类型 | 覆盖模块 |
 |---|---|
