@@ -13,14 +13,27 @@
 
 ---
 
-## 预览
+## 📸 预览
 
-<div align="center">
-  <img src=".github/shot/主页 1.png" alt="主界面" width="45%" />
-  <img src=".github/shot/主页2.png" alt="主界面-文件列表" width="45%" />
-  <img src=".github/shot/主页3.png" alt="主界面-传输队列" width="45%" />
-  <img src=".github/shot/设置.png" alt="设置页面" width="45%" />
-</div>
+<p align="center">
+  <img src=".github/shot/主页 1.png" alt="主界面" width="70%" />
+  <br /><sub>📂 主界面 — 文件浏览</sub>
+</p>
+
+<p align="center">
+  <img src=".github/shot/主页2.png" alt="文件列表" width="70%" />
+  <br /><sub>📄 文件列表 — 文件操作</sub>
+</p>
+
+<p align="center">
+  <img src=".github/shot/主页3.png" alt="传输队列" width="70%" />
+  <br /><sub>📤 传输队列 — 上传下载</sub>
+</p>
+
+<p align="center">
+  <img src=".github/shot/设置.png" alt="设置" width="70%" />
+  <br /><sub>⚙️ 设置页面 — 配置偏好</sub>
+</p>
 
 ---
 
