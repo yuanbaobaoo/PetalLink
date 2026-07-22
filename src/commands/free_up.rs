@@ -12,7 +12,9 @@ use crate::sync::state::FreeUpCheckResult;
 use super::{mount, sync_engine, try_sync_engine, DB, FILES_API};
 
 /// 可释放空间候选项（基于 DB 基线枚举，实际释放前再逐项安全核验）。
+/// 与前端 `FreeableItem` interface 的合同为 camelCase，序列化/反序列化必须保持一致。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FreeableItem {
     /// 云端文件 ID
     pub file_id: String,
@@ -25,7 +27,9 @@ pub struct FreeableItem {
 }
 
 /// 批量释放空间结果统计。
+/// 与前端 `FreeUpBatchResult` interface 的合同为 camelCase，缺失时前端读不到计数。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FreeUpBatchResult {
     /// 成功释放的文件数
     pub freed_count: usize,
