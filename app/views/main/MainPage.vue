@@ -70,16 +70,15 @@ async function handleRefreshAll(): Promise<void> {
   <div class="main-page">
     <Sidebar />
     <div class="main-content">
-      <!-- AppBar 56px -->
+      <!-- 工具栏 64px -->
       <div class="app-bar">
         <div class="app-bar__left">
-          <MateSearchField v-model="searchKeyword" :max-width="280" @submit="handleSearch" />
+          <MateSearchField v-model="searchKeyword" :max-width="420" @submit="handleSearch" />
           <MateButton v-if="searchKeyword" variant="icon" icon="x" tooltip="清除搜索" @click="handleClearSearch" />
         </div>
         <div class="app-bar__tools">
-          <div class="app-bar__sep" />
-          <MateButton v-if="mountConfigured" variant="icon-text" icon="refresh" tooltip="拉取云端索引，创建本地目录与占位文件" :loading="refreshLoading || sync.isIndexing" :disabled="refreshLoading || sync.isIndexing" @click="handleRefreshAll">同步索引</MateButton>
-          <MateButton variant="icon-text" icon="transfer" tooltip="传输队列" @click="showTransferPopover = !showTransferPopover">传输队列</MateButton>
+          <MateButton v-if="mountConfigured" variant="primary" icon="refresh" tooltip="拉取云端索引，创建本地目录与占位文件" :loading="refreshLoading || sync.isIndexing" :disabled="refreshLoading || sync.isIndexing" @click="handleRefreshAll">同步索引</MateButton>
+          <MateButton variant="soft" icon="transfer" tooltip="传输队列" @click="showTransferPopover = !showTransferPopover">传输队列</MateButton>
           <MateButton v-if="mountConfigured" variant="icon-text" icon="folder-open" tooltip="在 Finder 中打开同步目录" :loading="finderLoading" :disabled="finderLoading" @click="handleOpenInFinder">Finder</MateButton>
         </div>
         <MateButton variant="icon" icon="settings" tooltip="设置" @click="handleOpenSettings" />
@@ -121,24 +120,23 @@ async function handleRefreshAll(): Promise<void> {
 
 <style scoped>
 .main-page { display: flex; width: 100%; height: 100%; }
-.main-content { flex: 1; display: flex; flex-direction: column; min-width: 0; background: var(--bg-container); position: relative; }
-.app-bar { height: var(--appbar-height); display: flex; align-items: center; padding: 0 var(--space-lg); gap: var(--space-md); border-bottom: 0.5px solid var(--border); flex-shrink: 0; }
-.app-bar__left { display: flex; align-items: center; gap: var(--space-md); flex: 1; min-width: 0; }
-.app-bar__sep { width: 1px; height: 24px; background: var(--border); }
-.app-bar__tools { display: flex; align-items: center; gap: var(--space-xs); }
+.main-content { flex: 1; display: flex; flex-direction: column; min-width: 0; background: var(--bg-card); position: relative; }
+.app-bar { height: var(--appbar-height); display: flex; align-items: center; padding: 0 20px; gap: var(--space-sm); flex-shrink: 0; }
+.app-bar__left { display: flex; align-items: center; gap: var(--space-sm); flex: 1; min-width: 0; }
+.app-bar__tools { display: flex; align-items: center; gap: var(--space-sm); }
 .info-area { flex-shrink: 0; }
-.info-area__error { padding: var(--space-xs) var(--space-lg); }
+.info-area__error { padding: var(--space-xs) 20px; }
 .main-content__files { flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; position: relative; }
-.loading-overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(255,255,255,0.6); }
+.loading-overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(255, 255, 255, 0.6); }
 .search-results { flex: 1; overflow-y: auto; }
-.search-header { padding: var(--space-md) var(--space-lg); font-size: var(--font-body-sm); font-weight: var(--fw-medium); color: var(--text-secondary); border-bottom: 0.5px solid var(--border); }
-.search-row { display: flex; align-items: center; gap: var(--space-sm); padding: var(--space-sm) var(--space-lg); cursor: pointer; border-bottom: 0.5px solid var(--border); }
+.search-header { padding: var(--space-md) 20px; font-size: var(--font-body-sm); font-weight: var(--fw-medium); color: var(--ink-400); border-bottom: 1px solid var(--line); }
+.search-row { display: flex; align-items: center; gap: var(--space-md); padding: 10px 20px; cursor: pointer; border-bottom: 1px solid var(--line); }
 .search-row:hover { background: var(--bg-hover); }
-.search-row__name { font-size: var(--font-body); color: var(--text-primary); }
-.search-row__sub { font-size: var(--font-body-sm); color: var(--text-secondary); }
-.search-row :deep(.is-folder) { color: var(--color-brand); }
+.search-row__name { font-size: var(--font-body); color: var(--ink-900); }
+.search-row__sub { font-size: var(--font-caption); color: var(--ink-400); font-variant-numeric: tabular-nums; }
+.search-row :deep(.is-folder) { color: var(--brand-500); }
 
-/* 传输队列 popover 定位：贴 AppBar 下方右侧 */
+/* 传输队列 popover 定位：贴工具栏下方右侧 */
 .tp-capture { position: fixed; inset: 0; z-index: 90; }
-.transfer-popover-anchor { position: absolute; top: var(--appbar-height); right: var(--space-md); z-index: 100; }
+.transfer-popover-anchor { position: absolute; top: calc(var(--appbar-height) + 12px); right: 20px; z-index: 100; }
 </style>

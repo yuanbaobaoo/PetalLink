@@ -1,7 +1,7 @@
-<!-- 侧边栏，递归目录树 + 账号栏（含配额） -->
+<!-- 侧边栏（v2：毛玻璃 248px），logo 区 + 目录树 + 更新卡片 + 账号卡 -->
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
-import { MateAppLogo } from "@/components/mate";
+import { MateAppLogo, MateIcon } from "@/components/mate";
 import SidebarTreeNode from "./SidebarTreeNode.vue";
 import { useFileBrowserStore, ROOT } from "@/stores/fileBrowser";
 import { useAuthStore } from "@/stores/auth";
@@ -29,6 +29,11 @@ const quotaText = computed(() => {
   if (!about.value || about.value.user_capacity <= 0) return "";
   return `${fmtSize(about.value.used_space)} / ${fmtSize(about.value.user_capacity)}`;
 });
+// 配额使用百分比（0-100），用于账号卡 4px 进度条
+const quotaPercent = computed(() => {
+  if (!about.value || about.value.user_capacity <= 0) return 0;
+  return Math.min(100, Math.round((about.value.used_space / about.value.user_capacity) * 100));
+});
 
 /**
  * 挂载后获取存储配额信息
@@ -48,131 +53,212 @@ function fmtSize(bytes: number): string {
   <aside class="sidebar">
     <!-- Logo 区 -->
     <div class="sidebar__logo">
-      <MateAppLogo :size="26" />
+      <MateAppLogo :size="28" />
     </div>
+
+    <!-- 位置分组 -->
+    <div class="sidebar__section">位置</div>
 
     <!-- 目录树（递归） -->
     <div class="sidebar__tree">
       <SidebarTreeNode :location="ROOT" :path="[ROOT]" :depth="0" :active-id="browser.current.id" />
     </div>
 
-    <!-- 底部账号栏 -->
+    <!-- 更新卡片（v2：渐变品牌卡）：下载中显示进度，否则有可用更新时显示横幅 -->
+    <div
+      v-if="updater.isUpdateDownloading"
+      class="sidebar__update"
+      title="点击查看更新详情"
+      @click="updater.showDownloadDialog()"
+    >
+      <div class="sidebar__update-title">
+        <span>正在下载更新</span>
+        <span class="sidebar__update-pct">{{ updater.downloadProgress }}%</span>
+      </div>
+      <div class="sidebar__update-track">
+        <div class="sidebar__update-fill" :style="{ width: `${updater.downloadProgress}%` }" />
+      </div>
+    </div>
+    <div v-else-if="updater.updateAvailable && !updater.dismissed" class="sidebar__update">
+      <div class="sidebar__update-title">
+        <span>新版本 {{ updater.newVersion }}</span>
+        <button class="sidebar__update-close" title="关闭" @click.stop="updater.dismissUpdate">
+          <MateIcon name="x" :size="12" />
+        </button>
+      </div>
+      <button class="sidebar__update-btn" @click="updater.showDialog()">
+        <MateIcon name="download" :size="14" />
+        立即更新
+      </button>
+    </div>
+
+    <!-- 底部账号卡 -->
     <div class="sidebar__account">
       <div class="account-avatar">{{ userInitial }}</div>
       <div class="account-info">
         <div class="account-info__primary">{{ userLabel }}</div>
         <div v-if="quotaText" class="account-info__secondary">{{ quotaText }}</div>
+        <div v-if="quotaText" class="account-info__quota-track">
+          <div class="account-info__quota-fill" :style="{ width: `${quotaPercent}%` }" />
+        </div>
       </div>
-    </div>
-
-    <!-- 更新包下载进度条：正在下载更新包时显示，点击重新打开弹窗 -->
-    <div
-      v-if="updater.isUpdateDownloading"
-      class="sidebar__update-progress"
-      @click="updater.showDownloadDialog()"
-      title="点击查看更新详情"
-    >
-      <div class="update-progress__head">
-        <span class="update-progress__label">正在下载更新</span>
-        <span class="update-progress__pct">{{ updater.downloadProgress }}%</span>
-      </div>
-      <div class="update-progress__bar">
-        <div class="update-progress__fill" :style="{ width: `${updater.downloadProgress}%` }" />
-      </div>
-    </div>
-
-    <!-- 更新提示条：有可用更新时显示 -->
-    <div
-      v-if="updater.updateAvailable && !updater.dismissed"
-      class="sidebar__update-banner"
-    >
-      <svg class="update-banner__icon" viewBox="0 0 16 16" width="14" height="14" fill="none">
-        <path d="M8 1.5a5.5 5.5 0 0 0-1 10.91v1.34a.5.5 0 0 0 .8.4L9.75 12.5h.17A5.5 5.5 0 0 0 8 1.5Z" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
-        <circle cx="8" cy="8" r="1.25" fill="currentColor"/>
-      </svg>
-      <span class="update-banner__text">新版本 {{ updater.newVersion }}</span>
-      <button class="update-banner__changelog" @click.stop="updater.showDialog()" title="查看更新日志">日志</button>
-      <button class="update-banner__close" @click.stop="updater.dismissUpdate" title="关闭">×</button>
     </div>
   </aside>
 </template>
 
 <style scoped>
-.sidebar { width: var(--sidebar-width); display: flex; flex-direction: column; background-color: var(--bg-page); border-right: 0.5px solid var(--border); flex-shrink: 0; }
-.sidebar__logo { display: flex; align-items: center; height: var(--appbar-height); padding: 0 var(--space-lg); flex-shrink: 0; }
-.sidebar__tree { flex: 1; overflow-y: auto; padding: var(--space-xs) var(--space-sm); }
-.sidebar__account { display: flex; align-items: center; gap: var(--space-md); padding: var(--space-lg); border-top: 0.5px solid var(--border); flex-shrink: 0; }
-.account-avatar { width: 28px; height: 28px; border-radius: 50%; background: linear-gradient(135deg, var(--color-brand), var(--color-brand-hover)); color: #fff; font-size: var(--font-body-sm); font-weight: var(--fw-semibold); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
-.account-info { flex: 1; min-width: 0; }
-.account-info__primary { font-size: var(--font-body-sm); font-weight: var(--fw-medium); color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.account-info__secondary { font-size: var(--font-caption); color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-/* 更新包下载进度条（账号栏下方） */
-.sidebar__update-progress {
-  padding: var(--space-sm) var(--space-lg) var(--space-md);
-  border-top: 0.5px solid var(--border);
-  cursor: pointer;
+.sidebar {
+  width: var(--sidebar-width);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: rgba(247, 247, 249, 0.85);
+  backdrop-filter: blur(20px);
+  border-right: 1px solid var(--line);
   flex-shrink: 0;
-  transition: background-color 0.15s;
 }
-.sidebar__update-progress:hover { background-color: var(--bg-hover); }
-.update-progress__head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
-.update-progress__label { font-size: var(--font-caption); color: var(--text-secondary); }
-.update-progress__pct { font-size: var(--font-caption); font-weight: var(--fw-semibold); color: var(--color-brand); }
-.update-progress__bar { height: 4px; background-color: var(--bg-active); border-radius: 2px; overflow: hidden; }
-.update-progress__fill { height: 100%; background: linear-gradient(90deg, var(--color-brand), var(--color-brand-hover)); border-radius: 2px; transition: width 0.3s ease; }
-
-/* 更新提示条 */
-.sidebar__update-banner {
+.sidebar__logo {
   display: flex;
   align-items: center;
-  gap: var(--space-sm);
-  padding: var(--space-sm) var(--space-lg);
-  margin: 0 var(--space-sm) var(--space-sm);
-  background: linear-gradient(135deg, var(--color-brand), var(--color-brand-hover));
-  border-radius: var(--radius-md);
-  cursor: pointer;
-  transition: opacity 0.15s;
+  height: 60px;
+  padding: 0 18px;
   flex-shrink: 0;
 }
-.sidebar__update-banner:hover { opacity: 0.9; }
-.update-banner__icon { color: #fff; flex-shrink: 0; }
-	.update-banner__text {
-	  flex: 1;
-	  font-size: var(--font-caption);
-	  font-weight: var(--fw-medium);
-	  color: #fff;
-	  overflow: hidden;
-	  text-overflow: ellipsis;
-	  white-space: nowrap;
-	}
-	.update-banner__changelog {
-	  flex-shrink: 0;
-	  padding: 1px 6px;
-	  border: 0.5px solid rgba(255,255,255,0.5);
-	  border-radius: var(--radius-sm);
-	  background: rgba(255,255,255,0.15);
-	  color: #fff;
-	  font-size: 11px;
-	  line-height: 16px;
-	  cursor: pointer;
-	  transition: background 0.15s;
-	}
-	.update-banner__changelog:hover { background: rgba(255,255,255,0.3); }
-	.update-banner__close {
+.sidebar__section {
+  font-size: 11px;
+  font-weight: var(--fw-semibold);
+  letter-spacing: 0.4px;
+  color: var(--ink-300);
+  padding: 12px 18px 6px;
   flex-shrink: 0;
-  width: 18px;
-  height: 18px;
-  border: none;
+}
+.sidebar__tree {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* 底部账号卡（v2：白卡 + 配额进度条） */
+.sidebar__account {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 10px;
+  padding: var(--space-md);
+  background: var(--bg-card);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--sh-sm), 0 0 0 0.5px var(--line);
+  flex-shrink: 0;
+}
+.account-avatar {
+  width: 32px;
+  height: 32px;
   border-radius: 50%;
-  background: rgba(255,255,255,0.25);
+  background: var(--grad-brand);
   color: #fff;
-  font-size: 14px;
-  line-height: 1;
-  cursor: pointer;
+  font-size: var(--font-body);
+  font-weight: var(--fw-semibold);
   display: flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
 }
-.update-banner__close:hover { background: rgba(255,255,255,0.4); }
+.account-info { flex: 1; min-width: 0; }
+.account-info__primary {
+  font-size: var(--font-body-sm);
+  font-weight: var(--fw-medium);
+  color: var(--ink-900);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.account-info__secondary {
+  font-size: var(--font-caption);
+  color: var(--ink-400);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.account-info__quota-track {
+  height: 4px;
+  margin-top: 6px;
+  background: var(--bg-fill);
+  border-radius: var(--radius-full);
+  overflow: hidden;
+}
+.account-info__quota-fill {
+  height: 100%;
+  background: var(--grad-brand);
+  border-radius: var(--radius-full);
+}
+
+/* 更新卡片（v2：渐变品牌卡，侧栏底部） */
+.sidebar__update {
+  margin: 0 10px 10px;
+  border-radius: var(--radius-lg);
+  background: var(--grad-brand);
+  color: #fff;
+  padding: var(--space-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  box-shadow: var(--sh-brand);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.sidebar__update-title {
+  font-size: var(--font-body-sm);
+  font-weight: var(--fw-semibold);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.sidebar__update-pct {
+  font-size: var(--font-caption);
+  font-variant-numeric: tabular-nums;
+}
+.sidebar__update-close {
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.25);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.sidebar__update-close:hover { background: rgba(255, 255, 255, 0.4); }
+.sidebar__update-btn {
+  height: 28px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.95);
+  color: var(--brand-500);
+  font-size: var(--font-caption);
+  font-weight: var(--fw-semibold);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-xs);
+  cursor: pointer;
+}
+.sidebar__update-track {
+  height: 4px;
+  background: rgba(255, 255, 255, 0.3);
+  border-radius: var(--radius-full);
+  overflow: hidden;
+}
+.sidebar__update-fill {
+  height: 100%;
+  background: #fff;
+  border-radius: var(--radius-full);
+  transition: width 0.3s ease;
+}
 </style>

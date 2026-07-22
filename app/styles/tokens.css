@@ -1,56 +1,94 @@
 /**
- * CloudMate 设计令牌 —— TDesign Enterprise × macOS Native
+ * PetalLink 设计令牌 —— v2 设计系统（logo 蓝 #0053DB + macOS 原生感）
  *
- * 完整复刻 `ai-context/design-rules.md` §2/§3/§6 的所有 CSS 变量。
- * 所有组件必须引用这些变量，禁止硬编码颜色/尺寸。
+ * 完整复刻 `design/assets/v2.css` 的令牌体系，并保留旧语义别名（重新映射到 v2 值），
+ * 以便存量组件平滑过渡。所有组件必须引用这些变量，禁止硬编码颜色/尺寸。
+ * 设计规则详见 `ai-context/design-rules.md`。
  */
 
 :root {
-  /* === 品牌色（TDesign Brand Blue） === */
-  --color-brand: #0052d9;
-  --color-brand-hover: #366ef4;
-  --color-brand-active: #003cab;
-  --color-brand-light: #d9e1ff;
-  --color-brand-lighter: #f2f3ff;
+  /* === 品牌蓝（取自 logo 主色 #0053DB） === */
+  --brand-50: #eff4fe;
+  --brand-100: #dce8fc;
+  --brand-200: #b7d0f7;
+  --brand-400: #4a8bf0;
+  --brand-500: #0053db;
+  --brand-600: #0047b8;
+  --brand-700: #003a99;
+  --grad-brand: linear-gradient(135deg, #4a8bf0 0%, #0053db 100%);
+  --grad-brand-soft: linear-gradient(135deg, #eff4fe 0%, #dce8fc 100%);
 
-  /* === 功能色（语义色 · 状态标识） === */
-  --color-success: #2ba471;
-  --color-success-bg: #e3f9e9;
-  --color-warning: #e37318;
-  --color-warning-bg: #fff1e9;
-  --color-error: #d54941;
-  --color-error-bg: #fff0ed;
+  /* === 品牌色语义别名（旧名 → v2 值） === */
+  --color-brand: var(--brand-500);
+  --color-brand-hover: var(--brand-400);
+  --color-brand-active: var(--brand-600);
+  --color-brand-light: var(--brand-100);
+  --color-brand-lighter: var(--brand-50);
 
-  /* === 14 级灰阶 === */
-  --gray-1: #f3f3f3;
-  --gray-2: #eeeeee;
-  --gray-3: #e8e8e8;
-  --gray-4: #dddddd;
-  --gray-5: #c6c6c6;
-  --gray-6: #a6a6a6;
-  --gray-7: #8b8b8b;
-  --gray-8: #777777;
-  --gray-9: #5e5e5e;
-  --gray-10: #4b4b4b;
-  --gray-11: #393939;
-  --gray-12: #2c2c2c;
-  --gray-13: #242424;
-  --gray-14: #181818;
+  /* === 墨色（文字） === */
+  --ink-900: #1c1c1e;
+  --ink-700: #3a3a3e;
+  --ink-600: #56565c;
+  --ink-400: #8e8e93;
+  --ink-300: #aeaeb2;
 
-  /* === 语义别名 === */
-  --bg-page: #f5f5f5;
-  --bg-container: #ffffff;
-  --bg-hover: #f3f3f3;
-  --bg-active: #e8e8e8;
-  --border: #dddddd;
-  --border-hover: #c6c6c6;
-  --text-primary: rgba(0, 0, 0, 0.9);
-  --text-secondary: rgba(0, 0, 0, 0.6);
-  --text-placeholder: rgba(0, 0, 0, 0.35);
+  /* === 功能色（柔和现代） === */
+  --ok: #0ca678;
+  --ok-bg: #e3f5ee;
+  --warn: #f08c00;
+  --warn-bg: #fff3de;
+  --err: #e5484d;
+  --err-bg: #fdecec;
+  --info: #3b82f6;
+  --info-bg: #e8f0fe;
+
+  /* === 功能色语义别名（旧名 → v2 值） === */
+  --color-success: var(--ok);
+  --color-success-bg: var(--ok-bg);
+  --color-warning: var(--warn);
+  --color-warning-bg: var(--warn-bg);
+  --color-error: var(--err);
+  --color-error-bg: var(--err-bg);
+  --color-info: var(--info);
+  --color-info-bg: var(--info-bg);
+
+  /* === 14 级灰阶（对齐 v2 墨色/背景体系） === */
+  --gray-1: #f7f7f9;
+  --gray-2: #f1f1f3;
+  --gray-3: #e9e9ec;
+  --gray-4: #e3e3e6;
+  --gray-5: #c6c6cc;
+  --gray-6: #aeaeb2;
+  --gray-7: #8e8e93;
+  --gray-8: #78787e;
+  --gray-9: #56565c;
+  --gray-10: #48484d;
+  --gray-11: #3a3a3e;
+  --gray-12: #2c2c2e;
+  --gray-13: #242426;
+  --gray-14: #1c1c1e;
+
+  /* === 背景与线条 === */
+  --bg-app: #f5f5f7;
+  --bg-card: #ffffff;
+  --bg-fill: #f1f1f3;
+  --line: rgba(0, 0, 0, 0.06);
+  --line-strong: rgba(0, 0, 0, 0.1);
+
+  /* === 语义别名（旧名 → v2 值） === */
+  --bg-page: var(--bg-app);
+  --bg-container: var(--bg-card);
+  --bg-hover: #f7f7f9;
+  --bg-active: var(--bg-fill);
+  --border: var(--line);
+  --border-hover: var(--line-strong);
+  --text-primary: var(--ink-900);
+  --text-secondary: var(--ink-600);
+  --text-placeholder: var(--ink-300);
 
   /* === macOS 窗口专用色 === */
-  --titlebar-bg: #ebebeb;
-  --titlebar-border: #d0d0d0;
+  --titlebar-bg: rgba(255, 255, 255, 0.8);
+  --titlebar-border: var(--line);
   --window-outer-bg: #5a5a5a;
   --traffic-close: #ff5f57;
   --traffic-minimize: #ffbd2e;
@@ -70,10 +108,12 @@
   --fw-medium: 500;
   --fw-semibold: 600;
 
-  /* === 圆角 === */
-  --radius-sm: 3px;
-  --radius-md: 6px;
-  --radius-lg: 9px;
+  /* === 圆角（v2：整体收小） === */
+  --radius-sm: 5px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+  --radius-xl: 12px;
+  --radius-full: 999px;
 
   /* === 间距（4-grid） === */
   --space-xs: 4px;
@@ -83,52 +123,33 @@
   --space-xl: 24px;
   --space-xxl: 32px;
 
-  /* === 阴影 === */
-  --shadow-card: 0 1px 4px rgba(0, 0, 0, 0.08), 0 0 0 0.5px rgba(0, 0, 0, 0.06);
-  --shadow-dropdown: 0 4px 12px rgba(0, 0, 0, 0.12),
-    0 0 0 0.5px rgba(0, 0, 0, 0.06);
-  --shadow-modal: 0 8px 24px rgba(0, 0, 0, 0.16);
-  --shadow-window: 0 20px 60px rgba(0, 0, 0, 0.3), 0 0 0 0.5px rgba(0, 0, 0, 0.1);
+  /* === 阴影（v2：柔和、低饱和） === */
+  --sh-sm: 0 1px 2px rgba(16, 24, 40, 0.05);
+  --sh-md: 0 4px 16px -2px rgba(16, 24, 40, 0.08);
+  --sh-lg: 0 12px 32px -8px rgba(16, 24, 40, 0.14);
+  --sh-pop: 0 24px 64px -12px rgba(16, 24, 40, 0.22);
+  --sh-brand: 0 4px 14px -4px rgba(0, 83, 219, 0.35);
+
+  /* === 阴影语义别名（旧名 → v2 值） === */
+  --shadow-card: var(--sh-sm), 0 0 0 0.5px var(--line);
+  --shadow-dropdown: var(--sh-lg), 0 0 0 0.5px rgba(0, 0, 0, 0.05);
+  --shadow-modal: var(--sh-pop);
+  --shadow-window: 0 32px 80px -16px rgba(16, 24, 40, 0.28),
+    0 0 0 0.5px rgba(0, 0, 0, 0.08);
 
   /* === 字体栈（系统字体，无 webfont） === */
   --font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC",
     "Helvetica Neue", sans-serif;
   --font-mono: "SF Mono", "Menlo", "Monaco", "Consolas", monospace;
 
-  /* === 布局尺寸 === */
-  --sidebar-width: 220px;
-  --settings-nav-width: 200px;
-  --appbar-height: 56px;
-  --breadcrumb-height: 32px;
-  --sync-bar-height: 32px;
-  --file-header-height: 36px;
-  --file-row-height: 44px;
-  --transfer-popover-width: 420px;
-  --transfer-popover-height: 560px;
-}
-
-/* === 深色模式（跟随系统） === */
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg-page: #181818;
-    --bg-container: #242424;
-    --bg-hover: #2c2c2c;
-    --bg-active: #2c2c2c;
-    --border: #3e3e3e;
-    --border-hover: #5e5e5e;
-    --text-primary: rgba(255, 255, 255, 0.9);
-    --text-secondary: rgba(255, 255, 255, 0.6);
-    --text-placeholder: rgba(255, 255, 255, 0.35);
-
-    --titlebar-bg: #2c2c2c;
-    --titlebar-border: #3e3e3e;
-    --window-outer-bg: #000000;
-
-    --color-brand-light: #1a3a8a;
-    --color-brand-lighter: #1f2a4a;
-
-    --shadow-card: 0 1px 4px rgba(0, 0, 0, 0.3), 0 0 0 0.5px rgba(255, 255, 255, 0.06);
-    --shadow-dropdown: 0 4px 12px rgba(0, 0, 0, 0.4),
-      0 0 0 0.5px rgba(255, 255, 255, 0.06);
-  }
+  /* === 布局尺寸（v2：放松版） === */
+  --sidebar-width: 248px;
+  --settings-nav-width: 240px;
+  --appbar-height: 64px;
+  --breadcrumb-height: 40px;
+  --sync-bar-height: 44px;
+  --file-header-height: 38px;
+  --file-row-height: 56px;
+  --transfer-popover-width: 440px;
+  --transfer-popover-height: 580px;
 }

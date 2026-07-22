@@ -45,9 +45,9 @@ function choose(): void {
 
 <style scoped>
 .mate-radio {
-  border: 1px solid var(--border);
+  border: 1.5px solid var(--ink-300);
   border-radius: 50%;
-  background-color: var(--bg-container);
+  background-color: var(--bg-card);
   cursor: pointer;
   padding: 0;
   display: inline-flex;
@@ -56,11 +56,11 @@ function choose(): void {
   flex-shrink: 0;
   transition: border-color 0.12s;
 }
-.mate-radio:hover:not(.is-disabled) { border-color: var(--color-brand); }
-.mate-radio.is-selected { border-color: var(--color-brand); }
+.mate-radio:hover:not(.is-disabled) { border-color: var(--brand-500); }
+.mate-radio.is-selected { border-color: var(--brand-500); }
 .mate-radio.is-disabled { opacity: 0.5; cursor: not-allowed; }
 .mate-radio__dot {
   border-radius: 50%;
-  background-color: var(--color-brand);
+  background-color: var(--brand-500);
 }
 </style>

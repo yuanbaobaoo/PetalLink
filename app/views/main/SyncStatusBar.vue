@@ -3,7 +3,7 @@
 import { computed, onMounted, ref, watch } from "vue";
 import { useSyncStore } from "@/stores/sync";
 import { useTransferStore } from "@/stores/transfer";
-import { MateIcon, MateDialog, MateButton } from "@/components/mate";
+import { MateDialog, MateButton } from "@/components/mate";
 import { pad2 } from "@/utils/format";
 
 // 同步 store
@@ -50,11 +50,6 @@ const isIdle = computed(
     && !sync.isIndexing
     && !sync.isRunning,
 );
-// 状态图标（同步中/失败/完成）
-const statusIcon = computed(() => {
-  if (!isIdle.value) return "sync";
-  return sync.failed ? "alert" : "check";
-});
 
 // 失败项弹窗是否可见
 const showFailedDialog = ref(false);
@@ -87,27 +82,26 @@ function handleShowFailed(): void {
 <template>
   <div class="sync-bar" v-if="sync.mountConfigured">
     <div class="sync-bar__left">
-      <MateIcon
-        :name="statusIcon"
-        :size="16"
-        :spin="!isIdle"
+      <!-- 状态点：同步中品牌蓝脉冲 / 失败红 / 完成绿 -->
+      <span
+        class="dot"
         :class="{
-          'is-success': isIdle && !sync.failed,
-          'is-error': isIdle && !!sync.failed,
-          'is-active': !isIdle,
+          'dot--brand pulse': !isIdle,
+          'dot--err': isIdle && !!sync.failed,
+          'dot--ok': isIdle && !sync.failed,
         }"
       />
       <span class="sync-bar__text">{{ statusText }}</span>
-      <span v-if="lastSyncFormatted && isIdle" class="sync-bar__time">· 上次同步 {{ lastSyncFormatted }}</span>
+      <span v-if="lastSyncFormatted && isIdle" class="sync-bar__time">上次同步 {{ lastSyncFormatted }}</span>
     </div>
 
     <div class="sync-bar__tags">
-      <span v-if="sync.uploading" class="tag tag--primary">上传 {{ sync.uploading }}</span>
-      <span v-if="sync.downloading" class="tag tag--primary">下载 {{ sync.downloading }}</span>
-      <span v-if="sync.waitingNetwork" class="tag tag--warning">等待网络 {{ sync.waitingNetwork }}</span>
-      <span v-if="sync.editing" class="tag tag--warning">编辑中 {{ sync.editing }}</span>
-      <span v-if="sync.conflict" class="tag tag--warning">冲突 {{ sync.conflict }}</span>
-      <span v-if="sync.failed" class="tag tag--error" @click="handleShowFailed">同步失败 {{ sync.failed }}</span>
+      <span v-if="sync.uploading" class="chip chip--brand">上传 {{ sync.uploading }}</span>
+      <span v-if="sync.downloading" class="chip chip--brand">下载 {{ sync.downloading }}</span>
+      <span v-if="sync.waitingNetwork" class="chip chip--warn">等待网络 {{ sync.waitingNetwork }}</span>
+      <span v-if="sync.editing" class="chip chip--warn">编辑中 {{ sync.editing }}</span>
+      <span v-if="sync.conflict" class="chip chip--warn">冲突 {{ sync.conflict }}</span>
+      <span v-if="sync.failed" class="chip chip--err chip--clickable" @click="handleShowFailed">同步失败 {{ sync.failed }}</span>
     </div>
 
     <!-- 失败项弹窗 -->
@@ -134,24 +128,48 @@ function handleShowFailed(): void {
 
 <style scoped>
 .sync-bar {
-  height: var(--sync-bar-height); display: flex; align-items: center; padding: 0 var(--space-lg);
-  gap: var(--space-sm); border-bottom: 0.5px solid var(--border); background-color: var(--bg-container);
-  font-size: var(--font-body-sm); flex-shrink: 0;
+  min-height: var(--sync-bar-height);
+  display: flex;
+  align-items: center;
+  padding: 6px 20px;
+  gap: 10px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  background-color: var(--bg-card);
+  font-size: var(--font-body-sm);
+  flex-shrink: 0;
 }
-.sync-bar__left { display: flex; align-items: center; gap: var(--space-sm); flex: 3; min-width: 0; }
-.sync-bar__left :deep(.is-success) { color: var(--color-success); }
-.sync-bar__left :deep(.is-error) { color: var(--color-error); }
-.sync-bar__left :deep(.is-active) { color: var(--color-brand); }
-.sync-bar__text { color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sync-bar__time { color: var(--text-secondary); }
-.sync-bar__tags { display: flex; gap: var(--space-xs); flex: 4; justify-content: flex-end; flex-wrap: wrap; }
-.tag { display: inline-flex; align-items: center; padding: 1px 6px; border-radius: var(--radius-sm); font-size: var(--font-caption); font-weight: var(--fw-medium); line-height: 18px; }
-.tag--primary { background-color: var(--color-brand-lighter); color: var(--color-brand); }
-.tag--warning { background-color: var(--color-warning-bg); color: var(--color-warning); }
-.tag--error { background-color: var(--color-error-bg); color: var(--color-error); cursor: pointer; }
+.sync-bar__left { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; }
+.sync-bar__text { color: var(--ink-900); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sync-bar__time { color: var(--ink-400); font-size: 12.5px; flex-shrink: 0; }
+.sync-bar__tags { display: flex; align-items: center; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
 
-.failed-empty { color: var(--text-secondary); }
+/* 状态点（v2 dot，同步中脉冲） */
+.dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.dot--ok { background: var(--ok); }
+.dot--err { background: var(--err); }
+.dot--brand { background: var(--brand-500); }
+
+/* 状态 chip（v2） */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 10px;
+  border-radius: var(--radius-sm);
+  font-size: var(--font-caption);
+  font-weight: var(--fw-medium);
+  white-space: nowrap;
+}
+.chip--brand { background: var(--brand-50); color: var(--brand-500); }
+.chip--warn { background: var(--warn-bg); color: var(--warn); }
+.chip--err { background: var(--err-bg); color: var(--err); }
+.chip--clickable { cursor: pointer; }
+.chip--clickable:hover { filter: brightness(0.96); }
+
+.failed-empty { color: var(--ink-400); }
 .failed-list { display: flex; flex-direction: column; gap: var(--space-sm); max-height: 320px; overflow-y: auto; }
-.failed-item__path { font-size: var(--font-body-sm); font-weight: var(--fw-medium); color: var(--text-primary); }
-.failed-item__err { font-size: var(--font-caption); color: var(--color-error); margin-top: 2px; }
+.failed-item__path { font-size: var(--font-body-sm); font-weight: var(--fw-medium); color: var(--ink-900); word-break: break-all; }
+.failed-item__err { font-size: var(--font-caption); color: var(--err); margin-top: 2px; }
 </style>

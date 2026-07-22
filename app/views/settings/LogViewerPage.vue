@@ -129,12 +129,13 @@ async function handleExportLogs(): Promise<void> {
       <span class="log-appbar__title">同步日志</span>
     </div>
 
-    <!-- 工具栏 -->
+    <!-- 工具栏（v2：描边过滤 chips + 圆形按钮） -->
     <div class="log-toolbar">
       <div class="log-filters">
         <MateTag v-for="lv in (['ALL','INFO','WARN','ERROR'] as Level[])" :key="lv"
           :label="lv"
-          :theme="filter === lv ? (lv === 'ERROR' ? 'error' : lv === 'WARN' ? 'warning' : lv === 'INFO' ? 'primary' : 'default') : 'default'"
+          outline
+          :active="filter === lv"
           @click="filter = lv"
         />
       </div>
@@ -142,11 +143,11 @@ async function handleExportLogs(): Promise<void> {
       <MateButton variant="icon" icon="trash" tooltip="清空" :loading="clearLoading" :disabled="exportLoading || clearLoading" @click="handleClearLogs" />
     </div>
 
-    <!-- 列表 -->
+    <!-- 列表（v2：白卡容器） -->
     <div class="log-body">
       <div v-if="loading" class="log-loading"><MateCircularProgress :size="24" /></div>
       <MateEmpty v-else-if="filtered.length === 0" icon="list" title="暂无日志" />
-      <div v-else>
+      <div v-else class="log-list">
         <div v-for="(r, i) in filtered" :key="i" class="log-item">
           <MateTag :label="r.level" :theme="tagTheme(r.level)" size="small" />
           <div class="log-item__content">
@@ -160,20 +161,26 @@ async function handleExportLogs(): Promise<void> {
 </template>
 
 <style scoped>
-.log-page { display: flex; flex-direction: column; width: 100%; height: 100%; background: var(--bg-page); }
+.log-page { display: flex; flex-direction: column; width: 100%; height: 100%; background: var(--bg-app); }
 .log-page--inline { height: 100%; background: transparent; }
 .log-page--inline .log-toolbar { padding-left: 0; padding-right: 0; padding-top: 0; }
-.log-page--inline .log-body { padding-left: 0; padding-right: 0; }
-.log-appbar { height: var(--appbar-height); display: flex; align-items: center; gap: var(--space-sm); padding: 0 var(--space-lg); border-bottom: 0.5px solid var(--border); background: var(--bg-container); flex-shrink: 0; }
+.log-page--inline .log-body { padding-left: 0; padding-right: 0; margin: 0; }
+.log-appbar { height: 56px; display: flex; align-items: center; gap: var(--space-sm); padding: 0 20px; border-bottom: 1px solid var(--line); background: var(--bg-card); flex-shrink: 0; }
 .log-appbar__back { transform: rotate(180deg); }
-.log-appbar__title { font-size: var(--font-title-sm); font-weight: var(--fw-semibold); }
-.log-toolbar { display: flex; align-items: center; gap: var(--space-sm); padding: var(--space-md) var(--space-lg); flex-shrink: 0; }
-.log-filters { display: flex; gap: var(--space-sm); }
+.log-appbar__title { font-size: var(--font-title-sm); font-weight: var(--fw-semibold); color: var(--ink-900); }
+.log-toolbar { display: flex; align-items: center; gap: var(--space-sm); padding: 14px 20px; flex-shrink: 0; }
+.log-filters { display: flex; gap: var(--space-sm); flex: 1; }
 .log-filters :deep(.mate-tag) { cursor: pointer; user-select: none; }
-.log-body { flex: 1; overflow-y: auto; padding: 0 var(--space-md); }
+.log-body { flex: 1; overflow-y: auto; margin: 0 20px 20px; }
+.log-list {
+  background: var(--bg-card);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--sh-sm), 0 0 0 0.5px var(--line);
+}
 .log-loading { display: flex; justify-content: center; padding: var(--space-xl); }
-.log-item { display: flex; gap: var(--space-md); padding: var(--space-sm) 0; border-bottom: 0.5px solid var(--border); }
+.log-item { display: flex; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--line); align-items: flex-start; }
+.log-item:last-child { border-bottom: none; }
 .log-item__content { flex: 1; min-width: 0; }
-.log-item__msg { font-size: var(--font-body); color: var(--text-primary); }
-.log-item__meta { font-size: var(--font-caption); color: var(--text-secondary); font-family: var(--font-mono); margin-top: 2px; }
+.log-item__msg { font-size: 13.5px; color: var(--ink-900); line-height: 1.55; }
+.log-item__meta { font-size: 11.5px; color: var(--ink-400); font-family: var(--font-mono); margin-top: 3px; }
 </style>

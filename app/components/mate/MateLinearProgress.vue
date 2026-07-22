@@ -1,4 +1,4 @@
-<!-- 线性进度条，确定/不确定两种态 -->
+<!-- 线性进度条（v2：渐变填充 + 灰底轨道），确定/不确定两种态 -->
 <script setup lang="ts">
 import { computed } from "vue";
 
@@ -6,11 +6,12 @@ const props = withDefaults(defineProps<{
   /** 0.0-1.0；null = 不确定 */
   value?: number | null;
   height?: number;
+  /** 填充背景（支持渐变，默认品牌渐变） */
   color?: string;
 }>(), {
   value: null,
-  height: 4,
-  color: "var(--color-brand)",
+  height: 6,
+  color: "var(--grad-brand)",
 });
 
 const isIndeterminate = computed(() => props.value === null || props.value === undefined);
@@ -29,12 +30,12 @@ const radius = computed(() => `${props.height / 2}px`);
     <div
       v-if="isIndeterminate"
       class="mate-linear-progress__indeterminate"
-      :style="{ backgroundColor: color, borderRadius: radius }"
+      :style="{ background: color, borderRadius: radius }"
     />
     <div
       v-else
       class="mate-linear-progress__fill"
-      :style="{ width: fillWidth, backgroundColor: color, borderRadius: radius }"
+      :style="{ width: fillWidth, background: color, borderRadius: radius }"
     />
   </div>
 </template>
@@ -42,7 +43,7 @@ const radius = computed(() => `${props.height / 2}px`);
 <style scoped>
 .mate-linear-progress {
   width: 100%;
-  background-color: var(--bg-active);
+  background-color: var(--bg-fill);
   overflow: hidden;
   position: relative;
 }

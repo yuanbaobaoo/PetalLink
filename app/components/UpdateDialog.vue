@@ -45,6 +45,13 @@ const releaseNotes = computed(() => {
 
 const transferWaiting = computed(() => updater.phase === "waitingTransfer");
 
+// 头部 icon badge 的配色类名（v2：品牌 / 成功 / 失败）
+const badgeClass = computed(() => {
+  if (updater.phase === "ready") return "update-dialog__badge--ok";
+  if (updater.phase === "error") return "update-dialog__badge--err";
+  return "";
+});
+
 async function handleStartUpdate(): Promise<void> {
   await updater.downloadAndInstall();
   // 下载完成后自动等待传输
@@ -73,14 +80,16 @@ function handleClose(): void {
   <Teleport to="body">
     <div v-if="visible" class="update-overlay" @click.self="handleClose">
       <div class="update-dialog">
-        <!-- 头部 -->
+        <!-- 头部（v2：icon badge + 标题） -->
         <div class="update-dialog__header">
-          <MateIcon name="download" :size="20" class="update-dialog__icon" />
-          <span class="update-dialog__title">{{ title }}</span>
+          <span class="update-dialog__badge" :class="badgeClass">
+            <MateIcon name="download" :size="20" />
+          </span>
+          <div class="update-dialog__headtext">
+            <span class="update-dialog__title">{{ title }}</span>
+            <span v-if="versionLabel" class="update-dialog__version">{{ versionLabel }}</span>
+          </div>
         </div>
-
-        <!-- 版本号 -->
-        <div v-if="versionLabel" class="update-dialog__version">{{ versionLabel }}</div>
 
         <!-- 正文区 -->
         <div class="update-dialog__body">
@@ -158,53 +167,70 @@ function handleClose(): void {
 .update-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.3);
+  background: rgba(28, 28, 30, 0.36);
+  backdrop-filter: blur(3px);
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: 1001;
 }
 .update-dialog {
-  width: 440px;
+  width: 460px;
   max-width: calc(100vw - 48px);
-  background-color: var(--bg-container);
-  border: 0.5px solid rgba(0, 0, 0, 0.2);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-modal);
+  background-color: var(--bg-card);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--sh-pop);
   display: flex;
   flex-direction: column;
+  overflow: hidden;
   animation: dialog-fade-in 0.15s ease-out;
 }
 .update-dialog__header {
   display: flex;
   align-items: center;
-  gap: var(--space-sm);
-  padding: var(--space-xxl) var(--space-xxl) var(--space-xs) var(--space-xxl);
+  gap: 12px;
+  padding: var(--space-xl) var(--space-xl) var(--space-sm);
 }
-.update-dialog__icon {
-  color: var(--color-brand);
+/* v2 icon badge（40px 圆角 10px） */
+.update-dialog__badge {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
   flex-shrink: 0;
+  background: var(--brand-50);
+  color: var(--brand-500);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.update-dialog__badge--ok { background: var(--ok-bg); color: var(--ok); }
+.update-dialog__badge--err { background: var(--err-bg); color: var(--err); }
+.update-dialog__headtext {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-sm);
+  min-width: 0;
 }
 .update-dialog__title {
-  font-size: var(--font-title-sm);
+  font-size: 17px;
   font-weight: var(--fw-semibold);
-  color: var(--text-primary);
+  color: var(--ink-900);
 }
 .update-dialog__version {
-  padding: 0 var(--space-xxl);
-  font-size: var(--font-body-lg);
-  font-weight: var(--fw-bold);
-  color: var(--color-brand);
+  font-size: var(--font-body-sm);
+  font-weight: var(--fw-semibold);
+  color: var(--brand-500);
+  font-variant-numeric: tabular-nums;
 }
 .update-dialog__body {
-  padding: var(--space-md) var(--space-xxl) var(--space-xxl);
+  padding: var(--space-sm) var(--space-xl) 20px;
   font-size: var(--font-body);
-  line-height: 1.6;
-  color: var(--text-secondary);
+  line-height: 1.65;
+  color: var(--ink-600);
 }
 .update-dialog__hint {
   margin: 0;
-  color: var(--text-secondary);
+  color: var(--ink-600);
 }
 .update-dialog__notes {
   margin-bottom: var(--space-md);
@@ -212,17 +238,18 @@ function handleClose(): void {
 .update-dialog__notes-label {
   font-size: var(--font-caption);
   font-weight: var(--fw-semibold);
-  color: var(--text-secondary);
+  color: var(--ink-400);
   margin-bottom: var(--space-xs);
 }
+/* v2 changelog：灰底面板 */
 .update-dialog__notes-text {
   margin: 0;
   padding: var(--space-md);
-  background: var(--bg-page);
+  background: var(--bg-fill);
   border-radius: var(--radius-md);
   font-size: var(--font-caption);
-  line-height: 1.5;
-  color: var(--text-secondary);
+  line-height: 1.6;
+  color: var(--ink-600);
   max-height: 180px;
   overflow-y: auto;
   white-space: pre-wrap;
@@ -236,23 +263,24 @@ function handleClose(): void {
 }
 .update-dialog__progress-bar {
   flex: 1;
-  height: 8px;
-  background: var(--bg-page);
-  border-radius: 4px;
+  height: 6px;
+  background: var(--bg-fill);
+  border-radius: var(--radius-full);
   overflow: hidden;
 }
 .update-dialog__progress-fill {
   height: 100%;
-  background: linear-gradient(90deg, var(--color-brand), var(--color-brand-hover));
-  border-radius: 4px;
+  background: var(--grad-brand);
+  border-radius: var(--radius-full);
   transition: width 0.3s ease;
 }
 .update-dialog__progress-text {
   font-size: var(--font-caption);
   font-weight: var(--fw-semibold);
-  color: var(--text-primary);
+  color: var(--ink-900);
   min-width: 40px;
   text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 .update-dialog__waiting {
   display: flex;
@@ -260,10 +288,10 @@ function handleClose(): void {
   gap: var(--space-md);
 }
 .update-dialog__spinner {
-  width: 20px;
-  height: 20px;
-  border: 2.5px solid var(--border);
-  border-top-color: var(--color-brand);
+  width: 18px;
+  height: 18px;
+  border: 2.5px solid var(--brand-100);
+  border-top-color: var(--brand-500);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
   flex-shrink: 0;
@@ -273,14 +301,13 @@ function handleClose(): void {
   to { transform: rotate(360deg); }
 }
 .update-dialog__error {
-  color: var(--color-error);
+  color: var(--err);
   margin: 0;
 }
 .update-dialog__footer {
   display: flex;
   justify-content: flex-end;
-  gap: var(--space-sm);
-  padding: var(--space-sm) var(--space-lg) var(--space-lg);
-  border-top: 0.5px solid var(--border);
+  gap: 10px;
+  padding: 0 var(--space-xl) 20px;
 }
 </style>

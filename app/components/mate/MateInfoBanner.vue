@@ -64,33 +64,37 @@ function handleClose(): void {
 .mate-banner {
   display: flex;
   align-items: center;
-  gap: var(--space-sm);
-  padding: 10px var(--space-md);
-  border: 1px solid;
-  border-radius: var(--radius-sm);
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: var(--radius-lg);
   font-size: var(--font-body-sm);
-  line-height: 1.5;
+  line-height: 1.55;
+  color: var(--ink-700);
 }
 
 .mate-banner--info {
-  background-color: var(--color-brand-lighter);
-  color: var(--color-brand);
-  border-color: rgba(0, 82, 217, 0.2);
+  background-color: var(--brand-50);
+}
+.mate-banner--info .mate-banner__icon {
+  color: var(--brand-500);
 }
 .mate-banner--success {
-  background-color: var(--color-success-bg);
-  color: var(--color-success);
-  border-color: rgba(43, 164, 113, 0.2);
+  background-color: var(--ok-bg);
+}
+.mate-banner--success .mate-banner__icon {
+  color: var(--ok);
 }
 .mate-banner--warning {
-  background-color: var(--color-warning-bg);
-  color: var(--color-warning);
-  border-color: rgba(227, 115, 24, 0.2);
+  background-color: var(--warn-bg);
+}
+.mate-banner--warning .mate-banner__icon {
+  color: var(--warn);
 }
 .mate-banner--error {
-  background-color: var(--color-error-bg);
-  color: var(--color-error);
-  border-color: rgba(213, 73, 65, 0.2);
+  background-color: var(--err-bg);
+}
+.mate-banner--error .mate-banner__icon {
+  color: var(--err);
 }
 
 .mate-banner__icon {

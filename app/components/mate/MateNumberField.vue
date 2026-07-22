@@ -59,14 +59,17 @@ function handleInput(event: Event): void {
   display: inline-flex;
   align-items: center;
   gap: var(--space-sm);
-  height: 32px;
+  height: 38px;
   padding: 0 var(--space-md);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background-color: var(--bg-container);
-  transition: border-color 0.15s;
+  border: none;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-fill);
+  transition: box-shadow 0.12s, background-color 0.12s;
 }
-.mate-number-field:focus-within { border-color: var(--color-brand); }
+.mate-number-field:focus-within {
+  background-color: var(--bg-card);
+  box-shadow: inset 0 0 0 2px var(--brand-200);
+}
 .mate-number-field__input {
   flex: 1;
   min-width: 0;
@@ -76,7 +79,7 @@ function handleInput(event: Event): void {
   background: transparent;
   font-family: var(--font-family);
   font-size: var(--font-body);
-  color: var(--text-primary);
+  color: var(--ink-900);
   text-align: center;
 }
 /* 隐藏原生数字输入框的上下箭头 */
@@ -87,7 +90,7 @@ function handleInput(event: Event): void {
 }
 .mate-number-field__suffix {
   font-size: var(--font-body-sm);
-  color: var(--text-secondary);
+  color: var(--ink-400);
   flex-shrink: 0;
 }
 </style>

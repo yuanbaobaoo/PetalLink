@@ -33,34 +33,35 @@ withDefaults(defineProps<{
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: var(--space-xxl);
+  gap: 10px;
+  padding: 48px var(--space-xl);
   text-align: center;
 }
+/* v2：72px 渐变圆角 badge */
 .mate-empty__icon-wrap {
-  width: 64px;
-  height: 64px;
-  border-radius: 50%;
-  background-color: var(--bg-hover);
+  width: 72px;
+  height: 72px;
+  border-radius: 14px;
+  background: var(--grad-brand-soft);
   display: flex;
   align-items: center;
   justify-content: center;
-  margin-bottom: var(--space-lg);
+  margin-bottom: var(--space-xs);
 }
 .mate-empty__icon {
-  color: var(--text-placeholder);
+  color: var(--brand-400);
 }
 .mate-empty__title {
-  font-size: var(--font-body);
-  font-weight: var(--fw-medium);
-  color: var(--text-primary);
+  font-size: 15px;
+  font-weight: var(--fw-semibold);
+  color: var(--ink-700);
 }
 .mate-empty__desc {
-  margin-top: var(--space-sm);
-  font-size: var(--font-caption);
-  color: var(--text-secondary);
-  line-height: 1.5;
+  font-size: var(--font-body-sm);
+  color: var(--ink-400);
+  line-height: 1.55;
 }
 .mate-empty__action {
-  margin-top: var(--space-lg);
+  margin-top: var(--space-sm);
 }
 </style>

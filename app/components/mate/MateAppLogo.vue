@@ -70,7 +70,7 @@ function onImgError(): void {
   justify-content: center;
   padding: 5px;
   border-radius: 16px;
-  box-shadow: 0 2px 8px rgba(0, 82, 217, 0.16);
+  box-shadow: var(--sh-brand);
 }
 .app-logo__img {
   border-radius: 6px;
@@ -84,7 +84,7 @@ function onImgError(): void {
 .app-logo__text {
   margin: 0;
   font-weight: var(--fw-semibold);
-  color: #181818;
+  color: var(--ink-900);
   line-height: 1;
 }
 </style>

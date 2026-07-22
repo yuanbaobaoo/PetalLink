@@ -26,6 +26,6 @@ const props = withDefaults(defineProps<{ height?: number }>(), { height: 32 });
 }
 .mate-logo-with-text__text {
   font-weight: var(--fw-semibold);
-  color: #181818;
+  color: var(--ink-900);
 }
 </style>

@@ -9,7 +9,7 @@ const props = withDefaults(defineProps<{
   tristate?: boolean;
   disabled?: boolean;
   size?: number;
-}>(), { tristate: false, disabled: false, size: 16 });
+}>(), { tristate: false, disabled: false, size: 18 });
 
 const checked = computed(() => props.modelValue === true);
 const indeterminate = computed(() => props.tristate && props.modelValue === null);
@@ -46,9 +46,9 @@ function toggle(): void {
 
 <style scoped>
 .mate-checkbox {
-  border: 1px solid var(--border);
+  border: 1.5px solid var(--ink-300);
   border-radius: var(--radius-sm);
-  background-color: var(--bg-container);
+  background-color: var(--bg-card);
   cursor: pointer;
   padding: 0;
   display: inline-flex;
@@ -57,10 +57,10 @@ function toggle(): void {
   flex-shrink: 0;
   transition: background-color 0.12s, border-color 0.12s;
 }
-.mate-checkbox:hover:not(.is-disabled) { border-color: var(--color-brand); }
+.mate-checkbox:hover:not(.is-disabled) { border-color: var(--brand-500); }
 .mate-checkbox.is-active {
-  background-color: var(--color-brand);
-  border-color: var(--color-brand);
+  background-color: var(--brand-500);
+  border-color: var(--brand-500);
 }
 .mate-checkbox.is-disabled { opacity: 0.5; cursor: not-allowed; }
 .mate-checkbox__icon { color: #fff; }

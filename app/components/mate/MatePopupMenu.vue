@@ -116,31 +116,39 @@ function select(item: PopupItem): void {
 .mate-popup-menu {
   position: fixed;
   z-index: 1501;
-  background-color: var(--bg-container);
-  border: 0.5px solid var(--border);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-dropdown);
-  padding: var(--space-xs) 0;
+  min-width: 200px;
+  background: rgba(255, 255, 255, 0.96);
+  backdrop-filter: blur(16px);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--sh-pop), 0 0 0 0.5px rgba(0, 0, 0, 0.05);
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
 }
 .mate-popup-menu__divider {
-  height: 0;
-  border-top: 0.5px solid var(--border);
-  margin: var(--space-xs) 0;
+  height: 1px;
+  background: var(--line);
+  margin: 5px 10px;
 }
 .mate-popup-menu__item {
   display: flex;
   align-items: center;
-  gap: var(--space-sm);
+  gap: 10px;
   width: 100%;
-  padding: 10px var(--space-md);
+  height: 36px;
+  padding: 0 var(--space-md);
   border: none;
+  border-radius: var(--radius-md);
   background: transparent;
   cursor: pointer;
   font-size: var(--font-body);
-  color: var(--text-primary);
+  color: var(--ink-900);
   text-align: left;
+  white-space: nowrap;
   transition: background-color 0.12s;
 }
-.mate-popup-menu__item:hover { background-color: var(--bg-hover); }
-.mate-popup-menu__item.is-danger { color: var(--color-error); }
+.mate-popup-menu__item:hover { background-color: var(--bg-fill); }
+.mate-popup-menu__item.is-danger { color: var(--err); }
+.mate-popup-menu__item.is-danger:hover { background-color: var(--err-bg); }
 </style>
