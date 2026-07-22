@@ -296,6 +296,20 @@ pub fn run() {
                 platform::activation::set_accessory();
             }
         }
+        tauri::RunEvent::Reopen { .. } => {
+            // macOS：关窗/Cmd+Q 被拦截后进程仍在后台（accessory 无 Dock 图标）。
+            // 此时用户再次点击应用图标，系统不会新建进程，只发 Reopen 事件
+            // （single-instance 回调也不会触发），必须在此顶出主窗口，
+            // 否则窗口永远隐藏，表现为「退出后再启动界面弹不出来」。
+            if !platform::activation::should_real_quit() {
+                if let Some(w) = handle.get_webview_window("main") {
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                }
+                #[cfg(target_os = "macos")]
+                platform::activation::set_regular();
+            }
+        }
         tauri::RunEvent::Exit => {
             crate::core::net_guard::shutdown_probe();
             platform::shutdown::flush_with_timeout(handle);
