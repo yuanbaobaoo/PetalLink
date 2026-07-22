@@ -181,6 +181,20 @@ target/release/bundle/macos/PetalLink.app    # macOS 应用包
 target/release/bundle/dmg/PetalLink_<version>_aarch64.dmg    # DMG 安装镜像 (~3.2MB)
 ```
 
+### 安装说明
+
+macOS 安全策略会拦截从互联网下载的未签名应用，双击 DMG 时可能提示「磁盘映像损坏」。请先移除隔离标记再打开：
+
+```bash
+xattr -d com.apple.quarantine ~/Downloads/PetalLink_*_aarch64.dmg
+```
+
+或者：
+
+```bash
+xattr -d com.apple.quarantine /Applications/PetalLink.app
+```
+
 **打包配置**：
 - Release profile：`panic=abort`、`lto=true`、`opt-level=s`、`strip=true`
 - 应用图标由 `build.rs` 自动从 `assets/` 生成多分辨率 PNG + `icon.icns`

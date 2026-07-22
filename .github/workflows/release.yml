@@ -140,18 +140,6 @@ jobs:
 
             ---
 
-            ## 安装说明
-
-            macOS 安全策略会拦截从互联网下载的未签名应用，双击 DMG 时可能提示「磁盘映像损坏」。请先移除隔离标记再打开：
-
-            ```bash
-            xattr -d com.apple.quarantine ~/Downloads/PetalLink_*_aarch64.dmg
-            ```
-            或者
-            ```
-            xattr -d com.apple.quarantine /Applications/PetalLink.app
-            ```
-
           files: |
             dist/*.dmg
             dist/*.app.tar.gz
