@@ -3,7 +3,8 @@
 //! 对齐 `legacy/lib/drive/drive_client.dart`。
 //!
 //! - baseURL = `driveapis.cloud.huawei.com.cn/drive/v1`
-//! - connect 15s / receive 60s / send 60s
+//! - 常规请求：connect 15s / 总超时 60s
+//! - 流式内容传输（整文件下载）：独立 client，仅 connect 15s，无总超时
 //! - 每个请求注入 Bearer token；401 时强制刷新并重放
 //! - 网络/响应错误保留结构化恢复元数据
 //!
@@ -23,6 +24,9 @@ use crate::error::{parse_retry_after, AppError, AppResult, DriveTransportKind, R
 /// 共享的 reqwest 客户端（连接池 maxConnectionsPerHost=15，对齐 dart）。
 pub struct DriveClient {
     http: Client,
+    /// 流式内容传输专用客户端：无总超时（总超时会在大文件下载中途掐断流），
+    /// 仅保留 connect 超时；断流/僵死由 TCP 层与任务恢复机制兜底。
+    http_stream: Client,
     auth: Arc<AuthService>,
     /// Drive API base URL（默认 `DRIVE_API_BASE`）。
     base_url: String,
@@ -44,8 +48,16 @@ impl DriveClient {
             .pool_max_idle_per_host(15)
             .build()
             .expect("构建 reqwest client 失败");
+        // 流式传输（整文件下载）不能使用总超时：reqwest 的 timeout 覆盖到响应体流读完，
+        // 60s 内下载不完的大文件会被强制掐断并误判为网络错误。
+        let http_stream = Client::builder()
+            .connect_timeout(Duration::from_secs(15))
+            .pool_max_idle_per_host(15)
+            .build()
+            .expect("构建流式 reqwest client 失败");
         Self {
             http,
+            http_stream,
             auth,
             base_url: constants::DRIVE_API_BASE.to_string(),
         }
@@ -59,6 +71,11 @@ impl DriveClient {
     /// 获取底层 reqwest client（upload/download 等需自定义 URL 时用）。
     pub fn raw_http(&self) -> &Client {
         &self.http
+    }
+
+    /// 获取流式传输专用 reqwest client（整文件内容下载，无总超时）。
+    pub fn streaming_http(&self) -> &Client {
+        &self.http_stream
     }
 
     /// 构造请求并注入 Bearer token，返回 RequestBuilder。

@@ -179,6 +179,29 @@ pub fn report_request_network_failure() -> bool {
     publish_request_network_failure(&mut runtime.network, &ONLINE, &TRANSITIONS)
 }
 
+/// 请求层失败后的离线确认入口：先做一次即时 TCP 探测，探测也失败才标记离线。
+/// 避免单次传输错误（如大文件流中途被掐断）把健康网络误判为全局离线；
+/// 真实断网仍能在一次探测（约 3s）内被确认，不牺牲离线发现速度。
+/// 同一时间最多一个确认在途；返回是否已受理（确认在后台异步执行）。
+pub fn request_offline_confirmation() -> bool {
+    // 确认在途标记：防止连续失败事件触发探测风暴
+    static CONFIRMING: AtomicBool = AtomicBool::new(false);
+    // 已离线：无需再确认
+    if !ONLINE.load(Ordering::SeqCst) {
+        return false;
+    }
+    if CONFIRMING.swap(true, Ordering::SeqCst) {
+        return false;
+    }
+    tokio::spawn(async move {
+        if !probe_once().await {
+            report_request_network_failure();
+        }
+        CONFIRMING.store(false, Ordering::SeqCst);
+    });
+    true
+}
+
 /// 发布请求层离线转换；重复失败不会产生重复边沿。
 fn publish_request_network_failure(
     network: &mut NetworkStateMachine,

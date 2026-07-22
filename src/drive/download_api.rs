@@ -141,6 +141,10 @@ impl DownloadApi {
 
         // 上次响应已经写完，但在最终核验或 rename 前断网/崩溃：不重复下载。
         if tmp.exists() && offset == remote.resume.size {
+            // 先上报满额进度：校验安装（大文件 sha256 需数秒）期间界面不应停在 0%
+            if let Some(callback) = on_progress {
+                callback(remote.resume.size, remote.resume.size);
+            }
             return self
                 .verify_and_install(file_id, dest_path, &remote.resume, expectation)
                 .await;
@@ -411,7 +415,7 @@ impl DownloadApi {
         let encoded_id = crate::drive::files_api::urlencoding(file_id);
         let mut request = self
             .client
-            .raw_http()
+            .streaming_http()
             .get(format!(
                 "{}/files/{encoded_id}?form=content",
                 self.drive_base
@@ -522,11 +526,15 @@ fn verify_local_destination(
             .map(String::from_utf8)
             .transpose()
             .map_err(|_| AppError::generic("下载占位 fileId 标记损坏"))?;
+        // 归属校验：fileId 标记存在时必须与任务一致（防止覆盖到其他文件的占位符）；
+        // 标记缺失但满足「0 字节 + state=placeholder」时按旧版客户端遗留占位符放行——
+        // 旧版只写 state 不写 fileId，0 字节占位符不可能是用户内容，安装结算会补全标记。
+        let owner_mismatch = owner.as_deref().is_some_and(|owner| owner != file_id);
         if metadata.file_type().is_symlink()
             || !metadata.is_file()
             || metadata.len() != 0
             || !crate::mount::manager::is_placeholder_file(dest_path)
-            || owner.as_deref() != Some(file_id)
+            || owner_mismatch
         {
             return Err(AppError::generic(
                 "下载期间目标路径出现用户内容，已拒绝覆盖并保留下载临时文件",
@@ -720,4 +728,80 @@ fn remove_resume_metadata(dest: &Path) {
 pub fn discard_resume_artifacts(dest: &Path) {
     let _ = std::fs::remove_file(tmp_path(dest));
     remove_resume_metadata(dest);
+}
+
+#[cfg(test)]
+mod tests {
+    //! 安装前目标校验的核心合同：旧版占位符放行、他主占位符与用户内容拒绝。
+    use super::*;
+    use crate::mount::manager::{STATE_PLACEHOLDER, XATTR_FILE_ID, XATTR_STATE};
+
+    /// 构造仅含占位身份约束的 expectation。
+    fn placeholder_expectation(file_id: &str) -> DownloadExpectation {
+        DownloadExpectation {
+            edited_time_ms: None,
+            size: None,
+            content_hash: None,
+            destination_snapshot: None,
+            placeholder_file_id: Some(file_id.to_string()),
+        }
+    }
+
+    /// 在临时目录创建 0 字节文件并按需写入 xattr 标记。
+    fn create_dest(dir: &tempfile::TempDir, xattrs: &[(&str, &str)]) -> PathBuf {
+        let dest = dir.path().join("video.mp4");
+        std::fs::write(&dest, b"").expect("创建目标文件失败");
+        for (key, value) in xattrs {
+            xattr::set(&dest, key, value.as_bytes()).expect("写入 xattr 失败");
+        }
+        dest
+    }
+
+    /// 旧版客户端遗留占位符（0 字节 + state=placeholder、无 fileId 标记）必须放行：
+    /// 它是自家占位符而非用户内容，拒绝会让历史占位符永远无法完成下载。
+    #[test]
+    fn legacy_placeholder_without_file_id_is_accepted() {
+        let dir = tempfile::tempdir().expect("创建临时目录失败");
+        let dest = create_dest(&dir, &[(XATTR_STATE, STATE_PLACEHOLDER)]);
+        assert!(verify_local_destination(&dest, Some(&placeholder_expectation("file-a"))).is_ok());
+    }
+
+    /// fileId 标记存在且匹配时放行。
+    #[test]
+    fn placeholder_with_matching_file_id_is_accepted() {
+        let dir = tempfile::tempdir().expect("创建临时目录失败");
+        let dest = create_dest(
+            &dir,
+            &[(XATTR_STATE, STATE_PLACEHOLDER), (XATTR_FILE_ID, "file-a")],
+        );
+        assert!(verify_local_destination(&dest, Some(&placeholder_expectation("file-a"))).is_ok());
+    }
+
+    /// fileId 标记存在但不匹配时拒绝：该占位符属于其他文件，覆盖会错位内容。
+    #[test]
+    fn placeholder_with_mismatched_file_id_is_rejected() {
+        let dir = tempfile::tempdir().expect("创建临时目录失败");
+        let dest = create_dest(
+            &dir,
+            &[(XATTR_STATE, STATE_PLACEHOLDER), (XATTR_FILE_ID, "file-b")],
+        );
+        assert!(verify_local_destination(&dest, Some(&placeholder_expectation("file-a"))).is_err());
+    }
+
+    /// 有实际内容的文件即使带占位标记也拒绝：不能覆盖用户内容。
+    #[test]
+    fn destination_with_content_is_rejected() {
+        let dir = tempfile::tempdir().expect("创建临时目录失败");
+        let dest = create_dest(&dir, &[(XATTR_STATE, STATE_PLACEHOLDER)]);
+        std::fs::write(&dest, b"user data").expect("写入用户内容失败");
+        assert!(verify_local_destination(&dest, Some(&placeholder_expectation("file-a"))).is_err());
+    }
+
+    /// 缺少占位标记的 0 字节文件拒绝：无法证明是自家占位符。
+    #[test]
+    fn destination_without_placeholder_mark_is_rejected() {
+        let dir = tempfile::tempdir().expect("创建临时目录失败");
+        let dest = create_dest(&dir, &[]);
+        assert!(verify_local_destination(&dest, Some(&placeholder_expectation("file-a"))).is_err());
+    }
 }
