@@ -1,8 +1,7 @@
-<!-- 步进器 [− | 值 | +] -->
+<!-- 步进器（v2：灰底胶囊容器 + 白色悬浮按钮） [− | 值 | +] -->
 <script setup lang="ts">
 import { computed } from "vue";
 import MateIcon from "./MateIcon.vue";
-import MateVerticalSeparator from "./MateVerticalSeparator.vue";
 
 interface Props {
   modelValue: number;
@@ -36,9 +35,7 @@ function inc(): void {
     <button class="mate-stepper__btn" :class="{ 'is-disabled': !canDec }" :disabled="!canDec" @click="dec">
       <MateIcon name="x" :size="16" class="mate-stepper__minus" />
     </button>
-    <MateVerticalSeparator :height="20" />
     <span class="mate-stepper__val">{{ modelValue }}</span>
-    <MateVerticalSeparator :height="20" />
     <button class="mate-stepper__btn" :class="{ 'is-disabled': !canInc }" :disabled="!canInc" @click="inc">
       <span class="mate-stepper__plus">+</span>
     </button>
@@ -49,34 +46,38 @@ function inc(): void {
 .mate-stepper {
   display: inline-flex;
   align-items: center;
-  height: 32px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background-color: var(--bg-container);
-  overflow: hidden;
+  background: var(--bg-fill);
+  border-radius: var(--radius-md);
+  padding: 3px;
 }
 .mate-stepper__btn {
-  width: 32px;
-  height: 100%;
+  width: 30px;
+  height: 30px;
   border: none;
+  border-radius: var(--radius-sm);
   background: transparent;
   cursor: pointer;
-  color: var(--text-secondary);
+  color: var(--ink-600);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  transition: background-color 0.15s;
+  transition: background-color 0.15s, color 0.15s;
 }
-.mate-stepper__btn:hover:not(.is-disabled) { background-color: var(--bg-hover); color: var(--text-primary); }
-.mate-stepper__btn.is-disabled { color: var(--text-placeholder); cursor: not-allowed; }
+.mate-stepper__btn:hover:not(.is-disabled) {
+  background: var(--bg-card);
+  color: var(--brand-500);
+  box-shadow: var(--sh-sm);
+}
+.mate-stepper__btn.is-disabled { color: var(--ink-300); cursor: not-allowed; }
 /* 把 x 图标旋转成减号 */
 .mate-stepper__minus { transform: rotate(45deg); }
-.mate-stepper__plus { font-size: 18px; line-height: 1; }
+.mate-stepper__plus { font-size: 15px; line-height: 1; }
 .mate-stepper__val {
-  width: 48px;
+  min-width: 44px;
   text-align: center;
   font-size: var(--font-body);
   font-weight: var(--fw-medium);
-  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-900);
 }
 </style>

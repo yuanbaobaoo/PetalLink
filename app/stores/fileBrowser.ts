@@ -30,17 +30,22 @@ export const useFileBrowserStore = defineStore("fileBrowser", () => {
   // 当前文件夹位置
   const current = computed(() => pathStack.value[pathStack.value.length - 1]);
 
-  /** 加载当前目录内容 */
-  async function loadCurrent(): Promise<void> {
-    loading.value = true;
+  /**
+   * 加载当前目录内容
+   *
+   * @param silent - 静默刷新：不切换 loading（避免遮罩闪烁），失败时保留旧列表；
+   *   目录切换/首次加载传 false 走完整 loading 流程
+   */
+  async function loadCurrent(silent = false): Promise<void> {
+    if (!silent) loading.value = true;
     errorMessage.value = null;
     try {
       files.value = await driveApi.listFiles(current.value.id || undefined);
     } catch (e) {
       errorMessage.value = extractErrorMessage(e);
-      files.value = [];
+      if (!silent) files.value = [];
     } finally {
-      loading.value = false;
+      if (!silent) loading.value = false;
     }
   }
 
@@ -69,9 +74,9 @@ export const useFileBrowserStore = defineStore("fileBrowser", () => {
     await jumpTo(pathStack.value.length - 2);
   }
 
-  /** 刷新当前目录 */
+  /** 刷新当前目录（静默：已有列表不闪 loading 遮罩，失败保留旧数据） */
   async function refresh(): Promise<void> {
-    await loadCurrent();
+    await loadCurrent(true);
   }
 
   return {

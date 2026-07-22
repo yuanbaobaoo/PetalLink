@@ -1,4 +1,4 @@
-<!-- 文本输入框，自绘容器，32px 高 -->
+<!-- 文本输入框（v2：灰底无框，聚焦白底 + 品牌描边环），38px 高 -->
 <script setup lang="ts">
 import { computed } from "vue";
 import MateIcon from "./MateIcon.vue";
@@ -110,34 +110,35 @@ function handleBlur(): void {
 .mate-text-field {
   display: inline-flex;
   align-items: center;
-  height: 32px;
+  height: 38px;
   width: 100%;
   padding: 0 var(--space-md);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background-color: var(--bg-container);
-  transition: border-color 0.15s;
+  border: none;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-fill);
+  transition: box-shadow 0.12s, background-color 0.12s;
   gap: var(--space-sm);
 }
 
+/* v2 聚焦态：白底 + 品牌浅蓝描边环 */
 .mate-text-field:focus-within {
-  border-color: var(--color-brand);
+  background-color: var(--bg-card);
+  box-shadow: inset 0 0 0 2px var(--brand-200);
 }
 
 .mate-text-field.is-error {
-  border-color: var(--color-error);
+  box-shadow: inset 0 0 0 2px var(--err);
 }
 .mate-text-field.is-error:focus-within {
-  border-color: var(--color-error);
+  box-shadow: inset 0 0 0 2px var(--err);
 }
 
 .mate-text-field.is-disabled {
-  background-color: var(--bg-hover);
   opacity: 0.6;
 }
 
 .mate-text-field__prefix {
-  color: var(--text-secondary);
+  color: var(--ink-300);
   flex-shrink: 0;
 }
 
@@ -149,10 +150,10 @@ function handleBlur(): void {
   outline: none;
   background: transparent;
   font-family: var(--font-family);
-  color: var(--text-primary);
+  color: var(--ink-900);
 }
 
 .mate-text-field__input::placeholder {
-  color: var(--text-placeholder);
+  color: var(--ink-300);
 }
 </style>

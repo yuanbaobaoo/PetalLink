@@ -1,12 +1,12 @@
 <!--
-  登录页 —— macOS 窗口 + 居中品牌卡片。
+  登录页 —— v2 原型 01-login：品牌渐变画布 + 居中玻璃拟态卡片。
 
   布局：
-  - 渐变背景（135deg #EBF1FF → #F5F5F5 → #FFFFFF）
+  - 柔光渐变背景（径向品牌蓝光斑 + 浅色线性渐变）
   - 3 个低透明度装饰圆
-  - 居中卡片（max-width 480，radius 9）
-  - 卡片内：品牌容器图标 + 标题 + 品牌分隔线 + 可选 warning/error banner + 主按钮
-  - 授权中：替换为 spinner + 提示 + 取消按钮
+  - 居中玻璃卡片（480px，白 90% + blur 16，radius-xl + sh-pop）
+  - 卡片内：品牌图标 + 标题 + 渐变分隔线 + 可选 warning/error banner + 主按钮
+  - 授权中：替换为 spinner 条 + 取消按钮
 -->
 <script setup lang="ts">
 import { computed, onMounted } from "vue";
@@ -58,7 +58,7 @@ function handleDismissError(): void {
     <div class="decor-circle decor-circle--md" />
     <div class="decor-circle decor-circle--sm" />
 
-    <!-- 居中卡片 -->
+    <!-- 居中玻璃卡片 -->
     <div class="login-card">
       <!-- 品牌容器图标 -->
       <MateAppLogo container text="" />
@@ -66,7 +66,7 @@ function handleDismissError(): void {
       <!-- 标题 -->
       <h1 class="login-card__title">{{ appTitle }}</h1>
 
-      <!-- 品牌分隔线 -->
+      <!-- 渐变分隔线 -->
       <div class="login-card__divider" />
 
       <!-- secret 未配置警告 -->
@@ -98,7 +98,7 @@ function handleDismissError(): void {
             <MateCircularProgress :size="16" :stroke-width="2" />
             <span class="authorizing-pane__text">请在浏览器中完成授权...</span>
           </div>
-          <MateButton variant="text" icon="x" @click="handleCancel">
+          <MateButton variant="text" icon="x" class="authorizing-pane__cancel" @click="handleCancel">
             取消授权
           </MateButton>
         </div>
@@ -109,7 +109,8 @@ function handleDismissError(): void {
           variant="primary"
           icon="cloud"
           full-width
-          :height="40"
+          :height="46"
+          class="login-card__login-btn"
           :disabled="!canLogin"
           @click="handleLogin"
         >
@@ -132,13 +133,11 @@ function handleDismissError(): void {
   align-items: center;
   justify-content: center;
   overflow: hidden;
-  /* 渐变背景 */
-  background: linear-gradient(
-    135deg,
-    #ebf1ff 0%,
-    #f5f5f5 50%,
-    #ffffff 100%
-  );
+  /* v2：径向品牌蓝光斑 + 浅色线性渐变 */
+  background:
+    radial-gradient(720px 420px at 85% -10%, #dce8fc 0%, transparent 60%),
+    radial-gradient(640px 420px at 0% 110%, #eff4fe 0%, transparent 55%),
+    linear-gradient(150deg, #fbfbfc 0%, #f5f5f7 100%);
 }
 
 /* 装饰圆（品牌色低透明度） */
@@ -146,7 +145,7 @@ function handleDismissError(): void {
   position: absolute;
   border-radius: 50%;
   pointer-events: none;
-  background-color: var(--color-brand);
+  background-color: var(--brand-500);
 }
 .decor-circle--lg {
   width: 400px;
@@ -167,10 +166,10 @@ function handleDismissError(): void {
   height: 200px;
   top: 45%;
   left: 30%;
-  opacity: 0.04;
+  opacity: 0.05;
 }
 
-/* 登录卡片 */
+/* 登录卡片（v2：玻璃拟态） */
 .login-card {
   position: relative;
   z-index: 1;
@@ -179,45 +178,49 @@ function handleDismissError(): void {
   align-items: center;
   width: 100%;
   max-width: 480px;
-  padding: var(--space-xxl) var(--space-xl);
-  /*background-color: var(--bg-container);*/
-  border-radius: var(--radius-lg);
-  /*border: 0.5px solid var(--border);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16),
-    0 0 0 0.5px rgba(0, 0, 0, 0.06);*/
+  padding: 44px 40px 32px;
+  background: rgba(255, 255, 255, 0.9);
+  backdrop-filter: blur(16px);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--sh-pop), 0 0 0 0.5px rgba(0, 0, 0, 0.04);
 }
 
 .login-card__title {
-  margin-top: var(--space-md);
+  margin-top: 14px;
   font-size: var(--font-title-md);
   font-weight: var(--fw-semibold);
-  color: var(--text-primary);
+  color: var(--ink-900);
   letter-spacing: -0.2px;
   text-align: center;
 }
 
 .login-card__divider {
-  width: 40px;
-  height: 2px;
-  margin: var(--space-xs) 0;
-  background-color: var(--color-brand);
-  border-radius: 1px;
+  width: 44px;
+  height: 3px;
+  margin-top: 10px;
+  background: var(--grad-brand);
+  border-radius: var(--radius-full);
 }
 
 .login-card__banner {
   width: 100%;
-  margin-top: var(--space-md);
+  margin-top: var(--space-lg);
 }
 
 .login-card__actions {
   width: 100%;
-  margin-top: var(--space-xl);
+  margin-top: 36px;
+}
+
+.login-card__login-btn {
+  border-radius: var(--radius-lg);
+  font-size: 15px;
 }
 
 .login-card__hint {
-  margin-top: var(--space-md);
+  margin-top: 14px;
   font-size: var(--font-caption);
-  color: var(--text-secondary);
+  color: var(--ink-400);
   text-align: center;
 }
 
@@ -226,24 +229,31 @@ function handleDismissError(): void {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: var(--space-sm);
+  gap: 10px;
 }
 
 .authorizing-pane__bar {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: var(--space-sm);
+  gap: 10px;
   width: 100%;
-  height: 40px;
+  height: 46px;
   padding: 0 var(--space-lg);
-  background-color: var(--color-brand-lighter);
-  border-radius: var(--radius-sm);
+  background-color: var(--brand-50);
+  border-radius: var(--radius-lg);
 }
 
 .authorizing-pane__text {
   font-size: var(--font-body);
   font-weight: var(--fw-medium);
-  color: var(--color-brand);
+  color: var(--brand-500);
+}
+
+.authorizing-pane__cancel {
+  color: var(--ink-600);
+}
+.authorizing-pane__cancel:hover {
+  background-color: var(--bg-fill);
 }
 </style>

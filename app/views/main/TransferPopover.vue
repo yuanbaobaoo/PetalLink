@@ -1,4 +1,4 @@
-<!-- 传输队列弹窗，420×560，单列表含上传/下载/删除 -->
+<!-- 传输队列弹窗（v2：440×580，stat-pill 统计条 + 方向 tile 任务行），单列表含上传/下载/删除 -->
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { useTransferStore } from "@/stores/transfer";
@@ -29,15 +29,15 @@ const allItems = computed(() => transfer.tasks);
 interface StateMeta { icon: string; label: string; color: string; spin?: boolean; }
 // 各传输状态的展示元信息（图标/文案/颜色）
 const stateMeta: Record<number, StateMeta> = {
-  [TRANSFER_STATE.PENDING]: { icon: "clock", label: "等待调度", color: "var(--text-secondary)" },
-  [TRANSFER_STATE.RUNNING]: { icon: "sync", label: "传输中", color: "var(--color-brand)", spin: true },
-  [TRANSFER_STATE.WAITING_FOR_NETWORK]: { icon: "clock", label: "等待网络", color: "var(--color-warning)" },
-  [TRANSFER_STATE.BACKING_OFF]: { icon: "clock", label: "等待重试", color: "var(--color-warning)" },
-  [TRANSFER_STATE.VERIFYING_REMOTE]: { icon: "sync", label: "核验远端", color: "var(--color-brand)", spin: true },
-  [TRANSFER_STATE.RESTART_REQUIRED]: { icon: "refresh", label: "等待重新规划", color: "var(--color-warning)" },
-  [TRANSFER_STATE.COMPLETED]: { icon: "check", label: "已完成", color: "var(--color-success)" },
-  [TRANSFER_STATE.FAILED]: { icon: "x", label: "失败", color: "var(--color-error)" },
-  [TRANSFER_STATE.CANCELED]: { icon: "x", label: "已取消", color: "var(--text-secondary)" },
+  [TRANSFER_STATE.PENDING]: { icon: "clock", label: "等待调度", color: "var(--ink-400)" },
+  [TRANSFER_STATE.RUNNING]: { icon: "sync", label: "传输中", color: "var(--brand-500)", spin: true },
+  [TRANSFER_STATE.WAITING_FOR_NETWORK]: { icon: "clock", label: "等待网络", color: "var(--warn)" },
+  [TRANSFER_STATE.BACKING_OFF]: { icon: "clock", label: "等待重试", color: "var(--warn)" },
+  [TRANSFER_STATE.VERIFYING_REMOTE]: { icon: "sync", label: "核验远端", color: "var(--brand-500)", spin: true },
+  [TRANSFER_STATE.RESTART_REQUIRED]: { icon: "refresh", label: "等待重新规划", color: "var(--warn)" },
+  [TRANSFER_STATE.COMPLETED]: { icon: "check", label: "已完成", color: "var(--ok)" },
+  [TRANSFER_STATE.FAILED]: { icon: "x", label: "失败", color: "var(--err)" },
+  [TRANSFER_STATE.CANCELED]: { icon: "x", label: "已取消", color: "var(--ink-400)" },
 };
 
 // 清除菜单选项（已完成 / 失败历史 / 完成+失败历史）
@@ -64,20 +64,33 @@ function dirIcon(direction: number): string {
   return "transfer";
 }
 
+/**
+ * 方向 tile 的配色类名（上传蓝 / 下载浅蓝 / 删除灰）
+ *
+ * @param direction - 传输方向
+ */
+function dirTileClass(direction: number): string {
+  if (direction === TRANSFER_DIR.DOWNLOAD || direction === TRANSFER_DIR.DOWNLOAD_UPDATE) {
+    return "tp-item__dir--down";
+  }
+  if (direction === TRANSFER_DIR.DELETE) return "tp-item__dir--del";
+  return "tp-item__dir--up";
+}
+
 function progressValue(t: { total_size: number; transferred: number }): number | null {
   if (t.total_size <= 0) return null;
   return Math.min(1, t.transferred / t.total_size);
 }
 function progressColor(state: number): string {
-  if (state === TRANSFER_STATE.COMPLETED) return "var(--color-success)";
-  if (state === TRANSFER_STATE.FAILED) return "var(--color-error)";
+  if (state === TRANSFER_STATE.COMPLETED) return "var(--ok)";
+  if (state === TRANSFER_STATE.FAILED) return "var(--err)";
   if (
     state === TRANSFER_STATE.PENDING
     || state === TRANSFER_STATE.WAITING_FOR_NETWORK
     || state === TRANSFER_STATE.BACKING_OFF
     || state === TRANSFER_STATE.RESTART_REQUIRED
-  ) return "var(--border-hover)";
-  return "var(--color-brand)";
+  ) return "var(--ink-300)";
+  return "var(--grad-brand)";
 }
 
 function fmtSize(bytes: number): string {
@@ -128,18 +141,26 @@ async function onRetry(item: TransferTask): Promise<void> {
       <MateButton variant="icon" icon="x" tooltip="关闭" @click="emit('close')" />
     </div>
 
-    <!-- 统计栏 -->
+    <!-- 统计条（stat-pill） -->
     <div class="tp-stats">
-      <span>处理中 {{ transfer.processing }}</span>
-      <span class="tp-stats__sep" />
-      <span>等待中 {{ transfer.waiting }}</span>
-      <span class="tp-stats__sep" />
-      <span>已完成 {{ transfer.completed }}</span>
-      <span v-if="transfer.failed" class="tp-stats__failed">
-        历史失败 {{ transfer.failed }}
-      </span>
+      <div class="stat-pill">
+        <span class="stat-pill__num">{{ transfer.processing }}</span>
+        <span class="stat-pill__label">处理中</span>
+      </div>
+      <div class="stat-pill">
+        <span class="stat-pill__num">{{ transfer.waiting }}</span>
+        <span class="stat-pill__label">等待中</span>
+      </div>
+      <div class="stat-pill">
+        <span class="stat-pill__num">{{ transfer.completed }}</span>
+        <span class="stat-pill__label">已完成</span>
+      </div>
+      <div class="stat-pill" :class="{ 'stat-pill--err': transfer.failed > 0 }">
+        <span class="stat-pill__num">{{ transfer.failed }}</span>
+        <span class="stat-pill__label">历史失败</span>
+      </div>
       <MatePopupMenu class="tp-stats__clear" :items="clearItems" @select="onClear">
-        <MateButton variant="icon" icon="transfer" tooltip="清除" />
+        <MateButton variant="icon" icon="trash" tooltip="清除" />
       </MatePopupMenu>
     </div>
 
@@ -147,11 +168,13 @@ async function onRetry(item: TransferTask): Promise<void> {
     <div class="tp-body">
       <MateEmpty v-if="allItems.length === 0" icon="cloud" title="暂无传输任务" />
       <div v-for="item in allItems" :key="item.id" class="tp-item">
-        <MateIcon :name="dirIcon(item.direction)" :size="16" class="tp-item__dir" />
+        <span class="tp-item__dir" :class="dirTileClass(item.direction)">
+          <MateIcon :name="dirIcon(item.direction)" :size="18" />
+        </span>
         <div class="tp-item__info">
-          <div class="tp-item__name">
+          <div class="tp-item__namerow">
             <span class="tp-item__tag">{{ DIR_LABEL[item.direction] ?? "—" }}</span>
-            {{ item.name }}
+            <span class="tp-item__name">{{ item.name }}</span>
           </div>
           <!-- 失败时显示错误原因，否则显示进度条 -->
           <div
@@ -168,7 +191,6 @@ async function onRetry(item: TransferTask): Promise<void> {
             <MateLinearProgress
               class="tp-item__bar"
               :value="progressValue(item)"
-              :height="4"
               :color="progressColor(item.state)"
             />
             <span class="tp-item__pct">
@@ -205,37 +227,73 @@ async function onRetry(item: TransferTask): Promise<void> {
 .transfer-popover {
   width: var(--transfer-popover-width);
   height: var(--transfer-popover-height);
-  background-color: var(--bg-container);
-  border-radius: var(--radius-md);
-  border: 0.5px solid var(--border);
-  box-shadow: var(--shadow-modal);
+  background-color: var(--bg-card);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--sh-pop), 0 0 0 0.5px rgba(0, 0, 0, 0.05);
   display: flex; flex-direction: column; overflow: hidden;
 }
 
 .tp-header {
-  height: 48px; display: flex; align-items: center; padding: 0 var(--space-sm) 0 var(--space-lg); gap: var(--space-sm);
-  border-bottom: 0.5px solid var(--border); flex-shrink: 0;
+  height: 60px; display: flex; align-items: center; padding: 0 12px 0 20px; gap: 10px;
+  flex-shrink: 0;
 }
-.tp-header__icon { color: var(--color-brand); }
-.tp-header__title { font-size: var(--font-title-sm); font-weight: var(--fw-semibold); flex: 1; color: var(--text-primary); }
+.tp-header__icon { color: var(--brand-500); }
+.tp-header__title { font-size: 17px; font-weight: var(--fw-semibold); flex: 1; color: var(--ink-900); }
 
-.tp-stats { height: 36px; display: flex; align-items: center; padding: 0 var(--space-lg); gap: var(--space-sm); font-size: var(--font-caption); color: var(--text-secondary); border-bottom: 0.5px solid var(--border); flex-shrink: 0; }
-.tp-stats__sep { width: 1px; height: 14px; background-color: var(--border); }
-.tp-stats__failed { color: var(--color-error); }
-.tp-stats__clear { margin-left: auto; }
+/* 统计条（v2 stat-pill） */
+.tp-stats {
+  display: flex; align-items: center; gap: var(--space-sm);
+  padding: 0 20px 14px; flex-shrink: 0;
+}
+.stat-pill {
+  flex: 1;
+  background: var(--bg-fill);
+  border-radius: var(--radius-md);
+  padding: 8px 10px;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.stat-pill__num { font-size: 16px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--ink-900); }
+.stat-pill__label { font-size: 11px; color: var(--ink-400); }
+.stat-pill--err { background: var(--err-bg); }
+.stat-pill--err .stat-pill__num { color: var(--err); }
+.tp-stats__clear { flex-shrink: 0; }
 
-.tp-body { flex: 1; overflow-y: auto; }
+.tp-body { flex: 1; overflow-y: auto; border-top: 1px solid var(--line); }
 
-.tp-item { height: 60px; display: flex; align-items: center; padding: 0 var(--space-lg); gap: var(--space-sm); border-bottom: 0.5px solid var(--border); }
-.tp-item__dir { color: var(--text-secondary); flex-shrink: 0; }
-.tp-item__info { flex: 1; min-width: 0; }
-.tp-item__name { font-size: var(--font-body-sm); font-weight: var(--fw-medium); color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tp-item__tag { font-size: var(--font-caption); color: var(--text-secondary); margin-right: 4px; padding: 0 4px; background: var(--bg-hover); border-radius: 3px; }
-.tp-item__progress { display: flex; align-items: center; gap: var(--space-sm); margin-top: 4px; }
-.tp-item__progress--delete { font-size: var(--font-caption); color: var(--text-secondary); }
-.tp-item__error { font-size: var(--font-caption); color: var(--color-error); margin-top: 4px; line-height: 1.4; word-break: break-all; }
+/* 任务行（v2：方向 tile + 迷你 chip + 进度条/错误文案） */
+.tp-item {
+  min-height: 68px; display: flex; align-items: center; padding: 10px 20px; gap: 12px;
+  border-bottom: 1px solid var(--line);
+}
+.tp-item__dir {
+  width: 36px; height: 36px; border-radius: var(--radius-md); flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+}
+.tp-item__dir--up { background: var(--brand-50); color: var(--brand-500); }
+.tp-item__dir--down { background: var(--info-bg); color: var(--info); }
+.tp-item__dir--del { background: var(--bg-fill); color: var(--ink-400); }
+.tp-item__info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 5px; }
+.tp-item__namerow { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.tp-item__tag {
+  font-size: 11px; color: var(--ink-600); padding: 0 6px; height: 20px;
+  display: inline-flex; align-items: center;
+  background: var(--bg-fill); border-radius: var(--radius-sm); flex-shrink: 0;
+}
+.tp-item__name {
+  font-size: 13.5px; font-weight: var(--fw-medium); color: var(--ink-900);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tp-item__progress { display: flex; align-items: center; gap: 10px; }
+.tp-item__progress--delete { font-size: var(--font-caption); color: var(--ink-400); }
+.tp-item__error { font-size: var(--font-caption); color: var(--err); line-height: 1.45; word-break: break-all; }
 .tp-item__bar { flex: 1; }
-.tp-item__pct { font-size: var(--font-caption); color: var(--text-secondary); white-space: nowrap; }
-.tp-item__state { font-size: var(--font-caption); font-weight: var(--fw-medium); white-space: nowrap; width: 80px; text-align: right; display: inline-flex; align-items: center; justify-content: flex-end; gap: 3px; }
-.tp-item__retry { flex-shrink: 0; margin-left: var(--space-xs); }
+.tp-item__pct {
+  font-size: 11.5px; color: var(--ink-400); white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.tp-item__state {
+  font-size: var(--font-caption); font-weight: var(--fw-medium); white-space: nowrap;
+  flex-shrink: 0; display: inline-flex; align-items: center; gap: 5px;
+}
+.tp-item__retry { flex-shrink: 0; }
 </style>

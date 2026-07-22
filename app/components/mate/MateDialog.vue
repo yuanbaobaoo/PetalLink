@@ -57,7 +57,8 @@ function close(): void {
 .mate-dialog-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.3);
+  background: rgba(28, 28, 30, 0.36);
+  backdrop-filter: blur(3px);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -65,10 +66,9 @@ function close(): void {
 }
 .mate-dialog {
   width: 100%;
-  background-color: var(--bg-container);
-  border: 0.5px solid rgba(0, 0, 0, 0.25);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-modal);
+  background-color: var(--bg-card);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--sh-pop);
   display: flex;
   flex-direction: column;
   animation: dialog-fade-in 0.15s ease-out;
@@ -76,27 +76,26 @@ function close(): void {
 .mate-dialog__header {
   display: flex;
   align-items: center;
-  gap: var(--space-sm);
-  padding: var(--space-xxl) var(--space-xxl) var(--space-sm) var(--space-xxl);
+  gap: var(--space-md);
+  padding: var(--space-xl) var(--space-xl) var(--space-sm);
 }
-.mate-dialog__title-icon { color: var(--color-brand); flex-shrink: 0; }
-.mate-dialog.is-danger .mate-dialog__title-icon { color: var(--color-error); }
+.mate-dialog__title-icon { color: var(--brand-500); flex-shrink: 0; }
+.mate-dialog.is-danger .mate-dialog__title-icon { color: var(--err); }
 .mate-dialog__title {
-  font-size: var(--font-title-sm);
+  font-size: 17px;
   font-weight: var(--fw-semibold);
-  color: var(--text-primary);
+  color: var(--ink-900);
 }
 .mate-dialog__body {
-  padding: var(--space-xs) var(--space-xxl) var(--space-xxl);
+  padding: var(--space-sm) var(--space-xl) 20px;
   font-size: var(--font-body);
-  line-height: 1.5;
-  color: var(--text-secondary);
+  line-height: 1.65;
+  color: var(--ink-600);
 }
 .mate-dialog__footer {
   display: flex;
   justify-content: flex-end;
-  gap: var(--space-sm);
-  padding: var(--space-sm) var(--space-lg) var(--space-lg);
-  border-top: 0.5px solid var(--border);
+  gap: 10px;
+  padding: 0 var(--space-xl) 20px;
 }
 </style>

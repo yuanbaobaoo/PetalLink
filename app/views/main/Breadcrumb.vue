@@ -23,10 +23,9 @@ const browser = useFileBrowserStore();
   height: var(--breadcrumb-height);
   display: flex;
   align-items: center;
-  padding: 0 var(--space-lg);
-  gap: var(--space-xs);
-  border-bottom: 0.5px solid var(--border);
-  background-color: var(--bg-container);
+  padding: 0 20px;
+  gap: 6px;
+  background-color: var(--bg-card);
   overflow-x: auto;
   white-space: nowrap;
   flex-shrink: 0;
@@ -34,20 +33,20 @@ const browser = useFileBrowserStore();
 
 .crumb {
   font-size: var(--font-body-sm);
-  color: var(--text-secondary);
+  color: var(--ink-400);
   cursor: pointer;
 }
 .crumb:hover {
-  color: var(--color-brand);
+  color: var(--brand-500);
 }
 .crumb.is-current {
-  color: var(--text-primary);
-  font-weight: var(--fw-medium);
+  color: var(--ink-900);
+  font-weight: var(--fw-semibold);
   cursor: default;
 }
 
 .crumb__sep {
-  font-size: 11px;
-  color: var(--text-placeholder);
+  font-size: var(--font-caption);
+  color: var(--ink-300);
 }
 </style>

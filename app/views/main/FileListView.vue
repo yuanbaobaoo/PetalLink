@@ -312,6 +312,22 @@ function syncStatusClass(f: DriveFile): string {
 }
 
 /**
+ * 文件类型色块 tile 的配色类名（v2：folder 橙 / doc 靛 / image 粉 / video 紫 / file 灰）
+ *
+ * @param f - 文件对象
+ */
+function fileTileClass(f: DriveFile): string {
+  if (driveApi.isFolder(f)) return "ftile--folder";
+  const cat = (f.category ?? "").toLowerCase();
+  switch (cat) {
+    case "image": return "ftile--image";
+    case "video": return "ftile--video";
+    case "document": return "ftile--doc";
+    default: return "ftile--file";
+  }
+}
+
+/**
  * 双击文件行：文件夹→打开目录，文件→触发同步下载
  *
  * @param f - 文件对象
@@ -714,13 +730,21 @@ function handleSort(field: "name" | "size" | "modifiedTime"): void {
 
 <template>
   <div class="file-list" :style="{ '--size-col-width': sizeWidth + 'px', '--time-col-width': timeWidth + 'px' }" @mousemove="onDrag" @mouseup="endDrag" @mouseleave="endDrag">
-    <!-- 批量操作栏 -->
+    <!-- 批量操作栏（v2：深色悬浮胶囊） -->
     <div v-if="checkedCount > 0" class="bulk-bar">
       <span class="bulk-bar__count">已选 {{ checkedCount }} 项</span>
-      <MateButton variant="text" icon="download" :loading="bulkDownloadLoading" :disabled="bulkDownloadLoading || bulkFreeUpLoading || bulkDeleteLoading || sync.isIndexing" @click="handleBulkDownload">批量下载</MateButton>
-      <MateButton variant="text" icon="cloud" :loading="bulkFreeUpLoading" :disabled="bulkDownloadLoading || bulkFreeUpLoading || bulkDeleteLoading" @click="handleBulkFreeUp">释放空间</MateButton>
-      <MateButton v-if="sync.mountConfigured" variant="text" icon="trash" danger :loading="bulkDeleteLoading" :disabled="bulkDownloadLoading || bulkFreeUpLoading || bulkDeleteLoading || sync.isIndexing" @click="handleBulkDelete">批量删除</MateButton>
-      <MateButton variant="icon" icon="x" tooltip="取消选择" @click="checked.clear(); showCheckboxes = false" />
+      <button class="bulk-btn" :disabled="bulkDownloadLoading || bulkFreeUpLoading || bulkDeleteLoading || sync.isIndexing" @click="handleBulkDownload">
+        <MateIcon name="download" :size="16" :spin="bulkDownloadLoading" /> 批量下载
+      </button>
+      <button class="bulk-btn" :disabled="bulkDownloadLoading || bulkFreeUpLoading || bulkDeleteLoading" @click="handleBulkFreeUp">
+        <MateIcon name="cloud" :size="16" :spin="bulkFreeUpLoading" /> 释放空间
+      </button>
+      <button v-if="sync.mountConfigured" class="bulk-btn bulk-btn--danger" :disabled="bulkDownloadLoading || bulkFreeUpLoading || bulkDeleteLoading || sync.isIndexing" @click="handleBulkDelete">
+        <MateIcon name="trash" :size="16" :spin="bulkDeleteLoading" /> 批量删除
+      </button>
+      <button class="bulk-close" title="取消选择" @click="checked.clear(); showCheckboxes = false">
+        <MateIcon name="x" :size="14" />
+      </button>
     </div>
 
     <!-- 空状态 -->
@@ -770,8 +794,10 @@ function handleSort(field: "name" | "size" | "modifiedTime"): void {
             <MateCheckbox v-if="showCheckboxes" :model-value="checked.has(f.id)" @update:model-value="handleToggleFile(f.id)" />
           </div>
           <div class="file-col file-col--name">
-            <img v-if="isThumbnailType(f) && thumbUrl(f)" :src="thumbUrl(f)" class="file-thumb" />
-            <MateIcon v-else :name="driveApi.fileTypeIcon(f)" :size="20" :class="{ 'is-folder': driveApi.isFolder(f) }" />
+            <span class="ftile" :class="fileTileClass(f)">
+              <img v-if="isThumbnailType(f) && thumbUrl(f)" :src="thumbUrl(f)" class="ftile__thumb" />
+              <MateIcon v-else :name="driveApi.fileTypeIcon(f)" :size="18" />
+            </span>
             <span class="file-name" :title="f.name">{{ f.name }}</span>
           </div>
           <div class="file-col file-col--size">
@@ -863,76 +889,138 @@ function handleSort(field: "name" | "size" | "modifiedTime"): void {
 </template>
 
 <style scoped>
-.file-list { flex: 1; display: flex; flex-direction: column; overflow: hidden; position: relative; }
+.file-list { flex: 1; display: flex; flex-direction: column; overflow: hidden; position: relative; padding: 0 12px; }
 
-/* 批量操作栏 */
-.bulk-bar { height: 36px; display: flex; align-items: center; gap: var(--space-sm); padding: 0 var(--space-lg); background-color: var(--color-brand-lighter); border-bottom: 0.5px solid var(--border); flex-shrink: 0; }
-.bulk-bar__count { font-size: var(--font-body-sm); color: var(--color-brand); font-weight: var(--fw-medium); margin-right: auto; }
+/* 批量操作栏（v2：深色悬浮胶囊） */
+.bulk-bar {
+  height: 44px; display: flex; align-items: center; gap: 10px;
+  margin: 10px 0 0; padding: 0 8px 0 16px;
+  background: rgba(28, 28, 30, 0.94); border-radius: var(--radius-lg);
+  color: #fff; box-shadow: var(--sh-lg); flex-shrink: 0;
+}
+.bulk-bar__count { font-size: var(--font-body-sm); font-weight: var(--fw-semibold); margin-right: auto; }
+.bulk-btn {
+  height: 32px; display: inline-flex; align-items: center; gap: 6px;
+  padding: 0 12px; border: none; border-radius: var(--radius-md);
+  background: transparent; color: rgba(255, 255, 255, 0.85);
+  font-size: var(--font-body-sm); font-weight: var(--fw-medium);
+  cursor: pointer; white-space: nowrap;
+}
+.bulk-btn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.12); }
+.bulk-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.bulk-btn--danger { color: #fda4af; }
+.bulk-btn--danger:hover:not(:disabled) { background: rgba(244, 63, 94, 0.18); }
+.bulk-close {
+  width: 28px; height: 28px; border: none; border-radius: 50%;
+  background: transparent; color: rgba(255, 255, 255, 0.7);
+  display: inline-flex; align-items: center; justify-content: center;
+  cursor: pointer; flex-shrink: 0;
+}
+.bulk-close:hover { background: rgba(255, 255, 255, 0.12); color: #fff; }
 
-/* 表头 */
-.file-header { height: var(--file-header-height); display: flex; align-items: center; background-color: var(--bg-hover); border-bottom: 1px solid var(--border); font-size: var(--font-caption); font-weight: var(--fw-medium); color: var(--text-secondary); flex-shrink: 0; padding: 0 var(--space-lg); }
+/* 表头（v2：小号大写感标签） */
+.file-header {
+  height: var(--file-header-height); display: flex; align-items: center;
+  border-bottom: 1px solid var(--line);
+  font-size: 11.5px; font-weight: var(--fw-semibold); letter-spacing: 0.3px;
+  color: var(--ink-400); flex-shrink: 0; padding: 0 12px;
+}
 .file-header__checkbox { width: 40px; display: flex; align-items: center; flex-shrink: 0; }
 .file-header__name { flex: 1; cursor: pointer; user-select: none; display: flex; align-items: center; gap: var(--space-xs); }
+.file-header__name:hover, .file-header__size:hover, .file-header__time:hover { color: var(--brand-500); }
 .file-header__size, .file-header__time { flex-shrink: 0; cursor: pointer; user-select: none; position: relative; display: flex; align-items: center; gap: var(--space-xs); }
-.file-header__size { width: var(--size-col-width, 100px); }
-.file-header__time { width: var(--time-col-width, 150px); }
+.file-header__size { width: var(--size-col-width, 110px); }
+.file-header__time { width: var(--time-col-width, 160px); }
 .resize-handle { position: absolute; right: 0; width: 6px; height: 100%; cursor: col-resize; }
-.file-header__status { width: 60px; flex-shrink: 0; }
-.file-header__actions { width: 40px; flex-shrink: 0; }
+.file-header__status { width: 72px; flex-shrink: 0; text-align: center; }
+.file-header__actions { width: 44px; flex-shrink: 0; text-align: center; }
 .is-desc { transform: rotate(90deg); }
 
-/* 文件行 */
+/* 文件行（v2：56px 卡片化行） */
 .file-body { flex: 1; overflow-y: auto; }
-.file-row { height: var(--file-row-height); display: flex; align-items: center; padding: 0 var(--space-lg); border-bottom: 0.5px solid var(--border); transition: background-color 0.1s; cursor: default; }
+.file-row {
+  height: var(--file-row-height); display: flex; align-items: center;
+  padding: 0 12px; border-bottom: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  transition: background-color 0.1s; cursor: default;
+}
 .file-row:hover { background-color: var(--bg-hover); }
-.file-row.is-selected { background-color: var(--color-brand-lighter); }
+.file-row.is-selected { background-color: var(--brand-50); }
 .file-col--checkbox { width: 40px; flex-shrink: 0; display: flex; align-items: center; }
-.file-col--name { flex: 1; min-width: 0; display: flex; align-items: center; gap: var(--space-sm); }
-.file-col--size, .file-col--time { flex-shrink: 0; font-size: var(--font-body-sm); color: var(--text-secondary); }
-.file-col--size { width: var(--size-col-width, 100px); }
-.file-col--time { width: var(--time-col-width, 150px); }
-.file-col--status { width: 60px; display: flex; align-items: center; justify-content: center; color: var(--text-placeholder); flex-shrink: 0; }
-.file-col--status :deep(.is-cloud-only) { color: var(--text-placeholder); }
-.file-col--status :deep(.is-synced-local) { color: var(--color-success); }
-.file-col--status :deep(.is-placeholder) { color: var(--text-secondary); }
-.file-col--status :deep(.is-folder-status) { color: var(--color-brand); }
-.file-col--actions { width: 40px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
-.file-row :deep(.is-folder) { color: var(--color-brand); }
-.file-thumb { width: 20px; height: 20px; border-radius: var(--radius-sm); object-fit: cover; flex-shrink: 0; }
-.file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--font-body); color: var(--text-primary); }
+.file-col--name { flex: 1; min-width: 0; display: flex; align-items: center; gap: 12px; }
+.file-col--size, .file-col--time { flex-shrink: 0; font-size: 12.5px; color: var(--ink-400); font-variant-numeric: tabular-nums; }
+.file-col--size { width: var(--size-col-width, 110px); }
+.file-col--time { width: var(--time-col-width, 160px); }
+.file-col--status { width: 72px; display: flex; align-items: center; justify-content: center; color: var(--ink-300); flex-shrink: 0; }
+.file-col--status :deep(.is-cloud-only) { color: var(--ink-300); }
+.file-col--status :deep(.is-synced-local) { color: var(--ok); }
+.file-col--status :deep(.is-placeholder) { color: var(--ink-600); }
+.file-col--status :deep(.is-folder-status) { color: var(--brand-500); }
+.file-col--actions { width: 44px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--font-body); color: var(--ink-900); }
+
+/* 文件类型色块 tile（v2：32px 圆角 6px，柔和底色 + 彩色图标） */
+.ftile {
+  width: 32px; height: 32px; border-radius: 6px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+}
+.ftile--folder { background: #fff4de; color: #f0a63c; }
+.ftile--doc { background: #eef2ff; color: #6366f1; }
+.ftile--image { background: #fde7f3; color: #ec4899; }
+.ftile--video { background: #f3e8ff; color: #8b5cf6; }
+.ftile--file { background: var(--bg-fill); color: var(--ink-400); }
+.ftile__thumb { width: 100%; height: 100%; border-radius: 6px; object-fit: cover; }
 
 /* 加载 / 空态 */
-.file-loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(255,255,255,0.6); }
+.file-loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(255, 255, 255, 0.6); }
 
 /* 底部 */
-.file-footer { height: 32px; display: flex; align-items: center; justify-content: center; font-size: var(--font-caption); color: var(--text-secondary); border-top: 0.5px solid var(--border); flex-shrink: 0; }
+.file-footer {
+  height: 36px; display: flex; align-items: center; justify-content: center;
+  font-size: var(--font-caption); color: var(--ink-300); flex-shrink: 0;
+}
 
-/* 右键菜单 */
+/* 右键菜单（v2：毛玻璃弹层） */
 .ctx-capture { position: fixed; inset: 0; z-index: 1500; }
-.ctx-menu { position: fixed; z-index: 1501; min-width: 168px; background: var(--bg-container); border: 0.5px solid var(--border); border-radius: var(--radius-md); box-shadow: var(--shadow-dropdown); padding: var(--space-xs); left: var(--menu-x, 0); top: var(--menu-y, 0); }
-.ctx-item { display: flex; align-items: center; gap: var(--space-sm); width: 100%; padding: 10px var(--space-md); font-size: var(--font-body); text-align: left; background: none; border: none; border-radius: var(--radius-sm); cursor: pointer; color: var(--text-primary); }
-.ctx-item:hover { background: var(--bg-hover); }
-.ctx-item--danger { color: var(--color-error); }
-.ctx-item:disabled { opacity: 0.5; cursor: not-allowed; }
+.ctx-menu {
+  position: fixed; z-index: 1501; min-width: 200px;
+  background: rgba(255, 255, 255, 0.96); backdrop-filter: blur(16px);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--sh-pop), 0 0 0 0.5px rgba(0, 0, 0, 0.05);
+  padding: 6px; left: var(--menu-x, 0); top: var(--menu-y, 0);
+  display: flex; flex-direction: column; gap: 1px;
+}
+.ctx-item {
+  display: flex; align-items: center; gap: 10px; width: 100%; height: 36px;
+  padding: 0 12px; font-size: var(--font-body); text-align: left;
+  background: none; border: none; border-radius: var(--radius-md);
+  cursor: pointer; color: var(--ink-900); white-space: nowrap;
+}
+.ctx-item:hover { background: var(--bg-fill); }
+.ctx-item--danger { color: var(--err); }
+.ctx-item--danger:hover { background: var(--err-bg); }
+.ctx-item:disabled { color: var(--ink-300); cursor: not-allowed; }
 .ctx-item:disabled:hover { background: none; }
-.ctx-sep { height: 0; border-top: 0.5px solid var(--border); margin: var(--space-xs) 0; }
+.ctx-sep { height: 1px; background: var(--line); margin: 5px 10px; }
 
-/* 属性列表 */
+/* 属性列表（v2 props-row） */
 .props-list { display: flex; flex-direction: column; }
-.props-row { display: flex; padding: var(--space-xs) 0; border-bottom: 0.5px solid var(--border); }
-.props-label { width: 80px; flex-shrink: 0; font-size: var(--font-body-sm); color: var(--text-secondary); }
-.props-value { flex: 1; font-size: var(--font-body-sm); color: var(--text-primary); word-break: break-all; }
-.props-mono { font-family: var(--font-mono); }
+.props-row { display: flex; align-items: baseline; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.props-row:last-child { border-bottom: none; }
+.props-label { width: 88px; flex-shrink: 0; font-size: var(--font-body-sm); color: var(--ink-400); }
+.props-value { flex: 1; font-size: var(--font-body-sm); color: var(--ink-900); word-break: break-all; }
+.props-mono { font-family: var(--font-mono); font-size: var(--font-caption); }
 
 /* 下载进度 */
 .dl-pane { display: flex; align-items: center; gap: var(--space-md); }
-.dl-name { font-size: var(--font-body); color: var(--text-primary); }
+.dl-name { font-size: var(--font-body); color: var(--ink-900); }
 
 /* 释放空间预览 */
 .freeup-pane { display: flex; flex-direction: column; gap: var(--space-sm); }
-.freeup-summary { font-size: var(--font-body-sm); color: var(--text-secondary); margin: 0; }
+.freeup-summary { font-size: var(--font-body-sm); color: var(--ink-600); margin: 0; }
+.freeup-summary strong { color: var(--ink-900); }
 .freeup-list { max-height: 280px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
-.freeup-row { display: flex; align-items: center; gap: var(--space-xs); padding: 4px 0; font-size: var(--font-body-sm); color: var(--text-primary); }
+.freeup-row { display: flex; align-items: center; gap: var(--space-sm); padding: 4px 0; font-size: var(--font-body-sm); color: var(--ink-900); }
 .freeup-row__name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.freeup-row__size { flex-shrink: 0; color: var(--text-secondary); }
+.freeup-row__size { flex-shrink: 0; color: var(--ink-400); font-variant-numeric: tabular-nums; }
 </style>

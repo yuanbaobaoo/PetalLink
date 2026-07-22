@@ -1,4 +1,4 @@
-<!-- 设置页，左导航 200px + 右设置区 -->
+<!-- 设置页（v2：左侧分组导航 240px + 右侧白卡面板 + 毛玻璃保存底栏） -->
 <script setup lang="ts">
 import { ref, computed, onMounted } from "vue";
 import { MateNavItem, MateSectionHeader, MateStepper, MateNumberField, MateTextField, MateSwitch, MateButton, MateInfoBanner, MateLogoWithText, MateIcon } from "@/components/mate";
@@ -22,14 +22,24 @@ type TabKey = "syncDir" | "transfer" | "advanced" | "account" | "logs" | "about"
 // 当前激活的 Tab
 const activeTab = ref<TabKey>("syncDir");
 
-// 左侧导航 Tab 列表
-const tabs: { key: TabKey; icon: string; label: string }[] = [
-  { key: "syncDir", icon: "folder", label: "同步目录" },
-  { key: "transfer", icon: "transfer", label: "传输设置" },
-  { key: "advanced", icon: "settings", label: "高级设置" },
-  { key: "account", icon: "info", label: "账号管理" },
-  { key: "logs", icon: "list", label: "日志查看" },
-  { key: "about", icon: "cloud", label: "关于" },
+// 左侧导航分组（通用 / 其他）
+const tabGroups: { group: string; items: { key: TabKey; icon: string; label: string }[] }[] = [
+  {
+    group: "通用",
+    items: [
+      { key: "syncDir", icon: "folder", label: "同步目录" },
+      { key: "transfer", icon: "transfer", label: "传输设置" },
+      { key: "advanced", icon: "settings", label: "高级设置" },
+    ],
+  },
+  {
+    group: "其他",
+    items: [
+      { key: "account", icon: "info", label: "账号管理" },
+      { key: "logs", icon: "list", label: "日志查看" },
+      { key: "about", icon: "cloud", label: "关于" },
+    ],
+  },
 ];
 
 // 传输设置
@@ -198,17 +208,19 @@ function fmtSize(bytes: number): string {
 
 <template>
   <div class="settings-page">
-    <!-- AppBar -->
+    <!-- 标题栏（返回 + 标题） -->
     <div class="settings-appbar">
       <MateButton variant="icon" icon="arrow" tooltip="返回" class="back-btn" @click="emit('back')" />
       <span class="settings-appbar__title">设置</span>
     </div>
 
     <div class="settings-body">
-      <!-- 左导航 200px -->
+      <!-- 左导航 240px（分组） -->
       <nav class="settings-nav">
-        <div class="settings-nav__header">设置</div>
-        <MateNavItem v-for="tab in tabs" :key="tab.key" :label="tab.label" :icon="tab.icon" :active="activeTab === tab.key" @click="activeTab = tab.key" />
+        <template v-for="g in tabGroups" :key="g.group">
+          <div class="settings-nav__group">{{ g.group }}</div>
+          <MateNavItem v-for="tab in g.items" :key="tab.key" :label="tab.label" :icon="tab.icon" :active="activeTab === tab.key" @click="activeTab = tab.key" />
+        </template>
       </nav>
 
       <!-- 右设置区 -->
@@ -217,13 +229,13 @@ function fmtSize(bytes: number): string {
         <section v-if="activeTab === 'syncDir'" class="settings-section">
           <MateSectionHeader icon="folder" text="同步目录" />
           <div v-if="!mountConfigured" class="card">
-            <MateIcon name="folder-open" :size="48" class="card-icon" />
+            <div class="card__badge"><MateIcon name="folder-open" :size="32" /></div>
             <div class="card-title">尚未配置同步目录</div>
             <div class="card-desc">选择一个本地空目录作为云盘镜像，文件将自动双向同步。</div>
             <MateButton variant="primary" icon="folder-open" :loading="selectDirLoading" :disabled="selectDirLoading" @click="handleSelectDir">选择目录</MateButton>
           </div>
-          <div v-else class="card card--success">
-            <MateIcon name="check" :size="20" class="card-icon" />
+          <div v-else class="card">
+            <MateIcon name="check" :size="20" class="card-icon card-icon--success" />
             <div class="card-title">当前同步目录</div>
             <code class="card-path">{{ mountDir }}</code>
             <MateButton variant="text" icon="folder-open" :loading="selectDirLoading" :disabled="selectDirLoading" @click="handleSelectDir">更换目录</MateButton>
@@ -234,51 +246,71 @@ function fmtSize(bytes: number): string {
         <!-- 传输设置 -->
         <section v-if="activeTab === 'transfer'" class="settings-section">
           <MateSectionHeader icon="transfer" text="传输设置" />
-          <div class="group-header">传输参数</div>
-          <div class="setting-row">
-            <div class="setting-label">并发上传数</div>
-            <div class="setting-desc">同时进行的文件传输任务数量。较高值可提升大文件传输效率，但会占用更多网络带宽。</div>
-            <div class="setting-control"><MateStepper v-model="concurrency" :min="1" :max="20" /><span class="suffix">范围 1-20</span></div>
-          </div>
-          <div class="setting-row">
-            <div class="setting-label">Debounce 时长</div>
-            <div class="setting-desc">文件变更后等待多少秒再触发同步上传，避免频繁修改导致重复传输。</div>
-            <div class="setting-control"><MateNumberField v-model="debounceSec" :min="1" :max="600" suffix="秒" /><span class="suffix" /></div>
-          </div>
-          <div class="setting-row">
-            <div class="setting-label">自动同步间隔</div>
-            <div class="setting-desc">每隔多久自动从云端拉取最新变更（新增/修改/删除）。0 = 关闭自动同步，仅手动点「同步索引」。设为 60 以上时生效。</div>
-            <div class="setting-control"><MateNumberField v-model="pollIntervalSec" :min="0" :max="86400" suffix="秒" /><span class="suffix" /></div>
-          </div>
-          <div class="group-header">同步过滤</div>
-          <div class="setting-row">
-            <div class="setting-label">跳过文件（逗号分隔）</div>
-            <div class="setting-desc">匹配名称的文件不会被同步，如 .DS_Store、临时文件。</div>
-            <MateTextField v-model="skipPatterns" width="100%" />
+          <div class="settings-panel">
+            <div class="group-header">传输参数</div>
+            <div class="setting-row">
+              <div class="setting-row__text">
+                <div class="setting-label">并发上传数</div>
+                <div class="setting-desc">同时进行的文件传输任务数量。较高值可提升大文件传输效率，但会占用更多网络带宽。</div>
+              </div>
+              <div class="setting-control"><MateStepper v-model="concurrency" :min="1" :max="20" /><span class="suffix">范围 1-20</span></div>
+            </div>
+            <div class="setting-row">
+              <div class="setting-row__text">
+                <div class="setting-label">Debounce 时长</div>
+                <div class="setting-desc">文件变更后等待多少秒再触发同步上传，避免频繁修改导致重复传输。</div>
+              </div>
+              <div class="setting-control"><MateNumberField v-model="debounceSec" :min="1" :max="600" suffix="秒" /></div>
+            </div>
+            <div class="setting-row">
+              <div class="setting-row__text">
+                <div class="setting-label">自动同步间隔</div>
+                <div class="setting-desc">每隔多久自动从云端拉取最新变更（新增/修改/删除）。0 = 关闭自动同步，仅手动点「同步索引」。设为 60 以上时生效。</div>
+              </div>
+              <div class="setting-control"><MateNumberField v-model="pollIntervalSec" :min="0" :max="86400" suffix="秒" /></div>
+            </div>
+            <div class="group-header">同步过滤</div>
+            <div class="setting-row setting-row--column">
+              <div class="setting-row__text">
+                <div class="setting-label">跳过文件（逗号分隔）</div>
+                <div class="setting-desc">匹配名称的文件不会被同步，如 .DS_Store、临时文件。</div>
+              </div>
+              <MateTextField v-model="skipPatterns" width="100%" />
+            </div>
           </div>
         </section>
 
         <!-- 高级设置 -->
         <section v-if="activeTab === 'advanced'" class="settings-section">
           <MateSectionHeader icon="settings" text="高级设置" />
-          <div class="group-header">通用</div>
-          <div class="setting-row">
-            <div class="setting-label">开机自启动</div>
-            <div class="setting-desc">开机登录后自动在后台启动（仅菜单栏图标，不显示主窗口）。关闭后需手动打开 App。</div>
-            <div class="setting-control"><MateSwitch :model-value="autoLaunch" @update:model-value="onToggleAutoLaunch" /></div>
-          </div>
-          <div class="group-header">OAuth</div>
-          <div class="setting-row">
-            <div class="setting-label">OAuth 回调端口</div>
-            <div class="setting-desc">本地 HTTP 回调服务器监听端口。修改后需与 AGC 后台 redirect_uri 保持一致。</div>
-            <div class="setting-control"><MateNumberField v-model="oauthPort" :min="1" :max="65535" /></div>
+          <div class="settings-panel">
+            <div class="group-header">通用</div>
+            <div class="setting-row">
+              <div class="setting-row__text">
+                <div class="setting-label">开机自启动</div>
+                <div class="setting-desc">开机登录后自动在后台启动（仅菜单栏图标，不显示主窗口）。关闭后需手动打开 App。</div>
+              </div>
+              <div class="setting-control"><MateSwitch :model-value="autoLaunch" @update:model-value="onToggleAutoLaunch" /></div>
+            </div>
+            <div class="group-header">OAuth</div>
+            <div class="setting-row">
+              <div class="setting-row__text">
+                <div class="setting-label">OAuth 回调端口</div>
+                <div class="setting-desc">本地 HTTP 回调服务器监听端口。修改后需与 AGC 后台 redirect_uri 保持一致。</div>
+              </div>
+              <div class="setting-control"><MateNumberField v-model="oauthPort" :min="1" :max="65535" /></div>
+            </div>
           </div>
           <MateInfoBanner variant="info" class="info-banner">回调地址固定为 http://127.0.0.1:&lt;端口&gt;/oauth/callback，修改端口后请同步更新 AGC 后台配置。</MateInfoBanner>
-          <div class="group-header">维护</div>
-          <div class="setting-row">
-            <div class="setting-label">清空缓存并重启</div>
-            <div class="setting-desc">清除登录状态、同步数据库、同步快照与配置文件，然后重启 App。适用于排查同步异常或切换账号时使用。</div>
-            <div class="setting-control"><MateButton variant="primary" icon="trash" danger :loading="clearLoading" :disabled="clearLoading" @click="handleClearCache">清空</MateButton></div>
+          <div class="settings-panel">
+            <div class="group-header">维护</div>
+            <div class="setting-row">
+              <div class="setting-row__text">
+                <div class="setting-label">清空缓存并重启</div>
+                <div class="setting-desc">清除登录状态、同步数据库、同步快照与配置文件，然后重启 App。适用于排查同步异常或切换账号时使用。</div>
+              </div>
+              <div class="setting-control"><MateButton variant="primary" icon="trash" danger :loading="clearLoading" :disabled="clearLoading" @click="handleClearCache">清空</MateButton></div>
+            </div>
           </div>
         </section>
 
@@ -289,20 +321,26 @@ function fmtSize(bytes: number): string {
             <div class="account-avatar">{{ userInitial }}</div>
             <div class="account-name">{{ userLabel }}</div>
           </div>
-          <div class="group-header">账号信息</div>
-          <div class="info-row"><span class="info-label">显示名</span><span class="info-value">{{ userInfo?.display_name ?? "—" }}</span></div>
-          <div class="info-row"><span class="info-label">手机号</span><span class="info-value">{{ authApi.secondaryLabel(userInfo) ?? "未授权" }}</span></div>
-          <div class="info-row"><span class="info-label">邮箱</span><span class="info-value">{{ userInfo?.email ?? "未授权" }}</span></div>
-          <div class="info-row"><span class="info-label">OpenID</span><span class="info-value info-mono">{{ userInfo?.open_id ?? "—" }}</span></div>
-          <div class="group-header">存储配额</div>
-          <div class="info-row"><span class="info-label">已用空间</span><span class="info-value">{{ about ? fmtSize(about.used_space) : "—" }}</span></div>
-          <div class="info-row"><span class="info-label">总容量</span><span class="info-value">{{ about && about.user_capacity > 0 ? fmtSize(about.user_capacity) : "—" }}</span></div>
-          <div class="info-row"><span class="info-label">剩余空间</span><span class="info-value">{{ about && about.user_capacity > 0 ? fmtSize(about.user_capacity - about.used_space) : "—" }}</span></div>
-          <div class="group-header">账号操作</div>
-          <div class="setting-row">
-            <div class="setting-label">退出登录</div>
-            <div class="setting-desc">清除本地 token 并返回登录页。后台进程仍会继续，可从菜单栏彻底退出。</div>
-            <div class="setting-control"><MateButton variant="primary" icon="x" danger :loading="logoutLoading" :disabled="logoutLoading" @click="handleLogout">退出登录</MateButton></div>
+          <div class="settings-panel">
+            <div class="group-header">账号信息</div>
+            <div class="info-row"><span class="info-label">显示名</span><span class="info-value">{{ userInfo?.display_name ?? "—" }}</span></div>
+            <div class="info-row"><span class="info-label">手机号</span><span class="info-value">{{ authApi.secondaryLabel(userInfo) ?? "未授权" }}</span></div>
+            <div class="info-row"><span class="info-label">邮箱</span><span class="info-value">{{ userInfo?.email ?? "未授权" }}</span></div>
+            <div class="info-row"><span class="info-label">OpenID</span><span class="info-value info-mono">{{ userInfo?.open_id ?? "—" }}</span></div>
+            <div class="group-header">存储配额</div>
+            <div class="info-row"><span class="info-label">已用空间</span><span class="info-value">{{ about ? fmtSize(about.used_space) : "—" }}</span></div>
+            <div class="info-row"><span class="info-label">总容量</span><span class="info-value">{{ about && about.user_capacity > 0 ? fmtSize(about.user_capacity) : "—" }}</span></div>
+            <div class="info-row"><span class="info-label">剩余空间</span><span class="info-value">{{ about && about.user_capacity > 0 ? fmtSize(about.user_capacity - about.used_space) : "—" }}</span></div>
+          </div>
+          <div class="settings-panel">
+            <div class="group-header">账号操作</div>
+            <div class="setting-row">
+              <div class="setting-row__text">
+                <div class="setting-label">退出登录</div>
+                <div class="setting-desc">清除本地 token 并返回登录页。后台进程仍会继续，可从菜单栏彻底退出。</div>
+              </div>
+              <div class="setting-control"><MateButton variant="primary" icon="x" danger :loading="logoutLoading" :disabled="logoutLoading" @click="handleLogout">退出登录</MateButton></div>
+            </div>
           </div>
         </section>
 
@@ -327,13 +365,13 @@ function fmtSize(bytes: number): string {
               </MateButton>
               <span v-if="updater.phase === 'upToDate'" class="about-update-hint">已是最新版本</span>
               <span v-else-if="updater.phase === 'error'" class="about-update-hint about-update-hint--error">检查失败</span>
-              <span v-else-if="updater.phase === 'available'" class="about-update-hint about-update-hint--available">
+              <span v-else-if="updater.phase === 'available'" class="chip chip--brand">
                 新版本 v{{ updater.newVersion }}
               </span>
             </div>
             <!-- 有可用更新时显示"查看更新日志"按钮 -->
             <div v-if="updater.phase === 'available'" class="about-update-action">
-              <MateButton variant="text" icon="info" @click="updater.showDialog()">查看更新日志</MateButton>
+              <MateButton variant="soft" icon="info" @click="updater.showDialog()">查看更新日志</MateButton>
             </div>
             <div class="about-tagline">一款开源免费的华为云盘客户端</div>
             <!-- 更新包下载进度：正在下载时展示进度条，点击重新打开弹窗 -->
@@ -365,67 +403,125 @@ function fmtSize(bytes: number): string {
       </div>
     </div>
 
-    <!-- 底部保存栏 -->
+    <!-- 底部保存栏（毛玻璃） -->
     <div v-if="showFooter" class="settings-footer">
       <MateButton variant="primary" icon="check" :disabled="saved || saving" :loading="saving" @click="handleSave">{{ saving ? "保存中…" : "保存设置" }}</MateButton>
       <MateButton variant="text" @click="handleReset">重置默认</MateButton>
       <span v-if="errorMessage" class="footer-error">{{ errorMessage }}</span>
-      <span v-else-if="saved" class="footer-saved"><span class="footer-dot" /> 配置已保存</span>
+      <span v-else-if="saved" class="chip chip--ok footer-saved"><span class="footer-dot" /> 配置已保存</span>
     </div>
   </div>
 </template>
 
 <style scoped>
-.settings-page { display: flex; flex-direction: column; width: 100%; height: 100%; background: var(--bg-page); }
-.settings-appbar { height: var(--appbar-height); display: flex; align-items: center; padding: 0 var(--space-lg); gap: var(--space-sm); border-bottom: 0.5px solid var(--border); background: var(--bg-container); flex-shrink: 0; }
+.settings-page { display: flex; flex-direction: column; width: 100%; height: 100%; background: var(--bg-app); }
+.settings-appbar { height: 56px; display: flex; align-items: center; padding: 0 20px; gap: var(--space-sm); border-bottom: 1px solid var(--line); background: var(--bg-card); flex-shrink: 0; }
 .back-btn { transform: rotate(180deg); }
-.settings-appbar__title { font-size: var(--font-title-sm); font-weight: var(--fw-semibold); }
+.settings-appbar__title { font-size: var(--font-title-sm); font-weight: var(--fw-semibold); color: var(--ink-900); }
 .settings-body { flex: 1; display: flex; min-height: 0; }
-.settings-nav { width: var(--settings-nav-width); padding: var(--space-lg) var(--space-sm); border-right: 0.5px solid var(--border); background: var(--bg-page); flex-shrink: 0; }
-.settings-nav__header { font-size: var(--font-caption); font-weight: var(--fw-semibold); color: var(--text-secondary); letter-spacing: 0.8px; margin-bottom: var(--space-sm); padding: 0 var(--space-md); }
-.settings-main { flex: 1; padding: var(--space-xl); overflow-y: auto; }
-.group-header { font-size: var(--font-body-sm); font-weight: var(--fw-semibold); color: var(--text-secondary); letter-spacing: 0.4px; padding: var(--space-sm) 0; border-bottom: 0.5px solid var(--border); margin-bottom: var(--space-md); margin-top: var(--space-xl); }
-.group-header:first-of-type { margin-top: 0; }
-.setting-row { padding: var(--space-lg) 0; border-bottom: 0.5px solid var(--border); }
-.setting-label { font-size: var(--font-body); font-weight: var(--fw-medium); color: var(--text-primary); }
-.setting-desc { font-size: var(--font-caption); color: var(--text-secondary); margin-top: var(--space-xs); margin-bottom: var(--space-sm); line-height: 1.5; }
-.setting-control { display: flex; align-items: center; gap: var(--space-sm); }
-.suffix { font-size: var(--font-body-sm); color: var(--text-secondary); }
-.info-banner { margin-top: var(--space-lg); }
-.info-row { display: flex; padding: var(--space-md) 0; border-bottom: 0.5px solid var(--border); }
-.info-label { width: 96px; flex-shrink: 0; font-size: var(--font-body-sm); color: var(--text-secondary); }
-.info-value { flex: 1; font-size: var(--font-body-sm); color: var(--text-primary); word-break: break-all; }
-.info-mono { font-family: var(--font-mono); }
-.card { padding: var(--space-xl); background: var(--bg-container); border: 1px solid var(--border); border-radius: var(--radius-md); display: flex; flex-direction: column; align-items: center; gap: var(--space-md); text-align: center; }
-.card--success { border-color: var(--color-success); }
+
+/* 左导航（v2：分组 + 大行高） */
+.settings-nav {
+  width: var(--settings-nav-width);
+  padding: 20px 12px;
+  border-right: 1px solid var(--line);
+  background: rgba(247, 247, 249, 0.85);
+  flex-shrink: 0;
+  display: flex; flex-direction: column; gap: 6px;
+  overflow-y: auto;
+}
+.settings-nav__group {
+  font-size: 11px; font-weight: var(--fw-semibold); letter-spacing: 0.4px;
+  color: var(--ink-300); padding: 20px 14px 6px;
+}
+.settings-nav__group:first-of-type { padding-top: 4px; }
+
+/* 右设置区（v2：灰底 + 白卡面板） */
+.settings-main { flex: 1; padding: 28px 32px; overflow-y: auto; background: var(--bg-app); }
+.settings-panel {
+  background: var(--bg-card);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--sh-sm), 0 0 0 0.5px var(--line);
+  padding: 4px 24px 8px;
+  margin-bottom: 20px;
+}
+.group-header {
+  font-size: var(--font-caption); font-weight: var(--fw-semibold); letter-spacing: 0.4px;
+  color: var(--ink-400); padding: 20px 0 8px; text-transform: uppercase;
+}
+.group-header:first-of-type { padding-top: 12px; }
+.setting-row { display: flex; align-items: center; gap: var(--space-xl); padding: var(--space-lg) 0; border-bottom: 1px solid var(--line); }
+.setting-row:last-child { border-bottom: none; }
+.setting-row--column { flex-direction: column; align-items: stretch; gap: var(--space-md); }
+.setting-row__text { flex: 1; min-width: 0; }
+.setting-label { font-size: var(--font-body); font-weight: var(--fw-medium); color: var(--ink-900); }
+.setting-desc { font-size: 12.5px; color: var(--ink-400); margin-top: 3px; line-height: 1.55; }
+.setting-control { display: flex; align-items: center; gap: var(--space-sm); flex-shrink: 0; }
+.suffix { font-size: var(--font-body-sm); color: var(--ink-400); }
+.info-banner { margin-top: 0; margin-bottom: 20px; }
+.info-row { display: flex; padding: 13px 0; border-bottom: 1px solid var(--line); font-size: 13.5px; }
+.info-row:last-child { border-bottom: none; }
+.info-label { width: 96px; flex-shrink: 0; color: var(--ink-400); }
+.info-value { flex: 1; color: var(--ink-900); word-break: break-all; }
+.info-mono { font-family: var(--font-mono); font-size: var(--font-caption); }
+
+/* 卡片 */
+.card {
+  padding: var(--space-xl); background: var(--bg-card);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--sh-sm), 0 0 0 0.5px var(--line);
+  display: flex; flex-direction: column; align-items: center; gap: var(--space-md);
+  text-align: center; margin-bottom: 20px;
+}
 .card--account { flex-direction: row; align-items: center; gap: var(--space-lg); text-align: left; }
 .card--about { align-items: flex-start; text-align: left; }
-.card-icon { color: var(--text-secondary); }
-.card-title { font-size: var(--font-body); font-weight: var(--fw-semibold); }
-.card-desc { font-size: var(--font-body-sm); color: var(--text-secondary); }
-.card-path { font-size: var(--font-caption); font-family: var(--font-mono); color: var(--text-secondary); background: var(--bg-hover); padding: 2px var(--space-sm); border-radius: var(--radius-sm); }
-.account-avatar { width: 56px; height: 56px; border-radius: 50%; background: linear-gradient(135deg, var(--color-brand), var(--color-brand-hover)); color: #fff; font-size: 22px; font-weight: var(--fw-semibold); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
-.account-name { font-size: var(--font-title-sm); font-weight: var(--fw-semibold); color: var(--text-primary); }
-/* 版本号 + 检查更新按钮同一行 */
+.card__badge {
+  width: 72px; height: 72px; border-radius: 14px;
+  background: var(--grad-brand-soft); color: var(--brand-400);
+  display: flex; align-items: center; justify-content: center;
+}
+.card-icon { color: var(--ink-400); }
+.card-icon--success { color: var(--ok); }
+.card-title { font-size: var(--font-body); font-weight: var(--fw-semibold); color: var(--ink-900); }
+.card-desc { font-size: var(--font-body-sm); color: var(--ink-400); }
+.card-path { font-size: var(--font-caption); font-family: var(--font-mono); color: var(--ink-600); background: var(--bg-fill); padding: 2px var(--space-sm); border-radius: var(--radius-sm); }
+.account-avatar { width: 56px; height: 56px; border-radius: 50%; background: var(--grad-brand); color: #fff; font-size: 22px; font-weight: var(--fw-semibold); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.account-name { font-size: var(--font-title-sm); font-weight: var(--fw-semibold); color: var(--ink-900); }
+
+/* 关于页 */
 .about-version-row { display: flex; align-items: center; gap: var(--space-sm); margin-top: var(--space-sm); flex-wrap: wrap; }
-.about-version { font-size: var(--font-caption); color: var(--text-secondary); }
-.about-tagline { font-size: var(--font-caption); color: var(--text-secondary); }
-.about-update-hint { font-size: var(--font-caption); color: var(--color-success); }
-.about-update-hint--error { color: var(--color-error); }
-.about-update-hint--available { color: var(--color-brand); font-weight: var(--fw-medium); }
-.about-update-action { margin-top: var(--space-sm); }
-/* 更新包下载进度（关于页） */
+.about-version { font-size: var(--font-caption); color: var(--ink-400); }
+.about-tagline { font-size: var(--font-caption); color: var(--ink-400); }
+.about-update-hint { font-size: var(--font-caption); color: var(--ok); }
+.about-update-hint--error { color: var(--err); }
+.about-update-action { margin-top: var(--space-xs); }
 .about-update-progress { width: 100%; margin-top: var(--space-md); cursor: pointer; padding: var(--space-sm) 0; }
 .about-update-progress__head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
-.about-update-progress__label { font-size: var(--font-caption); color: var(--text-secondary); }
-.about-update-progress__pct { font-size: var(--font-caption); font-weight: var(--fw-semibold); color: var(--color-brand); }
-.about-update-progress__bar { height: 4px; background-color: var(--bg-active); border-radius: 2px; overflow: hidden; }
-.about-update-progress__fill { height: 100%; background: linear-gradient(90deg, var(--color-brand), var(--color-brand-hover)); border-radius: 2px; transition: width 0.3s ease; }
-.settings-footer { height: var(--appbar-height); display: flex; align-items: center; gap: var(--space-md); padding: 0 var(--space-xl); border-top: 0.5px solid var(--border); background: var(--bg-container); flex-shrink: 0; }
-.footer-saved { font-size: var(--font-caption); color: var(--color-success); display: inline-flex; align-items: center; gap: var(--space-xs); }
-.footer-dot { width: 6px; height: 6px; border-radius: 50%; background-color: var(--color-success); display: inline-block; }
-.footer-error { font-size: var(--font-caption); color: var(--color-error); }
+.about-update-progress__label { font-size: var(--font-caption); color: var(--ink-400); }
+.about-update-progress__pct { font-size: var(--font-caption); font-weight: var(--fw-semibold); color: var(--brand-500); }
+.about-update-progress__bar { height: 4px; background-color: var(--bg-fill); border-radius: var(--radius-full); overflow: hidden; }
+.about-update-progress__fill { height: 100%; background: var(--grad-brand); border-radius: var(--radius-full); transition: width 0.3s ease; }
 .about-links { display: flex; gap: var(--space-lg); margin-top: var(--space-md); }
-.about-link { display: inline-flex; align-items: center; gap: var(--space-xs); font-size: var(--font-body-sm); color: var(--color-brand); text-decoration: none; transition: color 0.15s; }
-.about-link:hover { color: var(--color-brand-hover); text-decoration: underline; }
+.about-link { display: inline-flex; align-items: center; gap: var(--space-xs); font-size: var(--font-body-sm); color: var(--brand-500); text-decoration: none; transition: color 0.15s; }
+.about-link:hover { color: var(--brand-400); text-decoration: underline; }
+
+/* chip（关于页新版本提示 / 底栏已保存） */
+.chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  height: 24px; padding: 0 10px; border-radius: var(--radius-sm);
+  font-size: var(--font-caption); font-weight: var(--fw-medium); white-space: nowrap;
+}
+.chip--brand { background: var(--brand-50); color: var(--brand-500); }
+.chip--ok { background: var(--ok-bg); color: var(--ok); }
+
+/* 底部保存栏（v2：毛玻璃） */
+.settings-footer {
+  height: 64px; display: flex; align-items: center; gap: 10px; padding: 0 32px;
+  border-top: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.85); backdrop-filter: blur(12px);
+  flex-shrink: 0;
+}
+.footer-saved { margin-left: auto; }
+.footer-dot { width: 6px; height: 6px; border-radius: 50%; background-color: var(--ok); display: inline-block; }
+.footer-error { font-size: var(--font-caption); color: var(--err); margin-left: auto; }
 </style>

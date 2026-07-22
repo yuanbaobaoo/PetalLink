@@ -23,10 +23,10 @@ withDefaults(defineProps<{
   gap: var(--space-xs);
   padding: var(--space-xs) var(--space-sm);
   border-radius: var(--radius-sm);
-  background-color: var(--bg-hover);
+  background-color: var(--bg-fill);
   font-size: var(--font-caption);
   font-weight: var(--fw-medium);
-  color: var(--text-secondary);
+  color: var(--ink-600);
   white-space: nowrap;
 }
 </style>

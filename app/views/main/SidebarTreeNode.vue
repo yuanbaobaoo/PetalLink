@@ -184,7 +184,7 @@ function handleNavigate(): void {
     <div
       class="tree-node"
       :class="{ 'is-active': browser.current.id === location.id }"
-      :style="{ '--tree-indent': `${depth * 14 + 8}px` }"
+      :style="{ '--tree-indent': `${depth * 14 + 10}px` }"
       @click="handleNavigate"
     >
       <span v-if="loading" class="tree-chevron"><MateCircularProgress :size="12" :stroke-width="2" /></span>
@@ -218,32 +218,37 @@ function handleNavigate(): void {
   display: flex;
   align-items: center;
   gap: var(--space-sm);
-  height: 28px;
-  padding-left: var(--tree-indent, 8px);
-  padding-right: var(--space-sm);
-  border-radius: var(--radius-sm);
+  height: 32px;
+  padding-left: var(--tree-indent, 10px);
+  padding-right: 10px;
+  border-radius: 6px;
   cursor: pointer;
   transition: background-color 0.1s;
-  font-size: var(--font-body-sm);
-  color: var(--text-secondary);
+  font-size: 13.5px;
+  color: var(--ink-600);
+  white-space: nowrap;
+  overflow: hidden;
 }
-.tree-node:hover { background-color: var(--bg-hover); }
+.tree-node:hover { background-color: rgba(0, 0, 0, 0.04); }
 .tree-node.is-active {
-  background-color: var(--color-brand-lighter);
-  color: var(--color-brand);
+  background-color: var(--brand-50);
+  color: var(--brand-500);
   font-weight: var(--fw-medium);
 }
 .tree-chevron {
-  width: 16px;
+  width: 14px;
+  height: 14px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
   cursor: pointer;
-  color: var(--text-secondary);
+  color: var(--ink-300);
   transition: transform 0.15s ease;
 }
 .tree-chevron.is-expanded { transform: rotate(90deg); }
-.tree-node__icon { color: var(--color-brand); flex-shrink: 0; }
+/* v2：文件夹图标橙色，激活态跟随品牌蓝 */
+.tree-node__icon { color: #f0a63c; flex-shrink: 0; }
+.tree-node.is-active .tree-node__icon { color: var(--brand-500); }
 .tree-node__name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>

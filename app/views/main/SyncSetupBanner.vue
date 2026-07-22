@@ -94,9 +94,9 @@ async function handleRetry(): Promise<void> {
 
 <style scoped>
 .setup-banner {
-  padding: var(--space-xs) var(--space-lg);
-  border-bottom: 0.5px solid var(--border);
-  background-color: var(--bg-container);
+  padding: var(--space-sm) 20px;
+  border-bottom: 1px solid var(--line);
+  background-color: var(--bg-card);
   flex-shrink: 0;
 }
 .setup-banner__inner { width: 100%; }

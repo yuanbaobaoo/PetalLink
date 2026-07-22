@@ -231,7 +231,7 @@ describe("SyncStatusBar 活动态与失败事实", () => {
 
     // 同步状态条包装器
     const wrapper = shallowMount(SyncStatusBar);
-    await wrapper.find(".tag--error").trigger("click");
+    await wrapper.find(".chip--err").trigger("click");
 
     expect(wrapper.findComponent(MateDialog).props("open")).toBe(true);
 

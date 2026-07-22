@@ -43,7 +43,7 @@
 | **HTTP** | reqwest（rustls-tls） |
 | **文件监听** | notify（macOS FSEvents） |
 | **安全存储** | `token.bin` + ChaCha20-Poly1305 AEAD（密钥由本机 IOPlatformUUID 派生） |
-| **UI 设计** | Mate 组件库 + 自建 design token（主色 `#0052D9`） |
+| **UI 设计** | Mate 组件库 + 自建 design token v2（主色 `#0053DB`，详见 ai-context/design-rules.md） |
 | **日志** | tracing + tracing-appender |
 
 ---

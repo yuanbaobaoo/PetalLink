@@ -318,16 +318,22 @@ impl SyncEngine {
 
         // 增量失败或缺少 cursor 时回退全量刷新。
         let refresh_result = self.try_incremental_or_full_refresh(&abs_dir).await;
+        // 仅在确有云端变更应用时通知前端刷新内容；无变化周期不置位，
+        // 避免每个定时周期都触发前端列表重载（loading 遮罩闪烁）。
+        let changed = refresh_result
+            .as_ref()
+            .map(|changed| *changed)
+            .unwrap_or(false);
 
-        // 无论成败都复位索引状态并通知前端刷新内容。
+        // 无论成败都复位索引状态。
         let reset_result = self.update_runtime_and_broadcast(|runtime| {
             runtime.is_indexing = false;
             runtime.sync_phase = None;
-            runtime.content_changed = true;
+            runtime.content_changed = changed;
         });
 
         match refresh_result {
-            Ok(()) => {
+            Ok(_) => {
                 reset_result?;
             }
             Err(error) => {
@@ -340,7 +346,8 @@ impl SyncEngine {
     }
 
     /// 优先增量刷新，必要时 fail-closed 回退全量刷新。
-    async fn try_incremental_or_full_refresh(&self, abs_dir: &str) -> AppResult<()> {
+    /// 返回是否确有云端变更被应用（增量按 changes 计数，全量保守视为有变更）。
+    async fn try_incremental_or_full_refresh(&self, abs_dir: &str) -> AppResult<bool> {
         let saved_cursor = self.cloud_cursor.lock().clone();
         let consecutive = self.incremental_since_full.load(Ordering::Relaxed);
         let force_full = consecutive >= INCREMENTAL_FORCED_FULL_THRESHOLD;
@@ -360,6 +367,8 @@ impl SyncEngine {
                     let (changes, final_cursor) =
                         self.changes_api.list_all_changes(&cursor).await?;
                     self.ensure_cycle_active()?;
+                    // 变更计数需在 moves 前取，用于判断是否通知前端刷新
+                    let changed = !changes.is_empty();
                     let mut tree = self.cloud_tree.lock().clone();
                     let mut path_to_id = self.path_to_id.lock().clone();
                     let root_folder_id = self.root_folder_id.lock().clone();
@@ -380,11 +389,11 @@ impl SyncEngine {
                     self.ensure_cycle_active()?;
                     self.install_cloud_checkpoint(checkpoint);
                     self.incremental_since_full.fetch_add(1, Ordering::Relaxed);
-                    Ok::<(), AppError>(())
+                    Ok::<bool, AppError>(changed)
                 }
                 .await;
                 match incremental {
-                    Ok(()) => return Ok(()),
+                    Ok(changed) => return Ok(changed),
                     Err(error) => {
                         self.set_cloud_tree_trusted(false);
                         tracing::warn!(%error, "增量 checkpoint 失败，保留旧盘并回退可信全量刷新");
@@ -394,7 +403,10 @@ impl SyncEngine {
         }
 
         self.set_phase("indexing-auto-full")?;
-        self.build_and_commit_full_checkpoint(abs_dir).await
+        // 全量 BFS 不做差异比对，保守视为有变更
+        self.build_and_commit_full_checkpoint(abs_dir)
+            .await
+            .map(|_| true)
     }
 
     /// 将 changes 批量应用到候选树；无法安全解析时直接失败。

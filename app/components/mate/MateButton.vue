@@ -1,10 +1,10 @@
 <script setup lang="ts">
-/* 按钮组件，四种变体：primary / text / icon / icon-text。图标走 MateIcon，hover 仅背景色过渡。 */
+/* 按钮组件，五种变体：primary（渐变主按钮）/ soft（软色）/ text / icon（圆形图标）/ icon-text（幽灵）。图标走 MateIcon。 */
 import { computed, ref } from "vue";
 import MateIcon from "./MateIcon.vue";
 
 /** 按钮变体 */
-export type ButtonVariant = "primary" | "text" | "icon" | "icon-text";
+export type ButtonVariant = "primary" | "soft" | "text" | "icon" | "icon-text";
 
 interface Props {
   variant?: ButtonVariant;
@@ -113,89 +113,124 @@ function handleClick(event: MouseEvent): void {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: var(--space-xs);
+  gap: 6px;
   font-family: var(--font-family);
   font-size: var(--font-body);
   font-weight: var(--fw-medium);
   border: none;
   cursor: pointer;
-  transition: background-color 0.15s, color 0.15s;
+  transition: filter 0.12s, background-color 0.15s, color 0.15s;
   white-space: nowrap;
   flex-shrink: 0;
 }
 
-/* === primary：蓝色实心 === */
+/* === primary：渐变主按钮（v2：品牌渐变 + 发光阴影） === */
 .mate-btn--primary {
-  background-color: var(--color-brand);
+  background: var(--grad-brand);
   color: #fff;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   height: 36px;
-  padding: 0 var(--space-lg);
+  padding: 0 18px;
+  box-shadow: var(--sh-brand);
 }
 .mate-btn--primary.is-hover {
-  background-color: var(--color-brand-hover);
-}
-.mate-btn--primary:active {
-  background-color: var(--color-brand-active);
+  filter: brightness(1.06);
 }
 .mate-btn--primary.is-full-width {
   width: 100%;
 }
 .mate-btn--primary.is-danger {
-  background-color: var(--color-error);
+  background: var(--err);
+  box-shadow: 0 4px 14px -4px rgba(229, 72, 77, 0.35);
 }
 .mate-btn--primary.is-disabled {
-  background-color: var(--border);
+  opacity: 0.45;
+  box-shadow: none;
   cursor: not-allowed;
 }
 
-/* === text：透明底蓝色文字 === */
+/* === soft：软色按钮（浅底深字，次要强调） === */
+.mate-btn--soft {
+  background-color: var(--brand-50);
+  color: var(--brand-500);
+  border-radius: var(--radius-md);
+  height: 36px;
+  padding: 0 var(--space-lg);
+}
+.mate-btn--soft.is-hover {
+  background-color: var(--brand-100);
+}
+.mate-btn--soft.is-full-width {
+  width: 100%;
+}
+.mate-btn--soft.is-danger {
+  background-color: var(--err-bg);
+  color: var(--err);
+}
+.mate-btn--soft.is-disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* === text：纯文字链接感 === */
 .mate-btn--text {
   background-color: transparent;
-  color: var(--color-brand);
+  color: var(--brand-500);
   border-radius: var(--radius-sm);
   height: 36px;
   padding: 2px var(--space-sm);
   font-size: var(--font-body-sm);
 }
 .mate-btn--text.is-hover {
-  background-color: var(--color-brand-lighter);
+  background-color: var(--brand-50);
 }
 .mate-btn--text.is-danger {
-  color: var(--color-error);
+  color: var(--err);
 }
 
-/* === icon：工具栏图标按钮（32×32） === */
+/* === icon：圆形图标按钮（36×36） === */
 .mate-btn--icon {
   background-color: transparent;
-  color: var(--text-secondary);
-  border-radius: var(--radius-sm);
-  width: 32px;
-  height: 32px;
+  color: var(--ink-400);
+  border-radius: 50%;
+  width: 36px;
+  height: 36px;
 }
 .mate-btn--icon.is-hover {
-  background-color: var(--bg-hover);
-  color: var(--text-primary);
+  background-color: var(--bg-fill);
+  color: var(--ink-700);
 }
 .mate-btn--icon.is-danger {
-  color: var(--color-error);
+  color: var(--err);
 }
 
-/* === icon-text：带文字的图标按钮 === */
+/* === icon-text：幽灵按钮（灰底 hover，无框） === */
 .mate-btn--icon-text {
   background-color: transparent;
-  color: var(--text-primary);
-  border-radius: var(--radius-sm);
-  height: 32px;
-  padding: 0 var(--space-md);
-  font-size: var(--font-body-sm);
-  gap: var(--space-xs);
+  color: var(--ink-700);
+  border-radius: var(--radius-md);
+  height: 36px;
+  padding: 0 14px;
+  font-size: var(--font-body);
+  gap: 6px;
+}
+.mate-btn--icon-text .mate-btn__icon {
+  color: var(--ink-400);
 }
 .mate-btn--icon-text.is-hover {
-  background-color: var(--bg-hover);
+  background-color: var(--bg-fill);
+}
+.mate-btn--icon-text.is-hover .mate-btn__icon {
+  color: var(--ink-700);
 }
 .mate-btn--icon-text.is-danger {
-  color: var(--color-error);
+  color: var(--err);
+}
+.mate-btn--icon-text.is-danger .mate-btn__icon {
+  color: var(--err);
+}
+.mate-btn--icon-text.is-danger.is-hover {
+  background-color: var(--err-bg);
 }
 
 /* spinner（加载中） */

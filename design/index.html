@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>PetalLink v2 重设计原型 · 导航</title>
+<link rel="stylesheet" href="assets/v2.css">
+<script src="assets/sprite.js"></script>
+</head>
+<body>
+<div class="v2-index">
+  <div style="display:flex;align-items:center;gap:12px;">
+    <span class="logo-tile" style="width:44px;height:44px;border-radius:10px;"><span class="icon icon--24"><svg><use href="#i-cloud"/></svg></span></span>
+    <div>
+      <h1>PetalLink · v2 重设计高保真原型</h1>
+      <div style="font-size:13.5px;color:var(--ink-600);margin-top:4px;">
+        全新视觉语言：logo 品牌蓝（#0053DB）· 毛玻璃侧栏 · 统一工具栏 · 小圆角卡片化。功能覆盖与现网完全一致。
+      </div>
+    </div>
+  </div>
+
+  <div class="v2-index__grid">
+    <a class="v2-card" href="01-login.html">
+      <span class="v2-card__no">01</span>
+      <span class="v2-card__title">登录授权</span>
+      <span class="v2-card__desc">品牌渐变画布 + 玻璃拟态卡片：默认 / 授权中 / 异常三态。覆盖 F-AUTH-01/02。</span>
+    </a>
+    <a class="v2-card" href="02-main.html">
+      <span class="v2-card__no">02</span>
+      <span class="v2-card__title">主界面</span>
+      <span class="v2-card__desc">毛玻璃侧栏、彩色文件类型 tile、同步完成 / 空状态 / 搜索结果。覆盖 F-UI-01~05。</span>
+    </a>
+    <a class="v2-card" href="03-sync-states.html">
+      <span class="v2-card__no">03</span>
+      <span class="v2-card__title">同步引导与状态</span>
+      <span class="v2-card__desc">首次同步引导三态、同步中多态 chips、失败详情弹窗。覆盖 F-MOUNT-01/13、F-STATUS-01~03。</span>
+    </a>
+    <a class="v2-card" href="04-transfer.html">
+      <span class="v2-card__no">04</span>
+      <span class="v2-card__title">传输队列</span>
+      <span class="v2-card__desc">统计 pill、九态任务卡片、清空菜单、空态。覆盖 F-FILE-10/11、F-STATUS-04。</span>
+    </a>
+    <a class="v2-card" href="05-file-ops.html">
+      <span class="v2-card__no">05</span>
+      <span class="v2-card__title">文件操作</span>
+      <span class="v2-card__desc">悬浮批量操作胶囊、右键菜单、重命名 / 属性 / 释放空间 / 删除确认对话框。覆盖 F-UI-06/07、F-FILE-04/05/07/09。</span>
+    </a>
+    <a class="v2-card" href="06-settings.html">
+      <span class="v2-card__no">06</span>
+      <span class="v2-card__title">设置</span>
+      <span class="v2-card__desc">六个标签面板化重排：同步目录 / 传输 / 高级 / 账号 / 日志 / 关于。覆盖 F-CFG-01~05、F-MOUNT-15。</span>
+    </a>
+    <a class="v2-card" href="07-logs.html">
+      <span class="v2-card__no">07</span>
+      <span class="v2-card__title">日志查看器</span>
+      <span class="v2-card__desc">级别过滤 chips、导出 / 清空、卡片式日志列表。覆盖 F-CFG-05。</span>
+    </a>
+    <a class="v2-card" href="08-update.html">
+      <span class="v2-card__no">08</span>
+      <span class="v2-card__title">应用更新</span>
+      <span class="v2-card__desc">更新对话框五态 + 侧栏渐变更新卡片 / 下载进度。覆盖 F-UPDATE-01~06。</span>
+    </a>
+    <a class="v2-card" href="09-tray.html">
+      <span class="v2-card__no">09</span>
+      <span class="v2-card__title">系统托盘与反馈</span>
+      <span class="v2-card__desc">托盘菜单两态、深色浮丸 Toast、后台运行说明。覆盖 F-MOUNT-08/15。</span>
+    </a>
+  </div>
+
+  <h2 style="margin-top:56px;font-size:18px;font-weight:600;">功能覆盖对照</h2>
+  <table class="v2-table">
+    <tr><th>需求域</th><th>功能点</th><th>原型页面</th></tr>
+    <tr><td>F-AUTH 授权与认证</td><td>OAuth+PKCE 登录、授权中/失败/取消、secret 未配置提示</td><td>01</td></tr>
+    <tr><td>F-UI 网盘主界面</td><td>双栏布局、面包屑、文件列表、排序、缩略图、多选、操作菜单、搜索</td><td>02 / 04 / 05</td></tr>
+    <tr><td>F-FILE 文件操作</td><td>进入目录、上传/下载/删除/重命名/属性、释放空间确认、传输队列、失败重试</td><td>04 / 05</td></tr>
+    <tr><td>F-MOUNT 挂载同步</td><td>挂载目录引导、首次同步手动引导、后台运行/托盘、开机自启</td><td>03 / 06 / 09</td></tr>
+    <tr><td>F-STATUS 同步状态</td><td>多态标识、进度、九种 syncPhase 文案、失败项详情、重试</td><td>03 / 04</td></tr>
+    <tr><td>F-CONFLICT 冲突处理</td><td>冲突计数标签（副本重命名结果在文件列表呈现）</td><td>03 / 02</td></tr>
+    <tr><td>F-CFG 配置管理</td><td>设置页六标签、持久化保存/重置、日志查看</td><td>06 / 07</td></tr>
+    <tr><td>F-UPDATE 应用更新</td><td>静默检查、侧栏提示、下载安装五态对话框</td><td>08</td></tr>
+  </table>
+  <div style="margin-top:32px;font-size:12.5px;color:var(--ink-400);">本目录原型为现行 v2 设计（logo 品牌蓝 #0053DB · 毛玻璃侧栏 · 小圆角卡片化），Compose 实现以 <code>shared/src/**/ui/theme/</code> 为准。</div>
+</div>
+</body>
+</html>

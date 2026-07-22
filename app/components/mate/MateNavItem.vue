@@ -14,7 +14,7 @@ withDefaults(defineProps<{
   icon: "",
   active: false,
   indent: 0,
-  height: 32,
+  height: 46,
 });
 
 defineEmits<{ (e: "click"): void }>();
@@ -23,7 +23,7 @@ defineEmits<{ (e: "click"): void }>();
 <template>
   <div
     :class="['mate-nav-item', { 'is-active': active }]"
-    :style="{ paddingLeft: `${indent + 8}px`, height: `${height}px` }"
+    :style="{ paddingLeft: `${indent + 14}px`, height: `${height}px` }"
     @click="$emit('click')"
   >
     <MateIcon v-if="icon" :name="icon" :size="16" class="mate-nav-item__icon" />
@@ -36,29 +36,29 @@ defineEmits<{ (e: "click"): void }>();
 .mate-nav-item {
   display: flex;
   align-items: center;
-  gap: var(--space-sm);
-  padding-right: var(--space-sm);
-  border-radius: var(--radius-sm);
+  gap: var(--space-md);
+  padding-right: 14px;
+  border-radius: var(--radius-md);
   cursor: pointer;
-  color: var(--text-primary);
+  color: var(--ink-700);
   font-size: var(--font-body);
   font-weight: var(--fw-regular);
   transition: background-color 0.15s;
 }
 .mate-nav-item:hover {
-  background-color: var(--bg-hover);
+  background-color: rgba(0, 0, 0, 0.04);
 }
 .mate-nav-item.is-active {
-  background-color: var(--color-brand-lighter);
-  color: var(--color-brand);
+  background-color: var(--brand-50);
+  color: var(--brand-500);
   font-weight: var(--fw-medium);
 }
 .mate-nav-item__icon {
   flex-shrink: 0;
-  color: var(--text-secondary);
+  color: var(--ink-400);
 }
 .mate-nav-item.is-active .mate-nav-item__icon {
-  color: var(--color-brand);
+  color: var(--brand-500);
 }
 .mate-nav-item__label {
   overflow: hidden;

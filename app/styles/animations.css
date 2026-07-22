@@ -76,6 +76,20 @@
   animation: toast-in 0.2s ease-out;
 }
 
+/* 状态呼吸点（同步中脉冲） */
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.pulse {
+  animation: pulse 1.6s ease-in-out infinite;
+}
+
 /* Reduced Motion 降级 */
 @media (prefers-reduced-motion: reduce) {
   *,

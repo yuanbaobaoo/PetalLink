@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>04 · 传输队列 - PetalLink v2 原型</title>
+<link rel="stylesheet" href="assets/v2.css">
+<script src="assets/sprite.js"></script>
+<style>
+  /* 本页专属：传输队列状态列字号 / 方向迷你 chip */
+  .transfer-item__state { font-size: 12.5px; font-weight: 500; }
+  .chip--xs { height: 20px; padding: 0 8px; font-size: 11px; }
+</style>
+</head>
+<body>
+<div class="canvas">
+
+  <!-- ============ 场景 1：传输队列 Popover（九态任务） ============ -->
+  <div class="scene">
+    <div class="scene__label"><b>传输队列 · 全状态</b>　毛玻璃 Popover，单列表展示全部任务，九态 icon/label/color 由 stateMeta 映射</div>
+    <div class="mac-window" style="height:1010px;">
+      <div class="mac-titlebar">
+        <div class="traffic"><i></i><i></i><i></i></div>
+        <div class="mac-titlebar__title">PetalLink - 华为云盘客户端开源版</div>
+      </div>
+      <div class="mac-body">
+        <!-- 毛玻璃侧栏 -->
+        <aside class="sidebar">
+          <div class="sidebar__logo">
+            <span class="logo-tile logo-tile--28"><span class="icon icon--16"><svg><use href="#i-cloud"/></svg></span></span>
+            <span style="font-size:15px;font-weight:600;">PetalLink</span>
+          </div>
+          <div class="sidebar__section">位置</div>
+          <div class="sidebar__tree">
+            <div class="tree-node is-active">
+              <span class="tree-node__chevron is-open"><span class="icon icon--12"><svg><use href="#i-arrow"/></svg></span></span>
+              <span class="icon icon--16 icon--folder"><svg><use href="#i-folder"/></svg></span>
+              <span class="tree-node__name">全部文件</span>
+            </div>
+            <div class="tree-node" style="padding-left:24px;">
+              <span class="tree-node__chevron"><span class="icon icon--12"><svg><use href="#i-arrow"/></svg></span></span>
+              <span class="icon icon--16 icon--folder"><svg><use href="#i-folder"/></svg></span>
+              <span class="tree-node__name">文档</span>
+            </div>
+          </div>
+          <div class="sidebar__account">
+            <div class="avatar avatar--32">华</div>
+            <div style="flex:1;min-width:0;">
+              <div style="font-size:13px;font-weight:600;">华小为</div>
+              <div style="font-size:11.5px;color:var(--ink-400);margin-top:1px;">36.5 GB / 200 GB</div>
+              <div class="progress" style="height:4px;margin-top:6px;"><div class="progress__fill" style="width:18%;"></div></div>
+            </div>
+          </div>
+        </aside>
+
+        <!-- 右侧主区 -->
+        <div style="flex:1;display:flex;flex-direction:column;min-width:0;background:var(--bg-card);">
+          <div class="toolbar">
+            <div class="search-field" style="flex:1;max-width:420px;">
+              <span class="icon icon--16"><svg><use href="#i-search"/></svg></span>
+              <input placeholder="搜索文件和文件夹...">
+            </div>
+            <span style="flex:1;"></span>
+            <button class="btn btn--sm" style="height:34px;"><span class="icon icon--16"><svg><use href="#i-refresh"/></svg></span>同步索引</button>
+            <button class="btn-soft is-active"><span class="icon icon--16"><svg><use href="#i-transfer"/></svg></span>传输队列</button>
+            <button class="btn-ghost"><span class="icon icon--16"><svg><use href="#i-folder-open"/></svg></span>Finder</button>
+            <button class="btn-circle"><span class="icon icon--18"><svg><use href="#i-settings"/></svg></span></button>
+          </div>
+
+          <div class="sync-bar">
+            <div class="sync-bar__left">
+              <span class="icon icon--16 spin" style="color:var(--brand-600);"><svg><use href="#i-sync"/></svg></span>
+              <span style="font-weight:500;">同步中</span>
+            </div>
+            <div class="sync-bar__tags">
+              <span class="chip chip--brand">上传 2</span>
+              <span class="chip chip--brand">下载 1</span>
+              <span class="chip chip--err chip--clickable">同步失败 1</span>
+            </div>
+          </div>
+
+          <div class="breadcrumb">
+            <span class="breadcrumb__item--current">全部文件</span>
+          </div>
+
+          <div class="file-table">
+            <div class="file-header">
+              <div class="col-check"></div>
+              <div class="col-name file-header__cell">名称</div>
+              <div class="col-size file-header__cell">大小</div>
+              <div class="col-time file-header__cell">修改时间</div>
+              <div class="col-status">状态</div>
+              <div class="col-actions">操作</div>
+            </div>
+            <div class="file-row">
+              <div class="col-check"></div>
+              <div class="col-name file-row__name">
+                <span class="ftile ftile--doc"><span class="icon icon--18"><svg><use href="#i-file-text"/></svg></span></span>
+                <span>Q4经营分析报告.docx</span>
+              </div>
+              <div class="col-size file-row__meta num">2.4 MB</div>
+              <div class="col-time file-row__meta num">2026-07-17 14:32</div>
+              <div class="col-status"><span class="icon icon--16 spin" style="color:var(--brand-600);"><svg><use href="#i-sync"/></svg></span></div>
+              <div class="col-actions"><button class="btn-circle btn-circle--sm"><span class="icon icon--16"><svg><use href="#i-list"/></svg></span></button></div>
+            </div>
+            <div class="file-row">
+              <div class="col-check"></div>
+              <div class="col-name file-row__name">
+                <span class="ftile ftile--video"><span class="icon icon--18"><svg><use href="#i-video"/></svg></span></span>
+                <span>产品演示视频.mp4</span>
+              </div>
+              <div class="col-size file-row__meta num">128.6 MB</div>
+              <div class="col-time file-row__meta num">2026-07-09 15:52</div>
+              <div class="col-status"><span class="icon icon--16 spin" style="color:var(--brand-600);"><svg><use href="#i-sync"/></svg></span></div>
+              <div class="col-actions"><button class="btn-circle btn-circle--sm"><span class="icon icon--16"><svg><use href="#i-list"/></svg></span></button></div>
+            </div>
+            <div style="flex:1;"></div>
+            <div class="file-footer">2 项 · 已全部加载</div>
+          </div>
+        </div>
+
+        <!-- 传输 Popover（贴工具栏下右侧） -->
+        <div style="position:absolute;top:76px;right:20px;z-index:200;">
+          <div class="transfer-popover" style="height:auto;">
+            <div class="transfer-popover__header">
+              <span class="icon icon--18" style="color:var(--brand-600);"><svg><use href="#i-transfer"/></svg></span>
+              <span class="transfer-popover__title">传输队列</span>
+              <button class="btn-circle btn-circle--sm"><span class="icon icon--16"><svg><use href="#i-x"/></svg></span></button>
+            </div>
+            <div class="transfer-popover__stats">
+              <div class="stat-pill"><span class="stat-pill__num">3</span><span class="stat-pill__label">处理中</span></div>
+              <div class="stat-pill"><span class="stat-pill__num">3</span><span class="stat-pill__label">等待中</span></div>
+              <div class="stat-pill"><span class="stat-pill__num">2</span><span class="stat-pill__label">已完成</span></div>
+              <div class="stat-pill stat-pill--err"><span class="stat-pill__num">1</span><span class="stat-pill__label">历史失败</span></div>
+              <button class="btn-circle btn-circle--sm" style="align-self:center;"><span class="icon icon--16"><svg><use href="#i-trash"/></svg></span></button>
+            </div>
+            <div class="transfer-popover__body">
+              <!-- Running 上传 -->
+              <div class="transfer-item">
+                <span class="transfer-item__dir transfer-item__dir--up"><span class="icon icon--18"><svg><use href="#i-transfer"/></svg></span></span>
+                <div class="transfer-item__info">
+                  <div class="transfer-item__namerow"><span class="chip chip--brand chip--xs">上传</span><span class="transfer-item__name">Q4经营分析报告.docx</span></div>
+                  <div class="transfer-item__progress">
+                    <div class="progress"><div class="progress__fill" style="width:62%;"></div></div>
+                    <span class="transfer-item__pct">62% · 1.5 MB/2.4 MB</span>
+                  </div>
+                </div>
+                <div class="transfer-item__state" style="color:var(--brand-600);"><span class="icon icon--12 spin"><svg><use href="#i-sync"/></svg></span>传输中</div>
+              </div>
+              <!-- Running 下载 -->
+              <div class="transfer-item">
+                <span class="transfer-item__dir transfer-item__dir--down"><span class="icon icon--18"><svg><use href="#i-download"/></svg></span></span>
+                <div class="transfer-item__info">
+                  <div class="transfer-item__namerow"><span class="chip chip--info chip--xs">下载</span><span class="transfer-item__name">产品演示视频.mp4</span></div>
+                  <div class="transfer-item__progress">
+                    <div class="progress"><div class="progress__fill" style="width:28%;"></div></div>
+                    <span class="transfer-item__pct">28% · 36.0 MB/128.6 MB</span>
+                  </div>
+                </div>
+                <div class="transfer-item__state" style="color:var(--brand-600);"><span class="icon icon--12 spin"><svg><use href="#i-sync"/></svg></span>传输中</div>
+              </div>
+              <!-- VerifyingRemote 下载更新 -->
+              <div class="transfer-item">
+                <span class="transfer-item__dir transfer-item__dir--down"><span class="icon icon--18"><svg><use href="#i-download"/></svg></span></span>
+                <div class="transfer-item__info">
+                  <div class="transfer-item__namerow"><span class="chip chip--info chip--xs">下载</span><span class="transfer-item__name">会议纪要 0717.md</span></div>
+                  <div class="transfer-item__progress">
+                    <div class="progress"><div class="progress__fill" style="width:100%;"></div></div>
+                    <span class="transfer-item__pct">100% · 8.2 KB/8.2 KB</span>
+                  </div>
+                </div>
+                <div class="transfer-item__state" style="color:var(--brand-600);"><span class="icon icon--12 spin"><svg><use href="#i-sync"/></svg></span>核验远端</div>
+              </div>
+              <!-- Pending -->
+              <div class="transfer-item">
+                <span class="transfer-item__dir transfer-item__dir--up"><span class="icon icon--18"><svg><use href="#i-transfer"/></svg></span></span>
+                <div class="transfer-item__info">
+                  <div class="transfer-item__namerow"><span class="chip chip--brand chip--xs">上传</span><span class="transfer-item__name">首页 Banner 终稿.png</span></div>
+                  <div class="transfer-item__progress">
+                    <div class="progress progress--gray"><div class="progress__fill" style="width:0%;"></div></div>
+                    <span class="transfer-item__pct">0% · 0 B/3.8 MB</span>
+                  </div>
+                </div>
+                <div class="transfer-item__state" style="color:var(--ink-600);"><span class="icon icon--12"><svg><use href="#i-clock"/></svg></span>等待调度</div>
+              </div>
+              <!-- WaitingForNetwork -->
+              <div class="transfer-item">
+                <span class="transfer-item__dir transfer-item__dir--down"><span class="icon icon--18"><svg><use href="#i-download"/></svg></span></span>
+                <div class="transfer-item__info">
+                  <div class="transfer-item__namerow"><span class="chip chip--info chip--xs">下载</span><span class="transfer-item__name">产品路线图-2026.key</span></div>
+                  <div class="transfer-item__progress">
+                    <div class="progress progress--gray"><div class="progress__fill" style="width:45%;"></div></div>
+                    <span class="transfer-item__pct">45% · 8.2 MB/18.2 MB</span>
+                  </div>
+                </div>
+                <div class="transfer-item__state" style="color:var(--warn);"><span class="icon icon--12"><svg><use href="#i-clock"/></svg></span>等待网络</div>
+              </div>
+              <!-- BackingOff -->
+              <div class="transfer-item">
+                <span class="transfer-item__dir transfer-item__dir--up"><span class="icon icon--18"><svg><use href="#i-transfer"/></svg></span></span>
+                <div class="transfer-item__info">
+                  <div class="transfer-item__namerow"><span class="chip chip--brand chip--xs">上传</span><span class="transfer-item__name">竞品分析.md</span></div>
+                  <div class="transfer-item__progress">
+                    <div class="progress progress--gray"><div class="progress__fill" style="width:12%;"></div></div>
+                    <span class="transfer-item__pct">12% · 3.0 KB/24.6 KB</span>
+                  </div>
+                </div>
+                <div class="transfer-item__state" style="color:var(--warn);"><span class="icon icon--12"><svg><use href="#i-clock"/></svg></span>等待重试</div>
+              </div>
+              <!-- RestartRequired（可重试） -->
+              <div class="transfer-item">
+                <span class="transfer-item__dir transfer-item__dir--up"><span class="icon icon--18"><svg><use href="#i-transfer"/></svg></span></span>
+                <div class="transfer-item__info">
+                  <div class="transfer-item__namerow"><span class="chip chip--brand chip--xs">上传</span><span class="transfer-item__name">产品需求文档 v3.docx</span></div>
+                  <div class="transfer-item__error">已有文件大于 20MB，需要重新规划上传（restart_required）</div>
+                </div>
+                <div class="transfer-item__state" style="color:var(--warn);"><span class="icon icon--12"><svg><use href="#i-refresh"/></svg></span>等待重新规划</div>
+                <button class="btn-circle btn-circle--sm"><span class="icon icon--16"><svg><use href="#i-refresh"/></svg></span></button>
+              </div>
+              <!-- Failed（可重试） -->
+              <div class="transfer-item">
+                <span class="transfer-item__dir transfer-item__dir--up"><span class="icon icon--18"><svg><use href="#i-transfer"/></svg></span></span>
+                <div class="transfer-item__info">
+                  <div class="transfer-item__namerow"><span class="chip chip--brand chip--xs">上传</span><span class="transfer-item__name">发布会录像-4K.mov</span></div>
+                  <div class="transfer-item__error">上传失败：配额不足（剩余 512 MB，文件 3.2 GB）</div>
+                </div>
+                <div class="transfer-item__state" style="color:var(--err);"><span class="icon icon--12"><svg><use href="#i-x"/></svg></span>失败</div>
+                <button class="btn-circle btn-circle--sm"><span class="icon icon--16"><svg><use href="#i-refresh"/></svg></span></button>
+              </div>
+              <!-- Completed -->
+              <div class="transfer-item">
+                <span class="transfer-item__dir transfer-item__dir--up"><span class="icon icon--18"><svg><use href="#i-transfer"/></svg></span></span>
+                <div class="transfer-item__info">
+                  <div class="transfer-item__namerow"><span class="chip chip--brand chip--xs">上传</span><span class="transfer-item__name">预算表-2026H2.xlsx</span></div>
+                  <div class="transfer-item__progress">
+                    <div class="progress progress--ok"><div class="progress__fill" style="width:100%;"></div></div>
+                    <span class="transfer-item__pct">100% · 356.0 KB/356.0 KB</span>
+                  </div>
+                </div>
+                <div class="transfer-item__state" style="color:var(--ok);"><span class="icon icon--12"><svg><use href="#i-check"/></svg></span>已完成</div>
+              </div>
+              <!-- delete Completed -->
+              <div class="transfer-item">
+                <span class="transfer-item__dir transfer-item__dir--del"><span class="icon icon--18"><svg><use href="#i-trash"/></svg></span></span>
+                <div class="transfer-item__info">
+                  <div class="transfer-item__namerow"><span class="chip chip--gray chip--xs">删除</span><span class="transfer-item__name">过期草稿.txt</span></div>
+                  <div style="font-size:12px;color:var(--ink-400);">删除操作</div>
+                </div>
+                <div class="transfer-item__state" style="color:var(--ok);"><span class="icon icon--12"><svg><use href="#i-check"/></svg></span>已完成</div>
+              </div>
+              <!-- Canceled -->
+              <div class="transfer-item" style="border-bottom:none;">
+                <span class="transfer-item__dir transfer-item__dir--down"><span class="icon icon--18"><svg><use href="#i-download"/></svg></span></span>
+                <div class="transfer-item__info">
+                  <div class="transfer-item__namerow"><span class="chip chip--info chip--xs">下载</span><span class="transfer-item__name">历史资料.zip</span></div>
+                  <div class="transfer-item__progress">
+                    <div class="progress progress--gray"><div class="progress__fill" style="width:67%;"></div></div>
+                    <span class="transfer-item__pct">67% · 120.0 MB/180.0 MB</span>
+                  </div>
+                </div>
+                <div class="transfer-item__state" style="color:var(--ink-600);"><span class="icon icon--12"><svg><use href="#i-x"/></svg></span>已取消</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 场景 2：清空菜单 ============ -->
+  <div class="scene">
+    <div class="scene__label"><b>传输队列 · 清空菜单</b>　清除已完成 / 清除失败历史 / 清除完成+失败历史</div>
+    <div class="mac-window">
+      <div class="mac-titlebar">
+        <div class="traffic"><i></i><i></i><i></i></div>
+        <div class="mac-titlebar__title">PetalLink - 华为云盘客户端开源版</div>
+      </div>
+      <div class="mac-body">
+        <aside class="sidebar">
+          <div class="sidebar__logo">
+            <span class="logo-tile logo-tile--28"><span class="icon icon--16"><svg><use href="#i-cloud"/></svg></span></span>
+            <span style="font-size:15px;font-weight:600;">PetalLink</span>
+          </div>
+          <div class="sidebar__section">位置</div>
+          <div class="sidebar__tree">
+            <div class="tree-node is-active">
+              <span class="tree-node__chevron is-open"><span class="icon icon--12"><svg><use href="#i-arrow"/></svg></span></span>
+              <span class="icon icon--16 icon--folder"><svg><use href="#i-folder"/></svg></span>
+              <span class="tree-node__name">全部文件</span>
+            </div>
+          </div>
+          <div class="sidebar__account">
+            <div class="avatar avatar--32">华</div>
+            <div style="flex:1;min-width:0;">
+              <div style="font-size:13px;font-weight:600;">华小为</div>
+              <div style="font-size:11.5px;color:var(--ink-400);margin-top:1px;">36.5 GB / 200 GB</div>
+              <div class="progress" style="height:4px;margin-top:6px;"><div class="progress__fill" style="width:18%;"></div></div>
+            </div>
+          </div>
+        </aside>
+        <div style="flex:1;display:flex;flex-direction:column;min-width:0;background:var(--bg-card);">
+          <div class="toolbar">
+            <div class="search-field" style="flex:1;max-width:420px;">
+              <span class="icon icon--16"><svg><use href="#i-search"/></svg></span>
+              <input placeholder="搜索文件和文件夹...">
+            </div>
+            <span style="flex:1;"></span>
+            <button class="btn btn--sm" style="height:34px;"><span class="icon icon--16"><svg><use href="#i-refresh"/></svg></span>同步索引</button>
+            <button class="btn-soft is-active"><span class="icon icon--16"><svg><use href="#i-transfer"/></svg></span>传输队列</button>
+            <button class="btn-ghost"><span class="icon icon--16"><svg><use href="#i-folder-open"/></svg></span>Finder</button>
+            <button class="btn-circle"><span class="icon icon--18"><svg><use href="#i-settings"/></svg></span></button>
+          </div>
+          <div class="sync-bar">
+            <div class="sync-bar__left">
+              <span class="dot dot--ok"></span>
+              <span style="font-weight:500;">同步完成</span>
+              <span class="sync-bar__time">上次同步 14:32</span>
+            </div>
+            <div class="sync-bar__tags"></div>
+          </div>
+          <div class="breadcrumb">
+            <span class="breadcrumb__item--current">全部文件</span>
+          </div>
+          <div style="flex:1;"></div>
+        </div>
+
+        <!-- Popover + 清空菜单展开 -->
+        <div style="position:absolute;top:76px;right:20px;z-index:200;">
+          <div class="transfer-popover" style="height:auto;">
+            <div class="transfer-popover__header">
+              <span class="icon icon--18" style="color:var(--brand-600);"><svg><use href="#i-transfer"/></svg></span>
+              <span class="transfer-popover__title">传输队列</span>
+              <button class="btn-circle btn-circle--sm"><span class="icon icon--16"><svg><use href="#i-x"/></svg></span></button>
+            </div>
+            <div class="transfer-popover__stats" style="position:relative;">
+              <div class="stat-pill"><span class="stat-pill__num">0</span><span class="stat-pill__label">处理中</span></div>
+              <div class="stat-pill"><span class="stat-pill__num">0</span><span class="stat-pill__label">等待中</span></div>
+              <div class="stat-pill"><span class="stat-pill__num">2</span><span class="stat-pill__label">已完成</span></div>
+              <div class="stat-pill stat-pill--err"><span class="stat-pill__num">1</span><span class="stat-pill__label">历史失败</span></div>
+              <button class="btn-circle btn-circle--sm is-active" style="align-self:center;"><span class="icon icon--16"><svg><use href="#i-trash"/></svg></span></button>
+              <!-- 清空菜单（下拉） -->
+              <div class="menu" style="position:absolute;top:calc(100% - 6px);right:12px;z-index:210;">
+                <div class="menu__item"><span class="icon icon--16"><svg><use href="#i-check"/></svg></span>清除已完成</div>
+                <div class="menu__item menu__item--danger"><span class="icon icon--16"><svg><use href="#i-x"/></svg></span>清除失败历史</div>
+                <div class="menu__item"><span class="icon icon--16"><svg><use href="#i-transfer"/></svg></span>清除完成+失败历史</div>
+              </div>
+            </div>
+            <div class="transfer-popover__body">
+              <div class="transfer-item">
+                <span class="transfer-item__dir transfer-item__dir--up"><span class="icon icon--18"><svg><use href="#i-transfer"/></svg></span></span>
+                <div class="transfer-item__info">
+                  <div class="transfer-item__namerow"><span class="chip chip--brand chip--xs">上传</span><span class="transfer-item__name">预算表-2026H2.xlsx</span></div>
+                  <div class="transfer-item__progress">
+                    <div class="progress progress--ok"><div class="progress__fill" style="width:100%;"></div></div>
+                    <span class="transfer-item__pct">100% · 356.0 KB/356.0 KB</span>
+                  </div>
+                </div>
+                <div class="transfer-item__state" style="color:var(--ok);"><span class="icon icon--12"><svg><use href="#i-check"/></svg></span>已完成</div>
+              </div>
+              <div class="transfer-item">
+                <span class="transfer-item__dir transfer-item__dir--up"><span class="icon icon--18"><svg><use href="#i-transfer"/></svg></span></span>
+                <div class="transfer-item__info">
+                  <div class="transfer-item__namerow"><span class="chip chip--brand chip--xs">上传</span><span class="transfer-item__name">发布会录像-4K.mov</span></div>
+                  <div class="transfer-item__error">上传失败：配额不足（剩余 512 MB，文件 3.2 GB）</div>
+                </div>
+                <div class="transfer-item__state" style="color:var(--err);"><span class="icon icon--12"><svg><use href="#i-x"/></svg></span>失败</div>
+                <button class="btn-circle btn-circle--sm"><span class="icon icon--16"><svg><use href="#i-refresh"/></svg></span></button>
+              </div>
+              <div class="transfer-item" style="border-bottom:none;">
+                <span class="transfer-item__dir transfer-item__dir--del"><span class="icon icon--18"><svg><use href="#i-trash"/></svg></span></span>
+                <div class="transfer-item__info">
+                  <div class="transfer-item__namerow"><span class="chip chip--gray chip--xs">删除</span><span class="transfer-item__name">过期草稿.txt</span></div>
+                  <div style="font-size:12px;color:var(--ink-400);">删除操作</div>
+                </div>
+                <div class="transfer-item__state" style="color:var(--ok);"><span class="icon icon--12"><svg><use href="#i-check"/></svg></span>已完成</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 场景 3：空队列（组件特写） ============ -->
+  <div class="scene">
+    <div class="scene__label"><b>传输队列 · 空态</b>　暂无传输任务</div>
+    <div class="transfer-popover" style="height:360px;">
+      <div class="transfer-popover__header">
+        <span class="icon icon--18" style="color:var(--brand-600);"><svg><use href="#i-transfer"/></svg></span>
+        <span class="transfer-popover__title">传输队列</span>
+        <button class="btn-circle btn-circle--sm"><span class="icon icon--16"><svg><use href="#i-x"/></svg></span></button>
+      </div>
+      <div class="transfer-popover__stats">
+        <div class="stat-pill"><span class="stat-pill__num">0</span><span class="stat-pill__label">处理中</span></div>
+        <div class="stat-pill"><span class="stat-pill__num">0</span><span class="stat-pill__label">等待中</span></div>
+        <div class="stat-pill"><span class="stat-pill__num">0</span><span class="stat-pill__label">已完成</span></div>
+        <button class="btn-circle btn-circle--sm" style="align-self:center;"><span class="icon icon--16"><svg><use href="#i-trash"/></svg></span></button>
+      </div>
+      <div class="empty">
+        <div class="empty__badge"><span class="icon icon--48"><svg><use href="#i-cloud"/></svg></span></div>
+        <div class="empty__title">暂无传输任务</div>
+      </div>
+    </div>
+  </div>
+
+  <a class="back-link" href="index.html">← 返回 v2 原型导航</a>
+</div>
+</body>
+</html>

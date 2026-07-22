@@ -46,6 +46,6 @@ function onInput(v: string): void { emit("update:modelValue", v); }function onEn
 <style scoped>
 .mate-search-field { display: inline-block; }
 .mate-search-field :deep(.mate-text-field) {
-  height: 30px;
+  height: 38px;
 }
 </style>

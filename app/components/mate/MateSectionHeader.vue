@@ -23,19 +23,17 @@ withDefaults(defineProps<{
 .mate-section-header {
   display: flex;
   align-items: center;
-  gap: var(--space-sm);
-  padding-bottom: var(--space-md);
-  border-bottom: 1px solid var(--border);
-  margin-bottom: var(--space-xxl);
+  gap: 10px;
+  margin-bottom: 20px;
 }
 .mate-section-header__icon {
-  color: var(--color-brand);
+  color: var(--brand-500);
   flex-shrink: 0;
 }
 .mate-section-header__text {
-  font-size: var(--font-title-sm);
+  font-size: 18px;
   font-weight: var(--fw-semibold);
-  color: var(--text-primary);
+  color: var(--ink-900);
 }
 .mate-section-header__trailing {
   margin-left: auto;

@@ -86,8 +86,9 @@ impl SyncEngine {
             schedule_revision: AtomicU64::new(0),
             started: AtomicBool::new(false),
             online_check: Arc::new(crate::core::net_guard::is_online),
+            // 请求层失败先经即时探测确认再标记离线，避免单次传输错误误判全局断网
             request_network_failure_reporter: Arc::new(|| {
-                crate::core::net_guard::report_request_network_failure()
+                crate::core::net_guard::request_offline_confirmation()
             }),
             known_waiting_count: Mutex::new(None),
             cycle_observer: Arc::new(|_| {}),

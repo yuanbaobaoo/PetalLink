@@ -1,4 +1,4 @@
-<!-- 开关，40×22，knob 18 白圆 -->
+<!-- 开关（v2：iOS 风格胶囊，46×28，knob 22 白圆） -->
 <script setup lang="ts">
 const props = withDefaults(defineProps<{
   modelValue: boolean;
@@ -23,28 +23,28 @@ function toggle(): void { emit("update:modelValue", !props.modelValue); }
 <style scoped>
 .mate-switch {
   position: relative;
-  width: 40px;
-  height: 22px;
-  border-radius: 11px;
+  width: 46px;
+  height: 28px;
+  border-radius: var(--radius-full);
   border: none;
-  background-color: var(--border);
+  background-color: #e3e3e6;
   cursor: pointer;
   flex-shrink: 0;
   padding: 0;
-  transition: background-color 0.2s ease-in-out;
+  transition: background-color 0.18s;
 }
-.mate-switch.is-on { background-color: var(--color-brand); }
+.mate-switch.is-on { background-color: var(--brand-500); }
 .mate-switch.is-disabled { opacity: 0.5; cursor: not-allowed; }
 .mate-switch__knob {
   position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 18px;
-  height: 18px;
+  top: 3px;
+  left: 3px;
+  width: 22px;
+  height: 22px;
   border-radius: 50%;
   background: #fff;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
-  transition: transform 0.2s ease-in-out;
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.18);
+  transition: transform 0.18s;
 }
 .mate-switch.is-on .mate-switch__knob { transform: translateX(18px); }
 </style>

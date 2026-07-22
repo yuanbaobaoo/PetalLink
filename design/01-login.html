@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>01 · 登录授权 - PetalLink v2 原型</title>
+<link rel="stylesheet" href="assets/v2.css">
+<script src="assets/sprite.js"></script>
+<style>
+  /* 登录页专属：品牌蓝渐变画布 + 装饰圆 + 居中玻璃卡片 */
+  .login-scene {
+    flex: 1;
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background:
+      radial-gradient(720px 420px at 85% -10%, #DCE8FC 0%, transparent 60%),
+      radial-gradient(640px 420px at 0% 110%, #EFF4FE 0%, transparent 55%),
+      linear-gradient(150deg, #FBFBFC 0%, #F5F5F7 100%);
+    overflow: hidden;
+  }
+  .login-deco { position: absolute; border-radius: 50%; background: var(--brand-500); }
+  .login-card {
+    position: relative;
+    width: 480px;
+    max-width: calc(100% - 48px);
+    background: rgba(255, 255, 255, 0.9);
+    backdrop-filter: blur(16px);
+    border-radius: var(--r-xl);
+    box-shadow: var(--sh-pop), 0 0 0 0.5px rgba(0, 0, 0, 0.04);
+    padding: 44px 40px 32px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  .login-title { font-size: 20px; font-weight: 600; letter-spacing: -0.2px; margin-top: 14px; text-align: center; }
+  .login-divider { width: 44px; height: 3px; border-radius: var(--r-full); background: var(--grad-brand); margin-top: 10px; }
+  .login-hint { font-size: 12px; color: var(--ink-400); text-align: center; margin-top: 14px; }
+  .login-authorizing {
+    width: 100%; height: 46px;
+    border-radius: var(--r-lg);
+    background: var(--brand-50);
+    display: flex; align-items: center; justify-content: center; gap: 10px;
+    font-size: 14px; font-weight: 500; color: var(--brand-500);
+  }
+</style>
+</head>
+<body>
+<div class="canvas">
+
+  <!-- ============ 场景 1：默认态 ============ -->
+  <div class="scene">
+    <div class="scene__label"><b>登录页 · 默认态</b>　OAuth 2.0 + PKCE，点击打开浏览器授权</div>
+    <div class="mac-window">
+      <div class="mac-titlebar">
+        <div class="traffic"><i></i><i></i><i></i></div>
+        <div class="mac-titlebar__title">PetalLink - 华为云盘客户端开源版</div>
+      </div>
+      <div class="mac-body">
+        <div class="login-scene">
+          <div class="login-deco" style="width:400px;height:400px;top:-100px;right:-80px;opacity:0.06;"></div>
+          <div class="login-deco" style="width:300px;height:300px;bottom:-60px;left:-80px;opacity:0.06;"></div>
+          <div class="login-deco" style="width:200px;height:200px;top:45%;left:30%;opacity:0.05;"></div>
+          <div class="login-card">
+            <span class="logo-tile logo-tile--72"><span class="icon" style="width:40px;height:40px;"><svg><use href="#i-cloud"/></svg></span></span>
+            <div class="login-title">PetalLink - 华为云盘客户端开源版</div>
+            <div class="login-divider"></div>
+            <div style="height:36px;"></div>
+            <button class="btn btn--lg"><span class="icon icon--18"><svg><use href="#i-cloud"/></svg></span>使用华为账号登录</button>
+            <div class="login-hint">点击后将打开浏览器，支持账号密码或手机扫码登录</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 场景 2：授权中 ============ -->
+  <div class="scene">
+    <div class="scene__label"><b>登录页 · 授权中</b>　本地回调服务器 127.0.0.1:9999 等待回调，可取消</div>
+    <div class="mac-window">
+      <div class="mac-titlebar">
+        <div class="traffic"><i></i><i></i><i></i></div>
+        <div class="mac-titlebar__title">PetalLink - 华为云盘客户端开源版</div>
+      </div>
+      <div class="mac-body">
+        <div class="login-scene">
+          <div class="login-deco" style="width:400px;height:400px;top:-100px;right:-80px;opacity:0.06;"></div>
+          <div class="login-deco" style="width:300px;height:300px;bottom:-60px;left:-80px;opacity:0.06;"></div>
+          <div class="login-deco" style="width:200px;height:200px;top:45%;left:30%;opacity:0.05;"></div>
+          <div class="login-card">
+            <span class="logo-tile logo-tile--72"><span class="icon" style="width:40px;height:40px;"><svg><use href="#i-cloud"/></svg></span></span>
+            <div class="login-title">PetalLink - 华为云盘客户端开源版</div>
+            <div class="login-divider"></div>
+            <div style="height:36px;"></div>
+            <div class="login-authorizing">
+              <div class="spinner"></div>请在浏览器中完成授权...
+            </div>
+            <div style="height:10px;"></div>
+            <button class="btn-link btn-link--gray"><span class="icon icon--14"><svg><use href="#i-x"/></svg></span>取消授权</button>
+            <div class="login-hint">点击后将打开浏览器，支持账号密码或手机扫码登录</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 场景 3：secret 未配置 + 授权失败 ============ -->
+  <div class="scene">
+    <div class="scene__label"><b>登录页 · 异常态</b>　client_secret 未配置警告（按钮禁用）＋ 授权失败错误条</div>
+    <div class="mac-window">
+      <div class="mac-titlebar">
+        <div class="traffic"><i></i><i></i><i></i></div>
+        <div class="mac-titlebar__title">PetalLink - 华为云盘客户端开源版</div>
+      </div>
+      <div class="mac-body">
+        <div class="login-scene">
+          <div class="login-deco" style="width:400px;height:400px;top:-100px;right:-80px;opacity:0.06;"></div>
+          <div class="login-deco" style="width:300px;height:300px;bottom:-60px;left:-80px;opacity:0.06;"></div>
+          <div class="login-deco" style="width:200px;height:200px;top:45%;left:30%;opacity:0.05;"></div>
+          <div class="login-card">
+            <span class="logo-tile logo-tile--72"><span class="icon" style="width:40px;height:40px;"><svg><use href="#i-cloud"/></svg></span></span>
+            <div class="login-title">PetalLink - 华为云盘客户端开源版</div>
+            <div class="login-divider"></div>
+            <div style="height:20px;"></div>
+            <div class="banner banner--warn" style="width:100%;">
+              <span class="icon icon--16"><svg><use href="#i-alert"/></svg></span>
+              <span class="banner__msg">尚未配置 client_secret。请在项目根目录创建 .env 文件，写入：&#10;HWCLOUD_CLIENT_SECRET=&lt;你的 64 位 hex&gt;&#10;（参考 .env.example）</span>
+            </div>
+            <div style="height:12px;"></div>
+            <div class="banner banner--err" style="width:100%;">
+              <span class="icon icon--16"><svg><use href="#i-alert"/></svg></span>
+              <span class="banner__msg">授权失败：invalid code (1101)，授权码已过期，请重试</span>
+              <button class="btn-link">重新授权</button>
+            </div>
+            <div style="height:24px;"></div>
+            <button class="btn btn--lg is-disabled"><span class="icon icon--18"><svg><use href="#i-cloud"/></svg></span>使用华为账号登录</button>
+            <div class="login-hint">点击后将打开浏览器，支持账号密码或手机扫码登录</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <a class="back-link" href="index.html">← 返回 v2 原型导航</a>
+</div>
+</body>
+</html>

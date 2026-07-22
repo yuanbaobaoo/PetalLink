@@ -1,14 +1,15 @@
-<!-- Toast 宿主，底部居中，teleport 到 body -->
+<!-- Toast 宿主（v2：近黑毛玻璃浮丸），底部居中，teleport 到 body -->
 <script setup lang="ts">
+import MateIcon from "./MateIcon.vue";
 import { toasts } from "./useToast";
 import type { ToastVariant } from "./useToast";
 
-// 各变体背景色映射
-const bg: Record<ToastVariant, string> = {
-  default: "var(--gray-13)",
-  success: "var(--color-success)",
-  warning: "var(--color-warning)",
-  error: "var(--color-error)",
+// 各变体图标映射（default 无图标）
+const icon: Record<ToastVariant, string> = {
+  default: "",
+  success: "check",
+  warning: "alert",
+  error: "x",
 };
 </script>
 
@@ -19,8 +20,9 @@ const bg: Record<ToastVariant, string> = {
         v-for="t in toasts"
         :key="t.id"
         class="mate-toast"
-        :style="{ backgroundColor: bg[t.variant] }"
+        :class="`mate-toast--${t.variant}`"
       >
+        <MateIcon v-if="icon[t.variant]" :name="icon[t.variant]" :size="16" class="mate-toast__icon" />
         {{ t.message }}
       </div>
     </div>
@@ -42,12 +44,20 @@ const bg: Record<ToastVariant, string> = {
 }
 .mate-toast {
   max-width: 480px;
-  padding: 10px var(--space-lg);
-  border-radius: var(--radius-sm);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
-  font-size: var(--font-body);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: 10px 18px;
+  border-radius: var(--radius-lg);
+  background: rgba(28, 28, 30, 0.92);
+  backdrop-filter: blur(8px);
+  box-shadow: var(--sh-lg);
+  font-size: var(--font-body-sm);
+  font-weight: var(--fw-medium);
   color: #fff;
-  text-align: center;
   animation: toast-in 0.2s ease-out;
 }
+.mate-toast--success .mate-toast__icon { color: #4ade80; }
+.mate-toast--warning .mate-toast__icon { color: #fbbf24; }
+.mate-toast--error .mate-toast__icon { color: #fb7185; }
 </style>
