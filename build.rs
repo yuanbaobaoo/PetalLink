@@ -4,23 +4,25 @@
 // 1. 注入凭证：读取 .env 中的 HWCLOUD_CLIENT_ID / HWCLOUD_CLIENT_SECRET，
 //    通过 rustc-env 注入编译期常量（option_env! 可获取）。缺失任一则 panic 阻断构建。
 // 2. 读取 tauri.conf.json 生成构建期常量（tauri_build::build）
-// 3. 将 assets/ 内的图标同步到 icons/，使 assets/ 成为唯一图源——
-//    每次 cargo build / cargo tauri dev 自动覆盖，无需手动复制。
+// 3. 将 assets/ 内的 PNG 与预生成 AppIcon.icns 同步到 icons/，使 assets/ 成为
+//    唯一图源。不要在构建期调用 iconutil：它在受限构建环境中可能把合法 iconset
+//    误报为 Invalid Iconset，且应用图标没有必要在每次 Rust 编译时重新编码。
 //
 // 说明：
 // - 托盘图标 assets/menubar-icon.png 由 tray.rs 的 include_bytes! 编译期嵌入，
 //   rustc 自动跟踪文件变化，无需此处同步。
 // - 应用图标（icons/*.png + icon.icns）被 tauri.conf.json bundle.icon 引用，
-//   属于「复制件」，由此处在构建期从 assets/ 重新生成，避免与 assets/ 漂移。
+//   属于「复制件」，由此处在构建期从 assets/ 同步，避免与 assets/ 漂移。
 
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 /// 应用图标源目录。
 const ASSETS_DIR: &str = "assets";
 /// Tauri 打包图标目录。
 const ICONS_DIR: &str = "icons";
+/// 已验证的 macOS 应用图标源文件。
+const APP_ICON_ICNS_SOURCE: &str = "assets/AppIcon.icns";
 /// OAuth 客户端标识环境变量名。
 const ENV_CLIENT_ID_KEY: &str = "HWCLOUD_CLIENT_ID";
 /// OAuth 客户端密钥环境变量名。
@@ -38,21 +40,6 @@ const PNG_COPY_MAP: &[(&str, &str)] = &[
     ("icon_512x512.png", "icon-512.png"),
     ("icon-1024.png", "icon-1024.png"),
     ("icon-1024.png", "icon.png"), // 1024×1024，Tauri 通用入口
-];
-
-/// iconutil 标准 .iconset 命名（assets/ 源 → iconset 内文件名）。
-/// 覆盖 16~512 及 @2x 全档位，生成多分辨率 icon.icns。
-const ICONSET_MAP: &[(&str, &str)] = &[
-    ("icon_16x16.png", "icon_16x16.png"),
-    ("icon_16x16@2x.png", "icon_16x16@2x.png"),
-    ("icon_32x32.png", "icon_32x32.png"),
-    ("icon_32x32@2x.png", "icon_32x32@2x.png"),
-    ("icon_128x128.png", "icon_128x128.png"),
-    ("icon_128x128@2x.png", "icon_128x128@2x.png"),
-    ("icon_256x256.png", "icon_256x256.png"),
-    ("icon_256x256@2x.png", "icon_256x256@2x.png"),
-    ("icon_512x512.png", "icon_512x512.png"),
-    ("icon_512x512@2x.png", "icon_512x512@2x.png"),
 ];
 
 /// 注入构建配置并同步图标资源。
@@ -80,6 +67,9 @@ fn main() {
 /// - `cargo:rustc-env=KEY=VALUE` 使 `option_env!("KEY")` 在编译期可见。
 /// - `cargo:rerun-if-changed=.env` 确保凭证变更触发重新编译。
 fn inject_env_credentials() {
+    println!("cargo:rerun-if-env-changed={ENV_CLIENT_ID_KEY}");
+    println!("cargo:rerun-if-env-changed={ENV_CLIENT_SECRET_KEY}");
+
     // 检测 cargo 构建环境是否已设置（用户显式 export / 命令行前缀）
     let env_id = std::env::var(ENV_CLIENT_ID_KEY)
         .ok()
@@ -91,8 +81,7 @@ fn inject_env_credentials() {
     let (client_id, client_secret) = if let (Some(client_id), Some(client_secret)) =
         (env_id, env_secret)
     {
-        // 已通过环境变量显式设置，直接使用
-        println!("cargo:warning=使用构建环境变量 {ENV_CLIENT_ID_KEY} / {ENV_CLIENT_SECRET_KEY}");
+        // 已通过环境变量显式设置，直接使用。
         (client_id, client_secret)
     } else {
         // 从 .env 文件读取
@@ -136,7 +125,6 @@ fn inject_env_credentials() {
             panic!("{ENV_FILE} 中 {ENV_CLIENT_SECRET_KEY} 为空。请填入真实凭据。");
         }
 
-        println!("cargo:warning=已从 {ENV_FILE} 注入 {ENV_CLIENT_ID_KEY} / {ENV_CLIENT_SECRET_KEY} 到编译期常量");
         (id, secret)
     };
 
@@ -149,7 +137,7 @@ fn inject_env_credentials() {
     println!("cargo:rerun-if-changed=.env.example");
 }
 
-/// 将 assets/ 图标同步到 icons/：复制 PNG + 重新生成 icon.icns。
+/// 将 assets/ 图标同步到 icons/：复制 PNG + 已验证的预生成 icon.icns。
 fn sync_icons() -> std::io::Result<()> {
     fs::create_dir_all(ICONS_DIR)?;
 
@@ -163,42 +151,7 @@ fn sync_icons() -> std::io::Result<()> {
         }
     }
 
-    #[cfg(target_os = "macos")]
-    regenerate_icns()?;
+    fs::copy(APP_ICON_ICNS_SOURCE, Path::new(ICONS_DIR).join("icon.icns"))?;
 
-    Ok(())
-}
-
-/// 由 assets/ 各档位 PNG 组装 .iconset，再用 iconutil 生成多分辨率 icon.icns。
-/// iconset 放在 OUT_DIR，避免污染项目树。
-#[cfg(target_os = "macos")]
-fn regenerate_icns() -> std::io::Result<()> {
-    let out_dir =
-        std::env::var_os("OUT_DIR").ok_or_else(|| std::io::Error::other("OUT_DIR 未设置"))?;
-    let iconset = Path::new(&out_dir).join("app.iconset");
-    let _ = fs::remove_dir_all(&iconset);
-    fs::create_dir_all(&iconset)?;
-
-    for (src, name) in ICONSET_MAP {
-        let s = Path::new(ASSETS_DIR).join(src);
-        if s.exists() {
-            fs::copy(&s, iconset.join(name))?;
-        }
-    }
-
-    let icns_out = Path::new(ICONS_DIR).join("icon.icns");
-    let status = Command::new("iconutil")
-        .args(["-c", "icns"])
-        .arg(&iconset)
-        .arg("-o")
-        .arg(&icns_out)
-        .status()?;
-
-    if !status.success() {
-        return Err(std::io::Error::other(format!(
-            "iconutil 退出码 {:?}",
-            status.code()
-        )));
-    }
     Ok(())
 }
