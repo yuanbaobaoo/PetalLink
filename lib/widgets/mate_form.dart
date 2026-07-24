@@ -719,12 +719,21 @@ class _MateCheckboxState extends State<MateCheckbox> {
 }
 
 /// 单选项（对标原 Vue `<MateRadio>`）。圆形，选中显示 brand 实心圆点。
+///
+/// 两种用法：
+/// - **独立使用**：直接传 [selected] + [onSelect]（手动管理选中态）。
+/// - **组内使用**：放在 [MateRadioGroup] 内，传 [value]；选中态由组的
+///   `groupValue` 自动判定，点击时自动回调组的 `onChanged(value)`
+///   （对齐 Vue provide/inject 联动，Flutter 用 InheritedWidget 实现）。
 class MateRadio extends StatelessWidget {
-  /// 是否选中。
+  /// 是否选中（独立用法必填；组内用法由 [value] 与组 groupValue 自动判定）。
   final bool selected;
 
-  /// 选中回调。
+  /// 选中回调（独立用法）。
   final VoidCallback? onSelect;
+
+  /// 本项代表的值（组内用法必填：与组 groupValue 相等时自动选中）。
+  final Object? value;
 
   /// 尺寸（默认 16）。
   final double? size;
@@ -734,23 +743,38 @@ class MateRadio extends StatelessWidget {
 
   const MateRadio({
     super.key,
-    required this.selected,
+    bool? selected,
     this.onSelect,
+    this.value,
     this.size,
     this.disabled = false,
-  });
+  }) : selected = selected ?? false;
 
   @override
   Widget build(BuildContext context) {
+    final scope = _MateRadioGroupScope.maybeOf(context);
+    // 组内：由 value 与组 groupValue 自动判定选中态
+    final isSelected = scope != null && value != null
+        ? scope.groupValue == value
+        : selected;
+    void handleTap() {
+      if (disabled) return;
+      if (scope != null && value != null) {
+        scope.onChanged(value);
+      } else {
+        onSelect?.call();
+      }
+    }
+
     final colors = MateTheme.colorsOf(context);
     final controls = MateTheme.metricsOf(context).form.controls;
     final size = this.size ?? controls.radioDefaultSize;
-    final borderColor = selected ? colors.brand : colors.border;
+    final borderColor = isSelected ? colors.brand : colors.border;
 
     return MouseRegion(
       cursor: disabled ? SystemMouseCursors.basic : SystemMouseCursors.click,
       child: GestureDetector(
-        onTap: disabled ? null : onSelect,
+        onTap: disabled ? null : handleTap,
         child: Opacity(
           opacity: disabled ? controls.radioDisabledAlpha : 1,
           child: Container(
@@ -765,7 +789,7 @@ class MateRadio extends StatelessWidget {
               ),
             ),
             alignment: Alignment.center,
-            child: selected
+            child: isSelected
                 ? Container(
                     width: size * 0.5,
                     height: size * 0.5,
@@ -778,6 +802,82 @@ class MateRadio extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// 单选组联动作用域（对齐 Vue `provide("mate-radio-group")`）。
+///
+/// 子 [MateRadio] 经 [maybeOf] 取到组的 `groupValue` 与 `onChanged`，
+/// 自动判定选中态并回调，无需逐个手动管理。
+class _MateRadioGroupScope extends InheritedWidget {
+  /// 当前选中值（与某子 MateRadio 的 value 相等时该项选中）
+  final Object? groupValue;
+
+  /// 选中值变更回调
+  final ValueChanged<Object?> onChanged;
+
+  const _MateRadioGroupScope({
+    required this.groupValue,
+    required this.onChanged,
+    required super.child,
+  });
+
+  static _MateRadioGroupScope? maybeOf(BuildContext context) {
+    return context.dependOnInheritedWidgetOfExactType<_MateRadioGroupScope>();
+  }
+
+  @override
+  bool updateShouldNotify(_MateRadioGroupScope oldWidget) {
+    return groupValue != oldWidget.groupValue;
+  }
+}
+
+/// 单选组容器（对标原 Vue `<MateRadioGroup>`）。
+///
+/// 竖向排列子 [MateRadio]；持 `groupValue` + `onChanged`，子项自动联动选中态
+/// （对齐 Vue provide/inject，Flutter 用 InheritedWidget 实现）。
+///
+/// 示例：
+/// ```dart
+/// MateRadioGroup<String>(
+///   groupValue: selected,
+///   onChanged: (v) => setState(() => selected = v),
+///   child: Column(
+///     children: [
+///       MateRadio(value: 'a'),
+///       MateRadio(value: 'b'),
+///     ],
+///   ),
+/// )
+/// ```
+class MateRadioGroup<T extends Object?> extends StatelessWidget {
+  /// 当前选中值
+  final T groupValue;
+
+  /// 选中值变更回调
+  final ValueChanged<T> onChanged;
+
+  /// 子节点（通常含多个 [MateRadio]）
+  final Widget child;
+
+  /// 主轴间距（对齐 Vue `.mate-radio-group` gap: var(--space-sm)）
+  final double spacing;
+
+  const MateRadioGroup({
+    super.key,
+    required this.groupValue,
+    required this.onChanged,
+    required this.child,
+    this.spacing = 8,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return _MateRadioGroupScope(
+      groupValue: groupValue,
+      onChanged: (v) => onChanged(v as T),
+      child: child,
     );
   }
 }

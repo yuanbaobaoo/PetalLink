@@ -86,7 +86,9 @@ class SettingsGroupHeader extends StatelessWidget {
         bottom: metrics.groupBottomPadding,
       ),
       child: Text(
-        label,
+        // 拉丁字母大写（对齐 Tauri 设置组标题 text-transform: uppercase，
+        // 如 "OAuth" → "OAUTH"；中文不受影响）
+        label.toUpperCase(),
         style: typography.groupHeader.copyWith(color: colors.textSecondary),
       ),
     );
@@ -95,6 +97,9 @@ class SettingsGroupHeader extends StatelessWidget {
 
 /// 设置行（v2 .setting-row：左侧 label+desc 占满剩余宽度，右侧 control；
 /// 非末行底 0.5px 细边）。
+///
+/// [column] = true 时为 v2 .setting-row--column 纵向布局：label+desc 在上，
+/// control 全宽在下（如「跳过文件」输入框，对齐 Tauri）。
 class SettingRow extends StatelessWidget {
   /// 设置项标题
   final String label;
@@ -102,11 +107,14 @@ class SettingRow extends StatelessWidget {
   /// 设置项说明
   final String desc;
 
-  /// 右侧控件
+  /// 右侧控件（column 布局时为下方全宽控件）
   final Widget control;
 
   /// 是否显示底部分隔线（末行传 false）
   final bool showDivider;
+
+  /// 纵向布局（label+desc 在上，control 全宽在下）
+  final bool column;
 
   const SettingRow({
     super.key,
@@ -114,6 +122,7 @@ class SettingRow extends StatelessWidget {
     required this.desc,
     required this.control,
     this.showDivider = true,
+    this.column = false,
   });
 
   @override
@@ -121,6 +130,29 @@ class SettingRow extends StatelessWidget {
     final colors = MateTheme.colorsOf(context);
     final metrics = MateTheme.metricsOf(context).settings;
     final typography = MateTheme.typographyOf(context).settings;
+
+    final labelDesc = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: typography.optionTitle.copyWith(
+            color: colors.textPrimary,
+          ),
+        ),
+        Padding(
+          padding: EdgeInsets.only(
+            top: metrics.settingDescriptionTopPadding,
+          ),
+          child: Text(
+            desc,
+            style: typography.optionDescription.copyWith(
+              color: colors.textSecondary,
+            ),
+          ),
+        ),
+      ],
+    );
 
     return SizedBox(
       width: double.infinity,
@@ -130,36 +162,22 @@ class SettingRow extends StatelessWidget {
             padding: EdgeInsets.symmetric(
               vertical: metrics.settingRowVerticalPadding,
             ),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Column(
+            child: column
+                ? Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
-                        label,
-                        style: typography.optionTitle.copyWith(
-                          color: colors.textPrimary,
-                        ),
-                      ),
-                      Padding(
-                        padding: EdgeInsets.only(
-                          top: metrics.settingDescriptionTopPadding,
-                        ),
-                        child: Text(
-                          desc,
-                          style: typography.optionDescription.copyWith(
-                            color: colors.textSecondary,
-                          ),
-                        ),
-                      ),
+                      labelDesc,
+                      SizedBox(height: metrics.settingRowContentSpacing),
+                      SizedBox(width: double.infinity, child: control),
+                    ],
+                  )
+                : Row(
+                    children: [
+                      Expanded(child: labelDesc),
+                      SizedBox(width: metrics.settingRowContentSpacing),
+                      control,
                     ],
                   ),
-                ),
-                SizedBox(width: metrics.settingRowContentSpacing),
-                control,
-              ],
-            ),
           ),
           if (showDivider)
             Container(

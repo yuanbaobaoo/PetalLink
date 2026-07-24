@@ -1,6 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
-import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:get/get.dart';
@@ -18,6 +16,8 @@ import 'package:petal_link/service/auth/auth_service.dart';
 import 'package:petal_link/service/config/config_service.dart';
 import 'package:petal_link/service/drive/about_service.dart';
 import 'package:petal_link/service/platform/platform_service.dart';
+import 'package:petal_link/service/platform/tray_service.dart';
+import 'package:petal_link/widgets/mate_overlay.dart';
 
 /// 设置页 Tab
 ///
@@ -71,6 +71,9 @@ class SettingsState {
   /// 是否开启开机启动
   final bool launchEnabled;
 
+  /// 是否显示托盘图标（对齐 Tauri「显示托盘图标」）
+  final bool trayVisible;
+
   /// 当前账号信息（未登录/未拉取到时为 null）
   final UserInfo? userInfo;
 
@@ -98,6 +101,7 @@ class SettingsState {
     this.oauthPort = AppConfig.defaultCallbackPort,
     this.skipPatterns = AppConfig.defaultSkipPatterns,
     this.launchEnabled = false,
+    this.trayVisible = true,
     this.userInfo,
     this.quotaUsed,
     this.quotaTotal,
@@ -122,6 +126,7 @@ class SettingsState {
     int? oauthPort,
     List<String>? skipPatterns,
     bool? launchEnabled,
+    bool? trayVisible,
     UserInfo? userInfo,
     int? quotaUsed,
     int? quotaTotal,
@@ -139,6 +144,7 @@ class SettingsState {
       oauthPort: oauthPort ?? this.oauthPort,
       skipPatterns: skipPatterns ?? this.skipPatterns,
       launchEnabled: launchEnabled ?? this.launchEnabled,
+      trayVisible: trayVisible ?? this.trayVisible,
       userInfo: userInfo ?? this.userInfo,
       quotaUsed: quotaUsed ?? this.quotaUsed,
       quotaTotal: quotaTotal ?? this.quotaTotal,
@@ -182,7 +188,7 @@ class SettingsController extends GetxController {
     try {
       final config = await _configService.configLoad();
       final launchEnabled =
-          Get.find<PlatformService>().launchAtLoginIsEnabled();
+          await Get.find<PlatformService>().launchAtLoginIsEnabled();
 
       final loaded = SettingsState(
         tab: state.value.tab, // 保留当前 Tab 选择
@@ -193,6 +199,7 @@ class SettingsController extends GetxController {
         oauthPort: config.oauthCallbackPort,
         skipPatterns: config.skipPatterns,
         launchEnabled: launchEnabled,
+        trayVisible: config.trayVisible,
         userInfo: _loadUserInfo(),
         quotaUsed: null,
         quotaTotal: null,
@@ -350,79 +357,6 @@ class SettingsController extends GetxController {
   }
 
   // ═══════════════════════════════════════════════════════════════════
-  // 配置导出 / 导入（对齐 CMP ApplicationRoot.exportConfig/importConfig）
-  // ═══════════════════════════════════════════════════════════════════
-
-  /// 导出配置：file_picker 保存对话框 + [ConfigService.configExportJson]
-  /// 写盘（默认文件名 PetalLink-config.json，不含 token）。
-  ///
-  /// 返回是否成功导出（用户取消返回 false 且不记错误）。
-  Future<bool> onExportConfig() async {
-    try {
-      final target = await FilePicker.platform.saveFile(
-        dialogTitle: '导出配置',
-        fileName: 'PetalLink-config.json',
-      );
-      if (target == null) return false; // 用户取消
-
-      final json = await _configService.configExportJson();
-      await File(target).writeAsString(json);
-      AppLogger.i('配置已导出: $target');
-      return true;
-    } catch (e, st) {
-      AppLogger.e('onExportConfig 异常', e, st);
-      state.value = state.value.copyWith(errors: ['导出配置失败: $e']);
-      return false;
-    }
-  }
-
-  /// 选取并解析导入配置文件（仅解析校验，不应用）。
-  ///
-  /// 对齐 CMP importConfig 的前半段：弹文件选择 → 读 JSON →
-  /// [ConfigService.configImportJson] 解析 + 校验。返回合法的 [AppConfig]；
-  /// 用户取消或解析失败返回 null（失败时错误写入 [SettingsState.errors]）。
-  Future<AppConfig?> pickImportConfig() async {
-    try {
-      final picked = await FilePicker.platform.pickFiles(
-        dialogTitle: '导入配置',
-        withData: true,
-      );
-      final file = picked?.files.firstOrNull;
-      if (file == null) return null; // 用户取消
-
-      final bytes = file.bytes;
-      final content = bytes != null
-          ? utf8.decode(bytes)
-          : await File(file.path!).readAsString();
-      return _configService.configImportJson(content);
-    } on ConfigError catch (e) {
-      state.value = state.value.copyWith(errors: [e.message]);
-    } catch (e, st) {
-      AppLogger.e('pickImportConfig 异常', e, st);
-      state.value = state.value.copyWith(errors: ['导入配置失败: $e']);
-    }
-    return null;
-  }
-
-  /// 应用导入的配置（经确认对话框后调用）：映射进状态并立即保存。
-  ///
-  /// 对齐 CMP importConfig 的确认分支：saveConfig(parsed) 立即生效
-  /// （挂载目录变更由 configSave 编排清缓存并重启）。
-  Future<bool> applyImportedConfig(AppConfig config) async {
-    state.value = state.value.copyWith(
-      mountDir: config.mountDir,
-      concurrency: config.concurrency,
-      pollInterval: config.pollIntervalSec,
-      debounce: config.debounceSec,
-      oauthPort: config.oauthCallbackPort,
-      skipPatterns: config.skipPatterns,
-      saved: false,
-      clearErrors: true,
-    );
-    return onSave();
-  }
-
-  // ═══════════════════════════════════════════════════════════════════
   // 操作
   // ═══════════════════════════════════════════════════════════════════
 
@@ -449,6 +383,21 @@ class SettingsController extends GetxController {
       // 平台层失败（已记日志）→ 回滚开关
       setLaunchEnabled(!enabled);
       AppLogger.w('开机启动设置失败，已回滚: $enabled');
+    }
+  }
+
+  /// 切换托盘图标可见性（对齐 Tauri「显示托盘图标」：
+  /// 立即生效 + 持久化到配置，失败回滚 + toast）
+  Future<void> onTrayVisibleChange(bool visible) async {
+    state.value = state.value.copyWith(trayVisible: visible);
+    try {
+      await Get.find<TrayService>().setVisible(visible);
+      final config = await _configService.configLoad();
+      await _configService.configSave(config.copyWith(trayVisible: visible));
+    } catch (e, st) {
+      AppLogger.e('托盘可见性切换失败，已回滚', e, st);
+      state.value = state.value.copyWith(trayVisible: !visible);
+      MateToast.show('托盘图标设置失败', variant: MateToastVariant.error);
     }
   }
 

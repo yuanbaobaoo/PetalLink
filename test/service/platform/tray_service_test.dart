@@ -9,6 +9,7 @@ class FakeTrayBackend implements TrayBackend {
   String? tooltip;
   bool? isTemplate;
   final List<List<TrayMenuItem>> menus = [];
+  final List<bool> visibleCalls = [];
 
   @override
   Future<void> init({
@@ -29,6 +30,21 @@ class FakeTrayBackend implements TrayBackend {
   @override
   Future<void> setToolTip(String tooltip) async {
     this.tooltip = tooltip;
+  }
+
+  @override
+  Future<void> setVisible({
+    required String iconPath,
+    required String tooltip,
+    required bool isTemplate,
+    required bool visible,
+  }) async {
+    visibleCalls.add(visible);
+    if (visible) {
+      this.iconPath = iconPath;
+      this.tooltip = tooltip;
+      this.isTemplate = isTemplate;
+    }
   }
 
   @override
@@ -214,6 +230,22 @@ void main() {
       expect(backend.tooltip, 'PetalLink — 后台同步中');
       // init 后首建菜单
       expect(backend.menus.length, 1);
+    });
+
+    test('setVisible：切换可见性并更新状态（对齐 Rust set_tray_visible）', () async {
+      final service = newService();
+      await service.init();
+      expect(service.isVisible, isTrue); // init 后默认可见
+
+      // 隐藏
+      await service.setVisible(false);
+      expect(service.isVisible, isFalse);
+      expect(backend.visibleCalls, contains(false));
+
+      // 重新显示
+      await service.setVisible(true);
+      expect(service.isVisible, isTrue);
+      expect(backend.visibleCalls, contains(true));
     });
   });
 }

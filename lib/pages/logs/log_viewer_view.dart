@@ -1,5 +1,3 @@
-import 'dart:math' as math;
-
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:intl/intl.dart';
@@ -9,26 +7,26 @@ import 'package:petal_link/core/logger/logger.dart';
 import 'package:petal_link/pages/logs/controller/logs_controller.dart';
 import 'package:petal_link/widgets/index.dart';
 
-/// 日志查看页（对标 CMP LogViewerScreen.kt 独立模式 / design/v2/07-logs.html）。
+/// 日志查看器主体（工具栏 + 日志列表，对齐 Tauri LogViewerPage inline）。
 ///
-/// AppBar（返回 + 同步日志）+ 工具栏（ALL/INFO/WARN/ERROR 级别过滤标签
-/// + 导出/清空图标按钮）+ 白色 panel 日志列表（级别 tag + 消息 + 元信息）。
-/// 列表数据由 [LogsController] 2s 轮询自动刷新。
-class LogsPage extends StatefulWidget {
-  const LogsPage({super.key});
+/// 内嵌在设置页「日志查看」分区使用：ALL/INFO/WARN/ERROR 级别过滤标签
+/// + 导出/清空图标按钮 + 白色 panel 日志列表（级别 tag + 消息 + 元信息）。
+/// 列表数据由 [LogsController] 2s 轮询自动刷新；组件自管理控制器生命周期。
+class LogViewerView extends StatefulWidget {
+  const LogViewerView({super.key});
 
   @override
-  State<LogsPage> createState() => _LogsPageState();
+  State<LogViewerView> createState() => _LogViewerViewState();
 }
 
-class _LogsPageState extends State<LogsPage> {
-  /// 页面控制器（xe-cloud 惯例：页面持有，dispose 时释放）
+class _LogViewerViewState extends State<LogViewerView> {
+  /// 页面控制器（xe-cloud 惯例：持有方 dispose 时释放）
   final LogsController notifier = Get.put(LogsController());
 
   @override
   void initState() {
     super.initState();
-    // 进入页面启动 2s 轮询（首次加载已在控制器 onInit 完成）
+    // 进入即启动 2s 轮询（首次加载已在控制器 onInit 完成）
     Future.microtask(notifier.startPolling);
   }
 
@@ -40,58 +38,16 @@ class _LogsPageState extends State<LogsPage> {
 
   @override
   Widget build(BuildContext context) {
-    final colors = MateTheme.colorsOf(context);
-    final metrics = MateTheme.metricsOf(context).logViewer;
-    final typography = MateTheme.typographyOf(context).logViewer;
-
-    return Scaffold(
-      body: Column(
+    return Obx(() {
+      final state = notifier.state.value;
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // 独立 AppBar（56px + 底分隔线 + 返回箭头 rotate 180°）
-          SizedBox(
-            height: metrics.inlineHeaderHeight,
-            child: Padding(
-              padding: EdgeInsets.symmetric(
-                horizontal: metrics.inlineHeaderHorizontalPadding,
-              ),
-              child: Row(
-                children: [
-                  Transform.rotate(
-                    angle: math.pi, // 180°：arrow 图标朝左
-                    child: MateButton(
-                      variant: MateButtonVariant.icon,
-                      icon: 'arrow',
-                      onClick: () => Get.back(),
-                    ),
-                  ),
-                  SizedBox(width: metrics.inlineHeaderContentSpacing),
-                  Text(
-                    '同步日志',
-                    style: typography.pageTitle.copyWith(
-                      color: colors.textPrimary,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          const MateHDivider(),
-
-          // 内容区（工具栏 + 列表随状态刷新）
-          Expanded(
-            child: Obx(() {
-              final state = notifier.state.value;
-              return Column(
-                children: [
-                  _buildToolbar(state),
-                  Expanded(child: _buildContent(state)),
-                ],
-              );
-            }),
-          ),
+          _buildToolbar(state),
+          _buildContent(state),
         ],
-      ),
-    );
+      );
+    });
   }
 
   /// 工具栏（v2 log-toolbar：级别过滤 chip + 右侧导出/清空）
@@ -135,13 +91,16 @@ class _LogsPageState extends State<LogsPage> {
     );
   }
 
-  /// 内容区：loading spinner / 空态 / 白色 panel 日志列表
+  /// 内容区：loading spinner / 空态 / 白色 panel 日志列表（固定高度内滚动）
   Widget _buildContent(LogsState state) {
     final colors = MateTheme.colorsOf(context);
     final metrics = MateTheme.metricsOf(context).logViewer;
 
     if (state.loading) {
-      return Center(child: MateCircularProgress(size: metrics.loadingSize));
+      return SizedBox(
+        height: metrics.listRadius * 20,
+        child: Center(child: MateCircularProgress(size: metrics.loadingSize)),
+      );
     }
 
     final filtered = state.filteredRecords;
@@ -149,7 +108,8 @@ class _LogsPageState extends State<LogsPage> {
       return const MateEmpty(title: '暂无日志', icon: 'list');
     }
 
-    // v2 log-list：白色 panel（bgContainer radius 10 + 0.5px 细边，外边距 0/20/20）
+    // v2 log-list：白色 panel（bgContainer radius 10 + 0.5px 细边）
+    // 内嵌场景列表在固定高度内自滚动（对齐 Tauri inline 模式）
     return Padding(
       padding: EdgeInsets.only(
         left: metrics.standaloneContentPadding,
@@ -157,6 +117,7 @@ class _LogsPageState extends State<LogsPage> {
         bottom: metrics.standaloneContentPadding,
       ),
       child: Container(
+        height: 360,
         decoration: BoxDecoration(
           color: colors.bgContainer,
           borderRadius: BorderRadius.circular(metrics.listRadius),
@@ -171,7 +132,7 @@ class _LogsPageState extends State<LogsPage> {
             itemCount: filtered.length,
             separatorBuilder: (_, _) => const MateHDivider(),
             itemBuilder: (context, index) =>
-                _LogRecordRow(record: filtered[index]),
+                LogRecordRow(record: filtered[index]),
           ),
         ),
       ),
@@ -190,10 +151,11 @@ class _LogsPageState extends State<LogsPage> {
 }
 
 /// 日志记录行（v2 log-item：级别 tag + 消息 + 等宽元信息）。
-class _LogRecordRow extends StatelessWidget {
+class LogRecordRow extends StatelessWidget {
+  /// 记录
   final LogRecordDisplay record;
 
-  const _LogRecordRow({required this.record});
+  const LogRecordRow({super.key, required this.record});
 
   static final DateFormat _timeFormat = DateFormat('yyyy-MM-dd HH:mm:ss');
 

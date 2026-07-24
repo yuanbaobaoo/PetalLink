@@ -43,6 +43,14 @@ class PlatformService {
   /// appClearCache：清安全存储中的敏感配置
   final Future<void> Function()? _clearSecureConfig;
 
+  /// 退出期 flush：真退出时停止同步引擎并标记索引完整性
+  /// （对齐 Rust `platform/shutdown.rs::flush_with_timeout`）
+  final Future<void> Function()? _shutdownFlush;
+
+  /// 查询托盘图标是否可见（退出联动用，对齐 Rust `is_tray_icon_visible`）。
+  /// 托盘不可见时 Cmd+Q 必须放行真退出（防僵尸进程）。
+  final bool Function()? _trayVisibleProvider;
+
   /// 当前是否处于 accessory 模式（对齐 Rust `IS_ACCESSORY`）
   bool _isAccessory = false;
 
@@ -54,13 +62,17 @@ class PlatformService {
     Future<void> Function()? onClearAuth,
     Future<void> Function()? onClearDatabase,
     Future<void> Function()? onClearSecureConfig,
+    Future<void> Function()? onShutdownFlush,
+    bool Function()? onTrayVisibleProvider,
   })  : _launchAtLogin = launchAtLogin ?? LaunchAtLoginService(),
         _channel = channel ?? _defaultChannel,
         _runner = runner ?? defaultProcRunner,
         _teardownRuntime = onTeardownRuntime,
         _clearAuth = onClearAuth,
         _clearDatabase = onClearDatabase,
-        _clearSecureConfig = onClearSecureConfig;
+        _clearSecureConfig = onClearSecureConfig,
+        _shutdownFlush = onShutdownFlush,
+        _trayVisibleProvider = onTrayVisibleProvider;
 
   // ═══════════════════════════════════════════════════════════════════
   // Finder 集成
@@ -103,7 +115,7 @@ class PlatformService {
   // ═══════════════════════════════════════════════════════════════════
 
   /// 开机启动是否已启用（仅判断 plist 存在）
-  bool launchAtLoginIsEnabled() => _launchAtLogin.isEnabled();
+  Future<bool> launchAtLoginIsEnabled() => _launchAtLogin.isEnabled();
 
   /// 设置开机启动；失败仅记录日志并返回 false（对齐 Rust 不抛错语义）
   Future<bool> setLaunchAtLoginEnabled(bool enabled) =>
@@ -314,6 +326,28 @@ class PlatformService {
       AppLogger.e('appClearCache 异常', e, st);
       return Err(GenericError(message: '清除缓存失败：$e'));
     }
+  }
+
+  /// 注册原生侧反向调用（native → Dart）。
+  ///
+  /// 目前仅 `shutdownFlush`：AppDelegate 在 `applicationWillTerminate`
+  /// （系统关机/登出真退出）时经 MethodChannel 触发，让 Dart 侧有机会
+  /// 停止引擎并标记索引完整性（对齐 Rust `flush_with_timeout`）。
+  void registerNativeCallbacks() {
+    _channel.setMethodCallHandler((call) async {
+      switch (call.method) {
+        case 'shutdownFlush':
+          if (_shutdownFlush != null) {
+            await _shutdownFlush();
+          }
+          return null;
+        case 'isTrayVisible':
+          // 退出联动：托盘不可见时 native 侧放行真退出（防僵尸进程）
+          return _trayVisibleProvider?.call() ?? true;
+        default:
+          return null;
+      }
+    });
   }
 
   /// 重启应用（对齐 Rust `relaunch`）：

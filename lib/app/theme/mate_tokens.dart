@@ -101,6 +101,10 @@ class MateColors {
   /// 浅色主题悬停背景色。
   static const Color lightBgHover = Color(0xFFF7F7F9);
 
+  /// 浅色主题强悬停背景色（黑 0.04）——侧边栏树节点/设置导航项，
+  /// 对齐 Tauri rgba(0,0,0,0.04)（bgHover 在灰底上仅差 2/255 不可见）。
+  static const Color lightHoverStrong = Color(0x0A000000);
+
   /// 浅色主题激活背景色。
   static const Color lightBgActive = Color(0xFFECECEF);
 
@@ -118,76 +122,6 @@ class MateColors {
 
   /// 浅色主题占位文字色。
   static const Color lightTextPlaceholder = Color(0x59000000);
-
-  // ------ 深色主题 ------
-  /// 深色主题页面背景色。
-  static const Color darkBgPage = Color(0xFF181818);
-
-  /// 深色主题容器背景色。
-  static const Color darkBgContainer = Color(0xFF242424);
-
-  /// 深色主题填充背景色。
-  static const Color darkBgFill = Color(0xFF2C2C2C);
-
-  /// 深色主题悬停背景色。
-  static const Color darkBgHover = Color(0xFF2C2C2C);
-
-  /// 深色主题激活背景色。
-  static const Color darkBgActive = Color(0xFF333333);
-
-  /// 深色主题默认边框色。
-  static const Color darkBorder = Color(0x14FFFFFF);
-
-  /// 深色主题悬停边框色。
-  static const Color darkBorderHover = Color(0x29FFFFFF);
-
-  /// 深色主题主要文字色。
-  static const Color darkTextPrimary = Color(0xE6FFFFFF);
-
-  /// 深色主题次要文字色。
-  static const Color darkTextSecondary = Color(0x99FFFFFF);
-
-  /// 深色主题占位文字色。
-  static const Color darkTextPlaceholder = Color(0x59FFFFFF);
-
-  /// 深色主题品牌浅色强调。
-  static const Color darkBrandLight = Color(0xFF1A3A8A);
-
-  /// 深色主题品牌 100 色阶背景。
-  static const Color darkBrand100 = Color(0xFF233A66);
-
-  /// 深色主题品牌最浅背景。
-  static const Color darkBrandLighter = Color(0xFF1F2A4A);
-
-  /// 深色主题成功状态背景色。
-  static const Color darkSuccessBackground = Color(0xFF173A31);
-
-  /// 深色主题警告状态背景色。
-  static const Color darkWarningBackground = Color(0xFF3D2C12);
-
-  /// 深色主题错误状态背景色。
-  static const Color darkErrorBackground = Color(0xFF432326);
-
-  /// 深色主题信息状态背景色。
-  static const Color darkInfoBackground = Color(0xFF1E2F4F);
-
-  /// 深色主题文件夹图标背景色。
-  static const Color darkFolderBackground = Color(0xFF3D301A);
-
-  /// 深色主题文档图标背景色。
-  static const Color darkDocumentBackground = Color(0xFF292B50);
-
-  /// 深色主题图片图标背景色。
-  static const Color darkImageBackground = Color(0xFF4A2239);
-
-  /// 深色主题视频图标背景色。
-  static const Color darkVideoBackground = Color(0xFF34264D);
-
-  /// 深色主题表格图标背景色。
-  static const Color darkSheetBackground = Color(0xFF183C31);
-
-  /// 深色主题关闭状态开关轨道色。
-  static const Color darkSwitchOffTrack = Color(0xFF4A4A4D);
 
   // ------ 固定前景色 ------
   /// Material 主色上的固定内容色。
@@ -216,6 +150,9 @@ class MateColors {
 
   /// 成功 Toast 图标色。
   static const Color toastSuccessIcon = Color(0xFF4ADE80);
+
+  /// 警告 Toast 图标色（对齐 Tauri #fbbf24）。
+  static const Color toastWarningIcon = Color(0xFFFBBF24);
 
   /// 错误 Toast 图标色。
   static const Color toastErrorIcon = Color(0xFFFB7185);
@@ -299,11 +236,11 @@ class MateColors {
   /// 主页面加载遮罩色（白 0.6）。
   static const Color mainLoadingScrim = Color(0x99FFFFFF);
 
-  /// 更新弹窗遮罩色（黑 0.36）。
-  static const Color updateDialogScrim = Color(0x5C000000);
+  /// 更新弹窗遮罩色（对齐 Tauri rgba(28,28,30,0.36)）。
+  static const Color updateDialogScrim = Color(0x5C1C1C1E);
 
-  /// 通用对话框遮罩色（黑 0.36）。
-  static const Color overlayDialogScrim = Color(0x5C000000);
+  /// 通用对话框遮罩色（对齐 Tauri rgba(28,28,30,0.36)）。
+  static const Color overlayDialogScrim = Color(0x5C1C1C1E);
 
   /// 控件阴影色（浅，黑 0.08）——步进按钮等浮起控件。
   static const Color controlShadowSoft = Color(0x14000000);
@@ -317,10 +254,4 @@ class MateColors {
 
   /// 分隔线色。
   static const Color divider = Color(0x1A000000);
-
-  /// 深色主题滚动条滑块色。
-  static const Color darkScrollbarThumb = Color(0x33FFFFFF);
-
-  /// 深色主题分隔线色。
-  static const Color darkDivider = Color(0x1AFFFFFF);
 }

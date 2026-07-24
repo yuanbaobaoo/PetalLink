@@ -9,6 +9,10 @@ import 'package:flutter/material.dart';
 
 /// 构造默认字体 token；[lineHeight] 为 CMP 的绝对行高（sp），
 /// 转换为 Flutter 的 height 倍率（lineHeight / size）。
+///
+/// fontFamilyFallback 显式声明苹方（对齐 Tauri tokens.css 字体栈
+/// `-apple-system, "PingFang SC", ...`）：macOS 西文走系统默认 SF，
+/// 中文固定回退 PingFang SC，避免引擎回退的不确定性。
 TextStyle _ts(
   double size, {
   FontWeight weight = FontWeight.normal,
@@ -20,6 +24,7 @@ TextStyle _ts(
     fontWeight: weight,
     height: lineHeight != null ? lineHeight / size : null,
     letterSpacing: letterSpacing,
+    fontFamilyFallback: const ['PingFang SC', 'Helvetica Neue', 'sans-serif'],
   );
 }
 
@@ -641,7 +646,7 @@ class MateTypography {
 
     // 菜单字体。
     final menu = MenuTypography(
-      itemLabel: _ts(13),
+      itemLabel: _ts(14),
     );
 
     // 表单字体。
@@ -689,8 +694,8 @@ class MateTypography {
       availableUpdateLabel: _ts(13, weight: FontWeight.w600),
       dismissUpdateAction: _ts(13),
       installUpdateAction: _ts(12, weight: FontWeight.w600),
-      treeNodeLabel: _ts(13),
-      selectedTreeNodeLabel: _ts(13, weight: FontWeight.w500),
+      treeNodeLabel: _ts(13.5),
+      selectedTreeNodeLabel: _ts(13.5, weight: FontWeight.w500),
     );
 
     // 面包屑字体。
@@ -714,10 +719,10 @@ class MateTypography {
       loadedSummary: _ts(12),
       toolbarAction: _ts(13, weight: FontWeight.w500),
       genericColumnHeader: _ts(11.5, weight: FontWeight.w600),
-      rowFileName: _ts(14),
+      rowFileName: _ts(13.5, weight: FontWeight.w500),
       rowFileSize: _ts(13),
       rowModifiedTime: _ts(13),
-      secondaryAction: _ts(13),
+      secondaryAction: _ts(14),
       renameDialogTitle: _ts(16, weight: FontWeight.w600),
       moveDialogTitle: _ts(16),
       moveDialogDescription: _ts(12),
@@ -731,7 +736,7 @@ class MateTypography {
       logRetentionDescription: _ts(14, lineHeight: 24),
       validationError: _ts(12),
       saveSuccess: _ts(12),
-      groupHeader: _ts(12, weight: FontWeight.w600),
+      groupHeader: _ts(12, weight: FontWeight.w600, letterSpacing: 0.4),
       optionTitle: _ts(14, weight: FontWeight.w500),
       optionDescription: _ts(12),
       emptyMountTitle: _ts(14, weight: FontWeight.w600),

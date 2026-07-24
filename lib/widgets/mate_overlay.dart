@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ui';
 
 import 'package:flutter/material.dart';
 
@@ -13,6 +14,43 @@ import 'mate_icon.dart';
 // - MateDialog：全局命令式对话框（open/confirm/close + MateDialogHost 挂载）
 // - MateToast：全局命令式 Toast（show + MateToastHost 挂载，单条语义）
 // =============================================================================
+
+/// 菜单/浮层进入动画（对齐 Tauri animations.css `menu-fade-in`：
+/// 0.12s ease-out，opacity 0→1 + scale 0.96→1）。
+///
+/// 右键菜单、下拉菜单等 OverlayEntry 浮层统一套用，
+/// 避免无动画瞬时出现造成的"闪"感。
+class MateMenuFadeIn extends StatelessWidget {
+  /// 子组件。
+  final Widget child;
+
+  /// 缩放锚点（菜单一般从锚点角展开，默认左上）。
+  final Alignment alignment;
+
+  const MateMenuFadeIn({
+    super.key,
+    required this.child,
+    this.alignment = Alignment.topLeft,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return TweenAnimationBuilder<double>(
+      tween: Tween(begin: 0, end: 1),
+      duration: const Duration(milliseconds: 120),
+      curve: Curves.easeOut,
+      builder: (context, t, child) => Opacity(
+        opacity: t,
+        child: Transform.scale(
+          scale: 0.96 + 0.04 * t,
+          alignment: alignment,
+          child: child,
+        ),
+      ),
+      child: child,
+    );
+  }
+}
 
 /// 弹出菜单项（对标 CMP MatePopupItem）。
 class MatePopupItem {
@@ -179,9 +217,10 @@ class _MatePopupMenuState extends State<MatePopupMenu> {
         Positioned(
           left: left.toDouble(),
           top: top.toDouble(),
-          child: Container(
-            width: width,
-            decoration: BoxDecoration(
+          child: MateMenuFadeIn(
+            child: Container(
+              width: width,
+              decoration: BoxDecoration(
               color: colors.bgContainer,
               borderRadius:
                   BorderRadius.circular(menuMetrics.containerRadius),
@@ -220,6 +259,7 @@ class _MatePopupMenuState extends State<MatePopupMenu> {
                         ),
               ],
             ),
+          ),
           ),
         ),
       ],
@@ -404,12 +444,28 @@ class MateDialogHost extends StatelessWidget {
 
         return GestureDetector(
           onTap: options.closeOnOverlay ? () => MateDialog.close(false) : null,
-          child: Container(
-            color: colors.overlayDialogScrim,
-            alignment: Alignment.center,
-            child: GestureDetector(
-              onTap: () {}, // 吞掉点击，避免穿透到遮罩关闭
-              child: Container(
+          // 遮罩毛玻璃 blur(3px)（对齐 Tauri 弹窗遮罩 backdrop-filter）
+          child: BackdropFilter(
+            filter: ImageFilter.blur(sigmaX: 3, sigmaY: 3),
+            child: Container(
+              color: colors.overlayDialogScrim,
+              alignment: Alignment.center,
+              child: GestureDetector(
+                onTap: () {}, // 吞掉点击，避免穿透到遮罩关闭
+                // dialog-fade-in：scale 0.96→1 + 淡入，150ms ease-out
+                // （对齐 Tauri animations.css）
+                child: TweenAnimationBuilder<double>(
+                  tween: Tween(begin: 0, end: 1),
+                  duration: const Duration(milliseconds: 150),
+                  curve: Curves.easeOut,
+                  builder: (context, t, child) => Opacity(
+                    opacity: t,
+                    child: Transform.scale(
+                      scale: 0.96 + 0.04 * t,
+                      child: child,
+                    ),
+                  ),
+                  child: Container(
                 width: options.width,
                 decoration: BoxDecoration(
                   color: colors.bgContainer,
@@ -522,6 +578,8 @@ class MateDialogHost extends StatelessWidget {
                     ),
                   ],
                 ),
+                  ),
+                ),
               ),
             ),
           ),
@@ -631,7 +689,8 @@ class _MateToastHostState extends State<MateToastHost> {
         final (iconName, iconColor) = switch (variant) {
           MateToastVariant.normal => ('info', colors.toastDefaultIcon),
           MateToastVariant.success => ('check', colors.toastSuccessIcon),
-          MateToastVariant.warning => ('alert', colors.warning),
+          // 对齐 Tauri toast 图标色：warning #fbbf24（非功能色 warning）
+          MateToastVariant.warning => ('alert', colors.toastWarningIcon),
           MateToastVariant.error => ('alert', colors.toastErrorIcon),
         };
 
@@ -640,36 +699,54 @@ class _MateToastHostState extends State<MateToastHost> {
             padding: EdgeInsets.all(overlayMetrics.toastOuterPadding),
             child: Align(
               alignment: Alignment.bottomCenter,
-              child: Container(
-                constraints: const BoxConstraints(maxWidth: 480),
-                decoration: BoxDecoration(
-                  color: colors.toastBackground,
+              // toast-in：translateY(8→0) + 淡入，200ms ease-out
+              // （对齐 Tauri animations.css）
+              child: TweenAnimationBuilder<double>(
+                tween: Tween(begin: 0, end: 1),
+                duration: const Duration(milliseconds: 200),
+                curve: Curves.easeOut,
+                builder: (context, t, child) => Opacity(
+                  opacity: t,
+                  child: Transform.translate(
+                    offset: Offset(0, 8 * (1 - t)),
+                    child: child,
+                  ),
+                ),
+                child: ClipRRect(
                   borderRadius:
                       BorderRadius.circular(dialogMetrics.toastRadius),
-                ),
-                padding: EdgeInsets.symmetric(
-                  horizontal: overlayMetrics.toastHorizontalPadding,
-                  vertical: overlayMetrics.toastVerticalPadding,
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.center,
-                  children: [
-                    MateIcon(
-                      name: iconName,
-                      size: overlayMetrics.toastIconSize,
-                      tint: iconColor,
-                    ),
-                    SizedBox(width: overlayMetrics.toastContentSpacing),
-                    Flexible(
-                      child: Text(
-                        message,
-                        style: typography.toastMessage.copyWith(
-                          color: colors.toastText,
-                        ),
+                  // 毛玻璃 blur(8px)（对齐 Tauri toast backdrop-filter）
+                  child: BackdropFilter(
+                    filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
+                    child: Container(
+                      constraints: const BoxConstraints(maxWidth: 480),
+                      color: colors.toastBackground,
+                      padding: EdgeInsets.symmetric(
+                        horizontal: overlayMetrics.toastHorizontalPadding,
+                        vertical: overlayMetrics.toastVerticalPadding,
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          MateIcon(
+                            name: iconName,
+                            size: overlayMetrics.toastIconSize,
+                            tint: iconColor,
+                          ),
+                          SizedBox(width: overlayMetrics.toastContentSpacing),
+                          Flexible(
+                            child: Text(
+                              message,
+                              style: typography.toastMessage.copyWith(
+                                color: colors.toastText,
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
                     ),
-                  ],
+                  ),
                 ),
               ),
             ),

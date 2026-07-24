@@ -1,0 +1,91 @@
+# PetalLink (Flutter) Release Workflow
+#
+# 构建 macOS (aarch64) 并发布 GitHub Release。
+# 对齐 Tauri 版更新协议：产出 .app.tar.gz + minisign 签名 + update.json，
+# 使 Tauri 老客户端能无缝更新到 Flutter 版。
+#
+# 触发方式：
+#   - workflow_dispatch：手动触发（GitHub Actions 页面点 Run workflow）
+#   - push tags 'flutter-v*'：Flutter 版专用 tag（避免与 Tauri 版 v* 冲突）
+#
+# 必需 Secrets（复用 Tauri 版已有的）：
+#   HWCLOUD_CLIENT_ID                  OAuth client_id
+#   HWCLOUD_CLIENT_SECRET              OAuth client_secret
+#   TAURI_SIGNING_PRIVATE_KEY          minisign 私钥（base64）
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD 私钥密码（空密码私钥可省略）
+
+name: Release (Flutter)
+
+on:
+  push:
+    tags: ['flutter-v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（如 2.0.0，留空则读 pubspec）'
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build & Release (macOS aarch64)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Install minisign & jq
+        run: |
+          brew install minisign
+          brew install jq
+
+      - name: Flutter dependencies
+        run: flutter pub get
+
+      - name: Build & package
+        run: ./tool/build-release.sh
+        env:
+          HWCLOUD_CLIENT_ID: ${{ secrets.HWCLOUD_CLIENT_ID }}
+          HWCLOUD_CLIENT_SECRET: ${{ secrets.HWCLOUD_CLIENT_SECRET }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Derive version & tag
+        id: ver
+        run: |
+          VERSION=$(grep '^version:' pubspec.yaml | head -1 | awk '{print $2}' | cut -d+ -f1)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          # tag 触发时用 tag 名；手动触发用 v+版本
+          TAG="${GITHUB_REF#refs/tags/}"
+          if [ "$TAG" = "$GITHUB_REF" ] || [ -z "$TAG" ]; then
+            TAG="flutter-v${VERSION}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: List artifacts
+        run: ls -la dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: ${{ steps.ver.outputs.tag }}
+          generate_release_notes: true
+          body: |
+            ## PetalLink (Flutter) ${{ steps.ver.outputs.version }}
+
+            本版本由 Flutter 版构建。Tauri 版客户端可通过自动更新升级至此版本
+            （共用 minisign 签名密钥，manifest 格式完全兼容）。
+          files: |
+            dist/PetalLink_aarch64.app.tar.gz
+            dist/PetalLink_aarch64.app.tar.gz.sig
+            dist/PetalLink_aarch64.dmg
+            dist/PetalLink_update.json

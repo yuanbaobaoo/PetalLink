@@ -5,7 +5,8 @@ import 'package:petal_link/app/theme/mate_theme.dart';
 import 'package:petal_link/app/theme/mate_tokens.dart';
 
 // =============================================================================
-// Mate 主题层测试：Token 完整性（关键色值 / 双主题解析）+ 访问入口。
+// Mate 主题层测试：Token 完整性（关键色值 / 浅色语义解析）+ 访问入口。
+// 注：已对齐 Tauri 移除深色主题（强制浅色）。
 // 色值基准：CMP shared/src@jvm/.../ui/theme/DesignTokens.kt 与 Theme.kt。
 // =============================================================================
 
@@ -51,17 +52,6 @@ void main() {
       expect(MateColors.lightTextPlaceholder, const Color(0x59000000));
     });
 
-    test('深色主题背景/边框/文字', () {
-      expect(MateColors.darkBgPage, const Color(0xFF181818));
-      expect(MateColors.darkBgContainer, const Color(0xFF242424));
-      expect(MateColors.darkBgFill, const Color(0xFF2C2C2C));
-      expect(MateColors.darkBgHover, const Color(0xFF2C2C2C));
-      expect(MateColors.darkBgActive, const Color(0xFF333333));
-      expect(MateColors.darkBorder, const Color(0x14FFFFFF));
-      expect(MateColors.darkTextPrimary, const Color(0xE6FFFFFF));
-      expect(MateColors.darkTextSecondary, const Color(0x99FFFFFF));
-      expect(MateColors.darkTextPlaceholder, const Color(0x59FFFFFF));
-    });
   });
 
   group('MateSemanticColors 双主题解析（对齐 CMP Theme.kt）', () {
@@ -81,38 +71,19 @@ void main() {
           [const Color(0xFFEFF4FE), const Color(0xFFDCE8FC)]);
     });
 
-    test('深色语义解析（品牌明暗互换 + 暗色 accent 变体）', () {
-      const dark = MateSemanticColors.dark;
-      // 深色主色用 hover 色，悬停色用主色（对齐 CMP DARK_SEMANTIC_COLORS）
-      expect(dark.brand, const Color(0xFF4A8BF0));
-      expect(dark.brandHover, const Color(0xFF0053DB));
-      expect(dark.brandLight, const Color(0xFF1A3A8A));
-      expect(dark.brand100, const Color(0xFF233A66));
-      expect(dark.brandLighter, const Color(0xFF1F2A4A));
-      expect(dark.bgPage, const Color(0xFF181818));
-      expect(dark.successBg, const Color(0xFF173A31));
-      expect(dark.warningBg, const Color(0xFF3D2C12));
-      expect(dark.errorBg, const Color(0xFF432326));
-      expect(dark.infoBg, const Color(0xFF1E2F4F));
-      expect(dark.folderBg, const Color(0xFF3D301A));
-      expect(dark.switchOffTrack, const Color(0xFF4A4A4D));
-      expect(dark.brandGradientSoft,
-          [const Color(0xFF1F2A4A), const Color(0xFF233A66)]);
-    });
-
-    test('固定前景色双主题一致', () {
-      for (final colors in [
-        MateSemanticColors.light,
-        MateSemanticColors.dark,
-      ]) {
-        expect(colors.toastBackground, const Color(0xEB1C1C1E));
-        expect(colors.toastSuccessIcon, const Color(0xFF4ADE80));
-        expect(colors.toastErrorIcon, const Color(0xFFFB7185));
-        expect(colors.buttonPrimaryText, const Color(0xFFFFFFFF));
-        expect(colors.overlayDialogScrim, const Color(0x5C000000));
-        expect(colors.mainLoadingScrim, const Color(0x99FFFFFF));
-        expect(colors.fileListBulkBackground, const Color(0xF01C1C1E));
-      }
+    test('固定前景色（浅色，对齐 Tauri tokens.css）', () {
+      const colors = MateSemanticColors.light;
+      expect(colors.toastBackground, const Color(0xEB1C1C1E));
+      expect(colors.toastSuccessIcon, const Color(0xFF4ADE80));
+      expect(colors.toastWarningIcon, const Color(0xFFFBBF24));
+      expect(colors.toastErrorIcon, const Color(0xFFFB7185));
+      expect(colors.buttonPrimaryText, const Color(0xFFFFFFFF));
+      // 遮罩对齐 Tauri rgba(28,28,30,0.36)
+      expect(colors.overlayDialogScrim, const Color(0x5C1C1C1E));
+      expect(colors.mainLoadingScrim, const Color(0x99FFFFFF));
+      expect(colors.fileListBulkBackground, const Color(0xF01C1C1E));
+      // 强悬停色（黑 0.04，对齐 Tauri rgba(0,0,0,0.04)）
+      expect(colors.hoverStrong, const Color(0x0A000000));
     });
   });
 
@@ -176,7 +147,7 @@ void main() {
       expect(metrics.button.primaryHeight, 36);
     });
 
-    testWidgets('跟随系统暗色模式注入深色皮肤', (tester) async {
+    testWidgets('系统暗色模式下仍强制浅色皮肤（对齐 Tauri：不支持深色）', (tester) async {
       tester.platformDispatcher.platformBrightnessTestValue = Brightness.dark;
       addTearDown(() => tester.platformDispatcher.clearAllTestValues());
 
@@ -193,8 +164,8 @@ void main() {
           ),
         ),
       );
-      expect(colors.bgPage, const Color(0xFF181818));
-      expect(colors.brand, const Color(0xFF4A8BF0));
+      expect(colors.bgPage, const Color(0xFFF5F5F7));
+      expect(colors.brand, const Color(0xFF0053DB));
     });
 
     testWidgets('reducedMotionOf 默认 false，跟随 disableAnimations', (tester) async {

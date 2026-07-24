@@ -287,6 +287,27 @@ class SyncService {
     AppLogger.i('登出：同步状态与缓存已清理');
   }
 
+  /// 退出期 flush（对齐 Rust `platform/shutdown.rs::flush_with_timeout`）。
+  ///
+  /// 真退出（系统关机/登出）时由 AppDelegate 经 MethodChannel 触发：
+  /// 若引擎正在全量索引（BFS），清理候选残留防止下次误用半成品；
+  /// 随后停止引擎释放 FSEvents watcher。失败仅记日志，绝不阻塞退出。
+  Future<void> disposeForShutdown() async {
+    try {
+      final engine = _engine;
+      final mountDir = _mountManager?.mountDir;
+      if (engine != null && mountDir != null) {
+        if (engine.currentState().isIndexing) {
+          await markCacheIncompleteIfExists(mountDir);
+          AppLogger.i('退出期 flush：索引未完成，已清理候选缓存残留');
+        }
+      }
+      await stopEngine();
+    } catch (e) {
+      AppLogger.w('退出期 flush 异常（忽略，放行退出）: $e');
+    }
+  }
+
   /// 清理孤儿同步状态（清表 + 清缓存 + 重置挂载配置）。
   Future<void> _cleanupOrphanState() async {
     final db = await _db.database;

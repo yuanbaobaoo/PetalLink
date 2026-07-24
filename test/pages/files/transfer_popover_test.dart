@@ -8,7 +8,7 @@ import 'package:petal_link/types/enums.dart';
 import 'package:petal_link/widgets/index.dart';
 
 // =============================================================================
-// TransferPopover 测试：9 态渲染 / 摘要统计 / 清空菜单 / 重试防抖。
+// TransferPopover 测试：9 态渲染 / 摘要统计（固定 4 卡片）/ 清空菜单。
 // =============================================================================
 
 Widget _wrap(Widget child) {
@@ -49,7 +49,6 @@ TransferTask _task(
 }
 
 class _Callbacks {
-  int? retriedId;
   int clearCompleted = 0;
   int clearFailed = 0;
   int clearFinished = 0;
@@ -60,10 +59,6 @@ Widget _popover(_Callbacks cb, List<TransferTask> tasks) {
   return TransferPopover(
     tasks: tasks,
     onDismiss: () => cb.dismissed++,
-    onRetry: (id, onResult) {
-      cb.retriedId = id;
-      onResult(true);
-    },
     onClearCompleted: () => cb.clearCompleted++,
     onClearFailed: () => cb.clearFailed++,
     onClearFinished: () => cb.clearFinished++,
@@ -204,7 +199,7 @@ void main() {
     expect(cb.clearFinished, 1);
   });
 
-  testWidgets('失败上传任务可重试，重试回调透出 taskId', (tester) async {
+  testWidgets('失败任务显示红色错误文案且无重试按钮（对齐 Tauri）', (tester) async {
     tester.view.physicalSize = const Size(1200, 900);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.reset);
@@ -215,14 +210,10 @@ void main() {
     ])));
     await tester.pump();
 
-    // 重试按钮（icon=refresh）
-    final retry = find.byWidgetPredicate(
-        (w) => w is MateButton && w.icon == 'refresh');
-    expect(retry, findsOneWidget);
-    await tester.tap(retry);
-    await tester.pump();
-
-    expect(cb.retriedId, 42);
+    // 错误文案替代进度条；无重试按钮（Tauri 无此入口）
+    expect(find.text('网络错误'), findsOneWidget);
+    expect(find.byWidgetPredicate(
+        (w) => w is MateButton && w.icon == 'refresh'), findsNothing);
   });
 
   testWidgets('删除方向任务显示「删除操作」且无重试按钮', (tester) async {

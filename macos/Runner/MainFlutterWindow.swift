@@ -115,6 +115,24 @@ class MainFlutterWindow: NSWindow {
     }
 
     super.awakeFromNib()
+
+    // 红绿灯位置对齐 Tauri tauri.conf.json trafficLightPosition {x: 16, y: 18}
+    // （x/y 为红色关闭按钮中心相对窗口左上角的偏移）
+    layoutTrafficLights()
+  }
+
+  /// 调整红绿灯按钮位置（关闭按钮中心 = (16, 18)，其余按原间距排开）。
+  private func layoutTrafficLights() {
+    guard let close = standardWindowButton(.closeButton),
+      let mini = standardWindowButton(.miniaturizeButton),
+      let zoom = standardWindowButton(.zoomButton),
+      let bar = close.superview
+    else { return }
+    let spacing = mini.frame.minX - close.frame.maxX
+    let y = bar.frame.height - 18 - close.frame.height / 2
+    close.setFrameOrigin(NSPoint(x: 16, y: y))
+    mini.setFrameOrigin(NSPoint(x: close.frame.maxX + spacing, y: y))
+    zoom.setFrameOrigin(NSPoint(x: mini.frame.maxX + spacing, y: y))
   }
 
   /// 读取 IOPlatformUUID（IOKit，无需 root，沙盒内可用）。

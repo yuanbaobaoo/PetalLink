@@ -160,7 +160,7 @@ void main() {
 
       final state = controller.state.value;
       expect(state.folderId, 'f1');
-      expect(state.breadcrumbs.map((b) => b.name), ['全部文件', '文档']);
+      expect(state.breadcrumbs.map((b) => b.name), ['我的云盘', '文档']);
     });
 
     test('enterFolder 忽略非文件夹', () async {
@@ -179,7 +179,7 @@ void main() {
 
       final state = controller.state.value;
       expect(state.folderId, isNull);
-      expect(state.breadcrumbs.single.name, '全部文件');
+      expect(state.breadcrumbs.single.name, '我的云盘');
     });
   });
 
@@ -210,7 +210,7 @@ void main() {
 
       final state = controller.state.value;
       expect(state.folderId, 'f2');
-      expect(state.breadcrumbs.map((b) => b.name), ['全部文件', '文档', '工作']);
+      expect(state.breadcrumbs.map((b) => b.name), ['我的云盘', '文档', '工作']);
     });
   });
 

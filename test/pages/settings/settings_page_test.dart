@@ -56,7 +56,7 @@ class _FakePlatformService extends PlatformService {
   bool launchEnabled = false;
 
   @override
-  bool launchAtLoginIsEnabled() => launchEnabled;
+  Future<bool> launchAtLoginIsEnabled() async => launchEnabled;
 
   @override
   Future<bool> setLaunchAtLoginEnabled(bool enabled) async {

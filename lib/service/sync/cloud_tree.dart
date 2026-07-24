@@ -568,6 +568,28 @@ Future<void> persistCloudCheckpoint(
   AppLogger.i('可信云端 checkpoint 已提交（${checkpoint.tree.length} 项）');
 }
 
+/// 退出期索引完整性双保险（对齐 Rust `mark_cache_incomplete_if_exists`）。
+///
+/// 仅清理 BFS 原子写中途崩溃可能残留的 `.tmp`/`.bak` 候选文件。
+/// 主缓存文件（`complete=true` 才被持久化）不受影响：
+/// - BFS 中途强退：主文件仍是上次完整快照或不存在，候选残留被本函数清掉
+/// - 正常退出：主缓存保留，下次启动秒级复用，无需重跑全量 BFS
+///
+/// 调用时机：真退出（系统关机/登出）且引擎正在索引时（见 SyncService.disposeForShutdown）。
+Future<void> markCacheIncompleteIfExists(String mountDir) async {
+  final file = await CachePaths.cloudTreeCacheFile(mountDir);
+  for (final suffix in const ['.tmp', '.bak']) {
+    final candidate = File('${file.path}$suffix');
+    if (await candidate.exists()) {
+      try {
+        await candidate.delete();
+      } catch (_) {
+        // 尽力清理
+      }
+    }
+  }
+}
+
 /// 尽力 fsync 父目录元数据（对齐 Rust sync_parent_directory；
 /// dart:io 在部分平台无法打开目录句柄，失败仅记日志）。
 Future<void> _syncParentDirectoryBestEffort(String parentPath) async {

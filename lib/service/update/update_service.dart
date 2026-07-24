@@ -3,6 +3,7 @@ import 'dart:ffi';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
 
@@ -11,6 +12,7 @@ import 'package:petal_link/core/error/app_result.dart';
 import 'package:petal_link/core/logger/logger.dart';
 import 'package:petal_link/core/storage/app_paths.dart';
 import 'package:petal_link/service/platform/launch_at_login.dart';
+import 'package:petal_link/service/update/minisign.dart';
 
 /// 更新清单（解析自 GitHub Releases 的 PetalLink_update.json）。
 ///
@@ -100,6 +102,13 @@ class UpdateService {
       'https://github.com/yuanbaobaoo/PetalLink/releases/latest/download/'
       'PetalLink_update.json';
 
+  /// 更新包签名公钥（对齐 tauri.conf.json updater pubkey）。
+  ///
+  /// 与 Tauri 客户端共用同一把 minisign 公钥，使 Tauri 老客户端能
+  /// 验签 Flutter 版更新包并无缝升级。base64 解码后为 42 字节 minisign 公钥。
+  static const String updatePublicKey =
+      'RWRFuz2UYehJmK1q/bUx6XfRv3RnCYmMnX6rYK4l/Odxf96Y5XLi4MHt';
+
   final http.Client _http;
   final String _endpoint;
   final String _currentVersion;
@@ -108,12 +117,11 @@ class UpdateService {
   final String? _executableOverride;
   final int? _pidOverride;
 
-  /// 期望的 Apple Team ID（安装期四重校验之一，对齐 CMP
-  /// `JvmUpdateService.expectedTeamId`）。
-  ///
-  /// 构建期经 `--dart-define=PETALLINK_UPDATE_TEAM_ID=...` 注入；
-  /// 空值时拒绝安装（对齐 CMP：正式更新未配置 Team ID 拒绝安装）。
-  final String expectedTeamId;
+  /// minisign 验签公钥（默认 [updatePublicKey]，测试可注入）。
+  final String _publicKeyBase64;
+
+  /// 是否启用更新检查（默认仅 release 构建启用；测试可强制开启）。
+  final bool _enableUpdateCheck;
 
   UpdateService({
     http.Client? httpClient,
@@ -123,7 +131,8 @@ class UpdateService {
     ProcRunner? runner,
     String? currentExecutable,
     int? currentPid,
-    String? expectedTeamId,
+    String? publicKey,
+    bool? enableUpdateCheck,
   })  : _http = httpClient ?? http.Client(),
         _endpoint = endpoint ?? updateEndpoint,
         _currentVersion = currentVersion ?? '0.0.0',
@@ -131,8 +140,8 @@ class UpdateService {
         _runner = runner ?? defaultProcRunner,
         _executableOverride = currentExecutable,
         _pidOverride = currentPid,
-        expectedTeamId = expectedTeamId ??
-            const String.fromEnvironment('PETALLINK_UPDATE_TEAM_ID');
+        _publicKeyBase64 = publicKey ?? updatePublicKey,
+        _enableUpdateCheck = enableUpdateCheck ?? kReleaseMode;
 
   // ═══════════════════════════════════════════════════════════════════
   // 检查更新
@@ -142,6 +151,12 @@ class UpdateService {
   ///
   /// 网络/解析/校验失败返回 Err；调用方（静默检查）自行决定是否提示。
   Future<AppResult<UpdateManifest?>> check() async {
+    // dev 构建跳过更新检查（含手动）：避免 dev 版误提示更新到正式版，
+    // 也避免 dev 版被更新包覆盖成正式版导致数据目录错乱。
+    if (!_enableUpdateCheck) {
+      AppLogger.d('dev 构建跳过更新检查');
+      return const Ok(null);
+    }
     try {
       final uri = Uri.parse(_endpoint);
       if (uri.scheme != 'https') {
@@ -184,17 +199,17 @@ class UpdateService {
   // 下载与校验
   // ═══════════════════════════════════════════════════════════════════
 
-  /// 下载更新包并校验 SHA-256（对齐 CMP `downloadAndStage` 的产物段）。
+  /// 下载更新包并校验完整性（对齐 Tauri updater 下载段）。
   ///
   /// 流程：建版本目录 → 流式下载到 `.part` → 原子改名 → SHA-256 校验
-  /// （不匹配删除并报错）。进度经 [onProgress]（received, total）回调。
-  /// 成功返回 DMG 本地路径。
+  /// （清单携带 sha256 时；不匹配删除并报错）。进度经 [onProgress]
+  /// （received, total）回调。成功返回更新包（.app.tar.gz）本地路径。
   Future<AppResult<String>> downloadAndStage(
     UpdateManifest manifest, {
     void Function(int received, int? total)? onProgress,
   }) async {
     final versionDir = await _versionDir(manifest.version);
-    final fileName = _dmgFileName(manifest);
+    final fileName = _archiveFileName(manifest);
     final target = p.join(versionDir.path, fileName);
     final part = '$target.part';
     try {
@@ -232,7 +247,7 @@ class UpdateService {
       await File(part).rename(target);
 
       // SHA-256 校验（不匹配删包；清单未携带 sha256 时跳过，
-      // 由安装期 codesign/spctl/Team ID 四重校验兜底）
+      // 由安装期 minisign 签名校验兜底）
       final expectedHash = manifest.sha256;
       if (expectedHash != null) {
         final digest = await sha256.bind(File(target).openRead()).first;
@@ -245,7 +260,7 @@ class UpdateService {
                   '更新包 SHA-256 不匹配（期望 $expectedHash，实际 $hex）'));
         }
       } else {
-        AppLogger.w('更新清单未携带 SHA-256，跳过哈希校验（安装期签名校验兜底）');
+        AppLogger.w('更新清单未携带 SHA-256，跳过哈希校验（安装期 minisign 签名校验兜底）');
       }
 
       AppLogger.i('更新包已就绪: $target');
@@ -259,11 +274,11 @@ class UpdateService {
     }
   }
 
-  /// DMG 文件名（取 URL 路径末段；兜底 PetalLink.dmg）
-  static String _dmgFileName(UpdateManifest manifest) {
+  /// 更新包文件名（取 URL 路径末段；兜底 PetalLink.app.tar.gz）
+  static String _archiveFileName(UpdateManifest manifest) {
     final segments = Uri.parse(manifest.url).pathSegments;
     final last = segments.isNotEmpty ? segments.last : '';
-    return last.isNotEmpty ? last : 'PetalLink.dmg';
+    return last.isNotEmpty ? last : 'PetalLink.app.tar.gz';
   }
 
   Future<Directory> _versionDir(String version) async {
@@ -273,127 +288,109 @@ class UpdateService {
   }
 
   // ═══════════════════════════════════════════════════════════════════
-  // 安装与重启（对齐 CMP launchInstaller；DMG 段对齐任务约束）
+  // 安装与重启（对齐 Tauri updater：minisign 验签 + tar.gz 解压替换）
   // ═══════════════════════════════════════════════════════════════════
 
-  /// 安装已校验的 DMG 并重启：挂载 → 提取 .app → 后台脚本替换并重开。
+  /// 安装已校验的更新包（.app.tar.gz）并重启：
+  /// minisign 验签 → 解压 .app → 后台脚本替换并重开。
   ///
   /// 成功后当前进程立即退出（由脚本完成替换）；失败返回 Err。
-  Future<AppResult<void>> installAndRelaunch(String dmgPath) async {
+  Future<AppResult<void>> installAndRelaunch(
+    String archivePath, {
+    String? signature,
+  }) async {
     try {
+      // 0. minisign 验签（对齐 Tauri updater：先验签 tar.gz 完整性再解压）
+      //    签名文本来自 manifest.signature（多行 minisign .sig 全文）
+      final sigText = signature;
+      if (sigText == null || sigText.trim().isEmpty) {
+        return const Err(
+            GenericError(message: '更新清单未携带签名，拒绝安装'));
+      }
+      final verifyErr = await _verifyArchive(archivePath, sigText);
+      if (verifyErr != null) return Err(verifyErr);
+
       // 1. 定位当前 .app（可执行文件上溯三级；对齐 Rust resolve_paths）
       final executable = _executableOverride ?? Platform.resolvedExecutable;
       final (currentApp, _) = LaunchAtLoginService.resolvePaths(executable);
       if (currentApp == null) {
         return const Err(
-            GenericError(message: '开发模式不能执行自更新安装，请从 DMG 手动更新'));
+            GenericError(message: '开发模式不能执行自更新安装，请手动更新'));
       }
       final parent = p.dirname(currentApp);
       final appName = p.basename(currentApp);
 
-      // 2. 父目录可写探测（不可写 → 引导手动 DMG 更新）
+      // 2. 父目录可写探测（不可写 → 引导手动更新）
       if (!await _probeWritable(parent)) {
         return const Err(
-            GenericError(message: '应用所在目录不可写，请从 DMG 手动更新'));
+            GenericError(message: '应用所在目录不可写，请手动更新'));
       }
 
-      // 3. 挂载 DMG（只读）
-      final stageDir = p.dirname(dmgPath);
-      final mountPoint = p.join(stageDir, 'mnt');
-      await Directory(mountPoint).create(recursive: true);
-      final attach = await _runner('hdiutil',
-          ['attach', '-nobrowse', '-readonly', '-mountpoint', mountPoint, dmgPath]);
-      if (attach.exitCode != 0) {
+      // 3. 解压 tar.gz 到暂存目录（对齐 Tauri updater 的 tar 解包）
+      final stageDir = p.dirname(archivePath);
+      final extractDir = Directory(p.join(stageDir, 'extracted'));
+      if (await extractDir.exists()) {
+        await extractDir.delete(recursive: true);
+      }
+      await extractDir.create(recursive: true);
+      final tar = await _runner(
+          '/usr/bin/tar', ['xzf', archivePath, '-C', extractDir.path]);
+      if (tar.exitCode != 0) {
         return Err(
-            GenericError(message: '挂载更新包失败：${attach.stderr.trim()}'));
+            GenericError(message: '解压更新包失败：${tar.stderr.trim()}'));
       }
 
-      try {
-        // 4. 找到挂载卷内第一个 .app 并 ditto 到暂存目录
-        final mountedApp = await _findFirstApp(Directory(mountPoint));
-        if (mountedApp == null) {
-          return const Err(GenericError(message: '更新包内未找到 .app'));
-        }
-        final stagedApp = p.join(stageDir, appName);
-        final stagedDir = Directory(stagedApp);
-        if (await stagedDir.exists()) await stagedDir.delete(recursive: true);
-        final ditto =
-            await _runner('/usr/bin/ditto', [mountedApp.path, stagedApp]);
-        if (ditto.exitCode != 0) {
-          return Err(
-              GenericError(message: '提取更新失败：${ditto.stderr.trim()}'));
-        }
-
-        // 5. 签名校验（对齐 CMP verifyApp 四重校验：codesign --verify
-        //    --deep --strict、spctl --assess、Team ID 匹配、SHA-256 已在
-        //    下载期完成）——必须在替换脚本启动之前通过
-        final verify = await _verifyApp(stagedApp);
-        if (verify != null) return Err(verify);
-
-        // 6. 后台替换脚本（等本进程退出后换入 + 重开；失败回滚）
-        final incoming = p.join(parent, '.$appName.incoming');
-        final backup = p.join(parent, '.$appName.backup');
-        final script = p.join(stageDir, 'install-update.sh');
-        await File(script).writeAsString(installScript);
-        await _runner('chmod', ['700', script]);
-
-        await Process.start(
-          '/bin/sh',
-          [script, '${_pidOverride ?? pid}', currentApp, stagedApp, incoming,
-            backup],
-          mode: ProcessStartMode.detached,
-        );
-        AppLogger.i('更新安装脚本已启动，应用即将退出完成替换');
-        exit(0);
-      } finally {
-        // 卸载 DMG（尽力而为）
-        try {
-          await _runner('hdiutil', ['detach', mountPoint, '-force']);
-        } catch (_) {
-          // 忽略
-        }
+      // 4. 找到解压目录内第一个 .app
+      final stagedAppDir = await _findFirstApp(extractDir);
+      if (stagedAppDir == null) {
+        return const Err(GenericError(message: '更新包内未找到 .app'));
       }
+      final stagedApp = stagedAppDir.path;
+
+      // 5. 后台替换脚本（等本进程退出后换入 + 重开；失败回滚）
+      final incoming = p.join(parent, '.$appName.incoming');
+      final backup = p.join(parent, '.$appName.backup');
+      final script = p.join(stageDir, 'install-update.sh');
+      await File(script).writeAsString(installScript);
+      await _runner('chmod', ['700', script]);
+
+      await Process.start(
+        '/bin/sh',
+        [script, '${_pidOverride ?? pid}', currentApp, stagedApp, incoming,
+          backup],
+        mode: ProcessStartMode.detached,
+      );
+      AppLogger.i('更新安装脚本已启动，应用即将退出完成替换');
+      exit(0);
     } catch (e, st) {
       AppLogger.e('安装更新异常', e, st);
       return Err(GenericError(message: '安装更新失败：$e'));
     }
   }
 
-  /// 安装包签名四重校验（对齐 CMP `JvmUpdateService.verifyApp`）。
+  /// minisign 验签更新包（对齐 Tauri updater 的签名校验）。
   ///
-  /// 依次为：codesign --verify --deep --strict（签名有效）、
-  /// spctl --assess（Gatekeeper/notarization）、Team ID 匹配；
-  /// 第四重 SHA-256 在下载期已完成。通过返回 null，失败返回错误。
-  Future<AppError?> _verifyApp(String appPath) async {
-    // 对齐 CMP：正式更新未配置 Team ID 拒绝安装
-    if (expectedTeamId.isEmpty) {
-      return const GenericError(message: '正式更新未配置 Apple Team ID，拒绝安装');
+  /// 用内置公钥验证 tar.gz 文件的 minisign 签名（BLAKE2b prehash）。
+  /// 通过返回 null，失败返回错误。
+  Future<AppError?> _verifyArchive(
+      String archivePath, String sigText) async {
+    try {
+      final publicKey = MinisignPublicKey.fromBase64(_publicKeyBase64);
+      final signature = MinisignSignature.fromSigText(sigText);
+      final fileBytes = await File(archivePath).readAsBytes();
+      final ok = await verifyMinisign(
+        publicKey: publicKey,
+        signature: signature,
+        fileBytes: fileBytes,
+      );
+      if (!ok) {
+        return const GenericError(message: '更新包 minisign 签名校验失败');
+      }
+      AppLogger.i('更新包 minisign 签名校验通过');
+      return null;
+    } catch (e) {
+      return GenericError(message: '更新包签名校验异常：$e');
     }
-    final codesign = await _runner('/usr/bin/codesign',
-        ['--verify', '--deep', '--strict', '--verbose=2', appPath]);
-    if (codesign.exitCode != 0) {
-      return GenericError(
-          message: '更新应用代码签名无效：${codesign.stderr.trim()}');
-    }
-    final spctl = await _runner('/usr/sbin/spctl',
-        ['--assess', '--type', 'execute', '--verbose=2', appPath]);
-    if (spctl.exitCode != 0) {
-      return GenericError(
-          message: '更新应用未通过 Gatekeeper/notarization：${spctl.stderr.trim()}');
-    }
-    // codesign -dv 的详情输出在 stderr
-    final details = await _runner(
-        '/usr/bin/codesign', ['-dv', '--verbose=4', appPath]);
-    final output = '${details.stdout}\n${details.stderr}';
-    final match =
-        RegExp(r'^TeamIdentifier=(.+)$', multiLine: true).firstMatch(output);
-    final team = match?.group(1)?.trim();
-    if (team != expectedTeamId) {
-      return GenericError(
-          message: '更新应用 Team ID 不匹配（期望 $expectedTeamId，实际 ${team ?? "缺失"}）');
-    }
-    AppLogger.i('更新应用签名校验通过（Team ID: $team）');
-    return null;
   }
 
   /// 目录可写探测：写测试文件再删（对齐 Rust 挂载目录可写探测思路）

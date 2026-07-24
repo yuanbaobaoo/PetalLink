@@ -125,18 +125,17 @@ class _TransferSectionState extends State<TransferSection> {
               ),
             ),
             const SettingsGroupHeader('同步过滤'),
+            // 纵向布局 + 全宽输入框（对齐 Tauri setting-row--column）
             SettingRow(
               label: '跳过文件（逗号分隔）',
               desc: '匹配名称的文件不会被同步，如 .DS_Store、临时文件。',
               showDivider: false,
-              control: SizedBox(
-                width: metrics.skipPatternFieldWidth,
-                child: MateTextField(
-                  controller: _skipCtrl,
-                  placeholder: '.DS_Store, .tmp, ~\$*, .Trash',
-                  onChanged: (v) =>
-                      notifier.setSkipPatterns(_parsePatterns(v)),
-                ),
+              column: true,
+              control: MateTextField(
+                controller: _skipCtrl,
+                placeholder: '.DS_Store, .tmp, ~\$*, .Trash',
+                onChanged: (v) =>
+                    notifier.setSkipPatterns(_parsePatterns(v)),
               ),
             ),
           ],

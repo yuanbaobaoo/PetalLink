@@ -47,7 +47,7 @@ void main() {
       await tester.pump();
 
       expect(find.text('位置'), findsOneWidget);
-      expect(find.text('全部文件'), findsOneWidget);
+      expect(find.text('我的云盘'), findsOneWidget);
       expect(find.text('文档'), findsOneWidget);
       expect(find.text('张三'), findsOneWidget);
       expect(find.text('张'), findsOneWidget); // 渐变头像首字

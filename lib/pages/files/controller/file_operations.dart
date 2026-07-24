@@ -3,7 +3,7 @@ part of 'file_browser_controller.dart';
 /// 文件操作与挂载配置（[FileBrowserController] 的 part 拆分）。
 ///
 /// 对标 CMP ApplicationRoot.kt 的命令接线：openItem / downloadItems /
-/// deleteItems / renameItem / moveItem / syncFolder / canFreeUp /
+/// deleteItems / renameItem / syncFolder / canFreeUp /
 /// previewFreeUpItems / freeUpItems + 缩略图加载。
 extension FileBrowserOperations on FileBrowserController {
   // ═══════════════════════════════════════════════════════════════════
@@ -160,20 +160,6 @@ extension FileBrowserOperations on FileBrowserController {
   Future<void> renameItem(DriveFile file, String newName) async {
     if (file.id.isEmpty) return;
     final result = await _filesService.rename(file.id, newName.trim());
-    if (result.isErr) {
-      errorMessage.value = (result as Err).error.message;
-      return;
-    }
-    errorMessage.value = '';
-    await refresh();
-  }
-
-  /// 将指定文件项移动到新的父目录（对齐 CMP moveItem）
-  Future<void> moveItem(DriveFile file, String newParentId) async {
-    if (file.id.isEmpty) return;
-    // update 内部会 GET 当前唯一 parent 构造成对移动参数（fileId 级幂等）
-    final result =
-        await _filesService.update(file.id, newParentFolder: newParentId);
     if (result.isErr) {
       errorMessage.value = (result as Err).error.message;
       return;

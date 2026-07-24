@@ -5,12 +5,12 @@ import 'package:get/get.dart';
 import 'package:petal_link/app/theme/mate_theme.dart';
 import 'package:petal_link/core/logger/logger.dart';
 import 'package:petal_link/pages/logs/controller/logs_controller.dart';
-import 'package:petal_link/pages/logs/logs_page.dart';
+import 'package:petal_link/pages/logs/log_viewer_view.dart';
 import 'package:petal_link/service/platform/platform_service.dart';
 import 'package:petal_link/widgets/index.dart';
 
 // =============================================================================
-// LogsPage 测试：级别筛选 / 空态 / 清空 / 轮询刷新 / 导出。
+// LogViewerView（设置页内嵌日志查看器）测试：级别筛选 / 空态 / 清空 / 轮询刷新 / 导出。
 // =============================================================================
 
 /// 假平台服务：记录 logsClear / logsExport 调用。
@@ -43,7 +43,9 @@ void main() {
 
   Widget wrap() {
     return MaterialApp(
-      home: MateLinkTheme(child: const LogsPage()),
+      home: MateLinkTheme(
+        child: const Scaffold(body: LogViewerView()),
+      ),
     );
   }
 

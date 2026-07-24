@@ -133,6 +133,9 @@ class UpdateController extends GetxController {
   /// 已下载并校验的更新包路径（downloaded/ready 后非空）
   String? _stagedDmgPath;
 
+  /// 已下载更新包对应的 minisign 签名（安装时验签用）
+  String? _stagedSignature;
+
   /// waitForTransfers 轮询定时器
   Timer? _waitTimer;
 
@@ -286,6 +289,7 @@ class UpdateController extends GetxController {
 
     // 发现新版本（静默检查不弹窗，对齐 Vue）
     _stagedDmgPath = null;
+    _stagedSignature = null;
     state.value = state.value.copyWith(
       phase: UpdatePhase.available,
       manifest: manifest,
@@ -344,6 +348,7 @@ class UpdateController extends GetxController {
     }
 
     _stagedDmgPath = (result as Ok<String>).value;
+    _stagedSignature = manifest.signature;
     state.value = state.value.copyWith(
       phase: UpdatePhase.downloaded,
       downloadProgress: 1.0,
@@ -377,7 +382,10 @@ class UpdateController extends GetxController {
       return;
     }
     AppLogger.i('开始安装更新: $dmg');
-    final result = await _updateService.installAndRelaunch(dmg);
+    final result = await _updateService.installAndRelaunch(
+      dmg,
+      signature: _stagedSignature,
+    );
     if (result.isErr) {
       final err = (result as Err).error;
       state.value = state.value.copyWith(

@@ -1,3 +1,5 @@
+import 'dart:ui' as ui;
+
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 
@@ -170,13 +172,17 @@ class _SettingsPageState extends State<SettingsPage> {
           height: metrics.footerBorderWidth,
           color: colors.border,
         ),
-        Container(
-          height: metrics.footerHeight,
-          color: colors.bgContainer,
-          padding: EdgeInsets.symmetric(
-            horizontal: metrics.footerHorizontalPadding,
-          ),
-          child: Row(
+        ClipRect(
+          // 毛玻璃底栏（对齐 Tauri：rgba(255,255,255,0.85) + blur(12px)）
+          child: BackdropFilter(
+            filter: ui.ImageFilter.blur(sigmaX: 12, sigmaY: 12),
+            child: Container(
+              height: metrics.footerHeight,
+              color: const Color(0xD9FFFFFF),
+              padding: EdgeInsets.symmetric(
+                horizontal: metrics.footerHorizontalPadding,
+              ),
+              child: Row(
             children: [
               MateButton(
                 label: state.saved ? '已保存' : '保存设置',
@@ -223,6 +229,8 @@ class _SettingsPageState extends State<SettingsPage> {
                   ],
                 ),
             ],
+              ),
+            ),
           ),
         ),
       ],

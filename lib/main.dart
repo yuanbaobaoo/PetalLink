@@ -10,6 +10,7 @@ import 'app/bindings/global_binding.dart';
 // 更新聚焦检查临时停用期间无需导入 UpdateController（恢复时还原）
 // import 'app/update/update_controller.dart';
 import 'core/logger/logger.dart';
+import 'service/config/config_service.dart';
 import 'service/platform/platform_service.dart';
 import 'service/platform/tray_service.dart';
 
@@ -31,10 +32,11 @@ Future<void> main() async {
   // 检测 --hidden 启动参数（LaunchAgent 自启静默模式）
   final hidden = await _isHiddenLaunch();
 
-  // 配置 macOS 窗口属性
-  await windowManager.setMinimumSize(const Size(900, 640));
-  await windowManager.setSize(const Size(1200, 800));
-  await windowManager.setTitle('PetalLink');
+  // 配置 macOS 窗口属性（尺寸/最小尺寸/标题对齐 Tauri tauri.conf.json）
+  await windowManager.setMinimumSize(const Size(700, 480));
+  await windowManager.setSize(const Size(1280, 800));
+  await windowManager.setTitle('PetalLink - 华为云盘客户端开源版');
+  await windowManager.center();
   await windowManager.center();
 
   // 关窗拦截：隐藏到托盘而非退出（对齐 Rust CloseRequested 拦截）
@@ -49,8 +51,19 @@ Future<void> main() async {
   // 初始化全局依赖
   await GlobalBinding().dependencies();
 
-  // 托盘初始化（失败不阻断主流程）
-  unawaited(Get.find<TrayService>().init());
+  // 注册原生反向回调（退出期 flush：对齐 Rust flush_with_timeout）
+  Get.find<PlatformService>().registerNativeCallbacks();
+
+  // 托盘初始化（失败不阻断主流程）；随后按配置恢复托盘图标可见性
+  // （对齐 Tauri「显示托盘图标」开关的启动恢复）
+  unawaited(Get.find<TrayService>().init().then((_) async {
+    try {
+      final config = await Get.find<ConfigService>().configLoad();
+      await Get.find<TrayService>().setVisible(config.trayVisible);
+    } catch (e) {
+      AppLogger.w('恢复托盘可见性失败: $e');
+    }
+  }));
 
   // 运行应用
   runApp(const MateLinkApp());

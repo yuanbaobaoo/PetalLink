@@ -310,7 +310,6 @@ class _FilesPageState extends State<FilesPage> {
                     onDownload: _browser.downloadItems,
                     onSyncFolder: _browser.syncFolder,
                     onRename: _browser.renameItem,
-                    onMove: _browser.moveItem,
                     onCanFreeUp: _browser.canFreeUp,
                   ),
           ),
@@ -349,16 +348,26 @@ class _FilesPageState extends State<FilesPage> {
               ),
             ),
             Positioned.fill(
-              child: TransferPopover(
-                tasks: _transfer.state.value.tasks,
-                onDismiss: () => setState(() => _showTransferPopover = false),
-                onRetry: (taskId, onResult) async {
-                  final result = await _transfer.retry(taskId);
-                  onResult(result.isOk);
-                },
-                onClearCompleted: _transfer.clearCompleted,
-                onClearFailed: _transfer.clearFailed,
-                onClearFinished: _transfer.clearFinished,
+              // popover-in：translateY(-4→0) + 淡入 120ms ease-out
+              // （对齐 Tauri animations.css `popover-in`）
+              child: TweenAnimationBuilder<double>(
+                tween: Tween(begin: 0, end: 1),
+                duration: const Duration(milliseconds: 120),
+                curve: Curves.easeOut,
+                builder: (context, t, child) => Opacity(
+                  opacity: t,
+                  child: Transform.translate(
+                    offset: Offset(0, -4 * (1 - t)),
+                    child: child,
+                  ),
+                ),
+                child: TransferPopover(
+                  tasks: _transfer.state.value.tasks,
+                  onDismiss: () => setState(() => _showTransferPopover = false),
+                  onClearCompleted: _transfer.clearCompleted,
+                  onClearFailed: _transfer.clearFailed,
+                  onClearFinished: _transfer.clearFinished,
+                ),
               ),
             ),
           ],

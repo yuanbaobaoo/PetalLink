@@ -135,6 +135,13 @@ Future<TransferOperation> validateStaticTask(
               !fileId.startsWith(pendingFileIdPrefix))) {
         throw const PreflightFailure.validation('Update 任务缺少真实 fileId');
       }
+      // Update 必须携带规划时云端版本快照，否则 preflight 无法拒绝覆盖并发修改
+      // （对齐 Rust preflight.rs：缺快照说明任务来自旧规划，需回 planner 重新规划）
+      if (operation == TransferOperation.update &&
+          task.expectedCloudEditedTime == null) {
+        throw const PreflightFailure.localChanged(
+            '更新上传缺少云端版本快照，需要重新规划');
+      }
       if (task.resumeOffset > 0 && !hasNonempty(task.sessionUrl)) {
         throw const PreflightFailure.validation(
             '非零上传断点缺少 session_url，拒绝作为全新请求重放');

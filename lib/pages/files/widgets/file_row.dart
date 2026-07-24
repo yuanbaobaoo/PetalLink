@@ -159,9 +159,6 @@ class FileListRow extends StatefulWidget {
   /// 重命名
   final VoidCallback onRename;
 
-  /// 移动到…
-  final VoidCallback onMove;
-
   /// 属性
   final VoidCallback onShowProps;
 
@@ -193,7 +190,6 @@ class FileListRow extends StatefulWidget {
     required this.onThumbnailNeeded,
     required this.onSync,
     required this.onRename,
-    required this.onMove,
     required this.onShowProps,
     required this.onDelete,
     required this.onFreeUp,
@@ -302,12 +298,6 @@ class _FileListRowState extends State<FileListRow> {
           enabled: !widget.isIndexing,
           action: widget.onRename,
         ),
-        FilesMenuEntry(
-          label: '移动到…',
-          icon: 'folder-open',
-          enabled: !widget.isIndexing,
-          action: widget.onMove,
-        ),
       ],
       FilesMenuEntry(label: '属性', icon: 'info', action: widget.onShowProps),
       if (widget.mountConfigured) ...[
@@ -336,123 +326,123 @@ class _FileListRowState extends State<FileListRow> {
             ? colors.bgHover
             : Colors.transparent;
 
-    return Column(
-      children: [
-        MouseRegion(
-          onEnter:
-              _rowClickEnabled ? (_) => setState(() => _hovered = true) : null,
-          onExit:
-              _rowClickEnabled ? (_) => setState(() => _hovered = false) : null,
-          child: Listener(
-            // 右键：在光标处弹菜单（对标原 Vue @contextmenu）
-            onPointerDown: (event) {
-              if (event.kind == PointerDeviceKind.mouse &&
-                  event.buttons == kSecondaryMouseButton) {
-                _openMenu(cursorPosition: event.position);
-              }
-            },
-            child: GestureDetector(
-              onTap: _rowClickEnabled ? _handleTap : null,
-              onLongPress: _rowClickEnabled ? () => _openMenu() : null,
-              behavior: HitTestBehavior.opaque,
-              child: Container(
-                height: controls.rowHeight,
-                padding: EdgeInsets.symmetric(
-                  horizontal: controls.rowHorizontalPadding,
-                ),
-                decoration: BoxDecoration(
-                  color: bg,
-                  borderRadius: BorderRadius.circular(controls.rowRadius),
-                ),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.center,
-                  children: [
-                    // checkbox 列
-                    SizedBox(
-                      width: controls.checkboxColumnWidth,
-                      child: widget.showCheckbox
-                          ? Align(
-                              alignment: Alignment.centerLeft,
-                              child: MateCheckbox(
-                                checked: widget.checked,
-                                // 三态循环 false→null 时回退为取反，保证可勾选
-                                onChanged: (c) => widget
-                                    .onCheckedChange(c ?? !widget.checked),
-                              ),
-                            )
-                          : null,
-                    ),
-                    // name 列（v2：图标 32×32 色块 tile，间距 12）
-                    Expanded(
-                      child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.center,
-                        children: [
-                          FileTypeTile(
-                            file: file,
-                            thumbnail: widget.thumbnail,
-                          ),
-                          SizedBox(width: controls.rowNameContentSpacing),
-                          Expanded(
-                            child: Text(
-                              file.name,
-                              style: typography.fileList.rowFileName.copyWith(
-                                color: colors.textPrimary,
-                              ),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    // size 列
-                    SizedBox(
-                      width: widget.sizeWidth,
-                      child: Text(
-                        file.isFolder ? '—' : formatFileSize(file.size),
-                        style: typography.fileList.rowFileSize.copyWith(
-                          color: colors.textSecondary,
-                        ),
-                      ),
-                    ),
-                    // time 列
-                    SizedBox(
-                      width: widget.timeWidth,
-                      child: Text(
-                        file.editedTime == null
-                            ? ''
-                            : DateFormat('yyyy-MM-dd HH:mm')
-                                .format(file.editedTime!),
-                        style: typography.fileList.rowModifiedTime.copyWith(
-                          color: colors.textSecondary,
-                        ),
-                      ),
-                    ),
-                    // status 列（v2 列宽 72；hover 显示文案 tooltip）
-                    SizedBox(
-                      width: controls.statusColumnWidth,
-                      child: Center(child: _buildStatusIcon(colors, controls)),
-                    ),
-                    // actions 列（v2 列宽 44；操作按钮 → 右键菜单）
-                    SizedBox(
-                      width: controls.actionColumnWidth,
-                      child: Center(
-                        child: MateButton(
-                          variant: MateButtonVariant.icon,
-                          icon: 'list',
-                          onClick: () => _openMenu(),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
+    return MouseRegion(
+      onEnter: _rowClickEnabled ? (_) => setState(() => _hovered = true) : null,
+      onExit: _rowClickEnabled ? (_) => setState(() => _hovered = false) : null,
+      child: Listener(
+        // 右键：在光标处弹菜单（对标原 Vue @contextmenu）
+        onPointerDown: (event) {
+          if (event.kind == PointerDeviceKind.mouse &&
+              event.buttons == kSecondaryMouseButton) {
+            _openMenu(cursorPosition: event.position);
+          }
+        },
+        child: GestureDetector(
+          onTap: _rowClickEnabled ? _handleTap : null,
+          onLongPress: _rowClickEnabled ? () => _openMenu() : null,
+          behavior: HitTestBehavior.opaque,
+          // AnimatedContainer：hover 背景 100ms 过渡（对齐 Tauri
+          // `transition: background-color 0.1s`），瞬时变色会"闪"。
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 100),
+            height: controls.rowHeight,
+            padding: EdgeInsets.symmetric(
+              horizontal: controls.rowHorizontalPadding,
+            ),
+            decoration: BoxDecoration(
+              color: bg,
+              borderRadius: BorderRadius.circular(controls.rowRadius),
+              // 行底分隔线作为行自身的 border（对齐 Tauri border-bottom），
+              // 不再用兄弟 widget——分隔线处于 hover 区域内，扫行不闪断。
+              border: Border(
+                bottom: BorderSide(color: colors.border, width: 0.5),
               ),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                // checkbox 列
+                SizedBox(
+                  width: controls.checkboxColumnWidth,
+                  child: widget.showCheckbox
+                      ? Align(
+                          alignment: Alignment.centerLeft,
+                          child: MateCheckbox(
+                            checked: widget.checked,
+                            // 三态循环 false→null 时回退为取反，保证可勾选
+                            onChanged: (c) => widget
+                                .onCheckedChange(c ?? !widget.checked),
+                          ),
+                        )
+                      : null,
+                ),
+                // name 列（v2：图标 32×32 色块 tile，间距 12）
+                Expanded(
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      FileTypeTile(
+                        file: file,
+                        thumbnail: widget.thumbnail,
+                      ),
+                      SizedBox(width: controls.rowNameContentSpacing),
+                      Expanded(
+                        child: Text(
+                          file.name,
+                          style: typography.fileList.rowFileName.copyWith(
+                            color: colors.textPrimary,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                // size 列
+                SizedBox(
+                  width: widget.sizeWidth,
+                  child: Text(
+                    file.isFolder ? '—' : formatFileSize(file.size),
+                    style: typography.fileList.rowFileSize.copyWith(
+                      color: colors.textSecondary,
+                    ),
+                  ),
+                ),
+                // time 列
+                SizedBox(
+                  width: widget.timeWidth,
+                  child: Text(
+                    file.editedTime == null
+                        ? ''
+                        : DateFormat('yyyy-MM-dd HH:mm')
+                            .format(file.editedTime!),
+                    style: typography.fileList.rowModifiedTime.copyWith(
+                      color: colors.textSecondary,
+                    ),
+                  ),
+                ),
+                // status 列（v2 列宽 72；hover 显示文案 tooltip）
+                SizedBox(
+                  width: controls.statusColumnWidth,
+                  child: Center(child: _buildStatusIcon(colors, controls)),
+                ),
+                // actions 列（v2 列宽 44；操作按钮 → 右键菜单）
+                SizedBox(
+                  width: controls.actionColumnWidth,
+                  child: Center(
+                    child: MateButton(
+                      variant: MateButtonVariant.icon,
+                      icon: 'list',
+                      onClick: () => _openMenu(),
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
         ),
-        // 行底分隔线 0.5px
-        const MateHDivider(),
-      ],
+      ),
     );
   }
 
@@ -470,6 +460,8 @@ class _FileListRowState extends State<FileListRow> {
     };
     return Tooltip(
       message: tip,
+      // 延迟 800ms 弹出（对齐 Tauri 原生 :title 系统延迟），扫过状态列不闪现
+      waitDuration: const Duration(milliseconds: 800),
       decoration: BoxDecoration(
         color: colors.bgContainer,
         borderRadius: BorderRadius.circular(6),

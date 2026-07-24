@@ -72,9 +72,9 @@ class MateTheme extends InheritedWidget {
 
 /// 应用主题入口组件。
 ///
-/// 自动检测平台亮度（[MediaQuery.platformBrightness]），选择对应的
-/// [MateSkin.light] 或 [MateSkin.dark]，并注入 [MateTheme]。
-/// 同时包裹标准 Flutter [Theme] 以使用品牌色配置 Material 组件。
+/// 固定使用 [MateSkin.light]（对齐 Tauri 版：仅亮色一套 token，不支持深色），
+/// 并注入 [MateTheme]。同时包裹标准 Flutter [Theme] 以使用品牌色配置
+/// Material 组件。
 class MateLinkTheme extends StatelessWidget {
   /// 子组件。
   final Widget child;
@@ -82,37 +82,29 @@ class MateLinkTheme extends StatelessWidget {
   /// 可选的浅色 skin 覆盖。
   final MateSkin? lightSkin;
 
-  /// 可选的深色 skin 覆盖。
-  final MateSkin? darkSkin;
-
   const MateLinkTheme({
     super.key,
     required this.child,
     this.lightSkin,
-    this.darkSkin,
   });
 
   @override
   Widget build(BuildContext context) {
-    final brightness = MediaQuery.of(context).platformBrightness;
-    final isDark = brightness == Brightness.dark;
-    final skin = isDark
-        ? (darkSkin ?? MateSkin.dark)
-        : (lightSkin ?? MateSkin.light);
+    final skin = lightSkin ?? MateSkin.light;
 
     return MateTheme(
       skin: skin,
       child: Theme(
-        data: _buildThemeData(skin.colors, isDark),
+        data: _buildThemeData(skin.colors),
         child: child,
       ),
     );
   }
 
   /// 使用品牌色构建标准 Flutter [ThemeData]。
-  ThemeData _buildThemeData(MateSemanticColors colors, bool isDark) {
+  ThemeData _buildThemeData(MateSemanticColors colors) {
     final colorScheme = ColorScheme(
-      brightness: isDark ? Brightness.dark : Brightness.light,
+      brightness: Brightness.light,
       primary: colors.brand,
       onPrimary: colors.onPrimary,
       secondary: colors.brandHover,
@@ -139,7 +131,7 @@ class MateLinkTheme extends StatelessWidget {
       scrollbarTheme: ScrollbarThemeData(
         thumbColor: WidgetStateProperty.all(colors.scrollbarThumb),
       ),
-      brightness: isDark ? Brightness.dark : Brightness.light,
+      brightness: Brightness.light,
     );
   }
 }

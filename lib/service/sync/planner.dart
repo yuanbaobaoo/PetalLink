@@ -214,6 +214,9 @@ class SyncPlanner {
           relativePath: relPath,
           fileId: cloud.id,
           localPath: local.absolutePath,
+          // Update 必须携带规划时远端版本，执行前据此拒绝覆盖并发修改
+          // （对齐 Rust planner.rs：expected_cloud_edited_time 由此快照填充）
+          cloudFile: cloud,
           reason: '本地已修改 → 上传',
         );
       } else if (cloudChanged) {

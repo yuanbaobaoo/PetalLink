@@ -221,6 +221,8 @@ class GlobalBinding {
           await db.deleteDatabaseFile();
         },
         onClearSecureConfig: () => secureStorage.deleteAll(),
+        onShutdownFlush: () => Get.find<SyncService>().disposeForShutdown(),
+        onTrayVisibleProvider: () => Get.find<TrayService>().isVisible,
       ),
       permanent: true,
     );

@@ -161,7 +161,9 @@ class _FilesMenuOverlay extends StatelessWidget {
         Positioned(
           left: left,
           top: top,
-          child: Container(
+          // menu-fade-in：scale 0.96→1 + 淡入 120ms（对齐 Tauri ctx-menu）
+          child: MateMenuFadeIn(
+            child: Container(
             width: controls.contextMenuWidth,
             padding: EdgeInsets.all(controls.contextMenuPadding),
             decoration: BoxDecoration(
@@ -195,6 +197,7 @@ class _FilesMenuOverlay extends StatelessWidget {
                         ),
               ],
             ),
+          ),
           ),
         ),
       ],
@@ -243,14 +246,20 @@ class _FilesMenuItemState extends State<_FilesMenuItem> {
       child: GestureDetector(
         onTap: entry.enabled ? widget.onClick : null,
         behavior: HitTestBehavior.opaque,
-        child: Container(
+        // AnimatedContainer：hover 120ms 过渡（对齐 Tauri 菜单项 0.12s）；
+        // danger 项 hover 底 errBg（对齐 Tauri danger hover err-bg）。
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 120),
           height: controls.contextActionHeight,
           padding: EdgeInsets.symmetric(
             horizontal: controls.contextActionHorizontalPadding,
           ),
           decoration: BoxDecoration(
-            color:
-                _hovered && entry.enabled ? colors.bgFill : Colors.transparent,
+            color: !(_hovered && entry.enabled)
+                ? Colors.transparent
+                : entry.danger
+                    ? colors.errorBg
+                    : colors.bgFill,
             borderRadius: BorderRadius.circular(controls.contextActionRadius),
           ),
           child: Row(

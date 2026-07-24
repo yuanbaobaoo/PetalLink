@@ -98,11 +98,27 @@ void main() {
       if (tempHome.existsSync()) tempHome.deleteSync(recursive: true);
     });
 
-    test('isEnabled 仅判断 plist 存在（对齐 Rust）', () async {
+    test('isEnabled：plist 存在且未被 BTM 禁用 → true', () async {
       final s = service();
-      expect(s.isEnabled(), isFalse);
+      expect(await s.isEnabled(), isFalse);
       await File(plistPath).create(recursive: true);
-      expect(s.isEnabled(), isTrue);
+      // print-disabled 无本服务记录 → 按未禁用 → true
+      expect(await s.isEnabled(), isTrue);
+    });
+
+    test('isEnabled：plist 存在但被 BTM 禁用 → false', () async {
+      await File(plistPath).create(recursive: true);
+      final s = service(onRun: (exe, args) {
+        if (exe == 'launchctl' && args.first == 'print-disabled') {
+          return const ProcResult(
+            exitCode: 0,
+            stdout: '\t"io.github.yuanbaobaoo.PetalLink-dev" => disabled',
+          );
+        }
+        if (exe == 'id') return const ProcResult(exitCode: 0, stdout: '501');
+        return const ProcResult(exitCode: 0);
+      });
+      expect(await s.isEnabled(), isFalse);
     });
 
     test('启用：写 plist → bootstrap gui/uid → 移除 Login Items', () async {
@@ -179,6 +195,48 @@ void main() {
             c.$1 == 'launchctl' && c.$2.join(' ').contains('gui/501')),
         isTrue,
       );
+    });
+  });
+
+  group('LaunchAtLoginService.parseDisabledEntry（对齐 Rust parse_disabled_entry）', () {
+    test('label 标记 disabled → true', () {
+      const output = '\t"com.example.foo" => disabled';
+      expect(LaunchAtLoginService.parseDisabledEntry(
+          output, 'com.example.foo'), isTrue);
+    });
+
+    test('label 标记 enabled → false', () {
+      const output = '\t"com.example.foo" => enabled';
+      expect(LaunchAtLoginService.parseDisabledEntry(
+          output, 'com.example.foo'), isFalse);
+    });
+
+    test('label 标记 true（新格式）→ true', () {
+      const output = '\t"com.example.foo" => true';
+      expect(LaunchAtLoginService.parseDisabledEntry(
+          output, 'com.example.foo'), isTrue);
+    });
+
+    test('label 无记录 → null（按未禁用处理）', () {
+      const output = '\t"com.other.bar" => disabled';
+      expect(LaunchAtLoginService.parseDisabledEntry(
+          output, 'com.example.foo'), isNull);
+    });
+
+    test('空输出 → null', () {
+      expect(LaunchAtLoginService.parseDisabledEntry('', 'com.example.foo'),
+          isNull);
+    });
+
+    test('真实 launchctl 多行输出 → 正确解析目标 label', () {
+      const output = '''
+disabled services:
+	"com.apple.FinderInfoSlower" => false
+	"io.github.yuanbaobaoo.PetalLink" => true
+	"com.other" => false
+''';
+      expect(LaunchAtLoginService.parseDisabledEntry(
+          output, 'io.github.yuanbaobaoo.PetalLink'), isTrue);
     });
   });
 }

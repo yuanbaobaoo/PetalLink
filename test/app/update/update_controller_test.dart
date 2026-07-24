@@ -45,6 +45,7 @@ void main() {
       currentVersion: currentVersion,
       updatesDir: tempDir.path,
       endpoint: 'https://example.com/update.json',
+      enableUpdateCheck: true,
     );
     final controller = UpdateController(
       updateService: service,
@@ -107,6 +108,7 @@ void main() {
         httpClient: client,
         endpoint: 'https://example.com/update.json',
         updatesDir: tempDir.path,
+        enableUpdateCheck: true,
       );
       final controller = UpdateController(
         updateService: service,
@@ -174,6 +176,7 @@ void main() {
         httpClient: client,
         updatesDir: tempDir.path,
         endpoint: 'https://example.com/update.json',
+        enableUpdateCheck: true,
       );
       final controller = UpdateController(
         updateService: service,

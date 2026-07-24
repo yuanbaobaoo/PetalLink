@@ -21,6 +21,7 @@ import 'package:petal_link/service/sync/engine/action_filters.dart';
 import 'package:petal_link/service/sync/engine/executor.dart';
 import 'package:petal_link/service/sync/path_recovery.dart';
 import 'package:petal_link/service/sync/sync_actions.dart';
+import 'package:petal_link/service/sync/user_messages.dart';
 import 'package:petal_link/types/enums.dart';
 
 /// 引擎结果结算 mixin。
@@ -178,7 +179,8 @@ mixin EngineResults on SyncEngineBase {
               'WHERE file_id = ? AND local_path = ?',
               [
                 SyncItemStatus.failed.code,
-                result.errorMessage ?? '同步失败',
+                // 落库前转换为用户可读提示（对齐 Rust settlement 转换语义）
+                simplifySyncError(result.errorMessage ?? '同步失败'),
                 fid,
                 rel,
               ],

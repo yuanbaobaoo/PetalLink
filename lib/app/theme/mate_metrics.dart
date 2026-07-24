@@ -2388,8 +2388,8 @@ class MateMetrics {
       moveDialogFolderIconSize: 18,
       moveDialogActionSpacing: 8,
       controls: FileListControlMetrics(
-        sizeColumnInitialWidth: 110,
-        timeColumnInitialWidth: 160,
+        sizeColumnInitialWidth: 100,
+        timeColumnInitialWidth: 150,
         resizableColumnMinimumWidth: 64,
         resizableColumnMaximumWidth: 400,
         bulkBarHorizontalMargin: 24,

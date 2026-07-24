@@ -5,6 +5,7 @@ import 'package:get/get.dart';
 import 'package:petal_link/core/logger/logger.dart';
 import 'package:petal_link/entity/sync_state.dart';
 import 'package:petal_link/service/sync/sync_service.dart';
+import 'package:petal_link/service/sync/user_messages.dart';
 import 'package:petal_link/service/transfer/task_runner_contracts.dart';
 import 'package:petal_link/types/enums.dart';
 
@@ -91,8 +92,11 @@ class SyncUIState {
           ? DateTime.fromMillisecondsSinceEpoch(s.lastSyncTime!)
           : null,
       pendingChanges: s.uploading + s.downloading + s.waitingNetwork,
-      errorMessage:
-          s.failedItems.isNotEmpty ? s.failedItems.first.errorMessage : null,
+      // 展示前兜底转换：历史旧数据可能仍是技术术语，统一转为用户可读提示
+      // （对齐 TS error.ts formatUserMessage 的展示层兜底语义）
+      errorMessage: s.failedItems.isNotEmpty
+          ? simplifySyncError(s.failedItems.first.errorMessage ?? '')
+          : null,
       revision: s.revision,
       isIndexing: s.isIndexing,
       indexingScannedFolders: s.indexingScannedFolders,

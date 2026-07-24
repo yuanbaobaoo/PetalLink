@@ -70,7 +70,6 @@ Widget _listView(
     onDownload: (_) => cb.downloads++,
     onSyncFolder: (f) => cb.syncs++,
     onRename: (_, _) {},
-    onMove: (_, _) {},
     onCanFreeUp: (f, onResult) => onResult(cb.canFree(f)),
   );
 }
@@ -233,7 +232,6 @@ void main() {
       expect(find.text('执行双端对齐'), findsOneWidget);
       expect(find.text('释放空间'), findsOneWidget);
       expect(find.text('重命名'), findsOneWidget);
-      expect(find.text('移动到…'), findsOneWidget);
       expect(find.text('属性'), findsOneWidget);
       expect(find.text('删除'), findsOneWidget);
 

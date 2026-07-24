@@ -5,7 +5,6 @@ import 'package:petal_link/pages/index/index_page.dart';
 import 'package:petal_link/pages/login/login_page.dart';
 import 'package:petal_link/pages/files/files_page.dart';
 import 'package:petal_link/pages/settings/settings_page.dart';
-import 'package:petal_link/pages/logs/logs_page.dart';
 import 'package:petal_link/pages/update/update_page.dart';
 
 /// 路由配置
@@ -34,12 +33,6 @@ class MateRoutes {
     GetPage(
       name: '/settings',
       page: () => const SettingsPage(),
-      middlewares: [AuthMiddleware(authorized: true)],
-      transition: Transition.rightToLeft,
-    ),
-    GetPage(
-      name: '/logs',
-      page: () => const LogsPage(),
       middlewares: [AuthMiddleware(authorized: true)],
       transition: Transition.rightToLeft,
     ),

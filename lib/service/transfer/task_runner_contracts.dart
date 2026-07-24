@@ -32,6 +32,32 @@ enum TaskDisposition {
   restartRequired,
 }
 
+/// 任务调度去向的用户可读文案（对齐 Rust `TaskDisposition::user_message`）。
+///
+/// 用于把内部 disposition 名转换为 UI 可直接展示的中文提示。
+extension TaskDispositionMessage on TaskDisposition {
+  String get userMessage {
+    switch (this) {
+      case TaskDisposition.completed:
+        return '同步已完成。';
+      case TaskDisposition.pending:
+        return '任务已加入传输队列，稍后会自动开始。';
+      case TaskDisposition.running:
+        return '文件正在同步。';
+      case TaskDisposition.blockedByActiveIntent:
+        return '该文件正在执行其他同步任务，请稍后再试。';
+      case TaskDisposition.waitingForNetwork:
+        return '网络不可用，恢复后会自动继续。';
+      case TaskDisposition.backingOff:
+        return '服务暂时不可用，稍后会自动重试。';
+      case TaskDisposition.verifyingRemote:
+        return '正在确认上次同步是否成功。';
+      case TaskDisposition.restartRequired:
+        return '文件状态已变化，请重新检查并重试。';
+    }
+  }
+}
+
 /// 为引擎的基线与云树结算保留的后端输出（对齐 Rust `TaskExecutionOutcome`）。
 class TaskExecutionOutcome {
   /// 后端校验过的完整云端元数据（上传/远端写操作产出）

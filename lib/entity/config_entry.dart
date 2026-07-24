@@ -102,6 +102,11 @@ class AppConfig {
   /// 排序方向
   final SortOrder sortOrder;
 
+  /// 是否显示托盘图标（对齐 Tauri「显示托盘图标」开关，默认 true）。
+  ///
+  /// 关闭后 App 仍在后台运行，通过 Cmd+Q 完全退出。
+  final bool trayVisible;
+
   const AppConfig({
     this.oauthRedirectUri = defaultRedirectUri,
     this.oauthCallbackPort = defaultCallbackPort,
@@ -113,6 +118,7 @@ class AppConfig {
     this.skipPatterns = defaultSkipPatterns,
     this.sortField = SortField.name,
     this.sortOrder = SortOrder.ascending,
+    this.trayVisible = true,
   });
 
   /// 展开 ~ 为真实 home 路径（对齐 Rust `expanded_mount_dir`）
@@ -198,6 +204,7 @@ class AppConfig {
       sortOrder:
           SortOrder.fromWireName(json['sort_order'] as String?) ??
               defaults.sortOrder,
+      trayVisible: json['tray_visible'] as bool? ?? defaults.trayVisible,
     );
   }
 
@@ -214,6 +221,7 @@ class AppConfig {
       'skip_patterns': skipPatterns,
       'sort_field': sortField.wireName,
       'sort_order': sortOrder.wireName,
+      'tray_visible': trayVisible,
     };
   }
 
@@ -229,6 +237,7 @@ class AppConfig {
     List<String>? skipPatterns,
     SortField? sortField,
     SortOrder? sortOrder,
+    bool? trayVisible,
   }) {
     return AppConfig(
       oauthRedirectUri: oauthRedirectUri ?? this.oauthRedirectUri,
@@ -241,6 +250,7 @@ class AppConfig {
       skipPatterns: skipPatterns ?? this.skipPatterns,
       sortField: sortField ?? this.sortField,
       sortOrder: sortOrder ?? this.sortOrder,
+      trayVisible: trayVisible ?? this.trayVisible,
     );
   }
 }

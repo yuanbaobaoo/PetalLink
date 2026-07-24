@@ -65,9 +65,6 @@ class FileListView extends StatefulWidget {
   /// 重命名确认
   final void Function(DriveFile file, String newName) onRename;
 
-  /// 移动确认（传目标父目录 ID）
-  final void Function(DriveFile file, String parentId) onMove;
-
   /// 查询是否可释放空间（异步回传）
   final void Function(DriveFile file, void Function(bool canFree) onResult)
       onCanFreeUp;
@@ -89,7 +86,6 @@ class FileListView extends StatefulWidget {
     required this.onDownload,
     required this.onSyncFolder,
     required this.onRename,
-    required this.onMove,
     required this.onCanFreeUp,
   });
 
@@ -160,26 +156,6 @@ class _FileListViewState extends State<FileListView> {
       builder: (_) => RenameFileDialog(
         target: file,
         onConfirm: (newName) => widget.onRename(file, newName),
-      ),
-    );
-  }
-
-  /// 打开移动对话框（候选为已加载目录树中的全部文件夹，排除自身）
-  void _openMove(DriveFile file) {
-    final known = <String, DriveFile>{};
-    for (final children in widget.browser.directoryChildren.values) {
-      for (final f in children) {
-        if (f.isFolder && f.id.isNotEmpty && f.id != file.id) {
-          known[f.id] = f;
-        }
-      }
-    }
-    showDialog<void>(
-      context: context,
-      builder: (_) => MoveFileDialog(
-        target: file,
-        folders: known.values.toList(),
-        onConfirm: (parentId) => widget.onMove(file, parentId),
       ),
     );
   }
@@ -279,7 +255,6 @@ class _FileListViewState extends State<FileListView> {
                               widget.onThumbnailNeeded(file),
                           onSync: () => widget.onSyncFolder(file),
                           onRename: () => _openRename(file),
-                          onMove: () => _openMove(file),
                           onShowProps: () => openFileProps(file),
                           onDelete: () => _requestDelete([file], () {}),
                           onFreeUp: () => _requestFreeUp([file]),

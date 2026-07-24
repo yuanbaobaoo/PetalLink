@@ -73,7 +73,7 @@ class FileBrowserState {
 
   const FileBrowserState({
     this.folderId,
-    this.breadcrumbs = const [Breadcrumb(name: '全部文件')],
+    this.breadcrumbs = const [Breadcrumb(name: '我的云盘')],
     this.files = const [],
     this.nextCursor,
     this.query = '',
@@ -232,6 +232,11 @@ class FileBrowserController extends GetxController {
 
   /// 各文件夹子目录缓存（folderId `->` `List<DriveFile>`）
   final Map<String?, List<DriveFile>> _childrenByFolder = {};
+
+  /// 目录树懒加载序号（对齐 Vue SidebarTreeNode loadToken）：
+  /// 每次 loadTreeChildren 入口递增，await 后校验仍是最新序号才写结果，
+  /// 防止快速展开/收起/路径变化时旧请求覆盖新状态。
+  final Map<String, int> _loadTokens = {};
 
   /// 请求中的缩略图 fileId 集合（防重复拉取）
   final Set<String> _thumbnailRequests = {};
@@ -438,7 +443,7 @@ class FileBrowserController extends GetxController {
       return;
     }
     if (folder.id.isEmpty) {
-      // 根节点（"全部文件"）回到首级
+      // 根节点（"我的云盘"）回到首级
       navigateToBreadcrumb(0);
       return;
     }
@@ -484,7 +489,7 @@ class FileBrowserController extends GetxController {
 
   /// 计算目录树节点从根到自身的完整路径（对标 CMP treePathTo）
   List<Breadcrumb> treePathTo(String folderId) {
-    const root = [Breadcrumb(name: '全部文件')];
+    const root = [Breadcrumb(name: '我的云盘')];
     final names = <String, String>{};
     final parentOf = <String, String?>{};
     for (final entry in state.value.directoryChildren.entries) {
@@ -546,10 +551,18 @@ class FileBrowserController extends GetxController {
   /// 懒加载指定文件夹的全部子目录写入目录树缓存（不改变当前浏览位置）。
   ///
   /// 对标 CMP ApplicationRoot.loadTreeChildren：失败静默，重新展开可重试。
+  ///
+  /// 并发保护（对齐 Vue SidebarTreeNode loadToken）：每次加载分配递增序号，
+  /// await 返回后若序号已过期（期间被新的加载意图取代）则丢弃结果，
+  /// 防止快速展开/收起/路径变化时旧响应覆盖新状态。
   Future<void> loadTreeChildren(DriveFile folder) async {
     final id = folder.id;
     if (id.isEmpty) return;
     if (state.value.treeLoadingIds.contains(id)) return;
+
+    // 分配本轮加载序号；后续若被新意图取代则 _loadTokens[id] > token
+    final token = (_loadTokens[id] ?? 0) + 1;
+    _loadTokens[id] = token;
 
     state.value = state.value.copyWith(
       treeLoadingIds: {...state.value.treeLoadingIds, id},
@@ -575,6 +588,9 @@ class FileBrowserController extends GetxController {
         cursor = page.nextCursor;
       }
 
+      // 序号已过期：期间发生了新的加载意图，丢弃本次旧结果
+      if (_loadTokens[id] != token) return;
+
       final folders = all.where((f) => f.isFolder).toList();
       _childrenByFolder[id] = folders;
       state.value = state.value.copyWith(
@@ -583,9 +599,12 @@ class FileBrowserController extends GetxController {
       );
     } catch (e, st) {
       AppLogger.e('loadTreeChildren 失败: $id', e, st);
-      state.value = state.value.copyWith(
-        treeLoadingIds: {...state.value.treeLoadingIds}..remove(id),
-      );
+      // 仅当本轮仍是最新意图时才清 loading（旧意图不应清掉新意图的标记）
+      if (_loadTokens[id] == token) {
+        state.value = state.value.copyWith(
+          treeLoadingIds: {...state.value.treeLoadingIds}..remove(id),
+        );
+      }
     }
   }
 

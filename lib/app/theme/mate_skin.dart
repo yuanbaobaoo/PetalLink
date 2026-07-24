@@ -38,12 +38,4 @@ class MateSkin {
     typography: MateTypography.standard(),
     metrics: MateMetrics.standard(),
   );
-
-  /// 深色皮肤。
-  static final MateSkin dark = MateSkin(
-    name: 'dark',
-    colors: MateSemanticColors.dark,
-    typography: MateTypography.standard(),
-    metrics: MateMetrics.standard(),
-  );
 }

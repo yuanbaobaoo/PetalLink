@@ -653,7 +653,9 @@ void main() {
 
       final stored = await row(task.id);
       expect(stored.state, TransferState.verifyingRemote);
-      expect(stored.errorMessage, contains('远端核验暂不可用'));
+      // 技术消息「远端核验暂不可用」经 simplifySyncError 转为用户可读提示
+      // （匹配「远端核验」规则 → 进行中语义）
+      expect(stored.errorMessage, '正在确认同步结果，请稍后查看。');
       expect(stored.nextRetryAt, nowMs + 15000);
       await runner.dispose();
     });

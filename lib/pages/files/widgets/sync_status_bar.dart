@@ -4,6 +4,7 @@ import 'package:intl/intl.dart';
 import 'package:petal_link/app/theme/mate_theme.dart';
 import 'package:petal_link/entity/sync_state.dart';
 import 'package:petal_link/entity/transfer_task.dart';
+import 'package:petal_link/service/sync/user_messages.dart';
 import 'package:petal_link/types/enums.dart';
 import 'package:petal_link/widgets/index.dart';
 
@@ -172,7 +173,11 @@ class FilesSyncStatusBar extends StatelessWidget {
   /// 失败项弹窗：列出 failedItems(path+error)（对标 CMP 失败弹窗）
   void _showFailedItems(BuildContext context) {
     final content = sync.failedItems.map((it) {
-      final err = it.errorMessage != null ? '\n${it.errorMessage}' : '';
+      // 展示前兜底转换历史技术术语（对齐 TS error.ts 展示层语义）
+      final raw = it.errorMessage;
+      final err = raw != null && raw.isNotEmpty
+          ? '\n${simplifySyncError(raw)}'
+          : '';
       return '${it.relativePath}$err';
     }).join('\n\n');
 

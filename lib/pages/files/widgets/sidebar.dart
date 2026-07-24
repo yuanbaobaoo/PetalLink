@@ -1,3 +1,5 @@
+import 'dart:ui' as ui;
+
 import 'package:flutter/material.dart';
 
 import 'package:petal_link/app/theme/mate_theme.dart';
@@ -87,13 +89,16 @@ class FilesSidebar extends StatelessWidget {
       width: metrics.width,
       height: double.infinity,
       decoration: BoxDecoration(
-        color: colors.bgPage,
+        // 毛玻璃底（对齐 Tauri .sidebar：rgba(247,247,249,0.85) + blur(20px)）
+        color: const Color(0xD9F7F7F9),
         // 右 0.5px border（v2 .sidebar border-right）
         border: Border(
           right: BorderSide(color: colors.border, width: 0.5),
         ),
       ),
-      child: Column(
+      child: BackdropFilter(
+        filter: ui.ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+        child: Column(
         children: [
           // 1. Logo 区（60px，padding 0/18）
           Container(
@@ -133,7 +138,7 @@ class FilesSidebar extends StatelessWidget {
               child: _SidebarTreeNode(
                 folder: const DriveFile(
                   id: '',
-                  name: '全部文件',
+                  name: '我的云盘',
                   category: FileCategory.folder,
                 ),
                 depth: 0,
@@ -166,7 +171,8 @@ class FilesSidebar extends StatelessWidget {
               onInstall: onInstallUpdate,
               onShowUpdate: onShowUpdate,
             ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -529,7 +535,11 @@ class _SidebarTreeNodeState extends State<_SidebarTreeNode> {
               setState(() => _expanded = true);
               widget.onSelect(widget.folder);
             },
-            child: Container(
+            // AnimatedContainer：hover 100ms 过渡（对齐 Tauri 0.1s）；
+            // hover 色用 hoverStrong（黑 0.04，对齐 Tauri rgba(0,0,0,0.04)），
+            // bgHover 在灰底侧边栏上仅差 2/255 不可见。
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 100),
               height: metrics.treeNodeHeight,
               padding: EdgeInsets.only(
                 left: metrics.treeNodeStartPadding +
@@ -541,7 +551,7 @@ class _SidebarTreeNodeState extends State<_SidebarTreeNode> {
                 color: isSelected
                     ? colors.brandLighter
                     : _hovered
-                        ? colors.bgHover
+                        ? colors.hoverStrong
                         : Colors.transparent,
               ),
               child: Row(
@@ -565,8 +575,12 @@ class _SidebarTreeNodeState extends State<_SidebarTreeNode> {
                         child: isLoading
                             ? MateCircularProgress(
                                 size: metrics.treeArrowIconSize)
-                            : Transform.rotate(
-                                angle: _expanded ? 3.141592653589793 / 2 : 0,
+                            // 展开旋转 90°，150ms（对齐 Tauri chevron
+                            // `transform 0.15s ease`）
+                            : AnimatedRotation(
+                                turns: _expanded ? 0.25 : 0,
+                                duration: const Duration(milliseconds: 150),
+                                curve: Curves.ease,
                                 child: MateIcon(
                                   name: 'arrow',
                                   size: metrics.treeArrowIconSize,

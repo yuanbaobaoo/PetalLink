@@ -117,6 +117,9 @@ class MateSemanticColors {
   /// 悬停背景色。
   final Color bgHover;
 
+  /// 强悬停背景色（黑 0.04）——侧边栏树节点/设置导航项 hover。
+  final Color hoverStrong;
+
   /// 激活背景色。
   final Color bgActive;
 
@@ -187,6 +190,9 @@ class MateSemanticColors {
   // ------ Toast ------
   /// 成功 Toast 图标色。
   final Color toastSuccessIcon;
+
+  /// 警告 Toast 图标色。
+  final Color toastWarningIcon;
 
   /// 错误 Toast 图标色。
   final Color toastErrorIcon;
@@ -293,6 +299,7 @@ class MateSemanticColors {
     required this.bgContainer,
     required this.bgFill,
     required this.bgHover,
+    required this.hoverStrong,
     required this.bgActive,
     required this.border,
     required this.borderHover,
@@ -315,6 +322,7 @@ class MateSemanticColors {
     required this.fileListBulkCloseHoverIcon,
     required this.fileListBulkCloseHoverBackground,
     required this.toastSuccessIcon,
+    required this.toastWarningIcon,
     required this.toastErrorIcon,
     required this.toastBackground,
     required this.toastDefaultIcon,
@@ -379,6 +387,7 @@ class MateSemanticColors {
     bgContainer: MateColors.lightBgContainer,
     bgFill: MateColors.lightBgFill,
     bgHover: MateColors.lightBgHover,
+    hoverStrong: MateColors.lightHoverStrong,
     bgActive: MateColors.lightBgActive,
     // 边框。
     border: MateColors.lightBorder,
@@ -409,6 +418,7 @@ class MateSemanticColors {
         MateColors.fileListBulkCloseHoverBackground,
     // Toast。
     toastSuccessIcon: MateColors.toastSuccessIcon,
+    toastWarningIcon: MateColors.toastWarningIcon,
     toastErrorIcon: MateColors.toastErrorIcon,
     toastBackground: MateColors.toastBackground,
     toastDefaultIcon: MateColors.toastDefaultIcon,
@@ -435,105 +445,6 @@ class MateSemanticColors {
     onPrimary: MateColors.onPrimary,
     scrollbarThumb: MateColors.scrollbarThumb,
     divider: MateColors.divider,
-    overlay: MateColors.overlayDialogScrim,
-  );
-
-  /// 深色语义配色（对齐 CMP DARK_SEMANTIC_COLORS）。
-  static const MateSemanticColors dark = MateSemanticColors(
-    // 品牌（明暗互换：主色用 hover 色）。
-    brand: MateColors.brandHover,
-    brandHover: MateColors.brand,
-    brandActive: MateColors.brandActive,
-    brandLight: MateColors.darkBrandLight,
-    brand100: MateColors.darkBrand100,
-    brandLighter: MateColors.darkBrandLighter,
-    brandGradient: [MateColors.brandHover, MateColors.brand],
-    brandGradientSoft: [MateColors.darkBrandLighter, MateColors.darkBrand100],
-    // 功能色。
-    success: MateColors.success,
-    successBg: MateColors.darkSuccessBackground,
-    warning: MateColors.warning,
-    warningBg: MateColors.darkWarningBackground,
-    error: MateColors.error,
-    errorBg: MateColors.darkErrorBackground,
-    info: MateColors.info,
-    infoBg: MateColors.darkInfoBackground,
-    // 文件类型色。
-    folder: MateColors.folder,
-    folderBg: MateColors.darkFolderBackground,
-    document: MateColors.document,
-    documentBg: MateColors.darkDocumentBackground,
-    image: MateColors.image,
-    imageBg: MateColors.darkImageBackground,
-    video: MateColors.video,
-    videoBg: MateColors.darkVideoBackground,
-    sheet: MateColors.sheet,
-    sheetBg: MateColors.darkSheetBackground,
-    // 控件色。
-    switchOffTrack: MateColors.darkSwitchOffTrack,
-    switchKnob: MateColors.switchKnob,
-    checkboxMark: MateColors.checkboxMark,
-    // 页面/容器背景。
-    bgPage: MateColors.darkBgPage,
-    bgContainer: MateColors.darkBgContainer,
-    bgFill: MateColors.darkBgFill,
-    bgHover: MateColors.darkBgHover,
-    bgActive: MateColors.darkBgActive,
-    // 边框。
-    border: MateColors.darkBorder,
-    borderHover: MateColors.darkBorderHover,
-    // 文字。
-    textPrimary: MateColors.darkTextPrimary,
-    textSecondary: MateColors.darkTextSecondary,
-    textPlaceholder: MateColors.darkTextPlaceholder,
-    // 固定前景色（与浅色主题一致）。
-    appLogoCompactText: MateColors.appLogoCompactText,
-    appLogoFullText: MateColors.appLogoFullText,
-    appLogoCompactIcon: MateColors.appLogoCompactIcon,
-    defaultIconTint: MateColors.defaultIconTint,
-    // 文件列表批量操作。
-    fileListBulkBackground: MateColors.fileListBulkBackground,
-    fileListBulkDangerText: MateColors.fileListBulkDangerText,
-    fileListBulkDangerIcon: MateColors.fileListBulkDangerIcon,
-    fileListBulkDangerHoverBackground:
-        MateColors.fileListBulkDangerHoverBackground,
-    fileListBulkSelectionText: MateColors.fileListBulkSelectionText,
-    fileListBulkActionText: MateColors.fileListBulkActionText,
-    fileListBulkActionIcon: MateColors.fileListBulkActionIcon,
-    fileListBulkActionHoverBackground:
-        MateColors.fileListBulkActionHoverBackground,
-    fileListBulkCloseIcon: MateColors.fileListBulkCloseIcon,
-    fileListBulkCloseHoverIcon: MateColors.fileListBulkCloseHoverIcon,
-    fileListBulkCloseHoverBackground:
-        MateColors.fileListBulkCloseHoverBackground,
-    // Toast。
-    toastSuccessIcon: MateColors.toastSuccessIcon,
-    toastErrorIcon: MateColors.toastErrorIcon,
-    toastBackground: MateColors.toastBackground,
-    toastDefaultIcon: MateColors.toastDefaultIcon,
-    toastText: MateColors.toastText,
-    // 遮罩。
-    mainLoadingScrim: MateColors.mainLoadingScrim,
-    updateDialogScrim: MateColors.updateDialogScrim,
-    overlayDialogScrim: MateColors.overlayDialogScrim,
-    // 侧边栏。
-    sidebarAccountAvatarText: MateColors.sidebarAccountAvatarText,
-    sidebarUpdateText: MateColors.sidebarUpdateText,
-    sidebarUpdateProgress: MateColors.sidebarUpdateProgress,
-    sidebarDismissBackground: MateColors.sidebarDismissBackground,
-    sidebarDismissText: MateColors.sidebarDismissText,
-    sidebarInstallBackground: MateColors.sidebarInstallBackground,
-    // 设置页。
-    settingsAccountAvatarText: MateColors.settingsAccountAvatarText,
-    // 按钮。
-    buttonPrimaryText: MateColors.buttonPrimaryText,
-    buttonDisabledPrimaryText: MateColors.buttonDisabledPrimaryText,
-    buttonDangerText: MateColors.buttonDangerText,
-    buttonBadgeText: MateColors.buttonBadgeText,
-    // Flutter 平台补充。
-    onPrimary: MateColors.onPrimary,
-    scrollbarThumb: MateColors.darkScrollbarThumb,
-    divider: MateColors.darkDivider,
     overlay: MateColors.overlayDialogScrim,
   );
 }

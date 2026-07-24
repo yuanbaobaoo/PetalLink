@@ -82,8 +82,24 @@ class LaunchAtLoginService {
     return p.join(home, 'Library', 'LaunchAgents', '$bundleId.plist');
   }
 
-  /// 是否已启用（仅判断 plist 文件存在，对齐 Rust `is_enabled`）
-  bool isEnabled() => File(plistPath).existsSync();
+  /// 是否已启用：plist 存在且未被系统（BTM / launchd disabled）禁用。
+  ///
+  /// 对齐 Rust `is_enabled`：用户在「系统设置 → 通用 → 登录项与扩展」
+  /// 关闭后，plist 文件仍在但服务已被 BTM 禁用，此时必须返回 false，
+  /// 保证 UI 开关与系统真实状态一致。
+  Future<bool> isEnabled() async {
+    if (!File(plistPath).existsSync()) return false;
+    return !await isDisabledBySystem();
+  }
+
+  /// 系统（BTM / launchd disabled 列表）是否禁用了本服务。
+  /// 查询失败或列表中无本服务记录时按未禁用处理（对齐 Rust `is_disabled_by_system`）。
+  Future<bool> isDisabledBySystem() async {
+    final uid = await _currentUid();
+    final r = await _runner('launchctl', ['print-disabled', 'gui/$uid']);
+    if (r.exitCode != 0) return false;
+    return parseDisabledEntry(r.stdout, bundleId) ?? false;
+  }
 
   /// 设置开机启动；失败仅记录日志并返回 false（对齐 Rust 不抛错语义）
   Future<bool> setEnabled(bool enabled) async {
@@ -189,6 +205,26 @@ class LaunchAtLoginService {
   // ============================================================
   // 纯函数（可测试）
   // ============================================================
+
+  /// 解析 `launchctl print-disabled` 输出中指定 label 的禁用状态。
+  ///
+  /// 对齐 Rust `parse_disabled_entry`：行格式为
+  /// `\t"com.example.foo" => enabled|disabled`（或 `=> true|false`）。
+  /// 命中行末状态为 disabled/true 视为禁用；无记录返回 null（按未禁用处理）。
+  static bool? parseDisabledEntry(String output, String label) {
+    final quoted = '"$label"';
+    for (final raw in output.split('\n')) {
+      final line = raw.trim();
+      if (!line.contains(quoted)) continue;
+      // 取 '=>' 之后的状态词
+      final idx = line.lastIndexOf('=> ');
+      if (idx < 0) continue;
+      final state = line.substring(idx + 3).trim();
+      // launchctl 输出可能是 disabled/enabled 或 true/false
+      return state == 'disabled' || state == 'true';
+    }
+    return null;
+  }
 
   /// 解析可执行路径为 (bundlePath, programPath)。
   ///

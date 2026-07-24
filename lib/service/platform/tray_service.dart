@@ -50,6 +50,18 @@ abstract class TrayBackend {
   /// 更新 tooltip
   Future<void> setToolTip(String tooltip);
 
+  /// 切换状态栏图标可见性（对齐 Rust `set_tray_visible`）。
+  ///
+  /// system_tray 插件不暴露 NSStatusItem 句柄，无法直接切可见性，
+  /// 故用 destroy（隐藏）/ 重新 init（显示）模拟。重建开销可接受：
+  /// 托盘开关是低频操作（设置页切换）。
+  Future<void> setVisible({
+    required String iconPath,
+    required String tooltip,
+    required bool isTemplate,
+    required bool visible,
+  });
+
   /// 销毁托盘
   Future<void> destroy();
 }
@@ -101,6 +113,26 @@ class SystemTrayBackend implements TrayBackend {
   Future<void> setToolTip(String tooltip) => _tray.setToolTip(tooltip);
 
   @override
+  Future<void> setVisible({
+    required String iconPath,
+    required String tooltip,
+    required bool isTemplate,
+    required bool visible,
+  }) async {
+    if (visible) {
+      // 显示：重新建图标（destroy 后的重建）
+      await _tray.initSystemTray(
+        iconPath: iconPath,
+        toolTip: tooltip,
+        isTemplate: isTemplate,
+      );
+    } else {
+      // 隐藏：销毁状态栏项
+      await _tray.destroy();
+    }
+  }
+
+  @override
   Future<void> destroy() => _tray.destroy();
 }
 
@@ -150,6 +182,13 @@ class TrayService {
   /// 是否已初始化
   bool _initialized = false;
 
+  /// 当前托盘图标是否可见（对齐 Rust `TRAY_ICON_VISIBLE`）。
+  /// 初始 true（init 后即可见）；退出拦截据此决定是否放行真退出。
+  bool _visible = true;
+
+  /// 托盘图标是否可见（供退出联动查询）
+  bool get isVisible => _visible;
+
   TrayService({
     TrayBackend? backend,
     required Future<List<TransferTask>> Function() activeTransfersProvider,
@@ -179,6 +218,30 @@ class TrayService {
       AppLogger.i('托盘已初始化');
     } catch (e, st) {
       AppLogger.e('托盘初始化失败', e, st);
+    }
+  }
+
+  /// 切换托盘图标可见性（对齐 Rust `set_tray_visible`）。
+  ///
+  /// 隐藏后用户失去托盘退出入口，此时 Cmd+Q 必须放行真退出（防僵尸进程，
+  /// 对齐 Rust `activation.rs` 的 `!is_tray_icon_visible()` 分支）。
+  Future<void> setVisible(bool visible) async {
+    if (_visible == visible) return;
+    try {
+      await _backend.setVisible(
+        iconPath: iconAsset,
+        tooltip: defaultTooltip,
+        isTemplate: true,
+        visible: visible,
+      );
+      _visible = visible;
+      if (visible && _initialized) {
+        // 重新显示后需重建菜单（destroy 已清掉上下文菜单）
+        await refreshMenu();
+      }
+      AppLogger.i('托盘可见性切换为: $visible');
+    } catch (e, st) {
+      AppLogger.e('托盘可见性切换失败', e, st);
     }
   }
 

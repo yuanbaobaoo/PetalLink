@@ -102,6 +102,21 @@ void main() {
       expect(actions.single.fileId, 'f1');
     });
 
+    test('本地变更 → Upload 携带规划时云端版本快照（对齐 Rust local_update_keeps_cloud_version_snapshot）', () {
+      // Update 必须携带规划时远端版本，执行前据此拒绝覆盖并发修改。
+      final actions = planner.plan(snap(
+        local: {'a.txt': localEntry('a.txt', mtime: 1700000060000)},
+        cloud: {'a.txt': cloudFile('f1', 'a.txt', editedMs: 1700000000000)},
+        db: {'a.txt': dbEntry('f1')},
+      ));
+      expect(actions.single.actionType, SyncActionType.upload);
+      expect(actions.single.cloudFile, isNotNull);
+      expect(actions.single.cloudFile?.id, 'f1');
+      // 规划时云端 editedTime 必须被快照保留，供 preflight 核验
+      expect(actions.single.cloudFile?.editedTime?.millisecondsSinceEpoch,
+          1700000000000);
+    });
+
     test('本地 size 变更（mtime 相同）→ Upload（v3 精度兜底）', () {
       final actions = planner.plan(snap(
         local: {'a.txt': localEntry('a.txt', size: 200)},

@@ -54,10 +54,16 @@ class MateLinearProgress extends StatelessWidget {
         width: double.infinity,
         color: colors.bgFill,
         child: value != null
-            ? FractionallySizedBox(
-                alignment: Alignment.centerLeft,
-                widthFactor: value!.clamp(0, 1).toDouble(),
-                child: DecoratedBox(decoration: fillDecoration),
+            // 填充宽度过渡 300ms ease（对齐 Tauri `transition: width 0.3s ease`）
+            ? TweenAnimationBuilder<double>(
+                tween: Tween(begin: 0, end: value!.clamp(0, 1).toDouble()),
+                duration: const Duration(milliseconds: 300),
+                curve: Curves.ease,
+                builder: (context, v, _) => FractionallySizedBox(
+                  alignment: Alignment.centerLeft,
+                  widthFactor: v,
+                  child: DecoratedBox(decoration: fillDecoration),
+                ),
               )
             : reducedMotion
                 // 减少动态：静止 30% 指示条
@@ -706,7 +712,8 @@ class MateSectionHeader extends StatelessWidget {
 
 /// 侧栏导航项（v2 放松版：46px 行高 + radius 8 + 18px 图标）。
 ///
-/// hover bgFill；active bg=brandLighter color=brand medium。
+/// hover hoverStrong（黑 0.04，对齐 Tauri rgba(0,0,0,0.04)）；
+/// active bg=brandLighter color=brand medium。
 class MateNavItem extends StatefulWidget {
   /// 标签文字。
   final String label;
@@ -754,7 +761,7 @@ class _MateNavItemState extends State<MateNavItem> {
     final bgColor = widget.active
         ? colors.brandLighter
         : _hovered
-            ? colors.bgFill
+            ? colors.hoverStrong
             : Colors.transparent;
 
     return MouseRegion(

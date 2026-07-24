@@ -17,16 +17,13 @@ typedef _StateMeta = ({String icon, String label, Color color, bool spin});
 /// （top 64 / end 20）；header(60) + stats(stat-pill 卡片行) +
 /// body(flex scroll，顶分隔线)；任务行 minHeight 68 padding 10/20：
 /// 方向色块(36×36 radius8) + 信息区(dir chip + name + 进度/错误) +
-/// 状态区(80) + 重试按钮。
+/// 状态区(80)。失败时进度条替换为红色错误文案（对齐 Tauri，无重试按钮）。
 class TransferPopover extends StatefulWidget {
   /// 传输任务列表
   final List<TransferTask> tasks;
 
   /// 关闭回调
   final VoidCallback onDismiss;
-
-  /// 重试回调（传 taskId 与结果回调，用于防抖与 toast 反馈）
-  final void Function(int taskId, void Function(bool ok) onResult) onRetry;
 
   /// 清除已完成
   final VoidCallback onClearCompleted;
@@ -41,7 +38,6 @@ class TransferPopover extends StatefulWidget {
     super.key,
     required this.tasks,
     required this.onDismiss,
-    required this.onRetry,
     required this.onClearCompleted,
     required this.onClearFailed,
     required this.onClearFinished,
@@ -52,23 +48,6 @@ class TransferPopover extends StatefulWidget {
 }
 
 class _TransferPopoverState extends State<TransferPopover> {
-  /// 重试防抖：单任务重试期间禁用重复点击（对标原 Vue retryingId）
-  int? _retryingId;
-
-  void _requestRetry(int id) {
-    if (_retryingId != null) return;
-    setState(() => _retryingId = id);
-    widget.onRetry(id, (ok) {
-      if (!mounted) return;
-      setState(() => _retryingId = null);
-      if (ok) {
-        MateToast.show('已重新提交传输任务', variant: MateToastVariant.success);
-      } else {
-        MateToast.show('重试失败，请稍后再试', variant: MateToastVariant.error);
-      }
-    });
-  }
-
   @override
   Widget build(BuildContext context) {
     final colors = MateTheme.colorsOf(context);
@@ -165,10 +144,9 @@ class _TransferPopoverState extends State<TransferPopover> {
                   _StatPill(num: waiting, label: '等待中'),
                   SizedBox(width: metrics.summaryItemSpacing),
                   _StatPill(num: completed, label: '已完成'),
-                  if (failed > 0) ...[
-                    SizedBox(width: metrics.summaryItemSpacing),
-                    _StatPill(num: failed, label: '历史失败', error: true),
-                  ],
+                  SizedBox(width: metrics.summaryItemSpacing),
+                  // 历史失败固定显示（对齐 Tauri 4 卡片），>0 时红底红字
+                  _StatPill(num: failed, label: '历史失败', error: failed > 0),
                   SizedBox(width: metrics.summaryItemSpacing),
                   // 清空菜单（自绘菜单右下锚定：贴窗口右边缘不溢出，
                   // 对齐 CMP MatePopupMenu 三项与图标）
@@ -221,8 +199,6 @@ class _TransferPopoverState extends State<TransferPopover> {
                         return _TransferTaskRow(
                           key: ValueKey(task.id),
                           task: task,
-                          retrying: _retryingId == task.id,
-                          onRetry: _requestRetry,
                         );
                       },
                     ),
@@ -294,16 +270,6 @@ Color _progressColor(TransferState state, MateSemanticColors colors) {
   };
 }
 
-/// 是否可重试（对标原 Vue canRetryTransferTask：
-/// Failed/RestartRequired + upload/download 方向，delete 不可）
-bool _canRetry(TransferTask task) {
-  final stateOk = task.state == TransferState.failed ||
-      task.state == TransferState.restartRequired;
-  final dirOk = task.direction == TransferDirection.upload ||
-      task.direction.isDownload;
-  return stateOk && dirOk;
-}
-
 /// stat-pill 统计卡片（v2：bgFill radius-md(8)，padding 8/10，上数字下标签）。
 ///
 /// 数字 17 bold（tabular-nums），标签 12 textSecondary；
@@ -358,14 +324,10 @@ class _StatPill extends StatelessWidget {
 /// 单个传输任务行（v2：minHeight 68，padding 10/20，含底分隔线）。
 class _TransferTaskRow extends StatelessWidget {
   final TransferTask task;
-  final bool retrying;
-  final void Function(int taskId) onRetry;
 
   const _TransferTaskRow({
     super.key,
     required this.task,
-    required this.retrying,
-    required this.onRetry,
   });
 
   @override
@@ -521,18 +483,6 @@ class _TransferTaskRow extends StatelessWidget {
                   ],
                 ),
               ),
-              // 重试按钮（条件；重试中显示进度指示并防抖）
-              if (_canRetry(task)) ...[
-                SizedBox(width: metrics.taskStateSpacing),
-                if (retrying)
-                  MateCircularProgress(size: metrics.taskStateIconSize)
-                else
-                  MateButton(
-                    variant: MateButtonVariant.icon,
-                    icon: 'refresh',
-                    onClick: () => onRetry(task.id),
-                  ),
-              ],
             ],
           ),
         ),

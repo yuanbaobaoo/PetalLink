@@ -151,6 +151,7 @@ void main() {
         httpClient: client,
         currentVersion: version,
         endpoint: 'https://example.com/update.json',
+        enableUpdateCheck: true,
       );
     }
 
@@ -210,8 +211,22 @@ void main() {
       final result = await UpdateService(
         httpClient: client,
         endpoint: 'http://example.com/update.json',
+        enableUpdateCheck: true,
       ).check();
       expect(result.isErr, isTrue);
+    });
+
+    test('dev 构建（enableUpdateCheck=false）→ 跳过检查返回 null', () async {
+      // 不应发起任何网络请求（client 为空 mock 也行）
+      final client = MockClient((request) async =>
+          http.Response('should-not-be-called', 200));
+      final result = await UpdateService(
+        httpClient: client,
+        endpoint: 'https://example.com/update.json',
+        enableUpdateCheck: false,
+      ).check();
+      expect(result.isOk, isTrue);
+      expect((result as Ok<UpdateManifest?>).value, isNull);
     });
   });
 
@@ -316,43 +331,23 @@ void main() {
     });
   });
 
-  group('UpdateService.installAndRelaunch 签名校验（对齐 CMP verifyApp 四重校验）', () {
+  group('UpdateService.installAndRelaunch minisign 验签（对齐 Tauri updater）', () {
     late Directory tempDir;
     late String executable;
-    late String dmgPath;
+    late String archivePath;
 
-    /// 装配假 .app / DMG / 挂载点，返回可注入 fake runner 的服务工厂
-    UpdateService serviceWith({
-      required String expectedTeamId,
-      bool codesignOk = true,
-      bool spctlOk = true,
-      String teamIdOutput = 'TeamIdentifier=TEAM123',
-      List<String>? recorded,
-    }) {
-      Future<ProcResult> runner(String exe, List<String> args) async {
-        recorded?.add('$exe ${args.join(' ')}');
-        if (exe.contains('codesign') && args.contains('--verify')) {
-          return ProcResult(exitCode: codesignOk ? 0 : 1, stderr: 'invalid');
-        }
-        if (exe.contains('spctl')) {
-          return ProcResult(exitCode: spctlOk ? 0 : 1, stderr: 'rejected');
-        }
-        if (exe.contains('codesign') && args.contains('-dv')) {
-          // codesign -dv 详情输出在 stderr（真实行为）
-          return ProcResult(exitCode: 0, stderr: teamIdOutput);
-        }
-        // hdiutil / ditto / chmod 默认成功
-        return const ProcResult(exitCode: 0);
-      }
+    /// 测试用 minisign 公钥（由 minisign 0.12 真实生成）
+    const testPublicKey = 'RWQumH1FCnRspPE49wySomZGx2w80Y4Yrt785hrQR5duOAcdhgVVb1Pu';
 
-      return UpdateService(
-        updatesDir: tempDir.path,
-        runner: runner,
-        currentExecutable: executable,
-        currentPid: 999999,
-        expectedTeamId: expectedTeamId,
-      );
-    }
+    /// 测试用签名（对 "hello petallink update package\n" 的 minisign prehashed 签名）
+    const testSigText = '''untrusted comment: signature from minisign secret key
+RUQumH1FCnRspNU2xY6zOPq5vZK16g5cmp0e3GzqTIkSkUQyH+zRTPuLJ/k/AkWByliYulOrRJzsPAsSaYubxLDtOxuWgXryDQM=
+trusted comment: timestamp:1784872454\tfile:test_payload.bin\thashed
+x7N6m+v81toEeyF+y5tuYgmgE3WGczy15xzF1EtRw4J/ln//l4eVGEqkRbaj5SlTaOtbuD6mTabudP4R6Y2/Dg==''';
+
+    /// 被签名的文件内容（与签名匹配）
+    final signedContent =
+        'hello petallink update package\n'.codeUnits;
 
     setUp(() async {
       tempDir = Directory.systemTemp.createTempSync('update_install_test');
@@ -360,59 +355,69 @@ void main() {
       await Directory('${tempDir.path}/My.app/Contents/MacOS')
           .create(recursive: true);
       await File(executable).writeAsString('bin');
-      dmgPath = '${tempDir.path}/pkg/PetalLink.dmg';
-      await Directory('${tempDir.path}/pkg/mnt/Test.app')
-          .create(recursive: true);
-      await File(dmgPath).writeAsString('dmg');
+      archivePath = '${tempDir.path}/pkg/PetalLink.app.tar.gz';
+      await Directory('${tempDir.path}/pkg').create(recursive: true);
     });
 
     tearDown(() {
       if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
     });
 
-    test('未配置 Team ID → 拒绝安装（对齐 CMP 空值拒绝）', () async {
-      final service = serviceWith(expectedTeamId: '');
-      final result = await service.installAndRelaunch(dmgPath);
-      expect(result.isErr, isTrue);
-      expect((result as Err).error.message, contains('Team ID'));
-    });
+    UpdateService serviceWith({required Future<ProcResult> Function(String, List<String>) runner}) {
+      return UpdateService(
+        updatesDir: tempDir.path,
+        runner: runner,
+        currentExecutable: executable,
+        currentPid: 999999,
+        publicKey: testPublicKey,
+      );
+    }
 
-    test('codesign --verify 失败 → Err', () async {
-      final service =
-          serviceWith(expectedTeamId: 'TEAM123', codesignOk: false);
-      final result = await service.installAndRelaunch(dmgPath);
-      expect(result.isErr, isTrue);
-      expect((result as Err).error.message, contains('代码签名'));
-    });
-
-    test('spctl 未通过 Gatekeeper → Err', () async {
-      final service = serviceWith(expectedTeamId: 'TEAM123', spctlOk: false);
-      final result = await service.installAndRelaunch(dmgPath);
-      expect(result.isErr, isTrue);
-      expect((result as Err).error.message, contains('Gatekeeper'));
-    });
-
-    test('Team ID 不匹配 → Err', () async {
+    test('未携带签名 → 拒绝安装', () async {
+      // 造一个假 tar.gz（内容无关，验签前就因签名缺失被拒）
+      await File(archivePath).writeAsBytes(signedContent);
       final service = serviceWith(
-          expectedTeamId: 'TEAM123', teamIdOutput: 'TeamIdentifier=OTHER');
-      final result = await service.installAndRelaunch(dmgPath);
+          runner: (exe, args) async => const ProcResult(exitCode: 0));
+      final result =
+          await service.installAndRelaunch(archivePath, signature: null);
       expect(result.isErr, isTrue);
-      expect((result as Err).error.message, contains('Team ID'));
+      expect((result as Err).error.message, contains('未携带签名'));
     });
 
-    test('校验顺序：codesign/spctl 在替换脚本启动之前执行', () async {
+    test('签名校验失败（内容被篡改）→ 拒绝安装', () async {
+      // 写入与签名不匹配的内容
+      await File(archivePath).writeAsBytes('tampered content'.codeUnits);
+      final service = serviceWith(
+          runner: (exe, args) async => const ProcResult(exitCode: 0));
+      final result = await service.installAndRelaunch(
+        archivePath,
+        signature: testSigText,
+      );
+      expect(result.isErr, isTrue);
+      expect((result as Err).error.message, contains('签名校验失败'));
+    });
+
+    test('签名校验通过 → 进入解压阶段（tar 被调用）', () async {
+      // 写入与签名匹配的内容
+      await File(archivePath).writeAsBytes(signedContent);
       final recorded = <String>[];
-      final service = serviceWith(
-          expectedTeamId: 'TEAM123', spctlOk: false, recorded: recorded);
-      await service.installAndRelaunch(dmgPath);
-      final codesignIdx =
-          recorded.indexWhere((c) => c.contains('codesign --verify'));
-      final dittoIdx = recorded.indexWhere((c) => c.contains('ditto'));
-      expect(codesignIdx, greaterThan(-1));
-      expect(dittoIdx, greaterThan(-1));
-      // 校验发生在提取（ditto）之后、且失败时不会启动安装脚本
-      expect(codesignIdx, greaterThan(dittoIdx));
-      expect(recorded.any((c) => c.contains('chmod')), isFalse);
+      final service = serviceWith(runner: (exe, args) async {
+        recorded.add('$exe ${args.join(' ')}');
+        // tar 故意返回失败，避免走到 exit(0) 终止测试进程；
+        // 能到达 tar 即证明 minisign 验签已通过
+        if (exe.contains('tar')) {
+          return const ProcResult(exitCode: 1, stderr: 'mock fail');
+        }
+        return const ProcResult(exitCode: 0);
+      });
+      final result = await service.installAndRelaunch(
+        archivePath,
+        signature: testSigText,
+      );
+      // tar 被调用（验签通过的证据），且因 mock 失败返回解压错误
+      expect(recorded.any((c) => c.contains('tar')), isTrue);
+      expect(result.isErr, isTrue);
+      expect((result as Err).error.message, contains('解压'));
     });
   });
 }
