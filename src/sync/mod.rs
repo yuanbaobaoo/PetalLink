@@ -28,3 +28,5 @@ pub mod sync_state_store;
 pub mod task_runner;
 /// 定义传输生命周期的持久化枚举与转换。
 pub mod transfer_state;
+/// 将内部同步诊断转换为用户侧提示。
+pub(crate) mod user_messages;

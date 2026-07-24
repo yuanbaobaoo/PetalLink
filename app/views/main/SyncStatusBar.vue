@@ -5,6 +5,7 @@ import { useSyncStore } from "@/stores/sync";
 import { useTransferStore } from "@/stores/transfer";
 import { MateDialog, MateButton } from "@/components/mate";
 import { pad2 } from "@/utils/format";
+import { formatUserMessage } from "@/utils/error";
 
 // 同步 store
 const sync = useSyncStore();
@@ -14,22 +15,22 @@ const transfer = useTransferStore();
 // 状态文案：根据 sync_phase 精确显示当前操作场景
 const statusText = computed(() => {
   switch (sync.syncPhase) {
-    case "indexing-startup": return "正在读取云端索引（首次）…";
-    case "indexing-manual": return "正在读取云端索引…";
-    case "indexing-auto-full": return "正在读取云端索引（全量纠偏）…";
-    case "querying-changes": return "正在查询云端变更…";
+    case "indexing-startup": return "正在首次读取云端文件…";
+    case "indexing-manual": return "正在刷新云端文件…";
+    case "indexing-auto-full": return "正在重新检查全部云端文件…";
+    case "querying-changes": return "正在检查云端更新…";
     case "syncing-auto-incremental": return "正在同步云端变更…";
     case "syncing-local": return "正在同步本地变更…";
     case "syncing-manual": return "正在同步…";
     case "syncing-retry": return "正在重试失败项…";
-    case "syncing-startup": return "正在同步（启动恢复）…";
+    case "syncing-startup": return "正在继续上次未完成的同步…";
     default:
       // 无 sync cycle 时仍按持久化传输队列区分活动态，不能把等待/退避/核验显示为完成。
-      if (transfer.verifyingRemote) return "正在核验远端状态…";
+      if (transfer.verifyingRemote) return "正在确认同步结果…";
       if (sync.uploading || sync.downloading || transfer.running) return "同步中";
       if (sync.waitingNetwork || transfer.waitingNetwork) return "等待网络恢复…";
       if (transfer.backingOff) return "等待下次重试…";
-      if (transfer.restartRequired) return "等待重新规划…";
+      if (transfer.restartRequired) return "有文件需要重新检查…";
       if (transfer.pending) return "等待传输…";
       if (sync.failed) return "同步存在失败项";
       return "同步完成";
@@ -116,7 +117,9 @@ function handleShowFailed(): void {
       <div v-else class="failed-list">
         <div v-for="(item, i) in sync.failedItems" :key="i" class="failed-item">
           <div class="failed-item__path">{{ item.relative_path }}</div>
-          <div v-if="item.error_message" class="failed-item__err">{{ item.error_message }}</div>
+          <div v-if="item.error_message" class="failed-item__err">
+            {{ formatUserMessage(item.error_message) }}
+          </div>
         </div>
       </div>
       <template #footer>

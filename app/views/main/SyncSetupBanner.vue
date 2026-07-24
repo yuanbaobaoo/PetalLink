@@ -84,7 +84,7 @@ async function handleRetry(): Promise<void> {
   <!-- needsFirstSync：目录已就绪，等待首次同步 -->
   <div v-else-if="sync.setupPhase === 'needsFirstSync'" class="setup-banner setup-banner--warning">
     <MateInfoBanner variant="warning" class="setup-banner__inner">
-      同步目录已就绪：{{ sync.mountDir || '未配置' }}，点击「同步索引」拉取云端索引
+      同步目录已就绪：{{ sync.mountDir || '未配置' }}，点击「同步索引」读取云端文件
       <template #action>
         <MateButton variant="text" icon="sync" @click="handleFirstSync">同步索引</MateButton>
       </template>

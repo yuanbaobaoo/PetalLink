@@ -36,7 +36,7 @@ pub struct SyncAction {
     pub parent_file_id: Option<String>,
     /// 本地绝对路径
     pub local_path: Option<String>,
-    /// 云端文件元数据（动态，仅在 createPlaceholder/createFolder/download 时使用）
+    /// 云端文件元数据；Update 用其版本快照防止覆盖规划后的远端修改。
     pub cloud_file: Option<crate::drive::models::DriveFile>,
     /// 原因（日志用）
     pub reason: Option<String>,

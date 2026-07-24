@@ -34,9 +34,9 @@ pub async fn sync_folder_recursive(
     // 全局索引读取中（云端树 BFS 重建中）：选择目录同步会基于不完整的 cloud_tree/path_to_id，
     // 且与全局 BFS 并发拉取易冲突 → 拒绝，等索引完成。
     if eng.current_state().is_indexing {
-        return Err(AppError::generic(
-            "正在读取云端索引，请稍后再试".to_string(),
-        ));
+        let user_message = "正在读取云端文件，请稍后再试";
+        tracing::debug!(user_message, "云端索引构建期间拒绝目录同步");
+        return Err(AppError::generic(user_message));
     }
     let Some(folder_guard) = eng.try_begin_folder_sync_guard() else {
         return Err(AppError::generic(

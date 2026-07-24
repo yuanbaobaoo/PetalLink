@@ -322,11 +322,19 @@ impl SyncExecutor {
 
     /// 在本地身份与目标去重校验通过后更新云端文件路径。
     async fn do_move_in_cloud(&self, action: &SyncAction) -> ActionResult {
-        let deferred = |message: String| ActionResult {
-            success: false,
-            error_message: Some(message),
-            deferred: true,
-            cloud_file: None,
+        let deferred = |technical_message: String| {
+            let user_message = crate::sync::user_messages::simplify_sync_error(&technical_message);
+            tracing::info!(
+                technical_reason = %technical_message,
+                user_message = %user_message,
+                "云端路径变更等待重新检查"
+            );
+            ActionResult {
+                success: false,
+                error_message: Some(user_message.into_owned()),
+                deferred: true,
+                cloud_file: None,
+            }
         };
         let Some(file_id) = action.file_id.as_deref() else {
             return deferred("云端路径变更缺少 fileId，等待重新规划".to_string());

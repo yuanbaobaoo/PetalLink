@@ -64,7 +64,7 @@ export function useFileOperation(deps: FileOperationDeps) {
    */
   function guard(opts?: { requireMount?: boolean }): boolean {
     if (deps.isIndexing()) {
-      showToast("正在读取云端索引，请稍后再试", { variant: "warning" });
+      showToast("正在读取云端文件，请稍后再试", { variant: "warning" });
       return false;
     }
     if (opts?.requireMount && !deps.mountConfigured()) {

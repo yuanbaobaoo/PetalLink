@@ -74,15 +74,39 @@ pub enum RemoteVerification {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 /// 任务执行或准入后的调度去向。
 pub enum TaskDisposition {
+    /// 任务及本地记录均已完成。
     #[default]
     Completed,
+    /// 任务已入队，等待执行。
     Pending,
+    /// 任务正在执行。
     Running,
+    /// 同一路径已有其他任务执行。
     BlockedByActiveIntent,
+    /// 网络恢复后自动继续。
     WaitingForNetwork,
+    /// 服务端退避时间到达后自动重试。
     BackingOff,
+    /// 正在确认远端写入是否成功。
     VerifyingRemote,
+    /// 文件状态变化，需重新检查后生成新任务。
     RestartRequired,
+}
+
+impl TaskDisposition {
+    /// 返回适合直接展示给用户的任务状态说明。
+    pub fn user_message(self) -> &'static str {
+        match self {
+            Self::Completed => "同步已完成。",
+            Self::Pending => "任务已加入传输队列，稍后会自动开始。",
+            Self::Running => "文件正在同步。",
+            Self::BlockedByActiveIntent => "该文件正在执行其他同步任务，请稍后再试。",
+            Self::WaitingForNetwork => "网络不可用，恢复后会自动继续。",
+            Self::BackingOff => "服务暂时不可用，稍后会自动重试。",
+            Self::VerifyingRemote => "正在确认上次同步是否成功。",
+            Self::RestartRequired => "文件状态已变化，请重新检查并重试。",
+        }
+    }
 }
 
 #[async_trait]

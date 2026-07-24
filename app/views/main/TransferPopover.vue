@@ -19,6 +19,7 @@ import {
 } from "@/components/mate";
 import type { PopupItem } from "@/components/mate";
 import { formatFileSize } from "@/utils/format";
+import { extractErrorMessage, formatUserMessage } from "@/utils/error";
 
 // 传输 store
 const transfer = useTransferStore();
@@ -29,12 +30,12 @@ const allItems = computed(() => transfer.tasks);
 interface StateMeta { icon: string; label: string; color: string; spin?: boolean; }
 // 各传输状态的展示元信息（图标/文案/颜色）
 const stateMeta: Record<number, StateMeta> = {
-  [TRANSFER_STATE.PENDING]: { icon: "clock", label: "等待调度", color: "var(--ink-400)" },
+  [TRANSFER_STATE.PENDING]: { icon: "clock", label: "等待开始", color: "var(--ink-400)" },
   [TRANSFER_STATE.RUNNING]: { icon: "sync", label: "传输中", color: "var(--brand-500)", spin: true },
   [TRANSFER_STATE.WAITING_FOR_NETWORK]: { icon: "clock", label: "等待网络", color: "var(--warn)" },
   [TRANSFER_STATE.BACKING_OFF]: { icon: "clock", label: "等待重试", color: "var(--warn)" },
-  [TRANSFER_STATE.VERIFYING_REMOTE]: { icon: "sync", label: "核验远端", color: "var(--brand-500)", spin: true },
-  [TRANSFER_STATE.RESTART_REQUIRED]: { icon: "refresh", label: "等待重新规划", color: "var(--warn)" },
+  [TRANSFER_STATE.VERIFYING_REMOTE]: { icon: "sync", label: "正在确认结果", color: "var(--brand-500)", spin: true },
+  [TRANSFER_STATE.RESTART_REQUIRED]: { icon: "refresh", label: "需要重新检查", color: "var(--warn)" },
   [TRANSFER_STATE.COMPLETED]: { icon: "check", label: "已完成", color: "var(--ok)" },
   [TRANSFER_STATE.FAILED]: { icon: "x", label: "失败", color: "var(--err)" },
   [TRANSFER_STATE.CANCELED]: { icon: "x", label: "已取消", color: "var(--ink-400)" },
@@ -118,13 +119,13 @@ async function onRetry(item: TransferTask): Promise<void> {
     await transfer.retry(item.id);
     showToast(
       item.state === TRANSFER_STATE.RESTART_REQUIRED
-        ? "已请求重新规划"
+        ? "已开始重新检查"
         : "已重新加入传输队列",
       { variant: "success" },
     );
   } catch (e) {
-    // AppError 经 Tauri 序列化后是对象，取 message 字段；兜底 String
-    const msg = (e as { message?: string })?.message ?? String(e);
+    // 用户侧错误提示
+    const msg = extractErrorMessage(e);
     showToast("重试失败：" + msg, { variant: "error" });
   } finally {
     retryingId.value = null;
@@ -185,7 +186,7 @@ async function onRetry(item: TransferTask): Promise<void> {
             "
             class="tp-item__error"
           >
-            {{ item.error_message }}
+            {{ formatUserMessage(item.error_message) }}
           </div>
           <div class="tp-item__progress" v-else-if="item.direction !== TRANSFER_DIR.DELETE">
             <MateLinearProgress
@@ -207,12 +208,12 @@ async function onRetry(item: TransferTask): Promise<void> {
           />
           {{ stateMeta[item.state]?.label ?? "" }}
         </div>
-        <!-- 只展示 TaskRunner/引擎真正支持的上传、下载重试或重新规划入口。 -->
+        <!-- 只展示后端真正支持的上传、下载重试或重新检查入口。 -->
         <MateButton
           v-if="canRetryTransferTask(item)"
           variant="icon"
           icon="refresh"
-          :tooltip="item.state === TRANSFER_STATE.RESTART_REQUIRED ? '重新规划' : '重试'"
+          :tooltip="item.state === TRANSFER_STATE.RESTART_REQUIRED ? '重新检查并重试' : '重试'"
           :loading="retryingId === item.id"
           :disabled="retryingId !== null"
           class="tp-item__retry"

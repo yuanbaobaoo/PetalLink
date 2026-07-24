@@ -673,8 +673,11 @@ pub async fn drive_search(
 
 /// 获取云盘文件缩略图。
 #[tauri::command]
-pub async fn drive_get_thumbnail(file_id: String) -> AppResult<Vec<u8>> {
-    THUMBNAIL_API.get(&file_id).await
+pub async fn drive_get_thumbnail(file_id: String) -> AppResult<String> {
+    THUMBNAIL_API.get_data_url(&file_id).await.map_err(|error| {
+        tracing::warn!(file_id, %error, "获取缩略图失败");
+        error
+    })
 }
 
 /// 获取云盘容量信息。
@@ -740,10 +743,13 @@ pub async fn drive_download_file(file_id: String, dest_path: String) -> AppResul
     if result.outcome.disposition == crate::sync::task_runner::TaskDisposition::Completed {
         Ok(())
     } else {
-        Err(AppError::generic(format!(
-            "下载已进入恢复队列：{:?}",
-            result.outcome.disposition
-        )))
+        let user_message = result.outcome.disposition.user_message();
+        tracing::info!(
+            disposition = ?result.outcome.disposition,
+            user_message,
+            "下载未立即完成，已保留在传输队列"
+        );
+        Err(AppError::generic(user_message))
     }
 }
 
@@ -801,10 +807,13 @@ pub async fn drive_upload_file(
         })
         .await?;
     if result.outcome.disposition != crate::sync::task_runner::TaskDisposition::Completed {
-        return Err(AppError::generic(format!(
-            "上传已进入恢复队列：{:?}",
-            result.outcome.disposition
-        )));
+        let user_message = result.outcome.disposition.user_message();
+        tracing::info!(
+            disposition = ?result.outcome.disposition,
+            user_message,
+            "上传未立即完成，已保留在传输队列"
+        );
+        return Err(AppError::generic(user_message));
     }
     result
         .outcome
@@ -819,9 +828,9 @@ fn ensure_not_indexing() -> AppResult<()> {
         .map(|e| e.current_state().is_indexing)
         .unwrap_or(false)
     {
-        return Err(AppError::generic(
-            "正在读取云端索引，请稍后再试".to_string(),
-        ));
+        let user_message = "正在读取云端文件，请稍后再试";
+        tracing::debug!(user_message, "云端索引构建期间拒绝文件操作");
+        return Err(AppError::generic(user_message));
     }
     Ok(())
 }

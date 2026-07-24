@@ -41,6 +41,19 @@ pub struct FreeUpBatchResult {
     pub errors: Vec<String>,
 }
 
+/// 记录释放空间的技术拒绝原因，并返回用户可理解的错误。
+fn free_up_rejection(file_id: &str, rel_path: &str, technical_reason: &str) -> AppError {
+    let user_message = crate::sync::user_messages::simplify_sync_error(technical_reason);
+    tracing::warn!(
+        file_id,
+        rel_path,
+        technical_reason,
+        user_message = %user_message,
+        "释放空间安全检查未通过"
+    );
+    AppError::generic(user_message.into_owned())
+}
+
 /// 检查文件是否可安全释放本地空间。
 #[tauri::command]
 pub async fn sync_check_safe_free_up(rel_path: String, file_id: String) -> AppResult<String> {
@@ -196,7 +209,11 @@ async fn free_up_one(
     let _path_lease = engine.begin_exclusive_path_activity(&rel_path)?;
 
     if size < 0 || !engine.cloud_tree_is_trusted() {
-        return Err(AppError::generic("云端索引尚未追平，拒绝释放本地唯一副本"));
+        return Err(free_up_rejection(
+            &file_id,
+            &rel_path,
+            "云端索引尚未追平，拒绝释放本地唯一副本",
+        ));
     }
 
     let metadata_snapshot = std::fs::symlink_metadata(&lp)
@@ -236,21 +253,29 @@ async fn free_up_one(
         }
         repository::find_by_file_id(&conn, &file_id)?
             .filter(|record| record.local_path == rel_path)
-            .ok_or_else(|| AppError::generic("找不到与路径匹配的成功同步基线"))?
+            .ok_or_else(|| {
+                free_up_rejection(&file_id, &rel_path, "找不到与路径匹配的成功同步基线")
+            })?
     };
     if baseline.status != repository::sync_status::SYNCED
         || baseline.local_mtime != Some(source_mtime)
         || baseline.local_size != Some(source_size)
         || baseline.size != size
     {
-        return Err(AppError::generic(
+        return Err(free_up_rejection(
+            &file_id,
+            &rel_path,
             "本地内容与最后成功同步基线不一致，拒绝释放",
         ));
     }
     {
         let cloud = engine.cloud_tree_lock();
         if cloud.get(&rel_path).map(|file| file.id.as_str()) != Some(file_id.as_str()) {
-            return Err(AppError::generic("可信云树中不存在同一 fileId"));
+            return Err(free_up_rejection(
+                &file_id,
+                &rel_path,
+                "可信云树中不存在同一 fileId",
+            ));
         }
     }
 
@@ -265,7 +290,9 @@ async fn free_up_one(
         || remote_edited_time != baseline.cloud_edited_time
         || FILES_API.verify_deleted(&file_id).await?
     {
-        return Err(AppError::generic(
+        return Err(free_up_rejection(
+            &file_id,
+            &rel_path,
             "远端副本不存在、已回收、大小或版本与成功基线不一致",
         ));
     }
@@ -281,7 +308,11 @@ async fn free_up_one(
         || current_metadata.len() as i64 != source_size
         || current_mtime != Some(source_mtime)
     {
-        return Err(AppError::generic("远端核验期间本地文件已变化，拒绝删除"));
+        return Err(free_up_rejection(
+            &file_id,
+            &rel_path,
+            "远端核验期间本地文件已变化，拒绝删除",
+        ));
     }
     {
         let conn = DB.lock();
@@ -309,7 +340,11 @@ async fn free_up_one(
                     || record.cloud_edited_time != baseline.cloud_edited_time
             })
         {
-            return Err(AppError::generic("释放租约已失效，请刷新后重试"));
+            return Err(free_up_rejection(
+                &file_id,
+                &rel_path,
+                "释放租约已失效，请刷新后重试",
+            ));
         }
     }
 
@@ -498,9 +533,9 @@ pub async fn sync_download_on_demand(
     let _activity = engine.begin_external_activity()?;
     // 全局索引读取中：禁止按需下载（同 sync_folder_recursive，cloud_tree 构建中）
     if engine.current_state().is_indexing {
-        return Err(AppError::generic(
-            "正在读取云端索引，请稍后再试".to_string(),
-        ));
+        let user_message = "正在读取云端文件，请稍后再试";
+        tracing::debug!(user_message, "云端索引构建期间拒绝按需下载");
+        return Err(AppError::generic(user_message));
     }
     let m = mount()?;
     let frontend_dest = PathBuf::from(&dest_path);
@@ -621,8 +656,14 @@ pub async fn sync_download_on_demand(
     let result = engine.task_runner()?.enqueue_and_run(task).await?;
     match result.outcome.disposition {
         crate::sync::task_runner::TaskDisposition::Completed => Ok(true),
-        disposition => Err(AppError::generic(format!(
-            "下载已进入恢复队列：{disposition:?}"
-        ))),
+        disposition => {
+            let user_message = disposition.user_message();
+            tracing::info!(
+                disposition = ?disposition,
+                user_message,
+                "按需下载未立即完成，已保留在传输队列"
+            );
+            Err(AppError::generic(user_message))
+        }
     }
 }

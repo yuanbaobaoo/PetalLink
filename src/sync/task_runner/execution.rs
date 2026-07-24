@@ -106,7 +106,7 @@ impl TaskRunner {
         if state == TransferState::BackingOff && current.next_retry_at.is_none() {
             let failure = PreflightFailure::validation("退避任务缺少 next_retry_at，拒绝立即重放");
             self.persist_preflight_rejection(&current, failure.clone())?;
-            return Err(AppError::generic(failure.message));
+            return Err(AppError::generic(failure.user_message().into_owned()));
         }
         if let Err(failure) = self.validate_static(&current) {
             self.persist_preflight_rejection(&current, failure.clone())?;
@@ -116,7 +116,7 @@ impl TaskRunner {
                     disposition: TaskDisposition::RestartRequired,
                 });
             }
-            return Err(AppError::generic(failure.message));
+            return Err(AppError::generic(failure.user_message().into_owned()));
         }
         if !(self.online_check)() {
             if state == TransferState::Pending {
@@ -159,7 +159,7 @@ impl TaskRunner {
                         disposition: TaskDisposition::RestartRequired,
                     });
                 }
-                return Err(AppError::generic(failure.message));
+                return Err(AppError::generic(failure.user_message().into_owned()));
             }
         }
         let running = match self.transition_to_running_or_block(&current)? {
@@ -210,7 +210,7 @@ impl TaskRunner {
                             running.operation_kind().map_err(transition_error)?,
                             Some(TransferOperation::Create | TransferOperation::Update)
                         );
-                    let (target, kind, message) = if remote_write_is_ambiguous {
+                    let (target, kind, technical_message) = if remote_write_is_ambiguous {
                         (
                             TransferState::VerifyingRemote,
                             TransferErrorKind::RemoteAmbiguous,
@@ -219,13 +219,23 @@ impl TaskRunner {
                     } else {
                         (failure.target, failure.kind, failure.message)
                     };
+                    let user_message =
+                        crate::sync::user_messages::simplify_sync_error(&technical_message);
+                    tracing::warn!(
+                        task_id = running.id,
+                        target_state = ?target,
+                        error_kind = ?kind,
+                        technical_reason = %technical_message,
+                        user_message = %user_message,
+                        "传输结果检查未通过"
+                    );
                     self.transition(
                         running.id,
                         running.state_revision,
                         target,
                         TransferPatch {
                             error_kind: ColumnPatch::Set(kind),
-                            error_message: ColumnPatch::Set(message),
+                            error_message: ColumnPatch::Set(user_message.into_owned()),
                             remote_result_file_id: remote_id
                                 .map(ColumnPatch::Set)
                                 .unwrap_or(ColumnPatch::Keep),
@@ -251,11 +261,18 @@ impl TaskRunner {
                 }
             }
             Err(TaskExecutionError::RestartRequired(message)) => {
+                let user_message = crate::sync::user_messages::simplify_sync_error(&message);
+                tracing::warn!(
+                    task_id = running.id,
+                    technical_reason = %message,
+                    user_message = %user_message,
+                    "文件状态变化，任务需要重新检查"
+                );
                 self.transition_failure(
                     &running,
                     TransferState::RestartRequired,
                     TransferErrorKind::LocalChanged,
-                    &message,
+                    &user_message,
                 )?;
                 Ok(TaskExecutionOutcome {
                     cloud_file: None,

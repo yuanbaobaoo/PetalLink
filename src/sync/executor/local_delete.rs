@@ -113,11 +113,20 @@ impl SyncExecutor {
             } // DB 清理场景
         };
         let rel = action.relative_path.as_deref().unwrap_or("?");
-        let fail = |message: String, deferred: bool| ActionResult {
-            success: false,
-            error_message: Some(message),
-            deferred,
-            cloud_file: None,
+        let fail = |technical_message: String, deferred: bool| {
+            let user_message = crate::sync::user_messages::simplify_sync_error(&technical_message);
+            tracing::warn!(
+                rel,
+                technical_reason = %technical_message,
+                user_message = %user_message,
+                "本地删除安全检查未通过"
+            );
+            ActionResult {
+                success: false,
+                error_message: Some(user_message.into_owned()),
+                deferred,
+                cloud_file: None,
+            }
         };
         let Some(mount) = &self.mount else {
             return fail("mount manager 未初始化，拒绝删除本地内容".into(), false);

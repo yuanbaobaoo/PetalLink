@@ -87,12 +87,12 @@ describe("TransferPopover 后端状态呈现", () => {
     await flushPromises();
 
     for (const label of [
-      "等待调度",
+      "等待开始",
       "传输中",
       "等待网络",
       "等待重试",
-      "核验远端",
-      "等待重新规划",
+      "正在确认结果",
+      "需要重新检查",
       "已完成",
       "失败",
       "已取消",
@@ -126,8 +126,8 @@ describe("SyncStatusBar 活动态与失败事实", () => {
   it.each([
     [TRANSFER_STATE.WAITING_FOR_NETWORK, "等待网络恢复…"],
     [TRANSFER_STATE.BACKING_OFF, "等待下次重试…"],
-    [TRANSFER_STATE.VERIFYING_REMOTE, "正在核验远端状态…"],
-    [TRANSFER_STATE.RESTART_REQUIRED, "等待重新规划…"],
+    [TRANSFER_STATE.VERIFYING_REMOTE, "正在确认同步结果…"],
+    [TRANSFER_STATE.RESTART_REQUIRED, "有文件需要重新检查…"],
   ] as const)("队列 state=%s 时主页不显示同步完成", (state, expectedText) => {
     const transfer = useTransferStore();
     transfer.tasks = [task(1, state)];

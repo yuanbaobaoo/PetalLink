@@ -137,11 +137,9 @@ export function renameFile(id: string, newName: string): Promise<DriveFile> {
  */
 export async function getThumbnail(fileId: string): Promise<string | null> {
   try {
-    const bytes = await invoke<number[]>("drive_get_thumbnail", { fileId });
-    if (!bytes || bytes.length === 0) return null;
-    // 转 base64 data URL
-    const binary = bytes.map((b) => String.fromCharCode(b)).join("");
-    return `data:image/png;base64,${btoa(binary)}`;
+    // 后端已保留或识别真实图片 MIME 的 data URL
+    const dataUrl = await invoke<string>("drive_get_thumbnail", { fileId });
+    return dataUrl.startsWith("data:image/") ? dataUrl : null;
   } catch {
     return null;
   }

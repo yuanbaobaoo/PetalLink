@@ -77,7 +77,7 @@ async function handleRefreshAll(): Promise<void> {
           <MateButton v-if="searchKeyword" variant="icon" icon="x" tooltip="清除搜索" @click="handleClearSearch" />
         </div>
         <div class="app-bar__tools">
-          <MateButton v-if="mountConfigured" variant="primary" icon="refresh" tooltip="拉取云端索引，创建本地目录与占位文件" :loading="refreshLoading || sync.isIndexing" :disabled="refreshLoading || sync.isIndexing" @click="handleRefreshAll">同步索引</MateButton>
+          <MateButton v-if="mountConfigured" variant="primary" icon="refresh" tooltip="读取云端文件并同步到本地" :loading="refreshLoading || sync.isIndexing" :disabled="refreshLoading || sync.isIndexing" @click="handleRefreshAll">同步索引</MateButton>
           <MateButton variant="soft" icon="transfer" tooltip="传输队列" @click="showTransferPopover = !showTransferPopover">传输队列</MateButton>
           <MateButton v-if="mountConfigured" variant="icon-text" icon="folder-open" tooltip="在 Finder 中打开同步目录" :loading="finderLoading" :disabled="finderLoading" @click="handleOpenInFinder">Finder</MateButton>
         </div>

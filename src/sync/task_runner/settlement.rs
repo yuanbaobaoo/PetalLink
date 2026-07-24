@@ -8,6 +8,7 @@ use crate::data::repository::{self, ColumnPatch, TransferPatch, TransferTask};
 use crate::error::{AppError, AppResult};
 use crate::sync::retry_policy::{classify_transfer_error, RecoveryContext, RecoveryDecision};
 use crate::sync::transfer_state::{TransferErrorKind, TransferOperation, TransferState};
+use crate::sync::user_messages::simplify_sync_error;
 use rusqlite::OptionalExtension;
 
 /// 单个持久任务允许的最大自动重试次数。
@@ -59,9 +60,20 @@ impl TaskRunner {
                 (TransferState::Failed, None, None)
             }
         };
+        let technical_message = error.to_string();
+        let user_message = simplify_sync_error(&technical_message);
+        tracing::warn!(
+            task_id = running.id,
+            operation = ?operation,
+            target_state = ?state,
+            error_kind = ?classified.kind,
+            technical_reason = %technical_message,
+            user_message = %user_message,
+            "传输任务执行失败"
+        );
         let patch = TransferPatch {
             error_kind: ColumnPatch::Set(classified.kind),
-            error_message: ColumnPatch::Set(error.to_string()),
+            error_message: ColumnPatch::Set(user_message.to_string()),
             next_retry_at: next_retry_at
                 .map(ColumnPatch::Set)
                 .unwrap_or(ColumnPatch::Clear),
@@ -74,7 +86,7 @@ impl TaskRunner {
             ..Default::default()
         };
         if state == TransferState::Failed {
-            let error_message = error.to_string();
+            let error_message = user_message.to_string();
             {
                 let conn = self.db.lock();
                 let transaction = conn.unchecked_transaction().map_err(|db_error| {
@@ -102,7 +114,7 @@ impl TaskRunner {
                 cloud_file: None,
                 disposition,
             }),
-            None => Err(error),
+            None => Err(AppError::generic(user_message.into_owned())),
         }
     }
 
@@ -112,7 +124,7 @@ impl TaskRunner {
         running: &TransferTask,
         output: &TaskExecutionOutcome,
     ) -> AppResult<TransferTask> {
-        let (state, kind, message) = match output.disposition {
+        let (state, kind) = match output.disposition {
             TaskDisposition::Completed => {
                 return Err(AppError::generic("Completed 不应走延迟结算"));
             }
@@ -121,32 +133,35 @@ impl TaskRunner {
             | TaskDisposition::BlockedByActiveIntent => {
                 return Err(AppError::generic("活动任务状态不应由后端返回"));
             }
-            TaskDisposition::WaitingForNetwork => (
-                TransferState::WaitingForNetwork,
-                TransferErrorKind::Network,
-                "后端请求等待网络恢复",
-            ),
+            TaskDisposition::WaitingForNetwork => {
+                (TransferState::WaitingForNetwork, TransferErrorKind::Network)
+            }
             TaskDisposition::BackingOff => {
                 return Err(AppError::generic("后端 BackingOff 缺少 next_retry_at"));
             }
             TaskDisposition::VerifyingRemote => (
                 TransferState::VerifyingRemote,
                 TransferErrorKind::RemoteAmbiguous,
-                "远端写入已返回资源 ID，但完整元数据尚未确认",
             ),
             TaskDisposition::RestartRequired => (
                 TransferState::RestartRequired,
                 TransferErrorKind::LocalChanged,
-                "本地源已变化，需要重新规划",
             ),
         };
+        let user_message = output.disposition.user_message();
+        tracing::info!(
+            task_id = running.id,
+            disposition = ?output.disposition,
+            user_message,
+            "传输任务进入等待处理状态"
+        );
         self.transition(
             running.id,
             running.state_revision,
             state,
             TransferPatch {
                 error_kind: ColumnPatch::Set(kind),
-                error_message: ColumnPatch::Set(message.to_string()),
+                error_message: ColumnPatch::Set(user_message.to_string()),
                 next_retry_at: if output.disposition == TaskDisposition::VerifyingRemote {
                     ColumnPatch::Set((self.now_ms)().saturating_add(3_000))
                 } else {
@@ -389,7 +404,7 @@ impl TaskRunner {
             .operation_kind()
             .map_err(transition_error)?
             .ok_or_else(|| AppError::generic("成功结算恢复缺少 operation"))?;
-        let message = format!("后端已完成，但本地同步基线结算失败：{error}");
+        let technical_message = format!("后端已完成，但本地同步基线结算失败：{error}");
         let (target, kind, disposition) = match operation {
             TransferOperation::Create | TransferOperation::Update => (
                 TransferState::VerifyingRemote,
@@ -403,13 +418,21 @@ impl TaskRunner {
             ),
             _ => return Err(error),
         };
+        let user_message = disposition.user_message();
+        tracing::warn!(
+            task_id = running.id,
+            disposition = ?disposition,
+            technical_reason = %technical_message,
+            user_message,
+            "传输已完成但本地记录更新失败"
+        );
         self.transition(
             running.id,
             running.state_revision,
             target,
             TransferPatch {
                 error_kind: ColumnPatch::Set(kind),
-                error_message: ColumnPatch::Set(message),
+                error_message: ColumnPatch::Set(user_message.to_string()),
                 remote_result_file_id: output
                     .cloud_file
                     .as_ref()

@@ -199,6 +199,15 @@ impl TransferOperations for ExecutorTransferOperations {
                     let current = self.files_api.get(file_id).await?;
                     let current_edited = current.edited_time.map(|time| time.timestamp_millis());
                     if current.id != file_id || current_edited != task.expected_cloud_edited_time {
+                        tracing::warn!(
+                            task_id = task.id,
+                            expected_file_id = file_id,
+                            current_file_id = %current.id,
+                            expected_edited_time = ?task.expected_cloud_edited_time,
+                            current_edited_time = ?current_edited,
+                            user_message = "云端文件已更新。为避免覆盖，请同步索引后重试。",
+                            "更新上传前远端版本核验失败"
+                        );
                         return Err(TaskExecutionError::RestartRequired(
                             "远端文件已在规划后变化，拒绝用旧任务覆盖".to_string(),
                         ));
@@ -593,12 +602,19 @@ impl SyncExecutor {
                     deferred: false,
                     cloud_file: enqueued.outcome.cloud_file,
                 },
-                disposition => ActionResult {
-                    success: false,
-                    error_message: Some(format!("传输已调度为 {disposition:?}")),
-                    deferred: true,
-                    cloud_file: None,
-                },
+                disposition => {
+                    tracing::info!(
+                        disposition = ?disposition,
+                        user_message = disposition.user_message(),
+                        "传输动作进入等待处理状态"
+                    );
+                    ActionResult {
+                        success: false,
+                        error_message: Some(disposition.user_message().to_string()),
+                        deferred: true,
+                        cloud_file: None,
+                    }
+                }
             },
             Err(error) => ActionResult {
                 success: false,

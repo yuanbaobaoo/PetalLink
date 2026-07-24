@@ -191,8 +191,8 @@
 | **API 端点** | `https://driveapis.cloud.huawei.com.cn/drive/v1/thumbnails/{fileId}?form=content` |
 | **方法** | `GET` |
 | **调用场景** | 文件列表中图片/视频文件显示缩略图（F-UI-05） |
-| **响应** | 二进制图片数据 |
-| **代码位置** | `src/drive/thumbnail_api.rs:get()` |
+| **响应** | 云端返回二进制图片数据；Rust 保留或按文件签名识别 MIME，并通过 IPC 返回 `data:image/*;base64,...` |
+| **代码位置** | `src/drive/thumbnail_api.rs:get_data_url()` |
 | **官方文档** | https://developer.huawei.com/consumer/en/doc/HMSCore-References/server-api-thumbnails-0000001050153621 |
 
 ### 16. 增量变更 —— 获取初始 cursor（getStartCursor）

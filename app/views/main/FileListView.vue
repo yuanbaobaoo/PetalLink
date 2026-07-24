@@ -20,10 +20,12 @@ import { extractErrorMessage } from "@/utils/error";
 const SYNC_STATUS_CLOUD_ONLY = "仅云端（未同步到本地）";
 // 同步状态文案：已双端对齐，文件已下载到本地
 const SYNC_STATUS_SYNCED_LOCAL = "已同步到本地";
-// 同步状态文案：本地仅占位符，实际内容在云端
-const SYNC_STATUS_PLACEHOLDER = "本地占位";
+// 同步状态文案：本地仅有占位文件，内容尚未下载
+const SYNC_STATUS_PLACEHOLDER = "仅云端（尚未下载）";
 // 同步状态文案：文件夹
 const SYNC_STATUS_FOLDER = "文件夹";
+// 单批并发缩略图请求数，避免目录内图片较多时串行阻塞或瞬时打满接口
+const THUMBNAIL_BATCH_SIZE = 6;
 
 // 文件浏览器 store
 const browser = useFileBrowserStore();
@@ -143,8 +145,8 @@ const fileStatuses = ref<Record<string, string>>({});
  * 监听排序文件变化，自动加载缩略图和批量同步状态
  */
 watch(sortedFiles, () => {
-  loadThumbs();
-  refreshBatchStatus();
+  void loadThumbs();
+  void refreshBatchStatus();
 });
 
 /**
@@ -196,11 +198,25 @@ function thumbUrl(f: DriveFile): string {
  * 预加载当前列表中所有文件的缩略图
  */
 async function loadThumbs(): Promise<void> {
-  const targets = sortedFiles.value.filter(isThumbnailType);
-  for (const f of targets) {
-    if (thumbUrls.value[f.id]) continue;
-    const url = await driveApi.getThumbnail(f.id);
-    if (url) thumbUrls.value = { ...thumbUrls.value, [f.id]: url };
+  // 当前目录内尚未缓存的图片和视频文件
+  const targets = sortedFiles.value.filter(
+    (file) => isThumbnailType(file) && !thumbUrls.value[file.id],
+  );
+  // 当前批次起始下标
+  for (let index = 0; index < targets.length; index += THUMBNAIL_BATCH_SIZE) {
+    // 当前限流批次
+    const batch = targets.slice(index, index + THUMBNAIL_BATCH_SIZE);
+    // 当前批次的缩略图结果
+    const loaded = await Promise.all(batch.map(async (file) => ({
+      fileId: file.id,
+      url: await driveApi.getThumbnail(file.id),
+    })));
+    // 合并后的缩略图缓存
+    const nextUrls = { ...thumbUrls.value };
+    for (const item of loaded) {
+      if (item.url) nextUrls[item.fileId] = item.url;
+    }
+    thumbUrls.value = nextUrls;
   }
 }
 
@@ -369,7 +385,7 @@ async function handleSyncItem(f: DriveFile): Promise<void> {
  */
 async function doSyncFolder(f: DriveFile): Promise<void> {
   const rel = relPathOf(f);
-  showToast(`开始双向对齐「${f.name}」，进度见传输队列`);
+  showToast(`已开始同步文件夹「${f.name}」，进度见传输队列`);
   // 后台执行：不 await（命令立即返回），失败仅告警
   syncApi.syncFolderRecursive(f.id, rel).catch((e) => {
     showToast("同步失败：" + extractErrorMessage(e), { variant: "error" });

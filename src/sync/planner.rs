@@ -183,7 +183,8 @@ impl SyncPlanner {
                     file_id: cloud.unwrap().id.clone().into(),
                     parent_file_id: None,
                     local_path: Some(local.unwrap().absolute_path.to_string_lossy().to_string()),
-                    cloud_file: None,
+                    // Update 必须携带规划时远端版本，执行前据此拒绝覆盖并发修改。
+                    cloud_file: Some(cloud.unwrap().clone()),
                     reason: Some("本地已修改 → 上传".to_string()),
                 });
             } else if cloud_changed {
@@ -436,4 +437,80 @@ pub fn is_cloud_changed(cloud: &DriveFile, db: &DbSnapshotEntry) -> bool {
         return true;
     }
     cloud_edited_ms.unwrap() != db.cloud_edited_time.unwrap()
+}
+
+/// 规划器私有决策合同测试。
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    use chrono::{TimeZone, Utc};
+
+    use super::{DbSnapshotEntry, SyncPlanner, SyncSnapshot};
+    use crate::data::repository;
+    use crate::drive::models::{DriveFile, FileCategory};
+    use crate::mount::manager::LocalFileEntry;
+    use crate::sync::state::SyncActionType;
+
+    /// 构造带稳定远端版本的文件元数据。
+    fn cloud_file(edited_time: i64) -> DriveFile {
+        DriveFile {
+            id: "cloud-file".to_string(),
+            name: "MEMORY.md".to_string(),
+            category: FileCategory::Document,
+            size: 12,
+            parent_folder: Some(vec!["root".to_string()]),
+            description: None,
+            created_time: None,
+            edited_time: Utc.timestamp_millis_opt(edited_time).single(),
+            mime_type: Some("text/markdown".to_string()),
+            content_hash: None,
+            thumbnail_link: None,
+        }
+    }
+
+    /// 本地单边修改生成的 Update 必须携带规划时远端版本快照。
+    #[test]
+    fn local_update_keeps_cloud_version_snapshot() {
+        let relative_path = "MEMORY.md".to_string();
+        let local = LocalFileEntry {
+            relative_path: relative_path.clone(),
+            absolute_path: PathBuf::from("/mount/MEMORY.md"),
+            size: 12,
+            mtime: 2_000,
+            is_folder: false,
+            is_placeholder: false,
+        };
+        let cloud = cloud_file(3_000);
+        let db = DbSnapshotEntry {
+            file_id: cloud.id.clone(),
+            local_mtime: Some(1_000),
+            local_size: Some(local.size as i64),
+            cloud_edited_time: Some(3_000),
+            status: repository::sync_status::SYNCED,
+            is_folder: false,
+        };
+        let snapshot = SyncSnapshot {
+            local: HashMap::from([(relative_path.clone(), local)]),
+            cloud: HashMap::from([(relative_path.clone(), cloud)]),
+            db: HashMap::from([(relative_path, db)]),
+            cloud_tree_trusted: true,
+            is_startup_resume: false,
+        };
+
+        let actions = SyncPlanner.plan(&snapshot);
+
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].action_type, SyncActionType::Upload);
+        assert_eq!(actions[0].file_id.as_deref(), Some("cloud-file"));
+        assert_eq!(
+            actions[0]
+                .cloud_file
+                .as_ref()
+                .and_then(|file| file.edited_time)
+                .map(|time| time.timestamp_millis()),
+            Some(3_000)
+        );
+    }
 }

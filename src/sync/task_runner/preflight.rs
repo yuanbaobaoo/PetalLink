@@ -8,6 +8,7 @@ use super::TaskRunner;
 use crate::data::repository::{self, ColumnPatch, TransferPatch, TransferTask};
 use crate::error::AppResult;
 use crate::sync::transfer_state::{TransferErrorKind, TransferOperation, TransferState};
+use crate::sync::user_messages::simplify_sync_error;
 
 impl TaskRunner {
     /// 校验任务可安全执行所需的静态条件。
@@ -65,6 +66,13 @@ impl TaskRunner {
                     })
                 {
                     return Err(PreflightFailure::validation("Update 任务缺少真实 fileId"));
+                }
+                if operation == TransferOperation::Update
+                    && task.expected_cloud_edited_time.is_none()
+                {
+                    return Err(PreflightFailure::local_changed(
+                        "更新上传缺少云端版本快照，需要重新规划",
+                    ));
                 }
                 if task.resume_offset > 0 && !has_nonempty(&task.session_url) {
                     return Err(PreflightFailure::validation(
@@ -252,6 +260,16 @@ impl TaskRunner {
         task: &TransferTask,
         failure: PreflightFailure,
     ) -> AppResult<TransferTask> {
+        let user_message = failure.user_message();
+        tracing::warn!(
+            task_id = task.id,
+            relative_path = ?task.relative_path,
+            target_state = ?failure.target,
+            error_kind = ?failure.kind,
+            technical_reason = %failure.message,
+            user_message = %user_message,
+            "传输前检查未通过"
+        );
         let current_state = task.state_kind().map_err(transition_error)?;
         if current_state == TransferState::Failed && failure.target == TransferState::Failed {
             let updated = {
@@ -317,7 +335,7 @@ impl PreflightFailure {
     fn patch(&self, finished: bool) -> TransferPatch {
         TransferPatch {
             error_kind: ColumnPatch::Set(self.kind),
-            error_message: ColumnPatch::Set(self.message.clone()),
+            error_message: ColumnPatch::Set(self.user_message().into_owned()),
             next_retry_at: ColumnPatch::Clear,
             finished_at: if finished {
                 ColumnPatch::Set(chrono::Utc::now().timestamp_millis())
@@ -326,6 +344,11 @@ impl PreflightFailure {
             },
             ..Default::default()
         }
+    }
+
+    /// 返回适合持久化并展示给用户的错误提示。
+    pub(super) fn user_message(&self) -> std::borrow::Cow<'_, str> {
+        simplify_sync_error(&self.message)
     }
 }
 
