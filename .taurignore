@@ -1,0 +1,4 @@
+# 这些前端生成物由 bindings/Vite 管理，变化时不应触发 Rust 重启。
+app/api/generated.ts
+app/node_modules/
+app/dist/

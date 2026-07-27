@@ -97,9 +97,6 @@ pub fn run() {
     init_logger();
     load_env();
 
-    #[cfg(debug_assertions)]
-    ipc::export_bindings();
-
     let ipc_builder = ipc::builder();
 
     tracing::info!(

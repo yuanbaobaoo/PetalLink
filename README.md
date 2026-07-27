@@ -122,13 +122,16 @@ cargo tauri dev --config tauri.dev.conf.json
 Tauri command、event、DTO 和共享常量统一在 Rust 侧定义，并由
 `tauri-specta` 生成 `app/api/generated.ts`。该文件是构建产物，请勿手动修改。
 
-- `cargo tauri dev`：前端 `predev` 和 debug 后端启动时自动生成。
+- `cargo tauri dev`：前端 `predev` 在 Vite 启动前自动生成。
 - `cargo tauri build`：前端 `prebuild` 在打包前自动生成。
 - `cd app && npm run dev` / `npm run build`：同样会先自动生成。
 - `cd app && npm run bindings`：仅在需要单独刷新或排查生成结果时使用。
 
 普通 `cargo build` 只编译 Rust 后端，不构建前端；需要生成前端 bindings 或打包
 桌面应用时应使用上面的 Tauri/npm 命令。
+
+开发期由 `.taurignore` 将 bindings、Vite 缓存和前端构建目录排除在 Rust watcher
+之外；这些生成物的变化不会重启后端进程。
 
 新增供 IPC 使用的 Rust entity 时，为其派生 `specta::Type`，并将它用于已注册的
 command 或 event 即会被递归导出；前端直接从 `app/api/generated.ts` 或现有
