@@ -40,6 +40,7 @@ const statusText = computed(() => {
 // 上次同步时间（格式化 HH:MM）
 const lastSyncFormatted = computed(() => {
   if (!sync.lastSyncTime) return "";
+  // 待格式化的日期对象。
   const d = new Date(sync.lastSyncTime);
   return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 });
@@ -74,7 +75,9 @@ watch(() => sync.failed, (failed) => {
   if (failed === 0) showFailedDialog.value = false;
 });
 
-/** 打开失败项弹窗 */
+/**
+ * 打开失败项弹窗
+ */
 function handleShowFailed(): void {
   showFailedDialog.value = true;
 }

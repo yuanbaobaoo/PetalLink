@@ -79,6 +79,7 @@ pub(super) fn parse_drive_file_strict(
     auth_already_replayed: bool,
     index: Option<usize>,
 ) -> AppResult<DriveFile> {
+    // 错误前缀保留列表索引，方便定位具体异常元素。
     let prefix = index
         .map(|index| format!("files[{index}]"))
         .unwrap_or_else(|| "file".to_string());
@@ -86,6 +87,7 @@ pub(super) fn parse_drive_file_strict(
         files_protocol_error(ctx, &format!("{prefix} 必须是对象"), auth_already_replayed)
     })?;
 
+    // 身份、名称和 MIME 是后续同步规划必需字段。
     require_nonempty_string(object.get("id"), ctx, &prefix, "id", auth_already_replayed)?;
     let name_value = object.get("fileName").or_else(|| object.get("name"));
     require_nonempty_string(name_value, ctx, &prefix, "fileName", auth_already_replayed)?;
@@ -109,6 +111,7 @@ pub(super) fn parse_drive_file_strict(
         }
     }
 
+    // 可选字段出现时必须严格匹配协议类型，不能静默丢弃坏数据。
     validate_optional_nonnegative_i64(
         object.get("size"),
         ctx,
@@ -155,6 +158,7 @@ pub(super) fn parse_drive_file_strict(
             auth_already_replayed,
         )?;
     }
+    // 父目录数组中的空 ID 会破坏路径解析，因此直接拒绝。
     if let Some(parent_folder) = object.get("parentFolder") {
         match parent_folder {
             Value::Null => {}
@@ -172,6 +176,7 @@ pub(super) fn parse_drive_file_strict(
         }
     }
 
+    // 字段合同通过后再交给模型解析，失败仍作为协议错误返回。
     DriveFile::from_json(value).ok_or_else(|| {
         files_protocol_error(
             ctx,

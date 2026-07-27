@@ -3,32 +3,51 @@
 import { computed, ref } from "vue";
 import MateIcon from "./MateIcon.vue";
 
-/** 按钮变体 */
+/**
+ * 按钮变体
+ */
 export type ButtonVariant = "primary" | "soft" | "text" | "icon" | "icon-text";
 
 interface Props {
   variant?: ButtonVariant;
-  /** 是否危险样式（红色） */
+  /**
+   * 是否危险样式（红色）
+   */
   danger?: boolean;
-  /** 是否禁用 */
+  /**
+   * 是否禁用
+   */
   disabled?: boolean;
-  /** 是否加载中：primary 显示 spinner，其余变体图标转圈 + 禁用 */
+  /**
+   * 是否加载中：primary 显示 spinner，其余变体图标转圈 + 禁用
+   */
   loading?: boolean;
-  /** 是否全宽（仅 primary/text） */
+  /**
+   * 是否全宽（仅 primary/text）
+   */
   fullWidth?: boolean;
-  /** tooltip 文本 */
+  /**
+   * tooltip 文本
+   */
   tooltip?: string;
-  /** 图标名（icon-name，如 "cloud"/"x"/"refresh"，不带 i- 前缀） */
+  /**
+   * 图标名（icon-name，如 "cloud"/"x"/"refresh"，不带 i- 前缀）
+   */
   icon?: string;
-  /** 角标计数（>0 才显示，仅 icon / icon-text 变体；对齐 MateIconButtonWithText.badge） */
+  /**
+   * 角标计数（>0 才显示，仅 icon / icon-text 变体；对齐 MateIconButtonWithText.badge）
+   */
   badge?: number;
-  /** 自定义高度（px） */
+  /**
+   * 自定义高度（px）
+   */
   height?: number;
 }
 
 // 悬停态（控制 hover 背景色，无 ripple）
 const hovered = ref(false);
 
+// 组件输入参数。
 const props = withDefaults(defineProps<Props>(), {
   variant: "primary",
   danger: false,
@@ -66,6 +85,7 @@ const heightStyle = computed(() =>
   props.height ? `height: ${props.height}px` : ""
 );
 
+// 组件事件发送器。
 const emit = defineEmits<{
   (e: "click", event: MouseEvent): void;
 }>();

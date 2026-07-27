@@ -1,9 +1,13 @@
 <!-- 底部分隔线 -->
 <script setup lang="ts">
 withDefaults(defineProps<{
-  /** 底色 token（默认 bg-container） */
+  /**
+   * 底色 token（默认 bg-container）
+   */
   background?: string;
-  /** 分隔线色 token（默认 border） */
+  /**
+   * 分隔线色 token（默认 border）
+   */
   color?: string;
 }>(), {
   background: "var(--bg-container)",

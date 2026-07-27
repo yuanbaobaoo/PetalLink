@@ -21,6 +21,7 @@ impl TaskRunner {
         running: &TransferTask,
         error: AppError,
     ) -> AppResult<TaskExecutionOutcome> {
+        // 统一分类决定是否等待、退避、核验或永久失败。
         let operation = running
             .operation_kind()
             .map_err(transition_error)?
@@ -36,9 +37,11 @@ impl TaskRunner {
                 max_attempts: MAX_AUTOMATIC_ATTEMPTS,
             },
         );
+        // 只有真正消耗预算的错误增加尝试次数。
         let attempts = running
             .attempt_count
             .saturating_add(i64::from(classified.consumes_retry_budget));
+        // 恢复决策同时确定持久状态、对外结果和下一次唤醒时间。
         let (state, disposition, next_retry_at) = match classified.decision {
             RecoveryDecision::WaitForNetwork => (
                 TransferState::WaitingForNetwork,
@@ -71,6 +74,7 @@ impl TaskRunner {
             user_message = %user_message,
             "传输任务执行失败"
         );
+        // 所有错误字段一次性随状态迁移提交。
         let patch = TransferPatch {
             error_kind: ColumnPatch::Set(classified.kind),
             error_message: ColumnPatch::Set(user_message.to_string()),
@@ -85,6 +89,7 @@ impl TaskRunner {
             attempt_count: Some(attempts),
             ..Default::default()
         };
+        // 永久失败还需同事务更新兼容表，避免两套状态不一致。
         if state == TransferState::Failed {
             let error_message = user_message.to_string();
             {
@@ -109,6 +114,7 @@ impl TaskRunner {
         } else {
             self.transition(running.id, running.state_revision, state, patch)?;
         }
+        // 可恢复错误作为正常 disposition 返回，终态失败才向调用方抛错。
         match disposition {
             Some(disposition) => Ok(TaskExecutionOutcome {
                 cloud_file: None,
@@ -183,6 +189,7 @@ impl TaskRunner {
         running: &TransferTask,
         output: &TaskExecutionOutcome,
     ) -> Result<(), PreflightFailure> {
+        // 按操作类型验证可证明的最终产物，避免仅凭后端返回成功结算。
         let operation = running
             .operation_kind()
             .map_err(|error| PreflightFailure::validation(error.to_string()))?
@@ -193,6 +200,7 @@ impl TaskRunner {
             .ok_or_else(|| PreflightFailure::validation("成功核验缺少本地路径"))?;
         match operation {
             TransferOperation::Create | TransferOperation::Update => {
+                // 上传必须得到完整且与源快照一致的远端资源。
                 let cloud = output
                     .cloud_file
                     .as_ref()
@@ -211,6 +219,7 @@ impl TaskRunner {
                 }
             }
             TransferOperation::Download | TransferOperation::DownloadUpdate => {
+                // 下载必须在预期路径形成普通文件且大小一致。
                 let metadata = std::fs::metadata(local_path)
                     .map_err(|_| PreflightFailure::local_changed("成功核验时下载文件不存在"))?;
                 if !metadata.is_file() {
@@ -237,6 +246,7 @@ impl TaskRunner {
         running: &TransferTask,
         output: &TaskExecutionOutcome,
     ) -> AppResult<TransferTask> {
+        // 先从已验证结果组装同步基线，再进入唯一写事务。
         let operation = running
             .operation_kind()
             .map_err(transition_error)?
@@ -278,6 +288,7 @@ impl TaskRunner {
                 .ok_or_else(|| AppError::generic("成功结算无法读取下载文件修改时间"))?;
             (local_mtime, metadata.len() as i64)
         };
+        // 上传采用服务端权威元数据，下载采用任务中锁定的云端快照。
         let (file_id, name, size, cloud_edited_time, parent_folder_id) = match operation {
             TransferOperation::Create | TransferOperation::Update => {
                 let cloud = output
@@ -309,11 +320,13 @@ impl TaskRunner {
             _ => return Err(AppError::generic("该 operation 不支持成功结算")),
         };
         let finished_at = chrono::Utc::now().timestamp_millis();
+        // 任务完成、旧基线清理和新基线写入必须原子提交。
         let completed = {
             let conn = self.db.lock();
             let transaction = conn
                 .unchecked_transaction()
                 .map_err(|error| AppError::generic(format!("开始传输结算事务失败：{error}")))?;
+            // 服务端缺少更新时间时保留 Update 前基线，避免误判成无版本。
             let preserved_cloud_edited_time =
                 if operation == TransferOperation::Update && cloud_edited_time.is_none() {
                     transaction
@@ -346,6 +359,7 @@ impl TaskRunner {
                 },
             )
             .map_err(transition_error)?;
+            // 清理同路径的临时 pending 身份，避免与真实 fileId 并存。
             transaction
                 .execute(
                     "DELETE FROM sync_items
@@ -356,6 +370,7 @@ impl TaskRunner {
                     ],
                 )
                 .map_err(|error| AppError::generic(format!("清理待确认同步基线失败：{error}")))?;
+            // 改名或移动后的 Update 只保留当前路径基线。
             if operation == TransferOperation::Update {
                 transaction
                     .execute(
@@ -366,6 +381,7 @@ impl TaskRunner {
                         AppError::generic(format!("清理改名/移动旧基线路径失败：{error}"))
                     })?;
             }
+            // 最后写入已同步基线，提交后再对外发布状态。
             repository::upsert(
                 &transaction,
                 &repository::SyncItem {
@@ -400,6 +416,7 @@ impl TaskRunner {
         output: &mut TaskExecutionOutcome,
         error: AppError,
     ) -> AppResult<TaskExecutionOutcome> {
+        // 远端写入与本地下载采用不同恢复策略，均禁止伪装成 Completed。
         let operation = running
             .operation_kind()
             .map_err(transition_error)?
@@ -426,6 +443,7 @@ impl TaskRunner {
             user_message,
             "传输已完成但本地记录更新失败"
         );
+        // 保留远端资源 ID，后续核验可以收敛而无需重复写入。
         self.transition(
             running.id,
             running.state_revision,

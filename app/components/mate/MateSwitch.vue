@@ -1,11 +1,16 @@
 <!-- 开关（v2：iOS 风格胶囊，46×28，knob 22 白圆） -->
 <script setup lang="ts">
+// 组件输入参数。
 const props = withDefaults(defineProps<{
   modelValue: boolean;
   disabled?: boolean;
 }>(), { disabled: false });
+// 组件事件发送器。
 const emit = defineEmits<{ (e: "update:modelValue", v: boolean): void }>();
 
+/**
+ * 切换当前控件值并向父组件提交。
+ */
 function toggle(): void { emit("update:modelValue", !props.modelValue); }
 </script>
 

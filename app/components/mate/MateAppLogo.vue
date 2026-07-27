@@ -10,6 +10,7 @@
 <script setup lang="ts">
 import logoUrl from "@assets/logo.png";
 
+// 组件输入参数。
 const props = withDefaults(defineProps<{
   size?: number;
   text?: string;
@@ -20,8 +21,12 @@ const props = withDefaults(defineProps<{
   container: false,
 });
 
+// 组件事件发送器。
 const emit = defineEmits<{ (e: "error"): void }>();
 
+/**
+ * 在 Logo 加载失败时通知父组件。
+ */
 function onImgError(): void {
   emit("error");
 }

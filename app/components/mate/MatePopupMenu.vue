@@ -11,21 +11,29 @@ export interface PopupItem {
   label?: string;
   icon?: string;
   danger?: boolean;
-  /** true = 只画分隔线 */
+  /**
+   * true = 只画分隔线
+   */
   divider?: boolean;
 }
 
+// 弹出菜单是否打开。
 const open = ref(false);
+// 菜单顶部坐标。
 const top = ref(0);
+// 菜单左侧坐标。
 const left = ref(0);
+// 菜单触发元素。
 const triggerEl = ref<HTMLElement | null>(null);
 
+// 组件输入参数。
 const props = withDefaults(defineProps<{
   items: PopupItem[];
   menuWidth?: number;
   disabled?: boolean;
 }>(), { menuWidth: 168, disabled: false });
 
+// 组件事件发送器。
 const emit = defineEmits<{ (e: "select", value: string | number): void }>();
 
 /**
@@ -37,12 +45,16 @@ function openMenu(ev: PointerEvent): void {
   if (props.disabled) return;
   // 阻止本帧立即被捕获层关掉
   ev.stopPropagation();
+  // 触发元素的视口位置。
   const rect = triggerEl.value?.getBoundingClientRect();
   if (!rect) return;
+  // 菜单与视口边缘的安全间距。
   const margin = 8;
+  // 用于翻转判断的菜单预估高度。
   const menuH = 200; // 预估高度，用于上下翻转
   // 默认：菜单左对齐触发器左边缘（避免右截断）
   let nextLeft = rect.left;
+  // 钳制后的菜单顶部坐标。
   let nextTop = rect.bottom + 2;
   // 右边界检查：超出则右对齐视口右边缘
   if (nextLeft + props.menuWidth > window.innerWidth - margin) {
@@ -59,6 +71,9 @@ function openMenu(ev: PointerEvent): void {
   open.value = true;
 }
 
+/**
+ * 关闭当前组件并释放临时界面状态。
+ */
 function close(): void {
   open.value = false;
 }

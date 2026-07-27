@@ -9,7 +9,9 @@ import type { AppError } from "@/api/tauri";
 import * as authApi from "@/api/auth";
 import { useSyncStore } from "@/stores/sync";
 
-/** 登录态枚举 */
+/**
+ * 登录态枚举
+ */
 export type AuthStatus =
   | "initial"
   | "authorizing"
@@ -20,6 +22,7 @@ export type AuthStatus =
 // 默认回调端口（对齐后端 DEFAULT_CALLBACK_PORT）
 const DEFAULT_PORT = 9999;
 
+// 全局认证 Store。
 export const useAuthStore = defineStore("auth", () => {
   // 当前登录态（initial 表示启动时未确定）
   const status = ref<AuthStatus>("initial");
@@ -42,6 +45,7 @@ export const useAuthStore = defineStore("auth", () => {
     loading.value = true;
     try {
       secretConfigured.value = await authApi.checkSecret();
+      // 后端恢复的认证状态。
       const state = await authApi.restore();
       callbackPort.value = state.callback_port;
       status.value = state.logged_in ? "loggedIn" : "loggedOut";
@@ -90,6 +94,7 @@ export const useAuthStore = defineStore("auth", () => {
       return true;
     } catch (e) {
       loading.value = false;
+      // 可展示的错误消息。
       const msg = (e as AppError).message;
       // 用户主动取消（非错误，静默回到未登录态）
       if (msg.includes("用户取消授权")) {
@@ -102,20 +107,26 @@ export const useAuthStore = defineStore("auth", () => {
     }
   }
 
-  /** 取消正在进行的授权 */
+  /**
+   * 取消正在进行的授权
+   */
   async function cancelLogin(): Promise<void> {
     await authApi.cancelLogin();
     status.value = "loggedOut";
     loading.value = false;
   }
 
-  /** 清除错误信息（用户点「重新授权」时调用） */
+  /**
+   * 清除错误信息（用户点「重新授权」时调用）
+   */
   function dismissError(): void {
     errorMessage.value = null;
     status.value = "loggedOut";
   }
 
-  /** 退出登录 */
+  /**
+   * 退出登录
+   */
   async function logout(): Promise<void> {
     await authApi.logout();
     status.value = "loggedOut";

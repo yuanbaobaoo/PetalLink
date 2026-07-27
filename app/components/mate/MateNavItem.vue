@@ -4,10 +4,14 @@ import MateIcon from "./MateIcon.vue";
 
 withDefaults(defineProps<{
   label: string;
-  /** 图标 icon-name */
+  /**
+   * 图标 icon-name
+   */
   icon?: string;
   active?: boolean;
-  /** 左侧缩进 px（层级用） */
+  /**
+   * 左侧缩进 px（层级用）
+   */
   indent?: number;
   height?: number;
 }>(), {

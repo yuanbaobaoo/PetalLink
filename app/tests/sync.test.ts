@@ -3,6 +3,9 @@ import { createPinia, setActivePinia } from "pinia";
 import type { SyncGlobalState } from "@/api/sync";
 import { useSyncStore } from "@/stores/sync";
 
+/**
+ * 构造可按字段覆盖的同步状态快照。
+ */
 function snapshot(overrides: Partial<SyncGlobalState> = {}): SyncGlobalState {
   return {
     revision: 1,
@@ -30,6 +33,7 @@ describe("sync store 权威快照字段", () => {
   beforeEach(() => setActivePinia(createPinia()));
 
   it("接收 waiting_network 并保持等待态为活动中", () => {
+    // 当前测试使用的 Store 实例。
     const store = useSyncStore();
     store.applyState(snapshot({ waiting_network: 2 }));
 
@@ -38,6 +42,7 @@ describe("sync store 权威快照字段", () => {
   });
 
   it("同步项 failed 与历史 transferFailed 分开保存", () => {
+    // 当前测试使用的 Store 实例。
     const store = useSyncStore();
     store.applyState(snapshot({ failed: 1, transfer_failed: 4 }));
 
@@ -47,6 +52,7 @@ describe("sync store 权威快照字段", () => {
   });
 
   it("拒绝旧 revision 覆盖更新状态", () => {
+    // 当前测试使用的 Store 实例。
     const store = useSyncStore();
     store.applyState(snapshot({ revision: 8, failed: 0, failed_items: [] }));
     store.applyState(snapshot({ revision: 7, failed: 3 }));

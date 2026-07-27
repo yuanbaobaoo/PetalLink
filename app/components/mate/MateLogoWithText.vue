@@ -3,8 +3,10 @@
 import { ref } from "vue";
 import MateAppLogo from "./MateAppLogo.vue";
 
+// Logo 图片是否加载失败。
 const imgError = ref(false);
 
+// 组件输入参数。
 const props = withDefaults(defineProps<{ height?: number }>(), { height: 32 });
 </script>
 

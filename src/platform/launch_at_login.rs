@@ -258,9 +258,11 @@ pub fn set_enabled(enabled: bool) -> std::io::Result<()> {
 }
 
 #[cfg(test)]
+/// macOS 登录项状态解析合同测试。
 mod tests {
     use super::parse_disabled_entry;
 
+    /// launchctl print-disabled 的代表性输出。
     const SAMPLE: &str = r#"
 	disabled services = {
 		"com.docker.helper" => enabled

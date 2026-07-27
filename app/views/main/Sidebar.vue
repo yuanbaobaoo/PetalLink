@@ -16,15 +16,21 @@ const LOADING_LABEL = "加载账号中…";
 // 头像占位首字符
 const FALLBACK_INITIAL = "华";
 
+// 当前文件浏览器状态。
 const browser = useFileBrowserStore();
+// 当前认证状态。
 const auth = useAuthStore();
+// 应用更新状态。
 const updater = useUpdaterStore();
 
+// 当前账号展示名。
 const userLabel = computed(() => authApi.primaryLabel(auth.userInfo) ?? LOADING_LABEL);
+// 当前账号头像字符。
 const userInitial = computed(() => authApi.initial(auth.userInfo) ?? FALLBACK_INITIAL);
 
 // 配额
 const about = ref<DriveAbout | null>(null);
+// 格式化后的云盘配额文本。
 const quotaText = computed(() => {
   if (!about.value || about.value.user_capacity <= 0) return "";
   return `${fmtSize(about.value.used_space)} / ${fmtSize(about.value.user_capacity)}`;
@@ -42,6 +48,9 @@ onMounted(async () => {
   try { about.value = await driveApi.getAbout(); } catch { about.value = null; }
 });
 
+/**
+ * 把字节数格式化为紧凑的可读文本。
+ */
 function fmtSize(bytes: number): string {
   // 配额场景：0 字节显示 "0 B" 而非 "—"（与原行为一致，表示已用 0 字节）
   if (!bytes) return "0 B";

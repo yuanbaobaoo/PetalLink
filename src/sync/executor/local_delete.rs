@@ -101,6 +101,7 @@ pub(crate) fn verify_local_delete_snapshot(
 impl SyncExecutor {
     /// 仅在本地内容仍匹配持久基线时执行递归删除。
     pub(super) async fn do_delete_from_local(&self, action: &SyncAction) -> ActionResult {
+        // 缺少本地路径表示仅清理数据库，不需要文件系统副作用。
         let path = match &action.local_path {
             Some(p) => PathBuf::from(p),
             None => {
@@ -132,6 +133,7 @@ impl SyncExecutor {
             return fail("mount manager 未初始化，拒绝删除本地内容".into(), false);
         };
 
+        // 删除前加载唯一基线映射，重复路径时 fail closed。
         let baselines = match &self.db {
             Some(db) => {
                 let conn = db.lock();
@@ -159,6 +161,7 @@ impl SyncExecutor {
             None => return fail("同步数据库未初始化，拒绝删除本地内容".into(), false),
         };
 
+        // 第一次本地快照校验发生在远端证明之前。
         let mut path_exists = match std::fs::symlink_metadata(&path) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
             Err(error) => return fail(format!("无法读取待删除路径，保留本地内容：{error}"), true),
@@ -217,6 +220,7 @@ impl SyncExecutor {
             };
         }
 
+        // 两次校验均通过后才进入不可逆删除；已不存在按幂等成功处理。
         let result = if !path_exists {
             ActionResult {
                 success: true,

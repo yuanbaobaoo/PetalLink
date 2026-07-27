@@ -9,14 +9,18 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { extractErrorMessage } from "@/utils/error";
 import { isEmptyDir } from "@/utils/fs";
 
+// 当前同步状态。
 const sync = useSyncStore();
+// 当前文件浏览器状态。
 const browser = useFileBrowserStore();
+// 当前操作的错误提示。
 const errorMessage = ref("");
 
 /**
  * 选择同步目录：原生目录选择器 → 校验空目录 → 保存配置 → 重新评估阶段
  */
 async function handleSelectDir(): Promise<void> {
+  // 当前选项是否选中或用户选择结果。
   const selected = await open({ directory: true, multiple: false, title: "选择同步目录" });
   if (!selected || typeof selected !== "string") return;
 
@@ -32,6 +36,7 @@ async function handleSelectDir(): Promise<void> {
   }
 
   try {
+    // 当前持久化配置。
     const config = await configApi.loadConfig();
     config.mount_dir = selected;
     config.mount_configured = true;
@@ -45,6 +50,9 @@ async function handleSelectDir(): Promise<void> {
   }
 }
 
+/**
+ * 执行首次同步并刷新配置阶段。
+ */
 async function handleFirstSync(): Promise<void> {
   try {
     await sync.triggerManualRefresh();
@@ -54,6 +62,9 @@ async function handleFirstSync(): Promise<void> {
   }
 }
 
+/**
+ * 重新执行上一次失败的初始化动作。
+ */
 async function handleRetry(): Promise<void> {
   errorMessage.value = "";
   await sync.init();

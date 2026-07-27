@@ -11,7 +11,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useAuthStore } from "@/stores/auth";
 import { useSyncStore } from "@/stores/sync";
 import { useUpdaterStore, CHECK_INTERVAL_MS } from "@/stores/updater";
-import { on } from "@/api/tauri";
+import { events } from "@/api/generated";
 import LoginPage from "@/views/LoginPage.vue";
 import MainPage from "@/views/main/MainPage.vue";
 import SettingsPage from "@/views/settings/SettingsPage.vue";
@@ -20,30 +20,37 @@ import IconSprite from "@/components/IconSprite.vue";
 import UpdateDialog from "@/components/UpdateDialog.vue";
 import { MateAppLogo, MateDialogHost, MateToastHost } from "@/components/mate";
 
+// 当前认证状态。
 const auth = useAuthStore();
 // 当前页面：main / settings / logs
 const currentPage = ref<"main" | "settings" | "logs">("main");
 
+// 是否展示启动闪屏。
 const showSplash = computed(() => auth.status === "initial" && auth.loading);
+// 是否进入已登录主界面。
 const showMain = computed(() => auth.status === "loggedIn");
 
 // 定时器 / 事件监听句柄（onUnmounted 时清理）
 let initialCheckTimer: ReturnType<typeof setTimeout> | null = null;
+// 周期更新检查定时器。
 let periodicCheckTimer: ReturnType<typeof setInterval> | null = null;
+// 窗口聚焦监听清理函数。
 let unlistenFocus: UnlistenFn | null = null;
 
 /**
  * 启动时恢复登录态 + 初始化同步 + 注册全局事件 + 更新检查
  */
-  onMounted(async () => {
+onMounted(async () => {
+  // 认证恢复完成后再初始化同步，避免未登录请求后端数据。
   await auth.restore();
   if (auth.status === "loggedIn") {
+    // 当前同步状态。
     const sync = useSyncStore();
     await sync.init();
   }
   // 注册全局事件：打开设置页
   try {
-    await on("navigate_settings", () => openSettings());
+    await events.navigateSettings.listen(() => openSettings());
   } catch {}
 
   // 启动后延迟静默检查更新（不阻塞启动流程）
@@ -60,13 +67,12 @@ let unlistenFocus: UnlistenFn | null = null;
 
   // ③ 窗口获得焦点时检查（节流 10 分钟）——覆盖从后台恢复、托盘/Dock 点击、
   //   单实例聚焦等所有「主窗口重新显示」的路径
-  getCurrentWindow()
-    .onFocusChanged(({ payload: focused }) => {
+  // 保存清理函数，组件卸载时解除原生窗口监听。
+  try {
+    unlistenFocus = await getCurrentWindow().onFocusChanged(({ payload: focused }) => {
       if (focused) updater.checkOnFocus();
-    })
-    .then((fn) => {
-      unlistenFocus = fn;
     });
+  } catch {}
 });
 
 onUnmounted(() => {
@@ -75,11 +81,17 @@ onUnmounted(() => {
   unlistenFocus?.();
 });
 
-/** 显示设置页（全局事件，MainPage 通过 emit 触发） */
+/**
+ * 显示设置页（全局事件，MainPage 通过 emit 触发）
+ */
 function openSettings(): void { currentPage.value = "settings"; }
-/** 返回主界面 */
+/**
+ * 返回主界面
+ */
 function openMain(): void { currentPage.value = "main"; }
-/** 显示日志页（设置页触发） */
+/**
+ * 显示日志页（设置页触发）
+ */
 function openLogs(): void { currentPage.value = "logs"; }
 </script>
 

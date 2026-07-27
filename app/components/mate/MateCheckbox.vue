@@ -3,21 +3,32 @@
 import { computed } from "vue";
 import MateIcon from "./MateIcon.vue";
 
+// 组件输入参数。
 const props = withDefaults(defineProps<{
-  /** null = 半选（需 tristate） */
+  /**
+   * null = 半选（需 tristate）
+   */
   modelValue: boolean | null;
   tristate?: boolean;
   disabled?: boolean;
   size?: number;
 }>(), { tristate: false, disabled: false, size: 18 });
 
+// 复选框是否为选中态。
 const checked = computed(() => props.modelValue === true);
+// 复选框是否为半选态。
 const indeterminate = computed(() => props.tristate && props.modelValue === null);
+// 控件是否处于激活态。
 const active = computed(() => checked.value || indeterminate.value);
+// 组件尺寸对应的 CSS 值。
 const sz = computed(() => `${props.size}px`);
 
+// 组件事件发送器。
 const emit = defineEmits<{ (e: "update:modelValue", v: boolean | null): void }>();
 
+/**
+ * 切换当前控件值并向父组件提交。
+ */
 function toggle(): void {
   if (props.disabled) return;
   if (props.tristate) {

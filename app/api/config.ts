@@ -1,44 +1,46 @@
 /**
  * Config API —— 配置读写。
  */
-import { invoke } from "./tauri";
+import { commands } from "./generated";
+import { call, discard } from "./tauri";
+import type { AppConfig as GeneratedAppConfig } from "./generated";
 
-/** 后端 AppConfig 结构 */
-export interface AppConfig {
-  oauth_redirect_uri: string;
-  oauth_callback_port: number;
-  mount_dir: string;
-  mount_configured: boolean;
-  concurrency: number;
-  poll_interval_sec: number;
-  debounce_sec: number;
-  skip_patterns: string[];
-  sort_field: string;
-  sort_order: string;
-  show_tray_icon: boolean;
-}
+/**
+ * 后端序列化始终返回完整配置；Rust 的 `serde(default)` 仅让导入旧配置时兼容缺字段。
+ */
+export type AppConfig = Required<GeneratedAppConfig>;
 
-/** 加载配置 */
+/**
+ * 加载配置
+ */
 export function loadConfig(): Promise<AppConfig> {
-  return invoke<AppConfig>("config_load");
+  return call(commands.configLoad()) as Promise<AppConfig>;
 }
 
-/** 保存配置 */
+/**
+ * 保存配置
+ */
 export function saveConfig(config: AppConfig): Promise<void> {
-  return invoke<void>("config_save", { config });
+  return discard(commands.configSave(config));
 }
 
-/** 导出配置 JSON */
+/**
+ * 导出配置 JSON
+ */
 export function exportConfigJson(): Promise<string> {
-  return invoke<string>("config_export_json");
+  return call(commands.configExportJson());
 }
 
-/** 导入配置 JSON */
+/**
+ * 导入配置 JSON
+ */
 export function importConfigJson(jsonStr: string): Promise<AppConfig> {
-  return invoke<AppConfig>("config_import_json", { jsonStr });
+  return call(commands.configImportJson(jsonStr)) as Promise<AppConfig>;
 }
 
-/** 清空全部缓存（退出登录态+DB+缓存+配置） */
+/**
+ * 清空全部缓存（退出登录态+DB+缓存+配置）
+ */
 export function clearCache(): Promise<void> {
-  return invoke<void>("app_clear_cache");
+  return discard(commands.appClearCache());
 }

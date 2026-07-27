@@ -2,7 +2,8 @@
 
 use std::collections::HashMap;
 
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
+use tauri_specta::Event;
 
 use crate::data::repository::{self, transfer_direction, TransferTask};
 use crate::drive::about_api::AboutApi;
@@ -17,6 +18,7 @@ use super::{
 
 /// 分页列出云盘目录内容。
 #[tauri::command]
+#[specta::specta]
 pub async fn drive_list(
     parent_id: Option<String>,
     cursor: Option<String>,
@@ -33,18 +35,21 @@ pub async fn drive_list(
 
 /// 列出云盘目录的全部内容。
 #[tauri::command]
+#[specta::specta]
 pub async fn drive_list_all(parent_id: Option<String>) -> AppResult<Vec<DriveFile>> {
     FILES_API.list_all(parent_id.as_deref()).await
 }
 
 /// 获取云盘文件信息。
 #[tauri::command]
+#[specta::specta]
 pub async fn drive_get_file(id: String) -> AppResult<DriveFile> {
     FILES_API.get(&id).await
 }
 
 /// 创建云盘目录。
 #[tauri::command]
+#[specta::specta]
 pub async fn drive_create_folder(name: String, parent_id: Option<String>) -> AppResult<DriveFile> {
     // FilesApi 保证创建前查重、严格写响应合同和丢响应后的 parent+name 唯一收敛。
     FILES_API.create_folder(&name, parent_id.as_deref()).await
@@ -113,6 +118,7 @@ fn ensure_no_db_path_collision(old_root: &str, new_root: &str) -> AppResult<()> 
 
 /// 删除云盘文件并结算本地同步状态。
 #[tauri::command]
+#[specta::specta]
 pub async fn drive_delete_file(app: AppHandle, id: String, name: Option<String>) -> AppResult<()> {
     // 索引中（云端树 BFS 重建）：删除会与索引并发改云端，且 cloud_tree 不完整
     // 无法正确反映删除后的状态 → 拒绝，等索引完成。
@@ -246,7 +252,7 @@ pub async fn drive_delete_file(app: AppHandle, id: String, name: Option<String>)
     // 前端据此区分「文件未删」与「文件已删但记录未写入」）；不进入 TaskRunner 执行体系。
     record_completed_delete(&DB.lock(), &id, name.as_deref(), local_info.as_ref())?;
     // 留痕写入成功后广播传输队列变化，使已打开的传输面板实时刷新出删除记录。
-    let _ = app.emit("transfer_update", ());
+    let _ = crate::ipc::TransferUpdateEvent.emit(&app);
     Ok(())
 }
 
@@ -317,6 +323,7 @@ async fn settle_verified_remote_path_change(
     new_relative_path: &str,
     verified: &DriveFile,
 ) -> AppResult<()> {
+    // 远端已核验后再读取旧基线，缺少基线时无需触碰本地路径。
     crate::core::paths::validate_relative_path(new_relative_path, false)?;
     let old_record = {
         let conn = DB.lock();
@@ -331,6 +338,7 @@ async fn settle_verified_remote_path_change(
     }
     ensure_no_db_path_collision(&old_relative_path, new_relative_path)?;
 
+    // 文件系统目标必须位于挂载根且不能覆盖已有内容。
     let mount = mount()?;
     let old_absolute =
         crate::core::paths::safe_join_under(mount.mount_dir(), &old_relative_path, false)?;
@@ -354,6 +362,7 @@ async fn settle_verified_remote_path_change(
         }
     }
 
+    // 目录移动需要连同所有后代基线一起重键。
     let affected = {
         let conn = DB.lock();
         let prefix = format!("{old_relative_path}/");
@@ -364,6 +373,7 @@ async fn settle_verified_remote_path_change(
             })
             .collect::<Vec<_>>()
     };
+    // 删除旧键与写入新键必须在同一事务内完成。
     {
         let conn = DB.lock();
         let transaction = conn
@@ -400,6 +410,7 @@ async fn settle_verified_remote_path_change(
             .map_err(|error| AppError::generic(format!("提交路径结算事务失败：{error}")))?;
     }
 
+    // 数据库提交后同步更新内存索引，下一轮不会再次规划旧路径。
     if let Some(engine) = try_sync_engine() {
         let prefix = format!("{old_relative_path}/");
         let mut cloud = engine.cloud_tree_lock();
@@ -468,10 +479,12 @@ async fn persist_remote_path_change_identity(
 
 /// 重命名云盘文件并结算本地路径。
 #[tauri::command]
+#[specta::specta]
 pub async fn drive_rename_file(id: String, new_name: String) -> AppResult<DriveFile> {
     // 索引中拒绝操作，避免与重建中的 cloud_tree 冲突。
     ensure_not_indexing()?;
     crate::core::paths::validate_path_segment(&new_name)?;
+    // 基线存在时同时计算本地目标路径；纯云端文件只执行远端重命名。
     let old_relative_path = {
         let conn = DB.lock();
         repository::find_by_file_id(&conn, &id)?.map(|record| record.local_path)
@@ -485,6 +498,7 @@ pub async fn drive_rename_file(id: String, new_name: String) -> AppResult<DriveF
             .to_string_lossy()
             .into_owned()
     });
+    // 源和目标路径租约覆盖远端写入及本地结算，防止并发同步介入。
     let engine_for_lease = try_sync_engine();
     let _source_lease = match (engine_for_lease.as_ref(), old_relative_path.as_deref()) {
         (Some(engine), Some(path)) => Some(engine.begin_exclusive_path_activity(path)?),
@@ -504,6 +518,7 @@ pub async fn drive_rename_file(id: String, new_name: String) -> AppResult<DriveF
     if new_relative_path.as_deref() != old_relative_path.as_deref() {
         ensure_no_active_transfer_for_identity(None, new_relative_path.as_deref())?;
     }
+    // 远端写入前完成所有可本地证明的碰撞检查。
     if let (Some(old), Some(new)) = (old_relative_path.as_deref(), new_relative_path.as_deref()) {
         ensure_no_db_path_collision(old, new)?;
         let mount = mount()?;
@@ -521,6 +536,7 @@ pub async fn drive_rename_file(id: String, new_name: String) -> AppResult<DriveF
     if let Some(old_relative_path) = old_relative_path.as_deref() {
         persist_remote_path_change_identity(&id, old_relative_path).await?;
     }
+    // 写请求失败时按目标状态补查，解决响应丢失造成的结果歧义。
     let file = match FILES_API.rename_file(&id, &new_name).await {
         Ok(file) => file,
         Err(write_error) => match FILES_API.get(&id).await {
@@ -533,6 +549,7 @@ pub async fn drive_rename_file(id: String, new_name: String) -> AppResult<DriveF
             }
         },
     };
+    // 只有远端结果已确认后才迁移本地路径与基线。
     if let Some(new_relative_path) = new_relative_path {
         settle_verified_remote_path_change(&id, &new_relative_path, &file).await?;
     }
@@ -542,6 +559,7 @@ pub async fn drive_rename_file(id: String, new_name: String) -> AppResult<DriveF
 
 /// 移动云盘文件并结算本地路径。
 #[tauri::command]
+#[specta::specta]
 pub async fn drive_move_file(id: String, new_parent_folder: String) -> AppResult<DriveFile> {
     // 索引中拒绝：移动改 parentFolder，与重建中的 path_to_id/cloud_tree 冲突。
     ensure_not_indexing()?;
@@ -552,10 +570,12 @@ pub async fn drive_move_file(id: String, new_parent_folder: String) -> AppResult
     } else {
         new_parent_folder
     };
+    // 基线存在时解析目标目录的本地相对路径。
     let old_relative_path = {
         let conn = DB.lock();
         repository::find_by_file_id(&conn, &id)?.map(|record| record.local_path)
     };
+    // 优先使用内存云树，缺失时回退数据库目录基线。
     let target_parent_path = if old_relative_path.is_some() {
         let mut resolved = (new_parent_folder == "root").then(String::new);
         if let Some(engine) = try_sync_engine() {
@@ -594,6 +614,7 @@ pub async fn drive_move_file(id: String, new_parent_folder: String) -> AppResult
             .into_owned())
         })
         .transpose()?;
+    // 同时占用源和目标路径，阻止移动期间生成竞争任务。
     let engine_for_lease = try_sync_engine();
     let _source_lease = match (engine_for_lease.as_ref(), old_relative_path.as_deref()) {
         (Some(engine), Some(path)) => Some(engine.begin_exclusive_path_activity(path)?),
@@ -613,6 +634,7 @@ pub async fn drive_move_file(id: String, new_parent_folder: String) -> AppResult
     if new_relative_path.as_deref() != old_relative_path.as_deref() {
         ensure_no_active_transfer_for_identity(None, new_relative_path.as_deref())?;
     }
+    // 修改远端前确认目标路径没有被其他本地内容占用。
     if let (Some(old), Some(new)) = (old_relative_path.as_deref(), new_relative_path.as_deref()) {
         ensure_no_db_path_collision(old, new)?;
         let mount = mount()?;
@@ -630,6 +652,7 @@ pub async fn drive_move_file(id: String, new_parent_folder: String) -> AppResult
     if let Some(old_relative_path) = old_relative_path.as_deref() {
         persist_remote_path_change_identity(&id, old_relative_path).await?;
     }
+    // 网络响应不确定时补查父目录关系，确认成功则继续结算。
     let file = match FILES_API
         .update(&id, None, Some(&new_parent_folder), None)
         .await
@@ -652,6 +675,7 @@ pub async fn drive_move_file(id: String, new_parent_folder: String) -> AppResult
             }
         },
     };
+    // 远端移动已确认后再原子迁移本地路径。
     if let Some(new_relative_path) = new_relative_path {
         settle_verified_remote_path_change(&id, &new_relative_path, &file).await?;
     }
@@ -661,6 +685,7 @@ pub async fn drive_move_file(id: String, new_parent_folder: String) -> AppResult
 
 /// 搜索云盘文件。
 #[tauri::command]
+#[specta::specta]
 pub async fn drive_search(
     keyword: String,
     parent_id: Option<String>,
@@ -673,6 +698,7 @@ pub async fn drive_search(
 
 /// 获取云盘文件缩略图。
 #[tauri::command]
+#[specta::specta]
 pub async fn drive_get_thumbnail(file_id: String) -> AppResult<String> {
     THUMBNAIL_API.get_data_url(&file_id).await.map_err(|error| {
         tracing::warn!(file_id, %error, "获取缩略图失败");
@@ -682,19 +708,23 @@ pub async fn drive_get_thumbnail(file_id: String) -> AppResult<String> {
 
 /// 获取云盘容量信息。
 #[tauri::command]
+#[specta::specta]
 pub async fn drive_get_about() -> AppResult<DriveAbout> {
     AboutApi::new(DRIVE_CLIENT.clone()).get().await
 }
 
 /// 下载云盘文件到挂载目录。
 #[tauri::command]
+#[specta::specta]
 pub async fn drive_download_file(file_id: String, dest_path: String) -> AppResult<()> {
+    // 外部活动许可保证同步关闭不会与本次手动下载交错。
     let engine = sync_engine()?;
     let _activity = engine.begin_external_activity()?;
     let m = mount()?;
     let dest = std::path::PathBuf::from(&dest_path);
     let rel = crate::core::paths::relative_path_from_mount(m.mount_dir(), &dest)?;
     let dest = crate::core::paths::safe_join_under(m.mount_dir(), &rel, false)?;
+    // 以最新云端元数据构造可校验的持久下载意图。
     let cloud = FILES_API.get(&file_id).await?;
     let is_update = dest.is_file();
     let operation = if is_update {
@@ -702,6 +732,7 @@ pub async fn drive_download_file(file_id: String, dest_path: String) -> AppResul
     } else {
         crate::sync::transfer_state::TransferOperation::Download
     };
+    // 手动下载也进入统一任务状态机，支持恢复与进度发布。
     let result = engine
         .task_runner()?
         .enqueue_and_run(repository::TransferTask {
@@ -755,10 +786,12 @@ pub async fn drive_download_file(file_id: String, dest_path: String) -> AppResul
 
 /// 上传挂载目录中的本地文件。
 #[tauri::command]
+#[specta::specta]
 pub async fn drive_upload_file(
     local_path: String,
     parent_id: Option<String>,
 ) -> AppResult<DriveFile> {
+    // 手动上传复用任务状态机，入口只负责锁定源快照。
     let engine = sync_engine()?;
     let _activity = engine.begin_external_activity()?;
     let m = mount()?;
@@ -766,6 +799,7 @@ pub async fn drive_upload_file(
     let rel = crate::core::paths::relative_path_from_mount(m.mount_dir(), &path)?;
     let path = crate::core::paths::safe_join_under(m.mount_dir(), &rel, false)?;
     let parent_id = parent_id.filter(|id| !id.trim().is_empty());
+    // 大小与修改时间共同组成执行前二次核验的源快照。
     let metadata = std::fs::metadata(&path)
         .map_err(|error| AppError::generic(format!("读取上传源失败：{error}")))?;
     let source_mtime = metadata
@@ -773,6 +807,7 @@ pub async fn drive_upload_file(
         .ok()
         .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|duration| duration.as_millis() as i64);
+    // 入队后由 runner 统一处理去重、重试、进度和结算。
     let result = engine
         .task_runner()?
         .enqueue_and_run(repository::TransferTask {

@@ -3,6 +3,7 @@
 //! 状态/方向常量以 i32 形式持久化，提供枚举转换。
 
 use serde::{Deserialize, Serialize};
+use specta::Type;
 
 use crate::sync::transfer_state::TransferErrorKind;
 
@@ -96,7 +97,7 @@ pub mod transfer_state {
 
 /// 同步状态项实体（对应 sync_items 表一行）。
 /// 对齐 dart `SyncItemEntity`。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct SyncItem {
     /// 云端文件 ID（主键之一）
     pub file_id: String,
@@ -128,7 +129,7 @@ pub struct SyncItem {
 
 /// 传输任务实体（对应 transfer_queue 表一行）。
 /// 对齐 dart `TransferTaskEntity`。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct TransferTask {
     /// 自增主键
     pub id: i64,

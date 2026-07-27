@@ -1,6 +1,10 @@
 <!-- 页面脚手架：AppBar + 内容区 + 底部安全区 -->
 <script setup lang="ts">
-withDefaults(defineProps<{ /** 顶部栏高度占位（可选） */ flush?: boolean }>(), { flush: false });
+// 页面脚手架参数。
+withDefaults(defineProps<{
+  // 是否移除顶部栏高度占位。
+  flush?: boolean;
+}>(), { flush: false });
 </script>
 
 <template>

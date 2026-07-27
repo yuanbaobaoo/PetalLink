@@ -6,12 +6,13 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use specta::Type;
 
 use crate::constants::DEFAULT_CALLBACK_PORT;
 use crate::error::{AppError, AppResult};
 
 /// 同步状态展示排序字段
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 #[derive(Default)]
 pub enum SortField {
@@ -22,7 +23,7 @@ pub enum SortField {
 }
 
 /// 列表排序方向
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 #[derive(Default)]
 pub enum SortOrder {
@@ -46,7 +47,7 @@ pub const DEFAULT_SKIP_PATTERNS: &[&str] = &[".DS_Store", ".tmp", "~$*", ".Trash
 /// 应用配置（不可变值对象，修改通过 [`AppConfig::with`] 链式构造）。
 ///
 /// 默认值对齐 dart：concurrency=6, pollIntervalSec=10, debounceSec=3。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(default)]
 pub struct AppConfig {
     /// OAuth 回调 URI（必须与 AGC 后台一致）

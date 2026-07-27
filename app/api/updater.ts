@@ -3,16 +3,21 @@
  */
 import { check } from "@tauri-apps/plugin-updater";
 import type { Update } from "@tauri-apps/plugin-updater";
-import { invoke } from "./tauri";
+import { commands } from "./generated";
+import { call } from "./tauri";
 
-/** 更新信息（前端可用） */
+/**
+ * 更新信息（前端可用）
+ */
 export interface UpdateInfo {
   version: string;
   body?: string;
   date?: string;
 }
 
-/** 下载进度事件 */
+/**
+ * 下载进度事件
+ */
 export interface DownloadProgress {
   stage: "started" | "progress" | "finished";
   downloaded?: number;
@@ -24,7 +29,9 @@ export interface DownloadProgress {
  * 返回 UpdateInfo 表示有新版本，null 表示已是最新。
  */
 export async function checkForUpdate(): Promise<UpdateInfo | null> {
+  // 保留插件返回对象，供后续下载流程持有。
   let update: Update | null = null;
+  // 自动检查失败时保持静默，不干扰应用启动。
   try {
     update = await check();
   } catch {
@@ -46,6 +53,7 @@ export async function checkForUpdate(): Promise<UpdateInfo | null> {
 export async function downloadAndInstall(
   onProgress?: (p: DownloadProgress) => void
 ): Promise<void> {
+  // 安装前重新获取一次更新句柄，避免使用过期元数据。
   let update: Update | null = null;
   try {
     update = await check();
@@ -54,7 +62,9 @@ export async function downloadAndInstall(
   }
   if (!update) throw new Error("没有可用更新");
 
+  // Started 事件提供总量，后续分片事件复用该值计算进度。
   let total = 0;
+  // 下载和安装由插件串行完成，回调只投影为前端阶段事件。
   await update.downloadAndInstall((event) => {
     switch (event.event) {
       case "Started":
@@ -75,7 +85,9 @@ export async function downloadAndInstall(
   });
 }
 
-/** 检查是否有进行中的传输任务（PENDING / RUNNING） */
+/**
+ * 检查是否有进行中的传输任务（PENDING / RUNNING）
+ */
 export function hasActiveTransfers(): Promise<boolean> {
-  return invoke<boolean>("transfer_has_active");
+  return call(commands.transferHasActive());
 }

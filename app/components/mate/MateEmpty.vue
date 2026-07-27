@@ -3,7 +3,9 @@
 import MateIcon from "./MateIcon.vue";
 
 withDefaults(defineProps<{
-  /** 图标 icon-name（默认 inbox → 用 list 近似） */
+  /**
+   * 图标 icon-name（默认 inbox → 用 list 近似）
+   */
   icon?: string;
   title: string;
   description?: string;

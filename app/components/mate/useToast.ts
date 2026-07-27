@@ -11,6 +11,7 @@ export interface ToastItem {
   variant: ToastVariant;
 }
 
+// 当前展示中的 Toast 列表。
 export const toasts = reactive<ToastItem[]>([]);
 
 // 默认 Toast 显示时长（毫秒）
@@ -25,15 +26,19 @@ let _seq = 0;
  * @param id - Toast ID
  */
 function dismiss(id: number): void {
+  // 目标项索引或格式化单位索引。
   const i = toasts.findIndex((t) => t.id === id);
   if (i >= 0) toasts.splice(i, 1);
 }
 
-/** 显示一条 Toast（默认 2s 自动消失；新 Toast 出现会顶替旧的） */
+/**
+ * 显示一条 Toast（默认 2s 自动消失；新 Toast 出现会顶替旧的）
+ */
 export function showToast(
   message: string,
   opts?: { variant?: ToastVariant; duration?: number },
 ): void {
+  // 新提示或任务的唯一标识。
   const id = ++_seq;
   // 单条语义：清空旧的
   toasts.splice(0, toasts.length);

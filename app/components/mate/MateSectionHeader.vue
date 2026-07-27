@@ -4,7 +4,9 @@ import MateIcon from "./MateIcon.vue";
 
 withDefaults(defineProps<{
   text: string;
-  /** 图标 icon-name */
+  /**
+   * 图标 icon-name
+   */
   icon?: string;
 }>(), { icon: "" });
 </script>

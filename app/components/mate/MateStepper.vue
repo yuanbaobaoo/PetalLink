@@ -9,11 +9,15 @@ interface Props {
   max?: number;
   step?: number;
 }
+// 组件输入参数。
 const props = withDefaults(defineProps<Props>(), { min: 0, max: 999999, step: 1 });
 
+// 步进器是否允许减小数值。
 const canDec = computed(() => props.modelValue > props.min);
+// 步进器是否允许增大数值。
 const canInc = computed(() => props.modelValue < props.max);
 
+// 组件事件发送器。
 const emit = defineEmits<{ (e: "update:modelValue", v: number): void }>();
 
 /**

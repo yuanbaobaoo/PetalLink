@@ -5,12 +5,18 @@ import { reactive } from "vue";
 
 export interface DialogOptions {
   title?: string;
-  /** 标题图标 icon-name */
+  /**
+   * 标题图标 icon-name
+   */
   titleIcon?: string;
   danger?: boolean;
-  /** 正文（纯文本） */
+  /**
+   * 正文（纯文本）
+   */
   content?: string;
-  /** 关闭遮罩可关闭（默认 true） */
+  /**
+   * 关闭遮罩可关闭（默认 true）
+   */
   closeOnOverlay?: boolean;
   width?: number;
 }
@@ -23,9 +29,13 @@ export interface ConfirmOptions extends DialogOptions {
 interface DialogState extends Required<Omit<ConfirmOptions, "content">> {
   open: boolean;
   content: string;
-  /** Promise resolver（confirm 流程用） */
+  /**
+   * Promise resolver（confirm 流程用）
+   */
   resolver: ((v: boolean) => void) | null;
-  /** 是否处于 confirm 流程（控制 host 是否渲染取消/确认按钮） */
+  /**
+   * 是否处于 confirm 流程（控制 host 是否渲染取消/确认按钮）
+   */
   isConfirm: boolean;
 }
 
@@ -44,7 +54,9 @@ export const dialogState = reactive<DialogState>({
   isConfirm: false,
 });
 
-/** 打开自定义对话框（不返回值，由调用方通过 closeDialog 关闭） */
+/**
+ * 打开自定义对话框（不返回值，由调用方通过 closeDialog 关闭）
+ */
 export function openDialog(opts: DialogOptions): void {
   Object.assign(dialogState, {
     open: true,
@@ -59,7 +71,9 @@ export function openDialog(opts: DialogOptions): void {
   });
 }
 
-/** 确认对话框，返回用户是否点击确认。 */
+/**
+ * 确认对话框，返回用户是否点击确认。
+ */
 export function confirmDialog(opts: ConfirmOptions): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
     Object.assign(dialogState, {
@@ -78,8 +92,11 @@ export function confirmDialog(opts: ConfirmOptions): Promise<boolean> {
   });
 }
 
-/** 结束当前对话框（confirm 流程会 resolve 给定的值） */
+/**
+ * 结束当前对话框（confirm 流程会 resolve 给定的值）
+ */
 export function closeDialog(value = false): void {
+  // 待完成确认流程的 Promise resolver。
   const resolver = dialogState.resolver;
   dialogState.open = false;
   dialogState.resolver = null;

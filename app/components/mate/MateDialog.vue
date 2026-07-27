@@ -2,13 +2,18 @@
 <script setup lang="ts">
 import MateIcon from "./MateIcon.vue";
 
+// 组件输入参数。
 const props = withDefaults(defineProps<{
   open: boolean;
   title?: string;
-  /** 标题图标 icon-name */
+  /**
+   * 标题图标 icon-name
+   */
   titleIcon?: string;
   danger?: boolean;
-  /** 点击遮罩是否关闭 */
+  /**
+   * 点击遮罩是否关闭
+   */
   closeOnOverlay?: boolean;
   width?: number;
 }>(), {
@@ -19,11 +24,15 @@ const props = withDefaults(defineProps<{
   width: 420,
 });
 
+// 组件事件发送器。
 const emit = defineEmits<{
   (e: "update:open", v: boolean): void;
   (e: "close"): void;
 }>();
 
+/**
+ * 关闭当前组件并释放临时界面状态。
+ */
 function close(): void {
   emit("update:open", false);
   emit("close");

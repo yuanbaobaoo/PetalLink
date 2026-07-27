@@ -3,6 +3,7 @@
 //! 对齐 `legacy/lib/sync/sync_state.dart`。
 
 use serde::Serialize;
+use specta::Type;
 
 /// 同步动作类型（对齐 dart SyncActionType 枚举）
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -43,7 +44,7 @@ pub struct SyncAction {
 }
 
 /// 同步全局状态（对齐 dart SyncGlobalState，供 UI 透传）
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Default, Type)]
 pub struct SyncGlobalState {
     /// 权威快照的进程内单调版本。
     pub revision: u64,
@@ -82,7 +83,7 @@ pub struct SyncGlobalState {
 }
 
 /// 失败项详情（前端失败项弹窗用）
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Type)]
 pub struct FailedItem {
     /// 相对路径（取自 sync_items.local_path）
     pub relative_path: String,
@@ -115,7 +116,8 @@ pub struct ActionResult {
 }
 
 /// 释放空间安全校验结果
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "snake_case")]
 pub enum FreeUpCheckResult {
     /// 可以安全释放
     Safe,

@@ -2,11 +2,14 @@
 <script setup lang="ts">
 import { computed } from "vue";
 
+// 组件输入参数。
 const props = withDefaults(defineProps<{
   size?: number;
   strokeWidth?: number;
   color?: string;
-  /** 0.0-1.0；null = 不确定 */
+  /**
+   * 0.0-1.0；null = 不确定
+   */
   value?: number | null;
 }>(), {
   size: 24,
@@ -19,10 +22,12 @@ const props = withDefaults(defineProps<{
 const radius = computed(() => (props.size - props.strokeWidth) / 2);
 // SVG 周长
 const circumference = computed(() => 2 * Math.PI * radius.value);
+// 进度是否为不确定模式。
 const isIndeterminate = computed(() => props.value === null || props.value === undefined);
 
 // 不确定态：画约 1.5 弧度（≈86°）的弧
 const indeterminateDash = computed(() => {
+  // 圆形进度条的弧长比例。
   const arc = 1.5; // 弧度
   return (arc / (2 * Math.PI)) * circumference.value;
 });
@@ -32,6 +37,7 @@ const indeterminateGap = computed(() => circumference.value - indeterminateDash.
 // dash 偏移量
 const dashOffset = computed(() => {
   if (isIndeterminate.value) return circumference.value / 4; // 起笔顶部
+  // 限制在有效范围内的数值。
   const v = Math.max(0, Math.min(1, props.value as number));
   return circumference.value * (1 - v);
 });

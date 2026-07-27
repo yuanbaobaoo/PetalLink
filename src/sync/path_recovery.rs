@@ -214,6 +214,7 @@ fn recover_one(
     new_root: &str,
     cloud_root: &DriveFile,
 ) -> AppResult<RecoveryOutcome> {
+    // 先验证路径、身份、类型和版本证明，任何歧义都拒绝猜测。
     crate::core::paths::validate_relative_path(&root.local_path, false)?;
     crate::core::paths::validate_relative_path(new_root, false)?;
     if records
@@ -253,6 +254,7 @@ fn recover_one(
             )));
         }
     }
+    // 活跃传输仍拥有旧/新路径时，恢复必须等待其先结算。
     if has_active_transfer(conn, &root.file_id, &root.local_path, new_root)? {
         tracing::warn!(
             old = %root.local_path,
@@ -263,6 +265,7 @@ fn recover_one(
         return Ok(RecoveryOutcome::BlockedByActiveTransfer);
     }
 
+    // 本地源和目标都限定在挂载根内，并读取持久 fileId 判断所有权。
     let old_absolute = crate::core::paths::safe_join_under(mount_root, &root.local_path, false)?;
     let new_absolute = crate::core::paths::safe_join_under(mount_root, new_root, false)?;
     let old_metadata = optional_metadata(&old_absolute)?;
@@ -278,6 +281,7 @@ fn recover_one(
         None
     };
 
+    // 只接受“源存在目标缺失”或“目标已由同一 fileId 占有”两种状态。
     let local_already_moved = match (old_metadata.as_ref(), new_metadata.as_ref()) {
         (Some(_), Some(_)) => {
             return Err(AppError::generic(format!(
@@ -310,6 +314,7 @@ fn recover_one(
         (None, None) => return Ok(RecoveryOutcome::Unmarked),
     };
 
+    // 整棵基线子树必须与可信云树映射一致，不能只移动根记录。
     let subtree = records
         .iter()
         .filter(|record| is_in_subtree(&record.local_path, &root.local_path))
@@ -342,6 +347,7 @@ fn recover_one(
             "可信云树无法确认目标 fileId，拒绝路径恢复：{new_root}"
         )));
     }
+    // 文件系统移动使用 no-replace，目标突变时保持源内容不受损。
     if !local_already_moved {
         ensure_safe_target_parent(mount_root, new_root)?;
         rename_no_replace(&old_absolute, &new_absolute).map_err(|error| {
@@ -352,6 +358,7 @@ fn recover_one(
         })?;
     }
 
+    // 磁盘路径稳定后再原子重键数据库子树。
     rekey_db_subtree(conn, &subtree, &root.local_path, new_root, cloud_root)?;
     tracing::info!(
         old = %root.local_path,
@@ -404,9 +411,11 @@ fn rekey_db_subtree(
     new_root: &str,
     cloud_root: &DriveFile,
 ) -> AppResult<()> {
+    // 删除旧键、写新键和取消失效任务必须在同一事务内完成。
     let transaction = conn
         .unchecked_transaction()
         .map_err(|error| AppError::generic(format!("开始路径恢复事务失败：{error}")))?;
+    // 先移除旧路径键，避免唯一约束阻碍子树重键。
     for record in subtree {
         transaction
             .execute(
@@ -415,6 +424,7 @@ fn rekey_db_subtree(
             )
             .map_err(|error| AppError::generic(format!("删除旧路径基线失败：{error}")))?;
     }
+    // 再按新根重写每条记录，仅根节点更新云端权威元数据。
     for record in subtree {
         let mut moved = record.clone();
         moved.local_path = rekey_path(&record.local_path, old_root, new_root)?;
@@ -434,6 +444,7 @@ fn rekey_db_subtree(
     }
     let old_prefix = format!("{old_root}/");
     let new_prefix = format!("{new_root}/");
+    // 没有远端结果的旧重规划任务已失效，可安全取消。
     transaction
         .execute(
             "UPDATE transfer_queue

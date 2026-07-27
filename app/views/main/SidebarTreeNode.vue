@@ -14,20 +14,30 @@ import SidebarTreeNode from "./SidebarTreeNode.vue";
 // 单次路径联动允许的额外补加载次数，避免服务端快照延迟时失联，也避免无限递归
 const MAX_RELINK_RETRIES = 2;
 
+// 组件输入参数。
 const props = withDefaults(defineProps<{
   location: FolderLocation;
-  /** 含本节点的完整路径栈 */
+  /**
+   * 含本节点的完整路径栈
+   */
   path: FolderLocation[];
   depth: number;
-  /** 当前选中文件夹 id（高亮用） */
+  /**
+   * 当前选中文件夹 id（高亮用）
+   */
   activeId: string;
 }>(), { depth: 0, activeId: "" });
 
+// 当前文件浏览器状态。
 const browser = useFileBrowserStore();
+// 当前同步状态。
 const sync = useSyncStore();
 
+// 目录节点是否展开。
 const expanded = ref(props.depth === 0);
+// 异步动作是否正在执行。
 const loading = ref(false);
+// 已加载的子目录列表。
 const children = ref<DriveFile[]>([]);
 // 加载请求序号：并发 loadChildren 时只有最新请求的结果能写入 children，防止旧请求覆盖新结果
 const loadToken = ref(0);
@@ -81,9 +91,11 @@ async function loadChildren(relink = true): Promise<void> {
   // 加载是否成功完成（区分空目录与加载失败）
   let loaded = false;
   try {
+    // 后端返回的全部目录内容。
     const all = await driveApi.listFiles(props.location.id || undefined);
     // 旧请求丢弃：较新的 loadChildren 已发起，本结果可能过期
     if (token !== loadToken.value) return;
+    // 过滤后的子目录列表。
     const folders = all.filter(driveApi.isFolder);
     children.value = folders;
     loaded = true;
@@ -165,6 +177,9 @@ function syncExpandToCurrent(): void {
   }
 }
 
+/**
+ * 展开或收起目录节点，首次展开时加载子目录。
+ */
 async function handleToggleExpand(event: Event): Promise<void> {
   event.stopPropagation();
   expanded.value = !expanded.value;
@@ -173,6 +188,9 @@ async function handleToggleExpand(event: Event): Promise<void> {
   }
 }
 
+/**
+ * 切换文件浏览器到当前目录节点。
+ */
 function handleNavigate(): void {
   browser.pathStack = [...props.path];
   browser.loadCurrent();

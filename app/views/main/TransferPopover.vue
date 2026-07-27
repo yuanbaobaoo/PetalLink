@@ -58,6 +58,9 @@ onMounted(() => {
   transfer.loadAll();
 });
 
+/**
+ * 返回传输方向对应的图标名。
+ */
 function dirIcon(direction: number): string {
   if (direction === TRANSFER_DIR.DOWNLOAD) return "download";
   if (direction === TRANSFER_DIR.DOWNLOAD_UPDATE) return "refresh";
@@ -78,10 +81,16 @@ function dirTileClass(direction: number): string {
   return "tp-item__dir--up";
 }
 
+/**
+ * 把传输字节数转换为进度组件值。
+ */
 function progressValue(t: { total_size: number; transferred: number }): number | null {
   if (t.total_size <= 0) return null;
   return Math.min(1, t.transferred / t.total_size);
 }
+/**
+ * 返回任务状态对应的进度条颜色。
+ */
 function progressColor(state: number): string {
   if (state === TRANSFER_STATE.COMPLETED) return "var(--ok)";
   if (state === TRANSFER_STATE.FAILED) return "var(--err)";
@@ -94,13 +103,22 @@ function progressColor(state: number): string {
   return "var(--grad-brand)";
 }
 
+/**
+ * 把字节数格式化为紧凑的可读文本。
+ */
 function fmtSize(bytes: number): string {
   return formatFileSize(bytes);
 }
+/**
+ * 计算任务当前的整数百分比。
+ */
 function pct(t: { total_size: number; transferred: number }): number {
   return t.total_size > 0 ? Math.round((t.transferred / t.total_size) * 100) : 0;
 }
 
+/**
+ * 按菜单选项清理对应范围的传输记录。
+ */
 async function onClear(value: string | number): Promise<void> {
   if (value === "completed") await transfer.clearCompleted();
   else if (value === "failed") await transfer.clearFailed();

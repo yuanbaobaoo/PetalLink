@@ -12,8 +12,12 @@
 import { ref } from "vue";
 
 export function useAsyncAction<T = void>() {
+  // 异步动作是否正在执行。
   const loading = ref(false);
 
+  /**
+   * 互斥执行异步动作并统一维护加载状态。
+   */
   async function run(fn: () => Promise<T>): Promise<T | undefined> {
     if (loading.value) return undefined; // 防重复点击：并发期间忽略
     loading.value = true;

@@ -3,7 +3,11 @@ import rustDriveSource from "../../src/commands/drive.rs?raw";
 import { DELETE_TRACE_ERROR_PREFIX } from "@/api/drive";
 
 /// 从 Rust 源码提取 DELETE_TRACE_ERROR_PREFIX 常量值，锁定前后端机器合同。
+/**
+ * 从 Rust 源码读取删除留痕错误前缀。
+ */
 function rustDeleteTracePrefix(): string {
+  // Rust 源码合同的正则匹配结果。
   const match = rustDriveSource.match(
     /DELETE_TRACE_ERROR_PREFIX:\s*&str\s*=\s*"([^"]*)"/,
   );

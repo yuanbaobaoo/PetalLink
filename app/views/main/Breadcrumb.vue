@@ -2,6 +2,7 @@
 <script setup lang="ts">
 import { useFileBrowserStore } from "@/stores/fileBrowser";
 
+// 当前文件浏览器状态。
 const browser = useFileBrowserStore();
 </script>
 

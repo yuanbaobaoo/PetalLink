@@ -92,6 +92,7 @@ impl TaskRunner {
         current: TransferTask,
         run_backend_preflight: bool,
     ) -> AppResult<TaskExecutionOutcome> {
+        // 活动许可覆盖校验、执行和结算，关闭同步时不会留下半准入任务。
         let state = current.state_kind().map_err(transition_error)?;
         // 这里是单行任务的线性化点，且有意先于静态校验：校验失败需要持久化，
         // 下载校验也可能创建父目录。准入许可持续到后端结算完成，包括远端写入歧义。
@@ -108,6 +109,7 @@ impl TaskRunner {
             self.persist_preflight_rejection(&current, failure.clone())?;
             return Err(AppError::generic(failure.user_message().into_owned()));
         }
+        // 静态拒绝必须持久化，避免同一坏任务在恢复循环中热重试。
         if let Err(failure) = self.validate_static(&current) {
             self.persist_preflight_rejection(&current, failure.clone())?;
             if failure.target == TransferState::RestartRequired {
@@ -118,6 +120,7 @@ impl TaskRunner {
             }
             return Err(AppError::generic(failure.user_message().into_owned()));
         }
+        // 离线任务进入可恢复等待态，不消耗自动重试预算。
         if !(self.online_check)() {
             if state == TransferState::Pending {
                 self.transition_failure(
@@ -149,6 +152,7 @@ impl TaskRunner {
                 disposition: TaskDisposition::BackingOff,
             });
         }
+        // 后端前置校验仅在自动恢复等需要重新确认远端状态的入口执行。
         if run_backend_preflight {
             if let Err(failure) = self.operations.preflight(&current).await {
                 let failure = PreflightFailure::from(failure);
@@ -162,6 +166,7 @@ impl TaskRunner {
                 return Err(AppError::generic(failure.user_message().into_owned()));
             }
         }
+        // Pending→Running 是路径级线性化点，竞争失败返回可观察的阻塞态。
         let running = match self.transition_to_running_or_block(&current)? {
             RunningGateOutcome::Running(running) => *running,
             RunningGateOutcome::Blocked => {
@@ -179,6 +184,7 @@ impl TaskRunner {
             self.state_sink.clone(),
             self.transfer_update_tx.clone(),
         );
+        // 后端结果先验证再结算，远端写入歧义绝不能直接标记失败后重放。
         match self.operations.execute(&running, &progress).await {
             Ok(mut output) => {
                 progress.ensure_current()?;
@@ -201,6 +207,7 @@ impl TaskRunner {
                     self.persist_backend_disposition(&running, &output)?;
                     return Ok(output);
                 }
+                // “执行成功”仍需满足操作合同，否则转为可恢复状态。
                 if let Err(failure) = self.validate_success_outcome(&running, &output) {
                     let remote_id = output.cloud_file.as_ref().map(|file| file.id.clone());
                     let remote_write_is_ambiguous = remote_id
@@ -249,6 +256,7 @@ impl TaskRunner {
                     };
                     return Ok(output);
                 }
+                // 完成结算失败时保留远端结果，交由专用恢复路径收敛。
                 match self.settle_success(&running, &output) {
                     Ok(completed) => {
                         debug_assert_eq!(completed.id, running.id);

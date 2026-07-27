@@ -15,31 +15,55 @@
 import { showToast } from "@/components/mate";
 import { extractErrorMessage } from "@/utils/error";
 
-/** useFileOperation 所需的外部依赖（由调用方注入，避免硬编码 store 引用）。 */
+/**
+ * useFileOperation 所需的外部依赖（由调用方注入，避免硬编码 store 引用）。
+ */
 export interface FileOperationDeps {
-  /** 索引中？cloud_tree 正在 BFS 重建，此时操作基于不完整数据 */
+  /**
+   * 索引中？cloud_tree 正在 BFS 重建，此时操作基于不完整数据
+   */
   isIndexing: () => boolean;
-  /** 是否已配置同步目录 */
+  /**
+   * 是否已配置同步目录
+   */
   mountConfigured: () => boolean;
-  /** 刷新当前文件列表 */
+  /**
+   * 刷新当前文件列表
+   */
   refresh: () => Promise<void>;
-  /** 清除多选状态（批量操作完成后调用） */
+  /**
+   * 清除多选状态（批量操作完成后调用）
+   */
   clearSelection?: () => void;
 }
 
-/** 单次操作的配置。 */
+/**
+ * 单次操作的配置。
+ */
 export interface FileOperationOptions {
-  /** 前缀提示（如"删除"），失败时显示"删除失败：xxx" */
+  /**
+   * 前缀提示（如"删除"），失败时显示"删除失败：xxx"
+   */
   errorPrefix: string;
-  /** 成功时显示的提示；不传则不显示成功 toast */
+  /**
+   * 成功时显示的提示；不传则不显示成功 toast
+   */
   successToast?: string;
-  /** 是否需要索引守卫（默认 true） */
+  /**
+   * 是否需要索引守卫（默认 true）
+   */
   requireSyncGuard?: boolean;
-  /** 是否需要同步目录守卫（默认 false） */
+  /**
+   * 是否需要同步目录守卫（默认 false）
+   */
   requireMount?: boolean;
-  /** 是否完成后刷新文件列表（默认 true） */
+  /**
+   * 是否完成后刷新文件列表（默认 true）
+   */
   refreshAfter?: boolean;
-  /** 是否完成后清除多选状态（默认 false） */
+  /**
+   * 是否完成后清除多选状态（默认 false）
+   */
   clearSelectionAfter?: boolean;
 }
 
@@ -63,10 +87,12 @@ export function useFileOperation(deps: FileOperationDeps) {
    * 索引中 → toast 警告并返回 false；未配置目录 → toast 警告并返回 false。
    */
   function guard(opts?: { requireMount?: boolean }): boolean {
+    // 索引期间的云端视图不完整，禁止基于它执行写操作。
     if (deps.isIndexing()) {
       showToast("正在读取云端文件，请稍后再试", { variant: "warning" });
       return false;
     }
+    // 依赖本地镜像的操作必须先完成目录配置。
     if (opts?.requireMount && !deps.mountConfigured()) {
       showToast("请先在设置中配置同步目录", { variant: "warning" });
       return false;
@@ -83,6 +109,7 @@ export function useFileOperation(deps: FileOperationDeps) {
     options: FileOperationOptions,
     action: () => Promise<void>,
   ): Promise<boolean> {
+    // 默认在成功后刷新列表，批量操作可显式清理选中态。
     const {
       errorPrefix,
       successToast,
@@ -91,12 +118,14 @@ export function useFileOperation(deps: FileOperationDeps) {
     } = options;
 
     try {
+      // 先完成业务动作，再统一处理成功反馈和界面收敛。
       await action();
       if (successToast) showToast(successToast);
       if (refreshAfter) await deps.refresh();
       if (clearSelectionAfter) deps.clearSelection?.();
       return true;
     } catch (e) {
+      // 错误只在外壳归一化，避免调用方重复弹出提示。
       showToast(`${errorPrefix}失败：` + extractErrorMessage(e), { variant: "error" });
       return false;
     }

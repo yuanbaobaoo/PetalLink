@@ -111,6 +111,7 @@ impl TaskRunner {
 
     /// 持久化 Pending 意图后执行对应任务行。
     pub async fn enqueue_and_run(&self, task: TransferTask) -> AppResult<EnqueuedTaskOutcome> {
+        // 新意图必须从未持久化的初始状态进入，防止调用方伪造任务修订。
         if task.id != 0
             || task.state_revision != 0
             || task.state_kind().map_err(transition_error)? != TransferState::Pending
@@ -122,6 +123,7 @@ impl TaskRunner {
         }
         // 在持久化入队前完成准入，避免独占路径许可释放后立即执行的 Pending 行绕过限制。
         let _enqueue_activity = self.begin_activity(&task)?;
+        // 同一路径只允许一个阻塞意图，重复请求复用已有任务。
         let existing_or_task_id = {
             let conn = self.db.lock();
             let path_tasks = match task.relative_path.as_deref() {
@@ -135,6 +137,7 @@ impl TaskRunner {
                 .iter()
                 .filter(|candidate| candidate.state_kind().is_ok_and(is_path_blocking_state))
                 .collect::<Vec<_>>();
+            // 运行中或远端核验中的写入具有最高优先级，不能被重新规划覆盖。
             if let Some(inflight) = blocking.iter().find(|candidate| {
                 candidate.state_kind().is_ok_and(|state| {
                     matches!(
@@ -163,6 +166,7 @@ impl TaskRunner {
                 Ok(ExistingOrInsertedTask::Existing(Box::new(
                     (*existing).clone(),
                 )))
+            // 可恢复任务保留原 ID 并原子替换意图，便于审计历史连续。
             } else if let Some(replannable) = blocking.first() {
                 self.replan_task(&conn, replannable, &task)
                     .map(|task| ExistingOrInsertedTask::Replanned(Box::new(task)))
@@ -189,6 +193,7 @@ impl TaskRunner {
                 return Err(error);
             }
         };
+        // 先广播持久化结果，再按实际准入结果执行或返回阻塞态。
         self.notify_best_effort();
         let (task_id, outcome) = match existing_or_task_id {
             ExistingOrInsertedTask::Inserted(task_id) => {
@@ -295,10 +300,12 @@ impl TaskRunner {
         current: &TransferTask,
         replacement: &TransferTask,
     ) -> AppResult<TransferTask> {
+        // 旧任务失效、转回 Pending 和替换意图字段必须在同一事务完成。
         let transaction = conn
             .unchecked_transaction()
             .map_err(|error| AppError::generic(format!("开始任务重规划事务失败：{error}")))?;
         let current_state = current.state_kind().map_err(transition_error)?;
+        // 已在重启态的任务直接复用，否则先留下旧意图被取代的状态记录。
         let restart = if current_state == TransferState::RestartRequired {
             current.clone()
         } else {
@@ -319,6 +326,7 @@ impl TaskRunner {
             )
             .map_err(transition_error)?
         };
+        // 清理旧错误与远端结果，并沿用替代意图提供的续传字段。
         let pending = repository::transition_transfer_in_transaction(
             &transaction,
             restart.id,
@@ -341,6 +349,7 @@ impl TaskRunner {
             },
         )
         .map_err(transition_error)?;
+        // 状态迁移后再替换所有规划字段，revision 条件阻止并发覆盖。
         let changed = transaction
             .execute(
                 "UPDATE transfer_queue SET
@@ -393,6 +402,7 @@ impl TaskRunner {
                 "任务重规划期间状态已变化，请等待下次同步",
             ));
         }
+        // 回读完整任务后同步兼容状态，再统一提交。
         let replanned = transaction
             .query_row(
                 "SELECT * FROM transfer_queue WHERE id=?1",

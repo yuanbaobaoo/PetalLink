@@ -259,6 +259,7 @@ fn parse_sort_order(v: Option<&Value>) -> SortOrder {
 }
 
 #[cfg(test)]
+/// 配置兼容性合同测试。
 mod tests {
     use super::*;
 

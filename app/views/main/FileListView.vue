@@ -75,6 +75,7 @@ const files = computed(() => browser.files);
 const sortedFiles = computed(() => [...files.value].sort((a, b) => {
   // 文件夹优先排在前面
   const aIsFolder = driveApi.isFolder(a);
+  // 右侧项目是否为文件夹。
   const bIsFolder = driveApi.isFolder(b);
   if (aIsFolder && !bIsFolder) return -1;
   if (!aIsFolder && bIsFolder) return 1;
@@ -155,9 +156,11 @@ watch(sortedFiles, () => {
  */
 async function refreshBatchStatus(): Promise<void> {
   if (!sync.mountConfigured) return;
+  // 当前列表的全部云端 ID。
   const ids = sortedFiles.value.map((f) => f.id);
   if (ids.length === 0) return;
   try {
+    // 后端返回的 fileId 到本地状态映射。
     const map = await syncApi.getBatchFileStatus(ids);
     fileStatuses.value = map;
   } catch {
@@ -181,6 +184,7 @@ function getFileStatus(f: DriveFile): string {
  * @param f - 文件对象
  */
 function isThumbnailType(f: DriveFile): boolean {
+  // 空 MIME 按不支持缩略图处理。
   const mime = f.mime_type ?? "";
   return mime.startsWith("image/") || mime.startsWith("video/");
 }
@@ -238,6 +242,7 @@ function startDrag(col: "size" | "time", e: MouseEvent): void {
  */
 function onDrag(e: MouseEvent): void {
   if (!dragging.value) return;
+  // 列宽限制在可读范围内。
   const newW = Math.max(64, Math.min(400, dragStartW + e.clientX - dragStartX));
   if (dragging.value === "size") sizeWidth.value = newW; else timeWidth.value = newW;
 }
@@ -269,14 +274,18 @@ function handleToggleFile(id: string): void {
  *
  * @param bytes - 字节数
  */
-const formatSize = formatFileSize;
+function formatSize(bytes: number): string {
+  return formatFileSize(bytes);
+}
 
 /**
  * 格式化时间显示
  *
  * @param iso - ISO 时间字符串
  */
-const formatTime = (iso?: string): string => formatDateTime(iso);
+function formatTime(iso?: string | null): string {
+  return formatDateTime(iso);
+}
 
 /**
  * 相对路径（跳过根节点名）
@@ -284,6 +293,7 @@ const formatTime = (iso?: string): string => formatDateTime(iso);
  * @param f - 文件对象
  */
 function relPathOf(f: DriveFile): string {
+  // 根节点是展示节点，不属于挂载目录内的相对路径。
   const segs = browser.pathStack.slice(1).map(p => p.name);
   segs.push(f.name);
   return segs.join("/");
@@ -295,6 +305,7 @@ function relPathOf(f: DriveFile): string {
  * @param f - 文件对象
  */
 function syncStatusIcon(f: DriveFile): string {
+  // 当前文件的批量状态缓存。
   const status = getFileStatus(f);
   if (status === "synced") return "local";
   if (status === "folder") return "folder";
@@ -307,6 +318,7 @@ function syncStatusIcon(f: DriveFile): string {
  * @param f - 文件对象
  */
 function syncStatusText(f: DriveFile): string {
+  // 当前文件的批量状态缓存。
   const status = getFileStatus(f);
   if (status === "synced") return SYNC_STATUS_SYNCED_LOCAL;
   if (status === "placeholder") return SYNC_STATUS_PLACEHOLDER;
@@ -320,6 +332,7 @@ function syncStatusText(f: DriveFile): string {
  * @param f - 文件对象
  */
 function syncStatusClass(f: DriveFile): string {
+  // 当前文件的批量状态缓存。
   const status = getFileStatus(f);
   if (status === "synced") return "is-synced-local";
   if (status === "placeholder") return "is-placeholder";
@@ -334,6 +347,7 @@ function syncStatusClass(f: DriveFile): string {
  */
 function fileTileClass(f: DriveFile): string {
   if (driveApi.isFolder(f)) return "ftile--folder";
+  // 服务端类别统一转小写映射视觉样式。
   const cat = (f.category ?? "").toLowerCase();
   switch (cat) {
     case "image": return "ftile--image";
@@ -384,12 +398,15 @@ async function handleSyncItem(f: DriveFile): Promise<void> {
  * @param f - 文件对象
  */
 async function doSyncFolder(f: DriveFile): Promise<void> {
+  // 后端递归同步所需的挂载相对路径。
   const rel = relPathOf(f);
   showToast(`已开始同步文件夹「${f.name}」，进度见传输队列`);
-  // 后台执行：不 await（命令立即返回），失败仅告警
-  syncApi.syncFolderRecursive(f.id, rel).catch((e) => {
+  // 后端命令只负责入队，等待调用结果不会阻塞实际后台同步。
+  try {
+    await syncApi.syncFolderRecursive(f.id, rel);
+  } catch (e) {
     showToast("同步失败：" + extractErrorMessage(e), { variant: "error" });
-  });
+  }
 }
 
 /**
@@ -400,6 +417,7 @@ async function doSyncFolder(f: DriveFile): Promise<void> {
 async function handleSyncFile(f: DriveFile): Promise<void> {
   if (driveApi.isFolder(f)) return;
   if (!fileOp.guard({ requireMount: true })) return;
+  // 文件在挂载目录中的安全目标路径。
   const dest = `${mountDir.value}/${relPathOf(f)}`;
   downloading.value = { open: true, name: f.name };
   try {
@@ -445,14 +463,22 @@ function closeMenu(): void { contextMenu.value.show = false; }
  * 菜单定位钳制：右/下溢出视口时翻转方向（向左/向上展开），保证完整可见。
  */
 function clampMenuToViewport(): void {
+  // 已渲染的菜单元素用于读取实际尺寸。
   const el = ctxMenuEl.value;
   if (!el) return;
+  // 菜单与视口边缘的最小留白。
   const MARGIN = 8;
+  // 菜单实际宽度。
   const w = el.offsetWidth;
+  // 菜单实际高度。
   const h = el.offsetHeight;
+  // 原始点击横坐标。
   const ox = contextMenu.value.x;
+  // 原始点击纵坐标。
   const oy = contextMenu.value.y;
+  // 钳制后的横坐标。
   let x = ox;
+  // 钳制后的纵坐标。
   let y = oy;
   if (x + w > window.innerWidth - MARGIN) x = ox - w; // 右溢出 → 向左展开
   if (y + h > window.innerHeight - MARGIN) y = oy - h; // 下溢出 → 向上展开
@@ -477,9 +503,11 @@ function handleRename(f: DriveFile): void {
 async function handleConfirmRename(): Promise<void> {
   if (!renameTarget.value) return;
   if (!fileOp.guard()) return;
+  // 去除用户无意输入的首尾空白。
   const newName = renameValue.value.trim();
   if (!newName || newName === renameTarget.value.name) { showRenameDialog.value = false; return; }
   showRenameDialog.value = false;
+  // 关闭弹窗前保存目标，避免响应式状态后续被清空。
   const target = renameTarget.value;
   await fileOp.runAction(
     { errorPrefix: "重命名", successToast: "已重命名" },
@@ -509,7 +537,9 @@ async function handleDelete(f: DriveFile): Promise<void> {
   if (sync.mountConfigured) {
     try { localStatus = await syncApi.checkFileLocalStatus(f.id); } catch { /* ignore */ }
   }
+  // 文件夹与文件使用不同的风险提示。
   const isFolder = driveApi.isFolder(f);
+  // 最终确认文案。
   let content: string;
   if (isFolder) {
     content = `确定删除文件夹「${f.name}」吗？删除后进入回收站。`;
@@ -518,6 +548,7 @@ async function handleDelete(f: DriveFile): Promise<void> {
   } else {
     content = `确定删除「${f.name}」吗？删除后进入回收站。`;
   }
+  // 用户确认结果。
   const ok = await confirmDialog({
     title: "删除文件", titleIcon: "trash", danger: true, confirmText: "删除",
     content,
@@ -610,15 +641,18 @@ async function handleBulkDelete(): Promise<void> {
     if (sync.mountConfigured) {
       for (const id of checked.value) {
         try {
+          // 当前文件的本地同步状态。
           const status = await syncApi.checkFileLocalStatus(id);
           if (status === "synced") syncedCount++;
         } catch { /* ignore */ }
       }
     }
+    // 根据已同步项目数量补充双端删除风险。
     let content = `确定删除选中的 ${checked.value.size} 项吗？删除后进入回收站。`;
     if (syncedCount > 0) {
       content = `确定删除选中的 ${checked.value.size} 项吗？\n\n⚠️ 其中 ${syncedCount} 项已双端对齐到本地，删除后云端和本地文件将同时被移除。删除后进入回收站，可从回收站恢复。`;
     }
+    // 用户确认结果。
     const ok = await confirmDialog({
       title: "批量删除", titleIcon: "trash", danger: true, confirmText: "删除",
       content,
@@ -681,6 +715,7 @@ async function handleBulkDownload(): Promise<void> {
   await runBulkDownload(async () => {
     if (checked.value.size === 0) return;
     if (!fileOp.guard({ requireMount: true })) return;
+    // 本轮成功入队的文件数。
     let n = 0;
     await fileOp.runAction(
       { errorPrefix: "批量下载", refreshAfter: false, clearSelectionAfter: true },
@@ -719,6 +754,7 @@ async function handleBulkFreeUp(): Promise<void> {
       }
     }
     if (all.length === 0) {
+      // 无候选时优先解释枚举失败原因。
       const reason = enumErrors.length > 0
         ? `无可释放项，且 ${enumErrors.length} 项枚举失败：\n${enumErrors.slice(0, 3).join("\n")}`
         : "选中的项均未同步到本地，无可释放项";

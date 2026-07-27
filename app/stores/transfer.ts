@@ -7,6 +7,7 @@ import * as transferApi from "@/api/transfer";
 import type { TransferTask } from "@/api/transfer";
 import { TRANSFER_DIR, TRANSFER_STATE } from "@/api/transfer";
 
+// 全局传输队列 Store。
 export const useTransferStore = defineStore("transfer", () => {
   // 全部传输任务
   const tasks = ref<TransferTask[]>([]);
@@ -54,6 +55,7 @@ export const useTransferStore = defineStore("transfer", () => {
   const waiting = computed(() => pending.value + waitingNetwork.value + backingOff.value + restartRequired.value);
   // 所有非终态任务；不能把等待/退避/核验/重新规划误判成完成
   const active = computed(() => processing.value + waiting.value);
+  // 是否存在活跃传输任务。
   const hasActiveTasks = computed(() => active.value > 0);
 
   /**
@@ -62,8 +64,10 @@ export const useTransferStore = defineStore("transfer", () => {
    * @returns 是否成功应用（乱序/IPC 失败返回 false，保留旧快照）
    */
   async function loadAll(): Promise<boolean> {
+    // 本次加载请求序号。
     const requestId = ++nextLoadRequest;
     try {
+      // 后端返回的完整传输列表。
       const loaded = await transferApi.listAllTransfers();
       if (requestId < lastAppliedLoadRequest) return false;
 
@@ -72,6 +76,7 @@ export const useTransferStore = defineStore("transfer", () => {
         tasks.value.map((task) => [task.id, task.state_revision]),
       );
       if (loaded.some((task) => {
+        // 本地已知的任务修订号。
         const currentRevision = currentRevisions.get(task.id);
         return currentRevision !== undefined && task.state_revision < currentRevision;
       })) return false;

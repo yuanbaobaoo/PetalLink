@@ -117,6 +117,23 @@ cargo tauri dev --config tauri.dev.conf.json
 
 前端运行在 `http://localhost:1420`（HMR 热更新），Rust 后端自动编译启动。
 
+### Rust / TypeScript IPC 类型
+
+Tauri command、event、DTO 和共享常量统一在 Rust 侧定义，并由
+`tauri-specta` 生成 `app/api/generated.ts`。该文件是构建产物，请勿手动修改。
+
+- `cargo tauri dev`：前端 `predev` 和 debug 后端启动时自动生成。
+- `cargo tauri build`：前端 `prebuild` 在打包前自动生成。
+- `cd app && npm run dev` / `npm run build`：同样会先自动生成。
+- `cd app && npm run bindings`：仅在需要单独刷新或排查生成结果时使用。
+
+普通 `cargo build` 只编译 Rust 后端，不构建前端；需要生成前端 bindings 或打包
+桌面应用时应使用上面的 Tauri/npm 命令。
+
+新增供 IPC 使用的 Rust entity 时，为其派生 `specta::Type`，并将它用于已注册的
+command 或 event 即会被递归导出；前端直接从 `app/api/generated.ts` 或现有
+`app/api/*` 适配层导入，不再复制接口定义、命令名和事件名。
+
 ---
 
 ## 测试
@@ -226,7 +243,8 @@ xattr -d com.apple.quarantine /Applications/PetalLink.app
 PetalLink/
 ├── src/                         # Rust 后端（Tauri）
 │   ├── main.rs                  # 入口
-│   ├── lib.rs                   # 应用装配 + 命令注册 + setup
+│   ├── lib.rs                   # 应用装配 + IPC 挂载 + setup
+│   ├── ipc.rs                   # command/event/常量注册 + TypeScript bindings 生成
 │   ├── commands.rs              # 命令运行时与统一导出
 │   ├── commands/                # Tauri 命令按领域拆分
 │   ├── auth/                    # OAuth + PKCE + token.bin 加密存储
@@ -239,7 +257,10 @@ PetalLink/
 ├── app/                         # Vue3 前端
 │   ├── views/                   # 页面（Login/Main/Settings/LogViewer）
 │   ├── stores/                  # Pinia 状态管理
-│   ├── api/                     # Tauri invoke 封装
+│   ├── api/                     # 生成的 IPC bindings + 领域业务适配层
+│   │   ├── generated.ts         # tauri-specta 自动生成，禁止手动修改
+│   │   ├── tauri.ts             # AppError 归一化
+│   │   └── auth/config/drive/sync/transfer 等领域适配
 │   ├── components/mate/         # Mate 组件库
 │   └── styles/                  # design token
 ├── assets/                      # 品牌图标资源（唯一图源）

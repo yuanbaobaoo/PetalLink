@@ -13,6 +13,7 @@ import { computed, onMounted } from "vue";
 import { useAuthStore } from "@/stores/auth";
 import { MateButton, MateAppLogo, MateInfoBanner, MateCircularProgress } from "@/components/mate";
 
+// 当前认证状态。
 const auth = useAuthStore();
 
 // 应用完整标题
@@ -27,6 +28,7 @@ const canLogin = computed(
   () => auth.secretConfigured && !auth.loading
 );
 
+// 是否展示授权进行中状态。
 const showAuthorizing = computed(
   () => auth.loading && auth.status === "authorizing"
 );
@@ -38,14 +40,23 @@ onMounted(() => {
   auth.restore();
 });
 
+/**
+ * 开始 OAuth 登录流程。
+ */
 function handleLogin(): void {
   auth.login();
 }
 
+/**
+ * 取消当前 OAuth 授权流程。
+ */
 function handleCancel(): void {
   auth.cancelLogin();
 }
 
+/**
+ * 清除登录错误并返回可重试状态。
+ */
 function handleDismissError(): void {
   auth.dismissError();
 }

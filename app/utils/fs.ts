@@ -12,6 +12,7 @@ import { readDir } from "@tauri-apps/plugin-fs";
  * 这些文件/模式即使存在也视为"空目录"：隐藏文件（`.` 开头）、
  * 临时文件、Office 锁定文件、系统回收站。
  */
+// 空目录校验需要忽略的系统文件模式。
 const SKIP_PATTERNS = [".DS_Store", ".tmp", "~$*", ".Trash"];
 
 /**
@@ -23,8 +24,11 @@ const SKIP_PATTERNS = [".DS_Store", ".tmp", "~$*", ".Trash"];
  * @returns true 表示目录可视为空
  */
 export async function isEmptyDir(dir: string): Promise<boolean> {
+  // 目录中的全部条目。
   const entries = await readDir(dir);
+  // 当前内容是否可见或可参与后续处理。
   const visible = entries.filter((e) => {
+    // 当前目录项名称。
     const name = e.name ?? "";
     if (!name) return false;
     if (name.startsWith(".")) return false; // 隐藏文件

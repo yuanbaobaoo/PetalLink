@@ -10,27 +10,43 @@ import * as configApi from "@/api/config";
 // 重新导出 FailedItem，保持既有导入路径（`from "@/stores/sync"`）可用
 export type { FailedItem };
 
+// 全局同步 Store。
 export const useSyncStore = defineStore("sync", () => {
   // 全局同步状态
   const revision = ref(0);
+  // 本轮总任务数。
   const total = ref(0);
+  // 本轮已完成任务数。
   const completed = ref(0);
+  // 正在上传的任务数。
   const uploading = ref(0);
+  // 正在下载的任务数。
   const downloading = ref(0);
+  // 等待网络的任务数。
   const waitingNetwork = ref(0);
+  // 当前同步失败数。
   const failed = ref(0);
   // 传输队列永久失败历史；与 sync_items 的当前失败 failed 分开保存
   const transferFailed = ref(0);
+  // 当前失败项明细。
   const failedItems = ref<FailedItem[]>([]);
+  // 冲突项数量。
   const conflict = ref(0);
+  // 编辑中项目数量。
   const editing = ref(0);
+  // 同步引擎是否运行。
   const isRunning = ref(false);
+  // 云端索引是否重建中。
   const isIndexing = ref(false);
+  // 已扫描目录数。
   const indexingScannedFolders = ref(0);
+  // 已发现项目数。
   const indexingDiscoveredItems = ref(0);
   // 当前同步阶段（精确显示：indexing-startup / querying-changes / syncing-local 等）
   const syncPhase = ref<string | null>(null);
+  // 最近同步完成时间。
   const lastSyncTime = ref<number | null>(null);
+  // 本次快照是否包含目录变化。
   const contentChanged = ref(false);
   // 侧边栏刷新计数器（folder_content_changed 事件每触一次 +1，布尔值无法重复触发 watch）
   const sidebarRefresh = ref(0);
@@ -59,11 +75,15 @@ export const useSyncStore = defineStore("sync", () => {
    * @returns 是否成功应用
    */
   function applyState(value: unknown): boolean {
+    // 只接受完整且版本有效的后端权威快照。
     if (!syncApi.isSyncGlobalState(value)) return false;
+    // 已应用过的更新不能被乱序旧事件回滚。
     const s = value;
     if (s.revision < revision.value) return false;
 
+    // 仅新 revision 可以触发一次性副作用。
     const isNewRevision = s.revision > revision.value;
+    // 同步赋值保持 UI 看到同一 revision 下的一组字段。
     revision.value = s.revision;
     total.value = s.total;
     completed.value = s.completed;
@@ -97,6 +117,7 @@ export const useSyncStore = defineStore("sync", () => {
    */
   async function init(): Promise<void> {
     try {
+      // 配置决定同步视图能否进入 active 阶段。
       const config = await configApi.loadConfig();
       mountConfigured.value = config.mount_configured;
       mountDir.value = config.mount_dir;
@@ -108,6 +129,7 @@ export const useSyncStore = defineStore("sync", () => {
         // 但那时 mountConfigured 还是 false、状态条未渲染 → 该事件被"错过"。
         // 这里同步一次真实状态，确保 UI（状态条"正在读取云端索引…"、刷新按钮转圈）正确。
         try {
+          // 当前后端权威状态。
           const state = await syncApi.getSyncState();
           applyState(state);
         } catch {

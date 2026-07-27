@@ -22,7 +22,9 @@ export function pad2(n: number): string {
  */
 export function formatFileSize(bytes: number): string {
   if (!bytes) return "—";
+  // 文件大小单位列表。
   const u = ["B", "KB", "MB", "GB", "TB"];
+  // 目标项索引或格式化单位索引。
   const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), u.length - 1);
   return `${(bytes / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 1)} ${u[i]}`;
 }
@@ -36,7 +38,9 @@ export function formatFileSize(bytes: number): string {
  */
 export function formatDateTime(input: string | number | null | undefined, withSeconds = false): string {
   if (!input) return "—";
+  // 待格式化的日期对象。
   const d = new Date(input);
+  // 不含年份省略逻辑的基础时间文本。
   const base = `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
   return withSeconds ? `${base}:${pad2(d.getSeconds())}` : base;
 }

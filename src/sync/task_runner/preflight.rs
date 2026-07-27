@@ -16,6 +16,7 @@ impl TaskRunner {
         &self,
         task: &TransferTask,
     ) -> Result<TransferOperation, PreflightFailure> {
+        // 先校验持久化合同，拒绝旧任务或字段不完整的任务进入 I/O。
         let operation = task
             .operation_kind()
             .map_err(|error| PreflightFailure::validation(error.to_string()))?
@@ -44,12 +45,14 @@ impl TaskRunner {
         if task.total_size < 0 || task.resume_offset < 0 || task.resume_offset > task.total_size {
             return Err(PreflightFailure::validation("任务大小或断点偏移非法"));
         }
+        // 空白字符串等同于字段缺失，避免绕过分支内的必填校验。
         let has_nonempty = |value: &Option<String>| {
             value
                 .as_deref()
                 .map(str::trim)
                 .is_some_and(|value| !value.is_empty())
         };
+        // 每类操作只验证自身所需的不变量，禁止 direction 与 operation 交叉执行。
         match operation {
             TransferOperation::Create | TransferOperation::Update => {
                 if task.direction != repository::transfer_direction::UPLOAD {
@@ -86,6 +89,7 @@ impl TaskRunner {
                 {
                     return Err(PreflightFailure::validation("子目录上传缺少 parentId"));
                 }
+                // 执行前快照必须仍与规划时一致，避免上传用户刚修改的内容。
                 let metadata = std::fs::metadata(local_path)
                     .map_err(|_| PreflightFailure::validation("本地上传源不存在"))?;
                 if !metadata.is_file() {
@@ -119,6 +123,7 @@ impl TaskRunner {
                 if task.expected_cloud_edited_time.is_none() {
                     return Err(PreflightFailure::validation("下载任务缺少云端版本"));
                 }
+                // 先验证父目录边界，再判断目标是否仍为空占位符。
                 self.ensure_download_parent(local_path)?;
                 match std::fs::metadata(local_path) {
                     Ok(metadata) if metadata.is_dir() => {
@@ -152,6 +157,7 @@ impl TaskRunner {
                 if task.expected_cloud_edited_time.is_none() {
                     return Err(PreflightFailure::validation("更新下载缺少云端版本"));
                 }
+                // 更新下载必须保留规划时的目标快照，防止覆盖本地新修改。
                 self.ensure_download_parent(local_path)?;
                 let metadata = std::fs::symlink_metadata(local_path).map_err(|_| {
                     PreflightFailure::local_changed("更新下载目标已不存在，需要重新规划")
@@ -184,6 +190,7 @@ impl TaskRunner {
 
     /// 校验并按需创建下载目标父目录。
     fn ensure_download_parent(&self, local_path: &Path) -> Result<(), PreflightFailure> {
+        // canonical root 是后续逐级检查不可越过的安全边界。
         let parent = local_path
             .parent()
             .ok_or_else(|| PreflightFailure::validation("下载目标缺少父目录"))?;
@@ -194,6 +201,7 @@ impl TaskRunner {
             PreflightFailure::validation(format!("挂载根目录无法解析：{error}"))
         })?;
         let mut current = self.mount_root.clone();
+        // 逐级创建目录，同时拒绝任何符号链接或非目录节点。
         for component in relative_parent.components() {
             let std::path::Component::Normal(segment) = component else {
                 return Err(PreflightFailure::validation("下载父目录包含非法路径分量"));

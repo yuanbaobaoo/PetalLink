@@ -71,6 +71,7 @@ fn thumbnail_media_type(content_type: Option<&str>, bytes: &[u8]) -> AppResult<S
 }
 
 #[cfg(test)]
+/// 缩略图媒体类型识别合同测试。
 mod tests {
     use super::thumbnail_media_type;
 

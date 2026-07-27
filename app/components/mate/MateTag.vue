@@ -9,11 +9,17 @@ withDefaults(defineProps<{
   label: string;
   theme?: TagTheme;
   size?: TagSize;
-  /** 图标 icon-name */
+  /**
+   * 图标 icon-name
+   */
   icon?: string;
-  /** 描边可点变体（v2 chip--outline） */
+  /**
+   * 描边可点变体（v2 chip--outline）
+   */
   outline?: boolean;
-  /** 选中态（仅 outline 变体） */
+  /**
+   * 选中态（仅 outline 变体）
+   */
   active?: boolean;
 }>(), {
   theme: "default",

@@ -62,8 +62,10 @@ impl TaskRunner {
     ) -> AppResult<Option<TaskExecutionOutcome>> {
         // Committed 的状态校验与本地结算必须和远端 GET 共用同一路径许可。
         let activity = self.begin_activity(task)?;
+        // 核验结果分为已提交、未提交和仍歧义三类，禁止互相降级。
         match self.operations.verify_remote(task).await {
             Ok(RemoteVerification::Committed(file)) => {
+                // 已提交仍需通过本地成功合同，再原子结算基线。
                 let mut outcome = TaskExecutionOutcome {
                     cloud_file: Some(file.clone()),
                     disposition: TaskDisposition::Completed,
@@ -99,12 +101,14 @@ impl TaskRunner {
                     }
                     return Ok(None);
                 }
+                // 结算失败保留已确认远端结果，避免重复写入。
                 if let Err(error) = self.settle_success(task, &outcome) {
                     self.recover_success_settlement_failure(task, &mut outcome, error)?;
                 }
                 Ok(Some(outcome))
             }
             Ok(RemoteVerification::NotCommitted) => {
+                // 只有明确证明未提交后才可清理旧会话并重新进入 Pending。
                 let session_expired = task.error_kind_typed().map_err(transition_error)?
                     == Some(TransferErrorKind::SessionExpired);
                 let restart_patch = TransferPatch {
@@ -138,6 +142,7 @@ impl TaskRunner {
                         restart_patch,
                     )?
                 };
+                // RestartRequired 作为审计边界，随后清错进入可执行状态。
                 let pending = self.transition(
                     restart.id,
                     restart.state_revision,
@@ -155,6 +160,7 @@ impl TaskRunner {
                 self.run_expected(pending, true).await.map(Some)
             }
             Ok(RemoteVerification::Ambiguous(message)) => {
+                // 仍歧义时延后一轮核验，并保留会话过期的原始分类。
                 let error_kind = if task.error_kind_typed().map_err(transition_error)?
                     == Some(TransferErrorKind::SessionExpired)
                 {
@@ -183,6 +189,7 @@ impl TaskRunner {
                 Ok(None)
             }
             Err(error) => {
+                // 核验基础设施暂不可用不改变写入事实，只缩短重试间隔。
                 tracing::warn!(task_id = task.id, %error, "远端写入核验暂不可用，保留歧义状态");
                 {
                     let conn = self.db.lock();
@@ -284,6 +291,7 @@ impl TaskRunner {
 
     /// 恢复启动时遗留的任务。
     pub async fn recover_startup(&self) -> AppResult<StartupRecoverySummary> {
+        // 同一路径优先保留最新任务，旧重复行必须先收敛为可解释状态。
         let mut tasks = self.list_states(&[TransferState::Pending, TransferState::Running])?;
         tasks.sort_by(|left, right| {
             right
@@ -294,6 +302,7 @@ impl TaskRunner {
         let mut summary = StartupRecoverySummary::default();
         let mut selected_tasks = Vec::new();
         let mut grouped = std::collections::HashMap::<String, Vec<TransferTask>>::new();
+        // 无路径任务单独处理，有路径任务按路径分组去重。
         for task in tasks {
             match task.relative_path.clone() {
                 Some(relative_path) => grouped.entry(relative_path).or_default().push(task),
@@ -301,6 +310,7 @@ impl TaskRunner {
             }
         }
         for (_, mut same_path) in grouped {
+            // 中断的远端写入结果不确定，同路径所有任务都禁止直接重放。
             let has_running_remote_write = same_path.iter().any(|task| {
                 task.state_kind() == Ok(TransferState::Running)
                     && matches!(
@@ -321,6 +331,7 @@ impl TaskRunner {
                 }
                 continue;
             }
+            // 分组已按新到旧排序，仅恢复最新一条，其余转换为重复任务结果。
             let selected = same_path.remove(0);
             selected_tasks.push(selected);
             for task in same_path {
@@ -334,6 +345,7 @@ impl TaskRunner {
                 }
             }
         }
+        // 单任务失败不终止整轮恢复，确保其他路径仍能继续。
         for task in selected_tasks {
             let task_id = task.id;
             match self.recover_startup_task(task).await {
@@ -353,6 +365,7 @@ impl TaskRunner {
         // 逐行获取许可，确保关闭时尚未准入的任务保持原样。
         let _activity = self.begin_activity(&task)?;
         let state = task.state_kind().map_err(transition_error)?;
+        // Pending 任务从完整前置校验重新进入主链。
         if state != TransferState::Running {
             let recovered_path = task.relative_path.clone();
             self.record_startup_outcome(
@@ -376,6 +389,7 @@ impl TaskRunner {
                 return Ok(summary);
             }
         };
+        // 中断写入进入远端核验；中断下载只复用本地已验证的临时文件长度。
         match operation {
             TransferOperation::Create | TransferOperation::Update => {
                 self.transition_failure(
@@ -398,6 +412,7 @@ impl TaskRunner {
                     .expect("validated download task has relative path");
                 let validated_destination = self.mount_root.join(relative_path);
                 let tmp_path = crate::drive::download_api::tmp_path(&validated_destination);
+                // 断点以磁盘临时文件为准，不能相信进程中断前未落盘的计数。
                 let durable_offset = std::fs::metadata(&tmp_path)
                     .ok()
                     .filter(|metadata| metadata.is_file())

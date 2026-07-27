@@ -10,7 +10,9 @@ import type { LogRecord } from "@/api/logs";
 import { formatDateTime } from "@/utils/format";
 
 withDefaults(defineProps<{
-  /** 内嵌模式：不渲染顶部 AppBar，由父组件提供导航 */
+  /**
+   * 内嵌模式：不渲染顶部 AppBar，由父组件提供导航
+   */
   inline?: boolean;
 }>(), {
   inline: false,
@@ -36,6 +38,7 @@ const filtered = computed(() => {
   return records.value.filter((r) => r.level.toUpperCase() === filter.value);
 });
 
+// 组件事件发送器。
 const emit = defineEmits<{ (e: "back"): void }>();
 
 /**
@@ -56,8 +59,12 @@ onUnmounted(() => {
   }
 });
 
+/**
+ * 重新读取并展示最近日志。
+ */
 async function load(): Promise<void> {
   try {
+    // 后端返回的日志数据。
     const data = await logsApi.listLogs();
     records.value = data;
   } catch {
@@ -74,6 +81,7 @@ async function load(): Promise<void> {
  * @param level - 日志级别字符串
  */
 function tagTheme(level: string): "error" | "warning" | "primary" | "default" {
+  // 统一为大写的日志级别。
   const l = level.toUpperCase();
   if (l === "ERROR") return "error";
   if (l === "WARN" || l === "WARNING") return "warning";
@@ -90,6 +98,9 @@ function fmtTime(ms: number): string {
   return formatDateTime(ms, true);
 }
 
+/**
+ * 确认后清空后端日志缓冲。
+ */
 async function handleClearLogs(): Promise<void> {
   await runClear(async () => {
     try {
@@ -102,9 +113,14 @@ async function handleClearLogs(): Promise<void> {
   });
 }
 
+/**
+ * 选择目标路径并导出完整日志。
+ */
 async function handleExportLogs(): Promise<void> {
   await runExport(async () => {
+    // 导出文件使用的日期后缀。
     const stamp = new Date().toISOString().slice(0, 10);
+    // 用户选择的日志导出路径。
     const path = await save({
       defaultPath: `PetalLink-logs-${stamp}.txt`,
       filters: [{ name: "Text", extensions: ["txt", "log"] }],

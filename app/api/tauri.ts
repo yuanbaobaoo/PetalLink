@@ -1,40 +1,20 @@
 /**
- * Tauri invoke + listen 封装。
- * 所有后端命令调用统一经过此处，错误归一化为前端可读的 AppError 结构。
- * 
+ * 所有后端命令调用的错误归一化封装。
  */
 
-import { invoke as tauriInvoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type { AppError } from "./generated";
 
-/**
- * 后端错误结构（扁平）。
- * kind 标识错误类别，message 为用户可读中文描述（始终为字符串）。
- * code 为子错误码（如 refresh_failed / network / denied），仅 Auth/Token/DriveApi 有。
- */
-export interface AppError {
-  kind: "Auth" | "Token" | "DriveApi" | "Config" | "QuotaExceeded" | "Generic";
-  message: string;
-  // 子错误码（Auth/Token/DriveApi 有值，其余为 null）
-  code?: string | null;
-  // DriveApi 特有字段
-  status_code?: number | null;
-  error_code?: string | null;
-}
+export type { AppError } from "./generated";
 
 /**
  * 调用后端命令，返回 Promise<T>。
  * 失败时抛出 AppError（后端序列化的结构），调用方用 try/catch 捕获。
  *
- * @param command - 命令名
- * @param args - 参数对象
+ * @param operation - generated bindings 返回的命令 Promise
  */
-export async function invoke<T>(
-  command: string,
-  args?: Record<string, unknown>
-): Promise<T> {
+export async function call<T>(operation: Promise<T>): Promise<T> {
   try {
-    return await tauriInvoke<T>(command, args);
+    return await operation;
   } catch (e) {
     // 后端返回的 AppError 已是对象结构；若不是则包装为 Generic
     if (e && typeof e === "object" && "kind" in e) {
@@ -42,20 +22,19 @@ export async function invoke<T>(
     }
     throw {
       kind: "Generic",
+      code: null,
       message: typeof e === "string" ? e : String(e),
-    } as AppError;
+      status_code: null,
+      error_code: null,
+    } satisfies AppError;
   }
 }
 
 /**
- * 监听后端事件，返回取消监听函数。
+ * 将返回 null 的 Rust command 转换为 Promise<void>。
  *
- * @param event - 事件名
- * @param handler - 事件回调，payload 为泛型 T
+ * @param operation - generated bindings 返回的命令 Promise
  */
-export function on<T = unknown>(
-  event: string,
-  handler: (payload: T) => void
-): Promise<UnlistenFn> {
-  return listen<T>(event, (e) => handler(e.payload));
+export async function discard(operation: Promise<null>): Promise<void> {
+  await call(operation);
 }

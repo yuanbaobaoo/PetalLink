@@ -1,6 +1,7 @@
 //! 认证命令。
 
 use serde::Serialize;
+use specta::Type;
 use tauri::AppHandle;
 
 use crate::auth::models::{TokenPair, UserInfo};
@@ -23,7 +24,7 @@ fn clear_account_caches() {
 }
 
 /// 前端恢复认证页面所需的登录、凭据与回调端口快照。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Type)]
 pub struct AuthState {
     pub logged_in: bool,
     pub secret_configured: bool,
@@ -32,12 +33,14 @@ pub struct AuthState {
 
 /// 检查 OAuth 客户端标识与密钥是否同时完成配置。
 #[tauri::command]
+#[specta::specta]
 pub fn auth_check_secret() -> bool {
     crate::constants::client_id_configured() && crate::constants::client_secret_configured()
 }
 
 /// 从 token store 恢复登录状态，并返回当前认证配置快照。
 #[tauri::command]
+#[specta::specta]
 pub async fn auth_restore() -> AppResult<AuthState> {
     let logged_in = AUTH_SERVICE.restore().await?;
     Ok(AuthState {
@@ -50,6 +53,7 @@ pub async fn auth_restore() -> AppResult<AuthState> {
 
 /// 完成 OAuth 登录，并在切换账号后停止旧运行时、清理同步数据和重置目录配置。
 #[tauri::command]
+#[specta::specta]
 pub async fn auth_login(app: AppHandle, port: u16) -> AppResult<TokenPair> {
     let token = AUTH_SERVICE.authorize(port).await?;
     // 清空旧账号同步状态
@@ -86,6 +90,7 @@ fn reset_account_config() -> AppResult<()> {
 
 /// 取消正在等待本地回调的 OAuth 授权流程。
 #[tauri::command]
+#[specta::specta]
 pub async fn auth_cancel_login() -> AppResult<()> {
     AUTH_SERVICE.cancel_authorize().await;
     Ok(())
@@ -93,6 +98,7 @@ pub async fn auth_cancel_login() -> AppResult<()> {
 
 /// 停止同步运行时，清理当前账号的同步数据与目录配置，然后删除登录 token。
 #[tauri::command]
+#[specta::specta]
 pub async fn auth_logout() -> AppResult<()> {
     // 清空当前账号同步状态
     drop_runtime_async().await;
@@ -103,6 +109,7 @@ pub async fn auth_logout() -> AppResult<()> {
 
 /// 使用当前认证信息读取账号资料。
 #[tauri::command]
+#[specta::specta]
 pub async fn auth_get_user_info() -> AppResult<UserInfo> {
     let api = UserInfoApi::new(AUTH_SERVICE.clone());
     api.get().await
@@ -110,6 +117,7 @@ pub async fn auth_get_user_info() -> AppResult<UserInfo> {
 
 /// 以本地 token store 是否存在有效记录判断登录状态。
 #[tauri::command]
+#[specta::specta]
 pub async fn auth_is_logged_in() -> AppResult<bool> {
     use crate::auth::token_store::global_store;
     Ok(global_store().load()?.is_some())

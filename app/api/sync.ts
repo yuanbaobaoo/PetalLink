@@ -1,40 +1,25 @@
 /**
  * Sync API —— 同步引擎操作。
  */
-import { invoke } from "./tauri";
+import { commands } from "./generated";
+import { call, discard } from "./tauri";
+export type {
+  FailedItem,
+  FreeableItem,
+  FreeUpBatchResult,
+  SyncGlobalState,
+} from "./generated";
+import type {
+  FileLocalStatus,
+  FreeUpCheckResult,
+  FreeableItem,
+  FreeUpBatchResult,
+  SyncGlobalState,
+} from "./generated";
 
-/** 同步全局状态 */
-export interface SyncGlobalState {
-  /** 权威快照的进程内单调版本。 */
-  revision: number;
-  total: number;
-  completed: number;
-  uploading: number;
-  downloading: number;
-  /** 因网络不可用而等待恢复的当前任务数，不属于永久失败。 */
-  waiting_network: number;
-  failed: number;
-  /** 传输队列中的永久失败历史数，不等同于当前同步项 failed。 */
-  transfer_failed: number;
-  failed_items: FailedItem[];
-  conflict: number;
-  editing: number;
-  is_running: boolean;
-  last_sync_time: number | null;
-  is_indexing: boolean;
-  indexing_scanned_folders: number;
-  indexing_discovered_items: number;
-  content_changed: boolean;
-  // 当前同步阶段（供状态条精确显示场景）；undefined = 空闲
-  sync_phase?: string;
-}
-
-/** 失败项详情（供 SyncStatusBar 失败项弹窗） */
-export interface FailedItem {
-  relative_path: string;
-  error_message: string | null;
-}
-
+/**
+ * 判断动态值是否为可安全表示的非负整数。
+ */
 function isNonNegativeInteger(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) >= 0;
 }
@@ -45,8 +30,11 @@ function isNonNegativeInteger(value: unknown): value is number {
  * 不接受缺字段或 revision=0 的默认对象，避免把“刷新信号”误当成真实状态。
  */
 export function isSyncGlobalState(value: unknown): value is SyncGlobalState {
+  // 先拒绝无法安全读取字段的输入。
   if (typeof value !== "object" || value === null) return false;
+  // 事件载荷只在本函数内按动态键读取。
   const state = value as Record<string, unknown>;
+  // 所有计数器必须是可精确表示的非负整数。
   const counters = [
     "revision",
     "total",
@@ -62,20 +50,24 @@ export function isSyncGlobalState(value: unknown): value is SyncGlobalState {
     "indexing_discovered_items",
   ];
   if (!counters.every((key) => isNonNegativeInteger(state[key]))) return false;
+  // revision=0 是默认占位对象，不能覆盖已展示状态。
   if ((state.revision as number) === 0) return false;
   if (!Array.isArray(state.failed_items)) return false;
   if (!state.failed_items.every((item) => {
     if (typeof item !== "object" || item === null) return false;
+    // 失败项合同只允许字符串路径和可空错误。
     const failedItem = item as Record<string, unknown>;
     return typeof failedItem.relative_path === "string"
       && (failedItem.error_message === null
         || typeof failedItem.error_message === "string");
   })) return false;
+  // 布尔状态缺失会改变界面分支，因此不接受部分快照。
   if (
     typeof state.is_running !== "boolean"
     || typeof state.is_indexing !== "boolean"
     || typeof state.content_changed !== "boolean"
   ) return false;
+  // 时间戳只允许有限数值或 null。
   if (
     state.last_sync_time !== null
     && (typeof state.last_sync_time !== "number"
@@ -85,20 +77,26 @@ export function isSyncGlobalState(value: unknown): value is SyncGlobalState {
   return true;
 }
 
-/** 释放空间安全校验结果 */
-export type FreeUpResult = "safe" | "not_in_cloud" | "not_synced";
+/**
+ * 释放空间安全校验结果
+ */
+export type FreeUpResult = FreeUpCheckResult;
 
-/** 文件本地同步状态（供删除确认用） */
-export type FileLocalStatus = "folder" | "synced" | "placeholder" | "not_synced";
+/**
+ * 文件本地同步状态（供删除确认用）
+ */
+export type { FileLocalStatus } from "./generated";
 
-/** 批量文件状态映射（fileId → 同步状态字符串） */
-export type BatchFileStatusMap = Record<string, string>;
+/**
+ * 批量文件状态映射（fileId → 同步状态字符串）
+ */
+export type BatchFileStatusMap = Record<string, FileLocalStatus>;
 
 /**
  * 手动刷新（全量 BFS + 同步周期）
  */
 export function manualRefresh(): Promise<void> {
-  return invoke<void>("sync_manual_refresh");
+  return discard(commands.syncManualRefresh());
 }
 
 /**
@@ -107,8 +105,8 @@ export function manualRefresh(): Promise<void> {
  * @param relPath - 文件相对路径
  * @param fileId - 文件 ID
  */
-export function checkSafeFreeUp(relPath: string, fileId: string): Promise<string> {
-  return invoke<string>("sync_check_safe_free_up", { relPath, fileId });
+export function checkSafeFreeUp(relPath: string, fileId: string): Promise<FreeUpResult> {
+  return call(commands.syncCheckSafeFreeUp(relPath, fileId));
 }
 
 /**
@@ -116,8 +114,8 @@ export function checkSafeFreeUp(relPath: string, fileId: string): Promise<string
  *
  * @param fileId - 文件 ID
  */
-export function checkFileLocalStatus(fileId: string): Promise<string> {
-  return invoke<string>("sync_check_file_local_status", { fileId });
+export function checkFileLocalStatus(fileId: string): Promise<FileLocalStatus> {
+  return call(commands.syncCheckFileLocalStatus(fileId));
 }
 
 /**
@@ -126,7 +124,7 @@ export function checkFileLocalStatus(fileId: string): Promise<string> {
  * @param fileIds - 文件 ID 列表
  */
 export function getBatchFileStatus(fileIds: string[]): Promise<BatchFileStatusMap> {
-  return invoke<BatchFileStatusMap>("sync_batch_file_status", { fileIds });
+  return call(commands.syncBatchFileStatus(fileIds));
 }
 
 /**
@@ -145,31 +143,7 @@ export function freeUpSpace(
   name: string,
   size: number,
 ): Promise<void> {
-  return invoke<void>("sync_free_up_space", { fileId, relPath, localPath, name, size });
-}
-
-/** 可释放空间候选项（文件名、相对路径、大小） */
-export interface FreeableItem {
-  // 文件 ID
-  fileId: string;
-  // 相对挂载目录的路径
-  relPath: string;
-  // 文件名
-  name: string;
-  // 本地已下载字节数
-  size: number;
-}
-
-/** 批量释放空间结果统计 */
-export interface FreeUpBatchResult {
-  // 成功释放的文件数
-  freedCount: number;
-  // 因不满足条件被跳过的文件数
-  skippedCount: number;
-  // 成功释放的总字节数
-  freedBytes: number;
-  // 被跳过项的错误原因
-  errors: string[];
+  return discard(commands.syncFreeUpSpace(fileId, relPath, localPath, name, size));
 }
 
 /**
@@ -178,7 +152,7 @@ export interface FreeUpBatchResult {
  * @param folderRelPath - 目录相对路径，传空串表示从根枚举
  */
 export function listFreeableInFolder(folderRelPath: string): Promise<FreeableItem[]> {
-  return invoke<FreeableItem[]>("sync_list_freeable_in_folder", { folderRelPath });
+  return call(commands.syncListFreeableInFolder(folderRelPath));
 }
 
 /**
@@ -187,7 +161,7 @@ export function listFreeableInFolder(folderRelPath: string): Promise<FreeableIte
  * @param items - 经用户确认的可释放候选项清单
  */
 export function freeUpBatch(items: FreeableItem[]): Promise<FreeUpBatchResult> {
-  return invoke<FreeUpBatchResult>("sync_free_up_batch", { items });
+  return call(commands.syncFreeUpBatch(items));
 }
 
 /**
@@ -197,7 +171,7 @@ export function freeUpBatch(items: FreeableItem[]): Promise<FreeUpBatchResult> {
  * @param destPath - 目标本地路径
  */
 export function downloadOnDemand(fileId: string, destPath: string): Promise<boolean> {
-  return invoke<boolean>("sync_download_on_demand", { fileId, destPath });
+  return call(commands.syncDownloadOnDemand(fileId, destPath));
 }
 
 /**
@@ -208,19 +182,19 @@ export function downloadOnDemand(fileId: string, destPath: string): Promise<bool
  * @param relPath - 目录相对路径
  */
 export function syncFolderRecursive(folderId: string, relPath: string): Promise<number> {
-  return invoke<number>("sync_folder_recursive", { folderId, relPath });
+  return call(commands.syncFolderRecursive(folderId, relPath));
 }
 
 /**
  * 重试失败项
  */
 export function retryFailed(): Promise<void> {
-  return invoke<void>("sync_retry_failed");
+  return discard(commands.syncRetryFailed());
 }
 
 /**
  * 获取当前同步全局状态
  */
 export function getSyncState(): Promise<SyncGlobalState> {
-  return invoke<SyncGlobalState>("sync_state");
+  return call(commands.syncState());
 }

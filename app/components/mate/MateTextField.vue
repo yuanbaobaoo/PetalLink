@@ -6,23 +6,41 @@ import MateIcon from "./MateIcon.vue";
 interface Props {
   modelValue?: string;
   placeholder?: string;
-  /** 是否自动聚焦 */
+  /**
+   * 是否自动聚焦
+   */
   autofocus?: boolean;
-  /** 是否禁用 */
+  /**
+   * 是否禁用
+   */
   disabled?: boolean;
-  /** 前缀图标 icon-name（如 "search"） */
+  /**
+   * 前缀图标 icon-name（如 "search"）
+   */
   prefixIcon?: string;
-  /** 自定义宽度（数字→px，字符串原样，如 "100%"/"280px"） */
+  /**
+   * 自定义宽度（数字→px，字符串原样，如 "100%"/"280px"）
+   */
   width?: number | string;
-  /** 输入类型 */
+  /**
+   * 输入类型
+   */
   type?: string;
-  /** 字号（默认 body 14；搜索框用 body-sm 13） */
+  /**
+   * 字号（默认 body 14；搜索框用 body-sm 13）
+   */
   fontSize?: string;
-  /** 填充色 token（默认 bg-container；搜索框用 bg-page） */
+  /**
+   * 填充色 token（默认 bg-container；搜索框用 bg-page）
+   */
   fill?: string;
-  /** 错误态（红色边框） */
+  /**
+   * 错误态（红色边框）
+   */
   error?: boolean;
-  /** 最大长度 */
+  /**
+   * 最大长度
+   */
   maxlength?: number;
 }
 
@@ -32,6 +50,7 @@ interface Emits {
   (e: "blur"): void;
 }
 
+// 组件输入参数。
 const props = withDefaults(defineProps<Props>(), {
   modelValue: "",
   placeholder: "",
@@ -61,17 +80,28 @@ const fontCssVar = computed(() =>
   props.fontSize ? `var(--${props.fontSize})` : "var(--font-body)"
 );
 
+// 组件事件发送器。
 const emit = defineEmits<Emits>();
 
+/**
+ * 把原生输入事件转换为组件值更新。
+ */
 function handleInput(event: Event): void {
+  // 原生输入元素或当前操作目标。
   const target = event.target as HTMLInputElement;
   emit("update:modelValue", target.value);
 }
 
+/**
+ * 提交回车事件并按配置结束编辑。
+ */
 function handleEnter(): void {
   emit("enter");
 }
 
+/**
+ * 提交失焦事件并同步输入值。
+ */
 function handleBlur(): void {
   emit("blur");
 }

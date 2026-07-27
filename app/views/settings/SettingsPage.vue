@@ -15,7 +15,9 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { formatFileSize } from "@/utils/format";
 import { isEmptyDir } from "@/utils/fs";
 
+// 当前认证状态。
 const auth = useAuthStore();
+// 应用更新状态。
 const updater = useUpdaterStore();
 
 type TabKey = "syncDir" | "transfer" | "advanced" | "account" | "logs" | "about";
@@ -44,12 +46,15 @@ const tabGroups: { group: string; items: { key: TabKey; icon: string; label: str
 
 // 传输设置
 const concurrency = ref(6);
+// 本地变更防抖秒数。
 const debounceSec = ref(3);
 // 云端定时刷新间隔（秒）：0=关闭，默认 900（15 分钟）
 const pollIntervalSec = ref(60);
+// 忽略文件模式的逗号分隔文本。
 const skipPatterns = ref(".DS_Store, .tmp, ~$*, .Trash");
 // 同步目录设置
 const mountDir = ref("");
+// 是否已经配置同步目录。
 const mountConfigured = ref(false);
 // OAuth 设置
 const oauthPort = ref(9999);
@@ -59,31 +64,41 @@ const autoLaunch = ref(false);
 const showTrayIcon = ref(true);
 // 保存状态
 const saving = ref(false);
+// 最近一次保存是否成功。
 const saved = ref(false);
+// 保存失败提示。
 const errorMessage = ref<string | null>(null);
 // 异步按钮 loading + 防重复点击
 const { loading: clearLoading, run: runClearCache } = useAsyncAction();
+// 退出登录按钮的互斥执行状态。
 const { loading: logoutLoading, run: runLogout } = useAsyncAction();
+// 选择目录按钮的互斥执行状态。
 const { loading: selectDirLoading, run: runSelectDir } = useAsyncAction();
 
 // 用户信息
 const userInfo = computed(() => auth.userInfo);
+// 当前账号展示名。
 const userLabel = computed(() => authApi.primaryLabel(userInfo.value) ?? "未获取到");
+// 当前账号头像字符。
 const userInitial = computed(() => authApi.initial(userInfo.value) ?? "华");
 // 存储配额
 const about = ref<driveApi.DriveAbout | null>(null);
 // 应用版本号
 const appVersion = ref("");
 
+// 配置类页签才展示保存底栏。
 const showFooter = computed(() => ["syncDir", "transfer", "advanced"].includes(activeTab.value));
 
+// 设置页导航事件。
 const emit = defineEmits<{ (e: "back"): void; (e: "open-logs"): void }>();
 
 /**
  * 挂载后加载配置、开机自启状态、存储配额
  */
 onMounted(async () => {
+  // 配置字段作为设置表单的初始快照。
   try {
+    // 当前持久化配置。
     const config = await configApi.loadConfig();
     concurrency.value = config.concurrency;
     debounceSec.value = config.debounce_sec;
@@ -101,10 +116,14 @@ onMounted(async () => {
   saved.value = true;
 });
 
+/**
+ * 保存当前设置表单。
+ */
 async function handleSave(): Promise<void> {
   if (saving.value) return; // 防重复点击
   saving.value = true; errorMessage.value = null;
   try {
+    // 所有配置一次提交，避免局部成功导致界面与磁盘不一致。
     await configApi.saveConfig({
       oauth_redirect_uri: `http://127.0.0.1:${oauthPort.value}/oauth/callback`,
       oauth_callback_port: oauthPort.value,
@@ -124,8 +143,12 @@ async function handleSave(): Promise<void> {
   finally { saving.value = false; }
 }
 
+/**
+ * 从持久化配置恢复表单。
+ */
 async function handleReset(): Promise<void> {
   try {
+    // 当前持久化配置。
     const config = await configApi.loadConfig();
     concurrency.value = config.concurrency;
     debounceSec.value = config.debounce_sec;
@@ -145,6 +168,7 @@ async function handleReset(): Promise<void> {
  */
 async function onToggleAutoLaunch(v: boolean): Promise<void> {
   autoLaunch.value = v;
+  // 后端返回是否实际切换成功。
   const ok = await platformApi.launchAtLoginSetEnabled(v);
   if (!ok) { autoLaunch.value = !v; showToast("设置开机自启失败", { variant: "error" }); }
 }
@@ -164,8 +188,12 @@ async function onToggleTrayIcon(v: boolean): Promise<void> {
   }
 }
 
+/**
+ * 清空本地状态并重启应用。
+ */
 async function handleClearCache(): Promise<void> {
   await runClearCache(async () => {
+    // 高风险操作必须由用户显式确认。
     const ok = await confirmDialog({
       title: "清空缓存并重启", titleIcon: "alert", danger: true, confirmText: "确认清空",
       content: "此操作将清除：\n• 登录状态（需重新登录）\n• 同步数据库（本地镜像与传输队列）\n• 缓存文件（同步状态快照 + 云端树缓存，工作目录）\n• 配置文件（端口、并发、过滤等设置）\n\n云盘文件不会被删除。",
@@ -177,8 +205,12 @@ async function handleClearCache(): Promise<void> {
   });
 }
 
+/**
+ * 退出当前账号。
+ */
 async function handleLogout(): Promise<void> {
   await runLogout(async () => {
+    // 用户确认结果。
     const ok = await confirmDialog({
       title: "退出登录", titleIcon: "x", danger: true, confirmText: "退出",
       content: "确定退出当前账号吗？本地 token 将被清除。",
@@ -189,7 +221,11 @@ async function handleLogout(): Promise<void> {
   });
 }
 
+/**
+ * 手动检查应用更新。
+ */
 async function handleCheckUpdate(): Promise<void> {
+  // 是否发现新版本。
   const hasUpdate = await updater.manualCheck();
   if (!hasUpdate && updater.phase === "upToDate") {
     showToast("已是最新版本", { variant: "success" });
@@ -199,13 +235,23 @@ async function handleCheckUpdate(): Promise<void> {
   // hasUpdate=true → updater.phase="available" → UpdateDialog 会自动弹出
 }
 
+/**
+ * 选择并校验新的同步目录。
+ */
 async function handleSelectDir(): Promise<void> {
   await runSelectDir(async () => {
     try {
+      // 用户选择的目录路径。
       const selected = await open({ directory: true, multiple: false, title: "选择同步目录" });
       if (selected && typeof selected === "string") {
         // 校验：必须空目录（过滤隐藏文件 + skipPatterns）
-        const isEmpty = await isEmptyDir(selected).catch(() => false);
+        let isEmpty = false;
+        try {
+          isEmpty = await isEmptyDir(selected);
+        } catch {
+          // 无法读取目录时按非空处理，避免覆盖未知内容。
+          isEmpty = false;
+        }
         if (!isEmpty) {
           showToast("所选目录不为空，请选择一个空目录", { variant: "warning" });
           return;

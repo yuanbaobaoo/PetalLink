@@ -5,9 +5,10 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use specta::Type;
 
 /// 文件分类
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub enum FileCategory {
     Folder,
@@ -93,7 +94,7 @@ impl FileCategory {
 
 /// Drive 文件 DTO（对应华为云盘 File 资源）。
 /// 对齐 dart `DriveFile`。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct DriveFile {
     pub id: String,
     pub name: String,
@@ -224,7 +225,7 @@ fn parse_time(v: Option<&Value>) -> Option<DateTime<Utc>> {
 }
 
 /// Drive 配额信息。对齐 dart `DriveAbout`。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct DriveAbout {
     pub user_capacity: i64,
     pub used_space: i64,
@@ -283,7 +284,7 @@ fn tolerant_parse_int(v: Option<&Value>) -> Option<i64> {
 }
 
 /// 文件列表结果。对齐 dart `FileListResult`。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Type)]
 pub struct FileListResult {
     pub files: Vec<DriveFile>,
     pub next_cursor: Option<String>,

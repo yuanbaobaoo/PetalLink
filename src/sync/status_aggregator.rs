@@ -86,6 +86,7 @@ impl StatusAggregator {
         conn: &Connection,
         runtime: RuntimeStatus,
     ) -> AppResult<SyncGlobalState> {
+        // 单条 SQL 在同一数据库快照内汇总基线与传输状态。
         let (total, failed, conflict, uploading, downloading, waiting_network, transfer_failed): (
             i64,
             i64,
@@ -129,6 +130,7 @@ impl StatusAggregator {
             )
             .map_err(|error| AppError::generic(format!("聚合同步状态失败：{error}")))?;
 
+        // 失败明细限制为 20 条，避免高频状态事件携带无界数据。
         let failed_items = {
             let mut statement = conn
                 .prepare(
@@ -139,6 +141,7 @@ impl StatusAggregator {
                      LIMIT 20",
                 )
                 .map_err(|error| AppError::generic(format!("查询失败项失败：{error}")))?;
+            // 查询阶段与逐行读取阶段分别映射为可诊断错误。
             let rows = statement
                 .query_map(params![sync_status::FAILED], |row| {
                     Ok(FailedItem {
@@ -156,11 +159,13 @@ impl StatusAggregator {
             items
         };
 
+        // SQL 计数转换后计算完成数，并分配严格递增 revision。
         let total = total as u64;
         let failed = failed as u64;
         let conflict = conflict as u64;
         let revision = self.next_revision.fetch_add(1, Ordering::Relaxed) + 1;
 
+        // 数据库事实与调用方提供的运行时字段合成一个权威快照。
         Ok(SyncGlobalState {
             revision,
             total,

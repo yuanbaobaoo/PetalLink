@@ -380,12 +380,14 @@ fn validate_optional_rfc3339(
 /// 返回 `(id, recycled, 完整文件)`。删除 tombstone 的 file 可以只含 id；
 /// 非删除事件由调用方要求第三项必须存在。
 fn parse_change_file(value: &Value) -> AppResult<(String, bool, Option<DriveFile>)> {
+    // 先验证 change.file 的基础身份字段。
     let object = value
         .as_object()
         .ok_or_else(|| protocol_error("change.file 不是对象"))?;
     validate_category(object, "category", "drive#file", "change.file")?;
 
     let id = required_non_empty_string(object, "id", "change.file")?.to_string();
+    // 删除 tombstone 可缺少名称，普通变更必须能构造完整文件。
     let name = match object.get("fileName") {
         Some(Value::String(value)) if !value.trim().is_empty() => Some(value.as_str()),
         Some(Value::String(_)) => {
@@ -399,6 +401,7 @@ fn parse_change_file(value: &Value) -> AppResult<(String, bool, Option<DriveFile
         }
     };
 
+    // 可选元数据若出现也必须符合协议类型。
     validate_optional_string(object, "mimeType", "change.file")?;
     validate_optional_string(object, "description", "change.file")?;
     validate_optional_string(object, "thumbnailLink", "change.file")?;
@@ -415,6 +418,7 @@ fn parse_change_file(value: &Value) -> AppResult<(String, bool, Option<DriveFile
     validate_optional_rfc3339(object, "createdTime", "change.file")?;
     validate_optional_rfc3339(object, "editedTime", "change.file")?;
 
+    // 父目录只允许非空字符串数组或 null。
     if let Some(parent_folder) = object.get("parentFolder") {
         match parent_folder {
             Value::Null => {}
@@ -447,6 +451,7 @@ fn parse_change_file(value: &Value) -> AppResult<(String, bool, Option<DriveFile
         }
     }
 
+    // 缺失 recycled 按未删除处理，错误类型不做宽松转换。
     let recycled = match object.get("recycled") {
         None | Some(Value::Null) => false,
         Some(Value::Bool(value)) => *value,
@@ -457,6 +462,7 @@ fn parse_change_file(value: &Value) -> AppResult<(String, bool, Option<DriveFile
         }
     };
 
+    // 只有非 tombstone 事件才构造完整 DriveFile。
     let file = if name.is_some() {
         Some(
             DriveFile::from_json(value)

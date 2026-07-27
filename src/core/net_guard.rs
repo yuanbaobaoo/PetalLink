@@ -184,7 +184,7 @@ pub fn report_request_network_failure() -> bool {
 /// 真实断网仍能在一次探测（约 3s）内被确认，不牺牲离线发现速度。
 /// 同一时间最多一个确认在途；返回是否已受理（确认在后台异步执行）。
 pub fn request_offline_confirmation() -> bool {
-    // 确认在途标记：防止连续失败事件触发探测风暴
+    /// 确认在途标记，防止连续失败事件触发探测风暴。
     static CONFIRMING: AtomicBool = AtomicBool::new(false);
     // 已离线：无需再确认
     if !ONLINE.load(Ordering::SeqCst) {

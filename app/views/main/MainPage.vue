@@ -15,12 +15,15 @@ import * as platformApi from "@/api/platform";
 import * as configApi from "@/api/config";
 import { useAsyncAction } from "@/composables/useAsyncAction";
 
+// 当前文件浏览器状态。
 const browser = useFileBrowserStore();
+// 当前同步状态。
 const sync = useSyncStore();
 // 搜索关键词
 const searchKeyword = ref("");
 // 搜索结果列表
 const searchResults = ref<driveApi.DriveFile[]>([]);
+// 是否正在执行云端搜索。
 const isSearching = ref(false);
 // 同步目录是否已配置
 const mountConfigured = computed(() => sync.mountConfigured);
@@ -28,6 +31,7 @@ const mountConfigured = computed(() => sync.mountConfigured);
 const showTransferPopover = ref(false);
 // 异步按钮 loading + 防重复点击
 const { loading: refreshLoading, run: runRefresh } = useAsyncAction();
+// 系统文件管理器操作的互斥执行状态。
 const { loading: finderLoading, run: runFinder } = useAsyncAction();
 
 // 定义事件
@@ -40,9 +44,16 @@ onMounted(async () => {
   await browser.loadRoot();
 });
 
+/**
+ * 通知根组件打开设置页。
+ */
 function handleOpenSettings(): void { emit("open-settings"); }
 
+/**
+ * 按当前关键词查询并展示云端文件。
+ */
 async function handleSearch(): Promise<void> {
+  // 去除首尾空白后的搜索关键词。
   const kw = searchKeyword.value.trim();
   if (!kw || isSearching.value) return; // 防重复
   isSearching.value = true;
@@ -50,14 +61,23 @@ async function handleSearch(): Promise<void> {
   catch { searchResults.value = []; }
   finally { isSearching.value = false; }
 }
+/**
+ * 清空关键词和当前搜索结果。
+ */
 function handleClearSearch(): void { searchKeyword.value = ""; searchResults.value = []; }
 
+/**
+ * 在系统文件管理器中打开同步目录。
+ */
 async function handleOpenInFinder(): Promise<void> {
   await runFinder(async () => {
     try { const c = await configApi.loadConfig(); await platformApi.openInFinder(c.mount_dir); } catch {}
   });
 }
 
+/**
+ * 触发全量刷新并等待文件列表收敛。
+ */
 async function handleRefreshAll(): Promise<void> {
   await runRefresh(async () => {
     await sync.triggerManualRefresh();

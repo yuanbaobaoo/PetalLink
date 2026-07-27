@@ -731,8 +731,8 @@ pub fn discard_resume_artifacts(dest: &Path) {
 }
 
 #[cfg(test)]
+/// 下载目标保护与恢复合同测试：旧版占位符放行，他主占位符与用户内容拒绝。
 mod tests {
-    //! 安装前目标校验的核心合同：旧版占位符放行、他主占位符与用户内容拒绝。
     use super::*;
     use crate::mount::manager::{STATE_PLACEHOLDER, XATTR_FILE_ID, XATTR_STATE};
 

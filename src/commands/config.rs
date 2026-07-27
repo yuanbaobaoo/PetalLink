@@ -13,12 +13,14 @@ use super::{drop_runtime_async, ensure_engine_started, relaunch, set_mount_manag
 
 /// 读取并校验当前持久化配置。
 #[tauri::command]
+#[specta::specta]
 pub fn config_load() -> AppResult<AppConfig> {
     ConfigStore::load()
 }
 
 /// 切换托盘图标显示：持久化到配置并立即生效（对齐开机自启开关的即时生效模式）。
 #[tauri::command]
+#[specta::specta]
 pub fn tray_set_visible(app: AppHandle, visible: bool) -> AppResult<()> {
     let mut config = ConfigStore::load()?;
     config.show_tray_icon = visible;
@@ -29,6 +31,7 @@ pub fn tray_set_visible(app: AppHandle, visible: bool) -> AppResult<()> {
 
 /// 保存配置；挂载目录变化时停止旧运行时、清理缓存并重启，首次配置时启动同步引擎。
 #[tauri::command]
+#[specta::specta]
 pub async fn config_save(app: AppHandle, config: AppConfig) -> AppResult<()> {
     let old = ConfigStore::load().ok();
     let old_configured = old.as_ref().map(|c| c.mount_configured).unwrap_or(false);
@@ -71,6 +74,7 @@ pub async fn config_save(app: AppHandle, config: AppConfig) -> AppResult<()> {
 
 /// 将当前配置序列化为可导入的 JSON 文本。
 #[tauri::command]
+#[specta::specta]
 pub fn config_export_json() -> AppResult<String> {
     let config = ConfigStore::load()?;
     ConfigStore::export_to_json(&config)
@@ -78,6 +82,7 @@ pub fn config_export_json() -> AppResult<String> {
 
 /// 解析并校验 JSON 配置，但不在此入口直接覆盖当前配置文件。
 #[tauri::command]
+#[specta::specta]
 pub fn config_import_json(json_str: String) -> AppResult<AppConfig> {
     ConfigStore::import_from_json(&json_str)
 }

@@ -6,6 +6,7 @@
 //! 所有 Display/serde 输出均不泄露 token（§3.2）。错误消息只包含用户可读的中文描述。
 
 use serde::Serialize;
+use specta::Type;
 use thiserror::Error;
 
 /// 请求的副作用语义。传输层据此保守记录失败时写入是否可能已到达服务端。
@@ -64,14 +65,48 @@ pub fn parse_retry_after(value: &str) -> Option<RetryAfter> {
         .map(|date| RetryAfter::AtUnixMs(date.timestamp_millis()))
 }
 
+/// 前端用于分流展示逻辑的错误类别。
+#[derive(Debug, Clone, Copy, Type)]
+pub enum IpcErrorKind {
+    /// OAuth 流程错误。
+    Auth,
+    /// Token 状态或刷新错误。
+    Token,
+    /// Drive API 请求错误。
+    DriveApi,
+    /// 配置读取或校验错误。
+    Config,
+    /// 云盘剩余配额不足。
+    QuotaExceeded,
+    /// 无法归入其他类别的错误。
+    Generic,
+}
+
+/// `AppError` 暴露给前端的稳定扁平结构。
+#[derive(Debug, Clone, Type)]
+pub struct IpcError {
+    /// 错误类别。
+    pub kind: IpcErrorKind,
+    /// 类别内错误码。
+    pub code: Option<String>,
+    /// 面向用户的错误消息。
+    pub message: String,
+    /// Drive API HTTP 状态码。
+    pub status_code: Option<u16>,
+    /// 华为 Drive API 错误码。
+    pub error_code: Option<String>,
+}
+
 /// 所有自定义异常基类。序列化为前端可解析的扁平结构。
 ///
 /// 自定义 Serialize 把字段提到顶层（`kind`/`code`/`message`/`status_code`/`error_code`），
 /// `message` 始终是字符串。这样前端 `AppError.message: string` 直接可读，
 /// 避免默认 tagged-enum 序列化把 payload 嵌套进 `message` 导致渲染成 `[object Object]`。
 ///
-/// `code` 字段供前端按错误类别渲染（登录态切换 / toast 文案 / 阻塞弹窗）。
-#[derive(Debug, Clone, Error)]
+/// `AppError` 自身包含仅供后端恢复和重试使用的字段，并通过手写 `Serialize`
+/// 输出为 `IpcError` 结构；Specta 使用同一结构生成前端类型。
+#[derive(Debug, Clone, Error, Type)]
+#[specta(type = IpcError)]
 pub enum AppError {
     /// OAuth 流程相关（取消 / state 不匹配 / 超时 / 被拒绝 / 浏览器打不开）
     #[error("{message}")]

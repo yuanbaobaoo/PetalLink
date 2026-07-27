@@ -8,6 +8,7 @@ interface Props {
   suffix?: string;
   disabled?: boolean;
 }
+// 组件输入参数。
 const props = withDefaults(defineProps<Props>(), {
   min: 0,
   max: 999999,
@@ -15,6 +16,7 @@ const props = withDefaults(defineProps<Props>(), {
   suffix: "",
   disabled: false,
 });
+// 组件事件发送器。
 const emit = defineEmits<{ (e: "update:modelValue", v: number): void }>();
 
 /**
@@ -32,7 +34,9 @@ function clamp(v: number): number {
  * @param event - 输入事件
  */
 function handleInput(event: Event): void {
+  // 输入框的原始文本值。
   const raw = (event.target as HTMLInputElement).value;
+  // 转换后的数值或本轮成功数量。
   const n = Number(raw);
   if (raw === "" || Number.isNaN(n)) return;
   emit("update:modelValue", clamp(n));

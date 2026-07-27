@@ -177,6 +177,7 @@ impl SyncExecutor {
 
     /// 为云端文件创建本地占位符并记录 cloud-only 基线。
     async fn do_create_placeholder(&self, action: &SyncAction) -> ActionResult {
+        // 占位符必须同时具备云端元数据和可定位的相对路径。
         let cloud = match &action.cloud_file {
             Some(c) => c,
             None => {
@@ -199,6 +200,7 @@ impl SyncExecutor {
                 }
             }
         };
+        // 先确保磁盘占位符，再写入 cloud-only 基线。
         if let Some(m) = &self.mount {
             match m
                 .create_placeholder_if_needed(rel_path, &cloud.id, cloud.size)
@@ -322,6 +324,7 @@ impl SyncExecutor {
 
     /// 在本地身份与目标去重校验通过后更新云端文件路径。
     async fn do_move_in_cloud(&self, action: &SyncAction) -> ActionResult {
+        // 所有不确定前置条件均延迟重规划，不直接标记永久失败。
         let deferred = |technical_message: String| {
             let user_message = crate::sync::user_messages::simplify_sync_error(&technical_message);
             tracing::info!(
@@ -336,6 +339,7 @@ impl SyncExecutor {
                 cloud_file: None,
             }
         };
+        // 远端身份、目标父目录和本地路径缺一不可。
         let Some(file_id) = action.file_id.as_deref() else {
             return deferred("云端路径变更缺少 fileId，等待重新规划".to_string());
         };
@@ -365,11 +369,13 @@ impl SyncExecutor {
             );
         }
 
+        // 目标名称来自规范化相对路径的末段。
         let target_name = relative_path
             .rsplit('/')
             .next()
             .filter(|name| !name.is_empty())
             .unwrap_or(relative_path);
+        // 写入前列出目标目录，存在同名不同 ID 时禁止覆盖。
         let target_files = match self.files_api.list_all(Some(target_parent)).await {
             Ok(files) => files,
             Err(error) => {

@@ -9,7 +9,11 @@ import rustFreeUpSource from "../../src/commands/free_up.rs?raw";
  */
 
 // 从 Rust 源码提取指定 struct 声明前的 serde rename_all 属性
+/**
+ * 读取指定 Rust 类型的 serde 重命名规则。
+ */
 function rustSerdeRenameAll(structName: string): string | null {
+  // 用于提取 Rust 合同的正则表达式。
   const pattern = new RegExp(
     `serde\\(rename_all\\s*=\\s*"([^"]+)"\\)[\\s\\S]{0,120}?pub struct ${structName}\\b`,
   );

@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use specta::Type;
 use tauri::AppHandle;
 
 use crate::data::repository;
@@ -13,7 +14,7 @@ use super::{mount, sync_engine, try_sync_engine, DB, FILES_API};
 
 /// 可释放空间候选项（基于 DB 基线枚举，实际释放前再逐项安全核验）。
 /// 与前端 `FreeableItem` interface 的合同为 camelCase，序列化/反序列化必须保持一致。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct FreeableItem {
     /// 云端文件 ID
@@ -28,7 +29,7 @@ pub struct FreeableItem {
 
 /// 批量释放空间结果统计。
 /// 与前端 `FreeUpBatchResult` interface 的合同为 camelCase，缺失时前端读不到计数。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct FreeUpBatchResult {
     /// 成功释放的文件数
@@ -56,19 +57,18 @@ fn free_up_rejection(file_id: &str, rel_path: &str, technical_reason: &str) -> A
 
 /// 检查文件是否可安全释放本地空间。
 #[tauri::command]
-pub async fn sync_check_safe_free_up(rel_path: String, file_id: String) -> AppResult<String> {
+#[specta::specta]
+pub async fn sync_check_safe_free_up(
+    rel_path: String,
+    file_id: String,
+) -> AppResult<FreeUpCheckResult> {
     // 引擎已启动 → 用 cloud_tree + DB 精确校验
     if let Some(e) = try_sync_engine() {
-        return Ok(match e.can_safely_free_up(&rel_path, &file_id) {
-            FreeUpCheckResult::Safe => "safe",
-            FreeUpCheckResult::NotInCloud => "not_in_cloud",
-            FreeUpCheckResult::NotSynced => "not_synced",
-        }
-        .to_string());
+        return Ok(e.can_safely_free_up(&rel_path, &file_id));
     }
     // 未启动引擎时缺少可信云端 checkpoint 与 activity gate，按不安全处理。
     let _ = (rel_path, file_id);
-    Ok("not_synced".to_string())
+    Ok(FreeUpCheckResult::NotSynced)
 }
 
 /// 在原文件同目录分配不存在的释放空间暂存路径。
@@ -162,6 +162,7 @@ fn rollback_free_up_baseline(
 
 /// 将已同步文件替换为按需下载占位符。
 #[tauri::command]
+#[specta::specta]
 pub async fn sync_free_up_space(
     file_id: String,
     rel_path: String,
@@ -444,6 +445,7 @@ async fn free_up_one(
 ///
 /// - `folder_rel_path` 目录相对挂载根的路径，传空串表示从根枚举
 #[tauri::command]
+#[specta::specta]
 pub fn sync_list_freeable_in_folder(folder_rel_path: String) -> AppResult<Vec<FreeableItem>> {
     let conn = DB.lock();
     // 根目录（空路径）枚举全部 SYNCED 文件；子目录用「等于自身 或 以「dir/」为前缀」匹配，
@@ -498,6 +500,7 @@ pub fn sync_list_freeable_in_folder(folder_rel_path: String) -> AppResult<Vec<Fr
 ///
 /// - `items` 由前端弹窗确认的可释放候选项清单
 #[tauri::command]
+#[specta::specta]
 pub async fn sync_free_up_batch(items: Vec<FreeableItem>) -> AppResult<FreeUpBatchResult> {
     let engine = sync_engine()?;
     let m = mount()?;
@@ -524,6 +527,7 @@ pub async fn sync_free_up_batch(items: Vec<FreeableItem>) -> AppResult<FreeUpBat
 
 /// 按需下载占位文件。
 #[tauri::command]
+#[specta::specta]
 pub async fn sync_download_on_demand(
     _app: AppHandle,
     file_id: String,

@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
+use tauri_specta::Event;
 
 use crate::auth::service::AuthService;
 use crate::core::config_store::ConfigStore;
@@ -28,7 +29,7 @@ mod auth;
 /// 配置读写命令。
 mod config;
 /// 云盘文件操作命令。
-mod drive;
+pub(crate) mod drive;
 /// 目录递归同步命令。
 mod folder_sync;
 /// 本地空间释放与按需下载命令。
@@ -310,8 +311,7 @@ fn ensure_engine_started_owned(app: &AppHandle) -> AppResult<()> {
             loop {
                 match transfer_update_rx.recv().await {
                     Ok(()) => {
-                        use tauri::Emitter;
-                        let _ = app_for_transfer.emit("transfer_update", ());
+                        let _ = crate::ipc::TransferUpdateEvent.emit(&app_for_transfer);
                         crate::platform::tray::refresh_menu(&app_for_transfer);
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -384,10 +384,10 @@ fn ensure_engine_started_owned(app: &AppHandle) -> AppResult<()> {
 
 /// 推送同步状态到前端（Tauri event）
 pub fn emit_sync_state(app: &AppHandle, state: &SyncGlobalState) {
-    let _ = app.emit("sync_state", state);
+    let _ = crate::ipc::SyncStateEvent(state.clone()).emit(app);
 }
 
 /// 推送目录内容变更通知（触发前端 folderChildren 刷新）
 pub fn emit_folder_content_changed(app: &AppHandle) {
-    let _ = app.emit("folder_content_changed", ());
+    let _ = crate::ipc::FolderContentChangedEvent.emit(app);
 }

@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
+use tauri_specta::Event;
 
 use crate::data::repository;
 use crate::drive::models::DriveFile;
@@ -13,17 +13,9 @@ use crate::sync::engine::SyncEngine;
 
 use super::{mount, sync_engine, FILES_API};
 
-/// 目录同步进度事件载荷。
-#[derive(Clone, Serialize)]
-pub struct FolderSyncProgress {
-    /// 已完成任务数。
-    pub done: usize,
-    /// 总任务数。
-    pub total: usize,
-}
-
 /// 递归同步云端目录子树与本地目录。
 #[tauri::command]
+#[specta::specta]
 pub async fn sync_folder_recursive(
     app: AppHandle,
     folder_id: String,
@@ -293,13 +285,11 @@ async fn sync_folder_recursive_impl(
             ),
         }
         done += 1;
-        let _ = app.emit(
-            "folder_sync_progress",
-            FolderSyncProgress {
-                done: done as usize,
-                total,
-            },
-        );
+        let _ = crate::ipc::FolderSyncProgressEvent {
+            done: done as usize,
+            total,
+        }
+        .emit(app);
     }
     // 上传本地独有文件。
     for (subrel, local_path) in &to_upload {
@@ -317,13 +307,11 @@ async fn sync_folder_recursive_impl(
                 "sync_folder_recursive: 云端父目录缺失，文件延期以避免上传到错误层级"
             );
             done += 1;
-            let _ = app.emit(
-                "folder_sync_progress",
-                FolderSyncProgress {
-                    done: done as usize,
-                    total,
-                },
-            );
+            let _ = crate::ipc::FolderSyncProgressEvent {
+                done: done as usize,
+                total,
+            }
+            .emit(app);
             continue;
         };
         let full_rel = if rel_path.is_empty() {
@@ -390,13 +378,11 @@ async fn sync_folder_recursive_impl(
             ),
         }
         done += 1;
-        let _ = app.emit(
-            "folder_sync_progress",
-            FolderSyncProgress {
-                done: done as usize,
-                total,
-            },
-        );
+        let _ = crate::ipc::FolderSyncProgressEvent {
+            done: done as usize,
+            total,
+        }
+        .emit(app);
     }
 
     tracing::info!(done, total, "sync_folder_recursive: 完成");

@@ -202,6 +202,7 @@ pub fn patch_transfer_in_state(
     expected_state: TransferState,
     patch: TransferPatch,
 ) -> Result<TransferTask, TransitionError> {
+    // 先读取并核对 revision/state，拒绝对已迁移任务做同态修补。
     let current = conn
         .query_row(
             "SELECT * FROM transfer_queue WHERE id=?1",
@@ -217,6 +218,7 @@ pub fn patch_transfer_in_state(
         });
     }
 
+    // 将三态 nullable patch 展开为 SQL CASE 的模式和值。
     let TransferPatch {
         error_kind,
         error_message,
@@ -235,6 +237,7 @@ pub fn patch_transfer_in_state(
     let (finished_at_mode, finished_at) = nullable_patch(finished_at);
     let (remote_result_file_id_mode, remote_result_file_id) = nullable_patch(remote_result_file_id);
     let (session_url_mode, session_url) = nullable_patch(session_url);
+    // WHERE 再次携带 revision/state，形成乐观锁线性化点。
     let changed = conn.execute(
         "UPDATE transfer_queue SET
             error_kind=CASE ?1 WHEN 0 THEN error_kind WHEN 1 THEN ?2 ELSE NULL END,
@@ -275,6 +278,7 @@ pub fn patch_transfer_in_state(
             expected_revision,
         });
     }
+    // 返回数据库实际保存的新修订，供后续状态迁移继续使用。
     conn.query_row(
         "SELECT * FROM transfer_queue WHERE id=?1",
         params![task_id],
@@ -339,6 +343,7 @@ pub(crate) fn transition_transfer_in_transaction(
     next_state: TransferState,
     patch: TransferPatch,
 ) -> Result<TransferTask, TransitionError> {
+    // 当前行必须仍处于调用方观察到的修订。
     let current = conn
         .query_row(
             "SELECT * FROM transfer_queue WHERE id=?1",
@@ -355,6 +360,7 @@ pub(crate) fn transition_transfer_in_transaction(
         });
     }
 
+    // 生命周期边只允许状态机合同中声明的迁移。
     let from = current.state_kind()?;
     if !can_transition(from, next_state) {
         return Err(TransitionError::IllegalTransition {
@@ -363,6 +369,7 @@ pub(crate) fn transition_transfer_in_transaction(
         });
     }
 
+    // 可空字段使用 Keep/Set/Clear 三态，避免把未修改误写成 NULL。
     let TransferPatch {
         error_kind,
         error_message,
@@ -382,6 +389,7 @@ pub(crate) fn transition_transfer_in_transaction(
     let (remote_result_file_id_mode, remote_result_file_id) = nullable_patch(remote_result_file_id);
     let (session_url_mode, session_url) = nullable_patch(session_url);
 
+    // revision 条件让并发迁移最多一个成功。
     let changed = conn.execute(
         "UPDATE transfer_queue SET
             state=?1,
@@ -424,6 +432,7 @@ pub(crate) fn transition_transfer_in_transaction(
         });
     }
 
+    // 事务调用方继续使用数据库返回的权威任务快照。
     let updated = conn
         .query_row(
             "SELECT * FROM transfer_queue WHERE id=?1",

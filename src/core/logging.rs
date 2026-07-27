@@ -9,6 +9,7 @@ use std::path::PathBuf;
 
 use parking_lot::Mutex;
 use serde::Serialize;
+use specta::Type;
 use tracing::field::{Field, Visit};
 use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::layer::{Context, Layer};
@@ -20,7 +21,7 @@ use crate::error::AppResult;
 const MAX_BUFFER_SIZE: usize = 1000;
 
 /// 日志级别（前端展示用，对齐 dart logging 的 Level）
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Type)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum LogLevel {
     Error,
@@ -44,7 +45,7 @@ impl From<Level> for LogLevel {
 }
 
 /// 单条日志记录（对齐 dart `LogRecord`）
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Type)]
 pub struct LogRecord {
     /// 级别
     pub level: LogLevel,

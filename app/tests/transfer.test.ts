@@ -9,6 +9,9 @@ import {
 } from "@/api/transfer";
 import { useTransferStore } from "@/stores/transfer";
 
+/**
+ * 构造满足当前测试合同的传输任务。
+ */
 function task(id: number, state: TransferState): TransferTask {
   return {
     id,
@@ -44,6 +47,7 @@ describe("transfer store 状态派生", () => {
   beforeEach(() => setActivePinia(createPinia()));
 
   it("分别统计 9 个后端状态并保持终态不偏移", () => {
+    // 当前测试使用的 Store 实例。
     const store = useTransferStore();
     store.tasks = [
       task(1, TRANSFER_STATE.PENDING),
@@ -77,6 +81,7 @@ describe("transfer store 状态派生", () => {
     ["VerifyingRemote", TRANSFER_STATE.VERIFYING_REMOTE],
     ["RestartRequired", TRANSFER_STATE.RESTART_REQUIRED],
   ] as const)("%s 仍属于活动任务", (_name, state) => {
+    // 当前测试使用的 Store 实例。
     const store = useTransferStore();
     store.tasks = [task(1, state)];
 

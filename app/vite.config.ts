@@ -6,6 +6,7 @@ import { fileURLToPath, URL } from "node:url";
 // Tauri 用固定端口 1420，HMR 与 Rust 端 devUrl 对齐
 const host = process.env.TAURI_DEV_HOST;
 
+// 当前持久化配置。
 const config: UserConfig = {
   plugins: [vue()],
 

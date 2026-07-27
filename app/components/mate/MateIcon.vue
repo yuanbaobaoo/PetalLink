@@ -3,14 +3,21 @@
 import { computed } from "vue";
 
 interface Props {
-  /** 图标名（不带 i- 前缀），如 "cloud" / "folder" / "search" */
+  /**
+   * 图标名（不带 i- 前缀），如 "cloud" / "folder" / "search"
+   */
   name: string;
-  /** 图标尺寸 px（design 默认 16，传输列表 18，侧边栏 Logo 20） */
+  /**
+   * 图标尺寸 px（design 默认 16，传输列表 18，侧边栏 Logo 20）
+   */
   size?: number;
-  /** 是否旋转（同步中图标用，对齐 §8 .icon-spin） */
+  /**
+   * 是否旋转（同步中图标用，对齐 §8 .icon-spin）
+   */
   spin?: boolean;
 }
 
+// 组件输入参数。
 const props = withDefaults(defineProps<Props>(), {
   size: 16,
   spin: false,

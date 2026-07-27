@@ -417,6 +417,7 @@ impl SyncEngine {
         changes: &[crate::drive::changes_api::Change],
     ) -> AppResult<()> {
         use crate::drive::changes_api::ChangeKind;
+        // 反向索引用于按 fileId 定位旧路径和父目录。
         let mut id_to_path: HashMap<String, String> = path_to_id
             .iter()
             .map(|(path, id)| (id.clone(), path.clone()))
@@ -425,9 +426,11 @@ impl SyncEngine {
             id_to_path.insert(root_id.to_string(), String::new());
         }
 
+        // 所有变更先应用到候选树，任一歧义都会放弃整批提交。
         for change in changes {
             match change.kind {
                 ChangeKind::Removed => {
+                    // 删除墓碑递归移除整棵子树及双向索引。
                     let Some(relative_path) = id_to_path.get(change.file_id()).cloned() else {
                         // 已从候选树删除的墓碑按幂等空操作处理。
                         continue;
@@ -450,6 +453,7 @@ impl SyncEngine {
                     }
                 }
                 ChangeKind::Modified => {
+                    // 修改事件必须携带可构造完整路径的文件与唯一父目录。
                     let file = change.file().ok_or_else(|| {
                         AppError::generic(format!(
                             "非删除 Change 缺少完整文件：{}",
@@ -483,6 +487,7 @@ impl SyncEngine {
                         format!("{parent_path}/{}", file.name)
                     };
 
+                    // 已知 fileId 路径变化时原子重键整棵子树。
                     if let Some(existing_path) = id_to_path.get(change.file_id()).cloned() {
                         if existing_path.is_empty() {
                             return Err(AppError::generic("Changes 不支持修改云盘根目录"));
@@ -507,6 +512,7 @@ impl SyncEngine {
                         }
                     };
 
+                    // 最后写入三份索引，保持路径与 fileId 一一对应。
                     tree.insert(desired_path.clone(), file.clone());
                     path_to_id.insert(desired_path.clone(), change.file_id().to_string());
                     id_to_path.insert(change.file_id().to_string(), desired_path);

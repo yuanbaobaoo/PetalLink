@@ -19,6 +19,8 @@ mod data;
 pub mod drive;
 /// 统一错误模型。
 pub mod error;
+/// Tauri IPC 合同与 TypeScript bindings。
+pub mod ipc;
 /// 本地挂载与文件监听。
 mod mount;
 /// 桌面平台集成。
@@ -95,6 +97,11 @@ pub fn run() {
     init_logger();
     load_env();
 
+    #[cfg(debug_assertions)]
+    ipc::export_bindings();
+
+    let ipc_builder = ipc::builder();
+
     tracing::info!(
         bundle_id = constants::BUNDLE_IDENTIFIER,
         version = constants::APP_VERSION,
@@ -128,65 +135,7 @@ pub fn run() {
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .invoke_handler(tauri::generate_handler![
-            // 授权命令
-            commands::auth_check_secret,
-            commands::auth_restore,
-            commands::auth_login,
-            commands::auth_cancel_login,
-            commands::auth_logout,
-            commands::auth_get_user_info,
-            commands::auth_is_logged_in,
-            // 云盘命令
-            commands::drive_list,
-            commands::drive_list_all,
-            commands::drive_get_file,
-            commands::drive_create_folder,
-            commands::drive_delete_file,
-            commands::drive_rename_file,
-            commands::drive_move_file,
-            commands::drive_search,
-            commands::drive_get_thumbnail,
-            commands::drive_get_about,
-            commands::drive_download_file,
-            commands::drive_upload_file,
-            // 同步命令
-            commands::sync_manual_refresh,
-            commands::sync_check_safe_free_up,
-            commands::sync_check_file_local_status,
-            commands::sync_batch_file_status,
-            commands::sync_free_up_space,
-            commands::sync_free_up_batch,
-            commands::sync_list_freeable_in_folder,
-            commands::sync_download_on_demand,
-            commands::sync_folder_recursive,
-            commands::sync_retry_failed,
-            commands::sync_state,
-            commands::sync_items_by_folder,
-            // 配置命令
-            commands::config_load,
-            commands::config_save,
-            commands::tray_set_visible,
-            commands::config_export_json,
-            commands::config_import_json,
-            // 传输命令
-            commands::transfer_list_all,
-            commands::transfer_has_active,
-            commands::transfer_clear_completed,
-            commands::transfer_clear_failed,
-            commands::transfer_clear_finished,
-            commands::transfer_retry,
-            // 平台命令
-            commands::open_in_finder,
-            commands::launch_at_login_is_enabled,
-            commands::launch_at_login_set_enabled,
-            commands::tray_is_visible,
-            commands::app_clear_cache,
-            commands::logs_list,
-            commands::logs_export,
-            commands::logs_clear,
-            commands::app_get_version,
-        ])
+        .invoke_handler(ipc_builder.invoke_handler())
         // 关窗拦截：关闭按钮/Cmd+W → 隐藏到后台 accessory（不退出），仅 tray 退出放行
         .on_window_event(|window, event| {
             match event {
@@ -208,7 +157,8 @@ pub fn run() {
                 _ => {}
             }
         })
-        .setup(|app| {
+        .setup(move |app| {
+            ipc_builder.mount_events(app);
             // 最早阶段：根据 --hidden 参数设置 activationPolicy
             platform::activation::init_activation_policy();
             // ★ 必须最早安装：拦截 Dock/Cmd+Q 退出，防止 macOS 直接杀进程

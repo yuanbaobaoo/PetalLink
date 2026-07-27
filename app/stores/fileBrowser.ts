@@ -8,7 +8,9 @@ import * as driveApi from "@/api/drive";
 import type { DriveFile } from "@/api/drive";
 import { extractErrorMessage } from "@/utils/error";
 
-/** 文件夹位置 */
+/**
+ * 文件夹位置
+ */
 export interface FolderLocation {
   id: string;
   name: string;
@@ -17,6 +19,7 @@ export interface FolderLocation {
 // 根目录
 export const ROOT: FolderLocation = { id: "", name: "我的云盘" };
 
+// 全局文件浏览器 Store。
 export const useFileBrowserStore = defineStore("fileBrowser", () => {
   // 路径栈
   const pathStack = ref<FolderLocation[]>([ROOT]);
@@ -49,32 +52,42 @@ export const useFileBrowserStore = defineStore("fileBrowser", () => {
     }
   }
 
-  /** 加载根目录 */
+  /**
+   * 加载根目录
+   */
   async function loadRoot(): Promise<void> {
     pathStack.value = [ROOT];
     await loadCurrent();
   }
 
-  /** 进入文件夹 */
+  /**
+   * 进入文件夹
+   */
   async function enterFolder(folder: DriveFile): Promise<void> {
     if (!driveApi.isFolder(folder)) return;
     pathStack.value.push({ id: folder.id, name: folder.name });
     await loadCurrent();
   }
 
-  /** 跳转到路径中的第 i 级 */
+  /**
+   * 跳转到路径中的第 i 级
+   */
   async function jumpTo(index: number): Promise<void> {
     pathStack.value = pathStack.value.slice(0, index + 1);
     await loadCurrent();
   }
 
-  /** 返回上级 */
+  /**
+   * 返回上级
+   */
   async function goUp(): Promise<void> {
     if (pathStack.value.length <= 1) return;
     await jumpTo(pathStack.value.length - 2);
   }
 
-  /** 刷新当前目录（静默：已有列表不闪 loading 遮罩，失败保留旧数据） */
+  /**
+   * 刷新当前目录（静默：已有列表不闪 loading 遮罩，失败保留旧数据）
+   */
   async function refresh(): Promise<void> {
     await loadCurrent(true);
   }

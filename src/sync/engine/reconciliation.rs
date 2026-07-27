@@ -251,6 +251,7 @@ impl SyncEngine {
         cloud: &HashMap<String, DriveFile>,
         blocked_changes: &[BlockedPathChange],
     ) -> AppResult<FailedRecordReconciliation> {
+        // 失败修复与残余清理必须同事务提交，避免只完成其中一半。
         let conn = self.db.lock();
         let transaction = conn
             .unchecked_transaction()
@@ -258,6 +259,7 @@ impl SyncEngine {
         let items = repository::load_all(&transaction)?;
         let mut reconciliation = FailedRecordReconciliation::default();
 
+        // 仅复核未被当前变更阻塞的失败记录。
         for item in items
             .iter()
             .filter(|item| item.status == repository::sync_status::FAILED)
@@ -269,6 +271,7 @@ impl SyncEngine {
                 )
             })
         {
+            // 两端同时存在才具备自动恢复为已同步的充分条件。
             let (local_entry, cloud_file) =
                 match (local.get(&item.local_path), cloud.get(&item.local_path)) {
                     (None, None) => continue,
@@ -293,6 +296,7 @@ impl SyncEngine {
                 reconciliation.type_conflict += 1;
                 continue;
             }
+            // 目录没有内容哈希，身份与类型一致即可恢复基线。
             if local_entry.is_folder && cloud_file.is_folder() {
                 let updated = transaction
                     .execute(
@@ -337,6 +341,7 @@ impl SyncEngine {
                 reconciliation.type_conflict += 1;
                 continue;
             }
+            // 文件必须同时匹配本地与云端快照，不能仅凭 fileId 清错。
             let file_converged = !local_entry.is_placeholder
                 && item.local_size == Some(local_entry.size as i64)
                 && item.local_mtime == Some(local_entry.mtime)
@@ -371,6 +376,7 @@ impl SyncEngine {
             }
         }
 
+        // 两端均已消失的基线可清理，但活跃传输仍拥有该路径时必须保留。
         for item in items
             .iter()
             .filter(|item| {
@@ -405,6 +411,7 @@ impl SyncEngine {
                 reconciliation.stale_transfer_blocked += 1;
             }
         }
+        // 在提交前统计最终失败数，保证日志与事务结果属于同一快照。
         reconciliation.remaining_failed = transaction
             .query_row(
                 "SELECT COUNT(*) FROM sync_items WHERE status=?1",

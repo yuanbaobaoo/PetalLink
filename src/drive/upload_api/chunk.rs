@@ -25,6 +25,7 @@ impl UploadApi {
         chunk_len: u64,
         total_size: u64,
     ) -> AppResult<ChunkResult> {
+        // 先验证本地范围，防止构造越界或空分片请求。
         let Some(chunk_end_exclusive) = offset.checked_add(chunk_len) else {
             return Err(AppError::generic("上传分片边界溢出"));
         };
@@ -35,6 +36,7 @@ impl UploadApi {
         let end = offset + chunk_len - 1;
         let content_range = format!("bytes {offset}-{end}/{total_size}");
         let mut auth_replayed = false;
+        // 写请求传输失败时结果不确定，必须查询同一会话而不是直接重发。
         let mut response = match self
             .send_chunk_request(&url, token, &content_range, chunk)
             .await
@@ -52,6 +54,7 @@ impl UploadApi {
             }
         };
 
+        // 认证失败只允许原样重放一次，避免无限刷新循环。
         if response.status() == StatusCode::UNAUTHORIZED {
             let refreshed = self.client.auth().refresher().refresh().await?;
             *token = refreshed.access_token;
@@ -74,8 +77,10 @@ impl UploadApi {
             };
         }
 
+        // 服务端可能轮换 Location，解析任何正文前先持久化最新会话地址。
         self.update_session_location(session, &response)?;
         let status = response.status();
+        // 308 只信任服务端确认偏移，绝不按本地已发送字节推进。
         if status.as_u16() == 308 {
             let body = response.json::<Value>().await.map_err(|error| {
                 remote_ambiguity(&format!("308 分片响应无法解析：{error}"), auth_replayed)
@@ -92,6 +97,7 @@ impl UploadApi {
             return Ok(incomplete_result(&body, uploaded));
         }
 
+        // 5xx 与超时可能已写入，先查询会话；确定性 4xx 直接返回。
         if !status.is_success() {
             let should_query = status.is_server_error() || status == StatusCode::REQUEST_TIMEOUT;
             let original =
@@ -104,6 +110,7 @@ impl UploadApi {
             return Err(original);
         }
 
+        // 2xx 仍需完整 File 或显式偏移，无法解析同样属于写入歧义。
         let body = match response.json::<Value>().await {
             Ok(body) => body,
             Err(error) => {
@@ -189,6 +196,7 @@ impl UploadApi {
         token: &mut String,
         total_size: u64,
     ) -> AppResult<ChunkResult> {
+        // 零长度 PUT 查询同一会话，不产生新的上传会话。
         let url = self.session_request_url(session)?;
         let content_range = format!("bytes */{total_size}");
         let mut auth_replayed = false;
@@ -202,6 +210,7 @@ impl UploadApi {
                     false,
                 )
             })?;
+        // 查询是只读语义，但认证刷新同样限制为一次。
         if response.status() == StatusCode::UNAUTHORIZED {
             let refreshed = self.client.auth().refresher().refresh().await?;
             *token = refreshed.access_token;
@@ -218,8 +227,10 @@ impl UploadApi {
                 })?;
         }
 
+        // Location 轮换在 308 和最终响应中都可能发生。
         self.update_session_location(session, &response)?;
         let status = response.status();
+        // 未完成响应只返回服务端确认偏移。
         if status.as_u16() == 308 {
             let body = response.json::<Value>().await.map_err(|error| {
                 remote_ambiguity(
@@ -242,6 +253,7 @@ impl UploadApi {
             .await);
         }
 
+        // 最终 2xx 必须能证明完整文件或给出有效中间偏移。
         let body = response.json::<Value>().await.map_err(|error| {
             remote_ambiguity(&format!("上传状态成功响应无法解析：{error}"), auth_replayed)
         })?;

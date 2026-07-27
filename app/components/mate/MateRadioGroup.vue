@@ -2,6 +2,7 @@
 <script setup lang="ts">
 import { provide, ref } from "vue";
 
+// 组件输入参数。
 const props = defineProps<{
   modelValue: string | number | null;
 }>();
@@ -9,6 +10,7 @@ const props = defineProps<{
 // 用 ref 持有当前值，provide 一个可被 MateRadio 调用的 select 函数
 const current = ref<string | number | null>(props.modelValue);
 
+// 组件事件发送器。
 const emit = defineEmits<{ (e: "update:modelValue", v: string | number): void }>();
 provide("mate-radio-group", {
   get value() { return current.value; },

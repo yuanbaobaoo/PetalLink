@@ -8,8 +8,10 @@ import { MateButton, MateIcon } from "@/components/mate";
 import { useUpdaterStore } from "@/stores/updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 
+// 应用更新状态。
 const updater = useUpdaterStore();
 
+// 当前内容是否可见或可参与后续处理。
 const visible = computed(() => {
   return updater.dialogOpen && (
     updater.phase === "available" ||
@@ -21,6 +23,7 @@ const visible = computed(() => {
   );
 });
 
+// 当前更新阶段的弹窗标题。
 const title = computed(() => {
   switch (updater.phase) {
     case "available": return "发现新版本";
@@ -33,16 +36,19 @@ const title = computed(() => {
   }
 });
 
+// 可展示的版本标签。
 const versionLabel = computed(() => {
   return updater.updateInfo?.version
     ? `v${updater.updateInfo.version}`
     : "";
 });
 
+// 格式化后的更新说明。
 const releaseNotes = computed(() => {
   return updater.updateInfo?.body ?? "";
 });
 
+// 是否正在等待活跃传输结束。
 const transferWaiting = computed(() => updater.phase === "waitingTransfer");
 
 // 头部 icon badge 的配色类名（v2：品牌 / 成功 / 失败）
@@ -52,10 +58,14 @@ const badgeClass = computed(() => {
   return "";
 });
 
+/**
+ * 确认传输状态后开始下载并安装更新。
+ */
 async function handleStartUpdate(): Promise<void> {
   await updater.downloadAndInstall();
   // 下载完成后自动等待传输
   if (updater.phase === "downloaded") {
+    // 用户确认或等待操作的结果。
     const ok = await updater.waitForTransfers();
     if (ok) {
       await relaunch();
@@ -63,14 +73,23 @@ async function handleStartUpdate(): Promise<void> {
   }
 }
 
+/**
+ * 重新执行上一次失败的初始化动作。
+ */
 async function handleRetry(): Promise<void> {
   await updater.downloadAndInstall();
 }
 
+/**
+ * 请求后端重启应用以完成更新。
+ */
 async function handleRelaunch(): Promise<void> {
   await relaunch();
 }
 
+/**
+ * 关闭当前浮层并同步相关界面状态。
+ */
 function handleClose(): void {
   updater.closeDialog();
 }

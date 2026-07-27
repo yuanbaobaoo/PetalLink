@@ -5,7 +5,10 @@
   "type": "module",
   "description": "PetalLink 前端 —— Vue3 + TS，与 Tauri Rust 后端通信",
   "scripts": {
+    "bindings": "cd .. && cargo test export_typescript_bindings --lib -- --nocapture",
+    "predev": "npm run bindings",
     "dev": "vite",
+    "prebuild": "npm run bindings",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
     "type-check": "vue-tsc --noEmit",

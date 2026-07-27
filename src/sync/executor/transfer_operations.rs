@@ -180,6 +180,7 @@ impl TransferOperations for ExecutorTransferOperations {
         task: &TransferTask,
         progress: &TaskProgressReporter,
     ) -> Result<TaskExecutionOutcome, TaskExecutionError> {
+        // 持久化任务已经过静态校验，这里解析执行所需的稳定字段。
         let operation = task
             .operation_kind()
             .map_err(|error| AppError::generic(error.to_string()))?
@@ -194,6 +195,7 @@ impl TransferOperations for ExecutorTransferOperations {
                 // 远端写入前再次核验上传源快照。
                 verify_source_snapshot(task, &local_path)
                     .map_err(|error| TaskExecutionError::RestartRequired(error.to_string()))?;
+                // 更新校验远端版本，创建校验同名碰撞，二者都禁止盲目覆盖。
                 if operation == TransferOperation::Update {
                     let file_id = task.file_id.as_deref().expect("preflight requires file id");
                     let current = self.files_api.get(file_id).await?;
@@ -225,6 +227,7 @@ impl TransferOperations for ExecutorTransferOperations {
                         ));
                     }
                 }
+                // 进度与续传回调只回写当前 lease，过期回调会被 reporter 丢弃。
                 let total = task.total_size;
                 let progress_reporter = progress.clone();
                 let on_progress: crate::drive::upload_api::ProgressFn = Box::new(move |ratio| {
@@ -247,6 +250,7 @@ impl TransferOperations for ExecutorTransferOperations {
                     });
                 let parent_id = task.parent_file_id.as_deref();
                 // 持久化会话即使偏移为零也必须走续传核验。
+                // 已持久化 session 的创建任务优先续传，不能退化为重复创建。
                 let upload_result = if operation == TransferOperation::Update {
                     self.upload_api
                         .upload_update(
@@ -282,24 +286,24 @@ impl TransferOperations for ExecutorTransferOperations {
                         .upload(&local_path, parent_id, Some(&on_progress), Some(&on_resume))
                         .await
                 };
+                // 上传失败同时通知 UI，结算仍由调用层统一写入任务状态。
                 let uploaded = match upload_result {
                     Ok(uploaded) => uploaded,
                     Err(error) => {
                         if let Some(app) = &self.app_handle {
-                            use tauri::Emitter;
                             let relative_path = task.relative_path.as_deref().unwrap_or(&task.name);
-                            let _ = app.emit(
-                                "upload_failed",
-                                serde_json::json!({
-                                    "rel_path": relative_path,
-                                    "name": task.name,
-                                    "error": error.to_string(),
-                                }),
-                            );
+                            use tauri_specta::Event;
+                            let _ = crate::ipc::UploadFailedEvent {
+                                rel_path: relative_path.to_string(),
+                                name: task.name.clone(),
+                                error: error.to_string(),
+                            }
+                            .emit(app);
                         }
                         return Err(TaskExecutionError::App(error));
                     }
                 };
+                // 服务端只返回 ID 时补取权威元数据；无法确认则进入远端核验态。
                 let (cloud_file, disposition) = if uploaded.edited_time.is_none() {
                     match self.files_api.get(&uploaded.id).await {
                         Ok(full) if full.id == uploaded.id && full.edited_time.is_some() => {
@@ -340,6 +344,7 @@ impl TransferOperations for ExecutorTransferOperations {
                 })
             }
             TransferOperation::Download | TransferOperation::DownloadUpdate => {
+                // 下载前准备父目录并保护可能被用户修改的占位符。
                 if let Some(parent) = local_path.parent() {
                     tokio::fs::create_dir_all(parent)
                         .await
@@ -358,6 +363,7 @@ impl TransferOperations for ExecutorTransferOperations {
                         }
                     });
                 let file_id = task.file_id.as_deref().expect("preflight requires file id");
+                // 期望快照让落盘前的最终替换具备并发修改保护。
                 let expectation = DownloadExpectation {
                     edited_time_ms: task.expected_cloud_edited_time,
                     size: u64::try_from(task.total_size).ok(),
@@ -378,6 +384,7 @@ impl TransferOperations for ExecutorTransferOperations {
                     placeholder_file_id: (operation == TransferOperation::Download)
                         .then(|| file_id.to_string()),
                 };
+                // 下载成功后再写 xattr；失败时保留原目标或恢复产物。
                 self.download_api
                     .download_with_expectation(
                         file_id,
@@ -398,12 +405,14 @@ impl TransferOperations for ExecutorTransferOperations {
 
     /// 根据远程 ID、父目录、大小、时间与哈希核实写入结果。
     async fn verify_remote(&self, task: &TransferTask) -> AppResult<RemoteVerification> {
+        // 只对可证明身份的上传写入执行远端核验。
         let operation = task
             .operation_kind()
             .map_err(|error| AppError::generic(error.to_string()))?
             .ok_or_else(|| AppError::generic("远端核验缺少 operation"))?;
         match operation {
             TransferOperation::Create => {
+                // 已持久化远端 ID 时优先按 ID 精确核验。
                 if let Some(remote_id) = task
                     .remote_result_file_id
                     .as_deref()
@@ -426,6 +435,7 @@ impl TransferOperations for ExecutorTransferOperations {
                             "远端结果 ID 存在，但名称或大小与创建任务不一致".to_string(),
                         ));
                     }
+                    // 服务端提供可比哈希时，同时核对当前上传源内容。
                     let local_sha256 = if comparable_sha256(&file).is_some() {
                         self.source_sha256_if_current(task).await?
                     } else {
@@ -439,6 +449,7 @@ impl TransferOperations for ExecutorTransferOperations {
                     return self.committed_upload(task, file).await;
                 }
 
+                // 缺少结果 ID 时在父目录内按名称、大小和创建窗口收敛。
                 let expected_size = task.source_size.unwrap_or(task.total_size);
                 let mut candidates = Vec::new();
                 let mut missing_time_candidates = Vec::new();
@@ -468,6 +479,7 @@ impl TransferOperations for ExecutorTransferOperations {
                         Some(_) => {}
                     }
                 }
+                // 仅在候选提供可比哈希时计算本地 SHA-256。
                 let needs_local_sha256 = candidates
                     .iter()
                     .chain(missing_time_candidates.iter())
@@ -480,6 +492,7 @@ impl TransferOperations for ExecutorTransferOperations {
                 candidates.retain(|file| content_hash_matches(file, local_sha256.as_deref()));
                 missing_time_candidates
                     .retain(|file| content_hash_matches(file, local_sha256.as_deref()));
+                // 唯一候选才可证明已提交，零个或多个分别表示未提交与歧义。
                 if candidates.len() == 1 {
                     return self.committed_upload(task, candidates.remove(0)).await;
                 }
@@ -494,6 +507,7 @@ impl TransferOperations for ExecutorTransferOperations {
                 }
             }
             TransferOperation::Update => {
+                // Update 必须沿用原 fileId，绝不能降级成 Create。
                 let file_id = task
                     .file_id
                     .as_deref()
@@ -507,6 +521,7 @@ impl TransferOperations for ExecutorTransferOperations {
                     }
                     Err(error) => return Err(error),
                 };
+                // 持久化结果 ID 可在 editedTime 延迟时证明本次写入。
                 if let Some(remote_result_id) = task
                     .remote_result_file_id
                     .as_deref()
@@ -524,6 +539,7 @@ impl TransferOperations for ExecutorTransferOperations {
                         "更新已返回远端结果 ID，但当前资源身份不一致".to_string(),
                     ));
                 }
+                // 版本未变化表示写入未提交，变化后还需核对名称与大小。
                 let edited_time = file.edited_time.map(|time| time.timestamp_millis());
                 if edited_time == task.expected_cloud_edited_time {
                     return Ok(RemoteVerification::NotCommitted);
@@ -627,6 +643,7 @@ impl SyncExecutor {
 
     /// 根据动作类型与当前本地快照构造待入队传输任务。
     fn pending_task_for_action(&self, action: &SyncAction) -> TransferTask {
+        // 根据动作和目标现状收窄为可持久化操作类型。
         let operation = match action.action_type {
             SyncActionType::Upload if action.file_id.is_some() => TransferOperation::Update,
             SyncActionType::Upload => TransferOperation::Create,
@@ -652,12 +669,14 @@ impl SyncExecutor {
             }
             _ => unreachable!("only upload/download create durable transfer tasks"),
         };
+        // direction 与 operation 必须保持一一对应。
         let direction = match operation {
             TransferOperation::Create | TransferOperation::Update => transfer_direction::UPLOAD,
             TransferOperation::Download => transfer_direction::DOWNLOAD,
             TransferOperation::DownloadUpdate => transfer_direction::DOWNLOAD_UPDATE,
             _ => unreachable!(),
         };
+        // 上传和覆盖下载都需要锁定本地源/目标快照。
         let source_metadata = matches!(
             operation,
             TransferOperation::Create
@@ -681,6 +700,7 @@ impl SyncExecutor {
         let source_size = source_metadata
             .as_ref()
             .map(|metadata| metadata.len() as i64);
+        // 上传大小来自本地快照，下载大小来自云端权威元数据。
         let total_size = if matches!(
             operation,
             TransferOperation::Create | TransferOperation::Update
@@ -693,6 +713,7 @@ impl SyncExecutor {
                 .map(|file| file.size)
                 .unwrap_or(0)
         };
+        // 新任务统一从 id=0/revision=0/Pending 进入准入层。
         TransferTask {
             id: 0,
             direction,

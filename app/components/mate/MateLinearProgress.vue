@@ -2,11 +2,16 @@
 <script setup lang="ts">
 import { computed } from "vue";
 
+// 组件输入参数。
 const props = withDefaults(defineProps<{
-  /** 0.0-1.0；null = 不确定 */
+  /**
+   * 0.0-1.0；null = 不确定
+   */
   value?: number | null;
   height?: number;
-  /** 填充背景（支持渐变，默认品牌渐变） */
+  /**
+   * 填充背景（支持渐变，默认品牌渐变）
+   */
   color?: string;
 }>(), {
   value: null,
@@ -14,10 +19,12 @@ const props = withDefaults(defineProps<{
   color: "var(--grad-brand)",
 });
 
+// 进度是否为不确定模式。
 const isIndeterminate = computed(() => props.value === null || props.value === undefined);
 // 填充宽度百分比
 const fillWidth = computed(() => {
   if (isIndeterminate.value) return "100%";
+  // 限制在有效范围内的数值。
   const v = Math.max(0, Math.min(1, props.value as number));
   return `${v * 100}%`;
 });

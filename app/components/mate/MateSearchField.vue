@@ -2,6 +2,7 @@
 <script setup lang="ts">
 import MateTextField from "./MateTextField.vue";
 
+// 组件输入参数。
 const props = withDefaults(defineProps<{
   modelValue?: string;
   placeholder?: string;
@@ -14,6 +15,7 @@ const props = withDefaults(defineProps<{
   maxWidth: 0,
 });
 
+// 组件事件发送器。
 const emit = defineEmits<{
   (e: "update:modelValue", v: string): void;
   (e: "submit", v: string): void;

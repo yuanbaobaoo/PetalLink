@@ -10,6 +10,7 @@ use super::{drop_runtime_async, relaunch, DB};
 
 /// 在 Finder 中打开路径。
 #[tauri::command]
+#[specta::specta]
 pub async fn open_in_finder(path: String) -> AppResult<bool> {
     #[cfg(target_os = "macos")]
     {
@@ -29,12 +30,14 @@ pub async fn open_in_finder(path: String) -> AppResult<bool> {
 
 /// 检查开机自启。
 #[tauri::command]
+#[specta::specta]
 pub fn launch_at_login_is_enabled() -> bool {
     crate::platform::launch_at_login::is_enabled()
 }
 
 /// 设置开机自启。
 #[tauri::command]
+#[specta::specta]
 pub fn launch_at_login_set_enabled(enabled: bool) -> bool {
     match crate::platform::launch_at_login::set_enabled(enabled) {
         Ok(()) => true,
@@ -47,12 +50,14 @@ pub fn launch_at_login_set_enabled(enabled: bool) -> bool {
 
 /// 查询托盘图标当前实际可见性（运行时真实状态，而非配置文件里的目标值）。
 #[tauri::command]
+#[specta::specta]
 pub fn tray_is_visible() -> bool {
     crate::platform::activation::is_tray_icon_visible()
 }
 
 /// 清空应用缓存。
 #[tauri::command]
+#[specta::specta]
 pub async fn app_clear_cache(app: AppHandle) -> AppResult<()> {
     // 停止运行时
     drop_runtime_async().await;
@@ -81,12 +86,14 @@ pub async fn app_clear_cache(app: AppHandle) -> AppResult<()> {
 
 /// 读取最近日志。
 #[tauri::command]
+#[specta::specta]
 pub fn logs_list() -> AppResult<Vec<crate::core::logging::LogRecord>> {
     Ok(crate::core::logging::snapshot())
 }
 
 /// 导出完整日志。
 #[tauri::command]
+#[specta::specta]
 pub fn logs_export(path: String) -> AppResult<()> {
     let dir = crate::core::logging::log_dir()?;
     let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
@@ -141,6 +148,7 @@ pub fn logs_export(path: String) -> AppResult<()> {
 
 /// 清空内存日志缓冲区；磁盘滚动日志由保留策略单独管理。
 #[tauri::command]
+#[specta::specta]
 pub fn logs_clear() -> AppResult<()> {
     crate::core::logging::clear();
     Ok(())
@@ -148,6 +156,7 @@ pub fn logs_clear() -> AppResult<()> {
 
 /// 获取应用版本。
 #[tauri::command]
+#[specta::specta]
 pub fn app_get_version() -> String {
     crate::constants::APP_VERSION.to_string()
 }

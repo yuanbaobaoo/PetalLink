@@ -4,10 +4,11 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use specta::Type;
 
 /// OAuth Token 对（需求 F-AUTH-03）。
 /// access_token + refresh_token + 过期时间，加密持久化到本地文件（机器码绑定）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct TokenPair {
     pub access_token: String,
     pub refresh_token: String,
@@ -68,7 +69,7 @@ impl TokenPair {
 
 /// 华为账号信息 DTO（合并自多个端点响应）。
 /// 对齐 dart `UserInfo`。
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, Type)]
 pub struct UserInfo {
     pub sub: Option<String>,
     pub open_id: Option<String>,

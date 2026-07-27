@@ -120,6 +120,7 @@ impl UploadApi {
         on_progress: Option<&ProgressFn>,
         on_resume_progress: Option<&ResumeProgressFn>,
     ) -> AppResult<DriveFile> {
+        // 文件长度在会话内固定，执行期间源变化由任务层快照保护。
         let total_size = file_path
             .metadata()
             .map_err(|e| AppError::generic(format!("读取文件元数据失败：{e}")))?
@@ -128,6 +129,7 @@ impl UploadApi {
             .await
             .map_err(|e| AppError::generic(format!("打开文件失败：{e}")))?;
 
+        // 恢复会话必须以服务端状态为准，新会话从零开始。
         let mut offset = if verify_server_offset {
             let observed = self
                 .query_session_status(&mut session, &mut token, total_size)
@@ -154,6 +156,7 @@ impl UploadApi {
             on_resume_progress,
         );
 
+        // 分片阶段与最终状态轮询共用同一会话和认证令牌。
         let mut final_status_polls = 0;
         loop {
             if offset < total_size {
@@ -168,6 +171,7 @@ impl UploadApi {
                     .await
                     .map_err(|e| AppError::generic(format!("读取分片失败：{e}")))?;
 
+                // 单分片仅对确定可本地重试的错误有限重试。
                 let mut last_err: Option<AppError> = None;
                 let mut chunk_result: Option<ChunkResult> = None;
                 for attempt in 1..=CHUNK_RETRIES {
@@ -207,6 +211,7 @@ impl UploadApi {
                         }
                     }
                 }
+                // 只有服务端确认推进后才更新 offset 并持久化断点。
                 let result = chunk_result
                     .ok_or_else(|| last_err.unwrap_or_else(|| AppError::generic("分片上传失败")))?;
                 if let Some(file) = result.final_file {
@@ -240,6 +245,7 @@ impl UploadApi {
 
             // 数据范围已全部确认，但只有最终 200 + 完整 File 才能结算完成。
             final_status_polls += 1;
+            // 全部字节确认后继续查询，直到拿到完整 File 或明确进入歧义态。
             match self
                 .query_session_status(&mut session, &mut token, total_size)
                 .await

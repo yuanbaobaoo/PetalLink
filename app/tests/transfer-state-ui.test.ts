@@ -18,11 +18,15 @@ import { MateDialog } from "@/components/mate";
 import SyncStatusBar from "@/views/main/SyncStatusBar.vue";
 import TransferPopover from "@/views/main/TransferPopover.vue";
 
+/**
+ * 构造满足当前测试合同的传输任务。
+ */
 function task(
   id: number,
   state: TransferState,
   direction: TransferDirection = TRANSFER_DIR.UPLOAD,
 ): TransferTask {
+  // 测试任务对应的传输操作。
   const operation = direction === TRANSFER_DIR.DOWNLOAD
     ? TRANSFER_OPERATION.DOWNLOAD
     : direction === TRANSFER_DIR.DOWNLOAD_UPDATE
@@ -67,6 +71,7 @@ describe("TransferPopover 后端状态呈现", () => {
   });
 
   it("显示 9 状态的准确文案，且只给支持的 Failed/RestartRequired 任务重试", async () => {
+    // 当前场景的传输任务集合。
     const tasks = [
       task(1, TRANSFER_STATE.PENDING),
       task(2, TRANSFER_STATE.RUNNING),
@@ -81,6 +86,7 @@ describe("TransferPopover 后端状态呈现", () => {
     ];
     vi.spyOn(transferApi, "listAllTransfers").mockResolvedValue(tasks);
 
+    // 当前组件测试包装器。
     const wrapper = shallowMount(TransferPopover, {
       global: { plugins: [setActivePinia(createPinia())] },
     });
@@ -100,6 +106,7 @@ describe("TransferPopover 后端状态呈现", () => {
       expect(wrapper.text()).toContain(label);
     }
 
+    // 界面中允许重试的任务名称。
     const retriableNames = wrapper
       .findAll(".tp-item")
       .filter((item) => item.find(".tp-item__retry").exists())
@@ -116,6 +123,7 @@ describe("SyncStatusBar 活动态与失败事实", () => {
   beforeEach(() => {
     setActivePinia(createPinia());
     vi.restoreAllMocks();
+    // 当前同步状态。
     const sync = useSyncStore();
     sync.mountConfigured = true;
     vi.spyOn(transferApi, "listAllTransfers").mockImplementation(async () => [
@@ -129,9 +137,11 @@ describe("SyncStatusBar 活动态与失败事实", () => {
     [TRANSFER_STATE.VERIFYING_REMOTE, "正在确认同步结果…"],
     [TRANSFER_STATE.RESTART_REQUIRED, "有文件需要重新检查…"],
   ] as const)("队列 state=%s 时主页不显示同步完成", (state, expectedText) => {
+    // 当前传输队列状态。
     const transfer = useTransferStore();
     transfer.tasks = [task(1, state)];
 
+    // 当前组件测试包装器。
     const wrapper = shallowMount(SyncStatusBar);
 
     expect(wrapper.text()).toContain(expectedText);
@@ -143,6 +153,7 @@ describe("SyncStatusBar 活动态与失败事实", () => {
       task(1, TRANSFER_STATE.BACKING_OFF),
     ]);
 
+    // 当前组件测试包装器。
     const wrapper = shallowMount(SyncStatusBar);
     await flushPromises();
 
@@ -151,6 +162,7 @@ describe("SyncStatusBar 活动态与失败事实", () => {
   });
 
   it("权威快照 waitingNetwork 使用等待网络文案而非泛化的同步中", () => {
+    // 当前同步状态。
     const sync = useSyncStore();
     sync.applyState({
       revision: 1,
@@ -172,6 +184,7 @@ describe("SyncStatusBar 活动态与失败事实", () => {
       content_changed: false,
     });
 
+    // 当前组件测试包装器。
     const wrapper = shallowMount(SyncStatusBar);
 
     expect(wrapper.text()).toContain("等待网络恢复…");
@@ -179,6 +192,7 @@ describe("SyncStatusBar 活动态与失败事实", () => {
   });
 
   it("主页只显示当前同步失败，历史失败留在传输队列", () => {
+    // 当前同步状态。
     const sync = useSyncStore();
     sync.applyState({
       revision: 1,
@@ -200,6 +214,7 @@ describe("SyncStatusBar 活动态与失败事实", () => {
       content_changed: false,
     });
 
+    // 当前组件测试包装器。
     const wrapper = shallowMount(SyncStatusBar);
 
     expect(wrapper.text()).toContain("同步失败 1");

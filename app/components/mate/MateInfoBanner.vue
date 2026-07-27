@@ -2,14 +2,20 @@
 <script setup lang="ts">
 import MateIcon from "./MateIcon.vue";
 
-/** 横幅变体 */
+/**
+ * 横幅变体
+ */
 type BannerVariant = "info" | "success" | "warning" | "error";
 
 interface Props {
   variant?: BannerVariant;
-  /** 标题 */
+  /**
+   * 标题
+   */
   title?: string;
-  /** 是否可关闭 */
+  /**
+   * 是否可关闭
+   */
   closable?: boolean;
 }
 
@@ -21,16 +27,21 @@ const defaultIcon: Record<BannerVariant, string> = {
   error: "x",
 };
 
+// 组件输入参数。
 const props = withDefaults(defineProps<Props>(), {
   variant: "info",
   title: "",
   closable: false,
 });
 
+// 组件事件发送器。
 const emit = defineEmits<{
   (e: "close"): void;
 }>();
 
+/**
+ * 关闭当前浮层并同步相关界面状态。
+ */
 function handleClose(): void {
   emit("close");
 }

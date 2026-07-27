@@ -11,6 +11,7 @@ use super::{emit_sync_state, sync_engine, try_sync_engine, DB, STATUS_AGGREGATOR
 
 /// 列出传输任务。
 #[tauri::command]
+#[specta::specta]
 pub fn transfer_list_all() -> AppResult<Vec<repository::TransferTask>> {
     let conn = DB.lock();
     repository::list_all_transfers(&conn)
@@ -18,6 +19,7 @@ pub fn transfer_list_all() -> AppResult<Vec<repository::TransferTask>> {
 
 /// 检查活动传输。
 #[tauri::command]
+#[specta::specta]
 pub fn transfer_has_active() -> AppResult<bool> {
     let conn = DB.lock();
     let count: i64 = conn
@@ -56,6 +58,7 @@ fn clear_transfer_history_and_snapshot(
 
 /// 清除已完成传输。
 #[tauri::command]
+#[specta::specta]
 pub fn transfer_clear_completed(app: AppHandle) -> AppResult<()> {
     if let Some(engine) = try_sync_engine() {
         engine.clear_transfer_history_and_broadcast(true, false)?;
@@ -72,6 +75,7 @@ pub fn transfer_clear_completed(app: AppHandle) -> AppResult<()> {
 
 /// 清除失败传输。
 #[tauri::command]
+#[specta::specta]
 pub fn transfer_clear_failed(app: AppHandle) -> AppResult<()> {
     if let Some(engine) = try_sync_engine() {
         engine.clear_transfer_history_and_broadcast(false, true)?;
@@ -88,6 +92,7 @@ pub fn transfer_clear_failed(app: AppHandle) -> AppResult<()> {
 
 /// 清除已结束传输。
 #[tauri::command]
+#[specta::specta]
 pub fn transfer_clear_finished(app: AppHandle) -> AppResult<()> {
     if let Some(engine) = try_sync_engine() {
         engine.clear_transfer_history_and_broadcast(true, true)?;
@@ -104,6 +109,7 @@ pub fn transfer_clear_finished(app: AppHandle) -> AppResult<()> {
 
 /// 重试传输任务。
 #[tauri::command]
+#[specta::specta]
 pub async fn transfer_retry(task_id: i64) -> AppResult<()> {
     let engine = sync_engine()?;
     engine.retry_transfer(task_id).await

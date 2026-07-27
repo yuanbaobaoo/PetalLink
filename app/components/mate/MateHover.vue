@@ -2,8 +2,10 @@
 <script setup lang="ts">
 import { ref } from "vue";
 
+// 组件是否处于悬停态。
 const hovered = ref(false);
 
+// 组件输入参数。
 const props = withDefaults(defineProps<{ cursor?: "pointer" | "default" }>(), { cursor: "pointer" });
 </script>
 

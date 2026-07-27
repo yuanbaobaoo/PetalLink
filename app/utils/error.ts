@@ -13,24 +13,28 @@
  * @returns 用户侧提示
  */
 export function formatUserMessage(message: string): string {
+  // 并发写冲突统一提示用户先刷新云端基线。
   if (
     message.includes("远端文件已在规划后变化")
     || message.includes("云端文件版本已变化")
   ) {
     return "云端文件已更新。为避免覆盖，请同步索引后重试。";
   }
+  // 编辑中和未稳定属于可自动恢复的本地暂态。
   if (
     message.includes("用户正在编辑")
     || message.includes("文件正在编辑")
   ) {
     return "文件正在编辑，保存并关闭后会自动继续。";
   }
+  // 本地快照失效需要重新规划，不能继续复用旧任务。
   if (
     message.includes("文件尚不稳定")
     || message.includes("文件仍在变化")
   ) {
     return "文件仍在变化，稳定后会自动继续。";
   }
+  // 合同字段缺失通常来自旧任务或尚未追平的索引。
   if (
     message.includes("本地上传源已变化")
     || message.includes("本地上传源在执行前发生变化")
@@ -41,6 +45,7 @@ export function formatUserMessage(message: string): string {
   ) {
     return "本地文件已发生变化，请重新检查并重试。";
   }
+  // 断点会话不可信时必须重新开始，避免错误续传。
   if (
     message.includes("缺少 fileId")
     || message.includes("缺少真实 fileId")
@@ -59,6 +64,7 @@ export function formatUserMessage(message: string): string {
   ) {
     return "续传信息已失效，请重新开始上传。";
   }
+  // 释放空间错误按核验阶段映射为可执行建议。
   if (message.includes("找不到与路径匹配的成功同步基线")) {
     return "没有找到可用于核对的同步记录，暂时无法释放空间。";
   }
@@ -80,6 +86,7 @@ export function formatUserMessage(message: string): string {
   if (message.includes("释放租约已失效")) {
     return "文件状态已变化，请同步索引后重试。";
   }
+  // 持久化状态机名称不直接暴露给普通用户。
   if (message.includes("WaitingForNetwork")) {
     return "网络不可用，恢复后会自动继续。";
   }
@@ -95,6 +102,7 @@ export function formatUserMessage(message: string): string {
   if (message.includes("BlockedByActiveIntent")) {
     return "该文件正在执行其他同步任务，请稍后再试。";
   }
+  // 兼容历史任务中保存的旧错误措辞。
   if (message.includes("重新规划")) {
     return "文件状态已变化，请重新检查并重试。";
   }

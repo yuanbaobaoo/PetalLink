@@ -127,6 +127,7 @@ impl LocalWatcher {
         mut rx: mpsc::Receiver<Event>,
         warmup: bool,
     ) {
+        // running 锁保证同一 watcher 只启动一个事件工作器。
         {
             let mut running = self.running.lock().await;
             if *running {
@@ -134,10 +135,12 @@ impl LocalWatcher {
             }
             *running = true;
         }
+        // generation 隔离 stop/start 前后的异步任务，旧代不能再发布事件。
         let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
         let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
         *self.stop_tx.lock().await = Some(stop_tx);
 
+        // 预热期间丢弃历史 FSEvents，结束后用空集合请求一次全量补偿扫描。
         let warming_up = Arc::new(AtomicBool::new(warmup));
         if warmup {
             let warming_up = warming_up.clone();
@@ -170,6 +173,7 @@ impl LocalWatcher {
         let change_tx = self.change_tx.clone();
         let current_generation = self.generation.clone();
         let running = self.running.clone();
+        // 主工作器负责收集路径并为每批变化重置消抖计时器。
         let worker_handle = tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -190,6 +194,7 @@ impl LocalWatcher {
                         if paths.is_empty() {
                             continue;
                         }
+                        // 同一消抖窗口内按相对路径去重。
                         let mut guard = pending.lock().await;
                         if current_generation.load(Ordering::Acquire) != generation {
                             break;
@@ -201,6 +206,7 @@ impl LocalWatcher {
                         }
                         drop(guard);
 
+                        // 新事件取消旧计时器，确保安静窗口后才发布。
                         let mut cancel_guard = timer_cancel.lock().await;
                         if let Some(cancel) = cancel_guard.take() {
                             let _ = cancel.send(());
@@ -217,6 +223,7 @@ impl LocalWatcher {
                         let pending = pending.clone();
                         let change_tx = change_tx.clone();
                         let current_generation = current_generation.clone();
+                        // 计时器发布前再次核对代际，避免 stop 后迟到事件。
                         let handle = tokio::spawn(async move {
                             tokio::select! {
                                 _ = cancel_rx => {}
@@ -237,6 +244,7 @@ impl LocalWatcher {
                     }
                 }
             }
+            // 只有当前代工作器可以清除 running 标记。
             if current_generation.load(Ordering::Acquire) == generation {
                 *running.lock().await = false;
             }

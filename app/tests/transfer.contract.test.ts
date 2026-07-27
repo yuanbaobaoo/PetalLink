@@ -2,7 +2,11 @@ import { describe, expect, it } from "vitest";
 import rustTransferStateSource from "../../src/sync/transfer_state.rs?raw";
 import { TRANSFER_STATE } from "@/api/transfer";
 
+/**
+ * 从 Rust 源码提取传输状态判别值。
+ */
 function rustTransferStateDiscriminants(): Record<string, number> {
+  // Rust 枚举声明的源码片段。
   const enumBody = rustTransferStateSource.match(
     /pub enum TransferState\s*\{([\s\S]*?)\n\}/,
   )?.[1];
@@ -18,7 +22,9 @@ function rustTransferStateDiscriminants(): Record<string, number> {
 
 describe("TransferState 跨语言合同", () => {
   it("前端 discriminant 与真实 Rust TransferState 逐项一致", () => {
+    // 从 Rust 提取的状态判别值。
     const rustStates = rustTransferStateDiscriminants();
+    // Rust variant 到前端常量的映射。
     const frontendByRustVariant = {
       Pending: TRANSFER_STATE.PENDING,
       Running: TRANSFER_STATE.RUNNING,
