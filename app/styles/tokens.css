@@ -3,7 +3,7 @@
  *
  * 完整复刻 `design/assets/v2.css` 的令牌体系，并保留旧语义别名（重新映射到 v2 值），
  * 以便存量组件平滑过渡。所有组件必须引用这些变量，禁止硬编码颜色/尺寸。
- * 设计规则详见 `ai-context/design-rules.md`。
+ * 设计规则详见 `.ai-context/design-rules.md`。
  */
 
 :root {
