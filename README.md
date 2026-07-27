@@ -132,7 +132,8 @@ Tauri command、event、DTO 和共享常量统一在 Rust 侧定义，并由
 
 新增供 IPC 使用的 Rust entity 时，为其派生 `specta::Type`，并将它用于已注册的
 command 或 event 即会被递归导出；前端直接从 `app/api/generated.ts` 或现有
-`app/api/*` 适配层导入，不再复制接口定义、命令名和事件名。
+`app/api/*` 业务适配层导入，不再复制接口定义、命令名和事件名。生成的 commands
+统一通过 `app/api/tauri.ts` 调用，以便在一个入口归一化非结构化异常。
 
 ---
 
@@ -257,10 +258,10 @@ PetalLink/
 ├── app/                         # Vue3 前端
 │   ├── views/                   # 页面（Login/Main/Settings/LogViewer）
 │   ├── stores/                  # Pinia 状态管理
-│   ├── api/                     # 生成的 IPC bindings + 领域业务适配层
+│   ├── api/                     # 生成的 IPC bindings + 少量业务适配
 │   │   ├── generated.ts         # tauri-specta 自动生成，禁止手动修改
-│   │   ├── tauri.ts             # AppError 归一化
-│   │   └── auth/config/drive/sync/transfer 等领域适配
+│   │   ├── tauri.ts             # generated commands 的 invoke 与 AppError 归一化
+│   │   └── auth/config/drive/sync/transfer 等展示、校验或类型收窄适配
 │   ├── components/mate/         # Mate 组件库
 │   └── styles/                  # design token
 ├── assets/                      # 品牌图标资源（唯一图源）

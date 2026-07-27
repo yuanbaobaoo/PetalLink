@@ -3,6 +3,7 @@
  */
 import { defineStore } from "pinia";
 import { ref, computed } from "vue";
+import { commands } from "@/api/generated";
 import * as syncApi from "@/api/sync";
 import type { FailedItem } from "@/api/sync";
 import * as configApi from "@/api/config";
@@ -130,7 +131,7 @@ export const useSyncStore = defineStore("sync", () => {
         // 这里同步一次真实状态，确保 UI（状态条"正在读取云端索引…"、刷新按钮转圈）正确。
         try {
           // 当前后端权威状态。
-          const state = await syncApi.getSyncState();
+          const state = await commands.syncState();
           applyState(state);
         } catch {
           // 引擎尚未启动（配置目录但引擎启动失败）→ 忽略，保留默认状态
@@ -146,7 +147,7 @@ export const useSyncStore = defineStore("sync", () => {
    */
   async function triggerManualRefresh(): Promise<void> {
     try {
-      await syncApi.manualRefresh();
+      await commands.syncManualRefresh();
     } catch {
       // handled by event update
     }
@@ -157,7 +158,7 @@ export const useSyncStore = defineStore("sync", () => {
    */
   async function retryFailed(): Promise<void> {
     try {
-      await syncApi.retryFailed();
+      await commands.syncRetryFailed();
     } catch {
       // handled by event update
     }

@@ -13,7 +13,7 @@ use crate::drive::{
     upload_api::{ResumeSession, UploadApi},
 };
 use crate::error::{AppError, AppResult};
-use crate::mount::file_hasher::FileHasher;
+use crate::mount::file_hasher::hash_file;
 use crate::mount::manager::MountManager;
 use crate::sync::stability::StabilityChecker;
 use crate::sync::state::{ActionResult, SyncAction, SyncActionType};
@@ -80,8 +80,7 @@ impl ExecutorTransferOperations {
         if verify_source_snapshot(task, &local_path).is_err() {
             return Ok(None);
         }
-        let sha256 = FileHasher::new()
-            .hash_file(&local_path)
+        let sha256 = hash_file(&local_path)
             .await
             .map_err(|error| AppError::generic(format!("计算上传源 SHA256 失败：{error}")))?;
         if verify_source_snapshot(task, &local_path).is_err() {

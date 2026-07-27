@@ -1,8 +1,4 @@
-/**
- * Config API —— 配置读写。
- */
 import { commands } from "./generated";
-import { call, discard } from "./tauri";
 import type { AppConfig as GeneratedAppConfig } from "./generated";
 
 /**
@@ -11,36 +7,17 @@ import type { AppConfig as GeneratedAppConfig } from "./generated";
 export type AppConfig = Required<GeneratedAppConfig>;
 
 /**
- * 加载配置
+ * 加载后端保证字段完整的当前配置。
  */
-export function loadConfig(): Promise<AppConfig> {
-  return call(commands.configLoad()) as Promise<AppConfig>;
+export async function loadConfig(): Promise<AppConfig> {
+  return await commands.configLoad() as AppConfig;
 }
 
 /**
- * 保存配置
+ * 解析后端补齐默认值后的导入配置。
+ *
+ * @param json - 待校验的配置 JSON
  */
-export function saveConfig(config: AppConfig): Promise<void> {
-  return discard(commands.configSave(config));
-}
-
-/**
- * 导出配置 JSON
- */
-export function exportConfigJson(): Promise<string> {
-  return call(commands.configExportJson());
-}
-
-/**
- * 导入配置 JSON
- */
-export function importConfigJson(jsonStr: string): Promise<AppConfig> {
-  return call(commands.configImportJson(jsonStr)) as Promise<AppConfig>;
-}
-
-/**
- * 清空全部缓存（退出登录态+DB+缓存+配置）
- */
-export function clearCache(): Promise<void> {
-  return discard(commands.appClearCache());
+export async function importConfigJson(json: string): Promise<AppConfig> {
+  return await commands.configImportJson(json) as AppConfig;
 }

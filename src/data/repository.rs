@@ -22,9 +22,7 @@ macro_rules! db_err {
 /// 同步基线记录的 SQLite 实现。
 mod sync_items;
 #[allow(unused_imports)]
-pub use sync_items::{
-    delete_all, delete_by_local_path, find_by_file_id, load_all, reset_stale_statuses, upsert,
-};
+pub use sync_items::{delete_all, find_by_file_id, load_all, reset_stale_statuses, upsert};
 
 // ===== 同步状态常量（对齐 dart SyncStatusType） =====
 /// 0=已同步 1=仅云端 2=仅本地 3=同步中 4=失败 5=冲突
@@ -261,6 +259,6 @@ pub(crate) use transfer_queue::transition_transfer_in_transaction;
 #[allow(unused_imports)]
 pub use transfer_queue::{
     delete_all_transfers, get_transfer_by_id, has_transfer_in_state, insert_transfer,
-    list_all_transfers, list_transfers, patch_transfer_in_state, prune_transfer_history,
-    transition_transfer, transition_transfer_clearing_upload_session, update_running_transfer,
+    list_all_transfers, patch_transfer_in_state, prune_transfer_history, transition_transfer,
+    transition_transfer_clearing_upload_session, update_running_transfer,
 };

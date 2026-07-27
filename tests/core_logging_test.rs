@@ -1,6 +1,6 @@
-//! 核心日志记录构造与级别过滤测试。
+//! 核心日志记录与快照顺序测试。
 
-use petal_link_lib::core::logging::{clear, push, snapshot_filtered, LogLevel, LogRecord};
+use petal_link_lib::core::logging::{clear, push, snapshot, LogLevel, LogRecord};
 
 /// 构造带固定时间的测试日志记录。
 fn rec(msg: &str, time_ms: i64) -> LogRecord {
@@ -12,17 +12,16 @@ fn rec(msg: &str, time_ms: i64) -> LogRecord {
     }
 }
 
-/// 验证日志快照按级别过滤。
+/// 验证日志快照保持 newest-first 顺序。
 #[test]
-fn test_filter_by_level() {
+fn test_snapshot_order() {
     clear();
-    let mut error = rec("err", 1);
-    error.level = LogLevel::Error;
-    push(rec("info", 2));
-    push(error);
+    push(rec("older", 1));
+    push(rec("newer", 2));
 
-    let errs = snapshot_filtered(Some(LogLevel::Error));
-    assert_eq!(errs.len(), 1);
-    assert_eq!(errs[0].message, "err");
+    let records = snapshot();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].message, "newer");
+    assert_eq!(records[1].message, "older");
     clear();
 }

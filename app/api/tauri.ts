@@ -1,22 +1,22 @@
-/**
- * 所有后端命令调用的错误归一化封装。
- */
-
+import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import type { AppError } from "./generated";
 
 export type { AppError } from "./generated";
 
 /**
- * 调用后端命令，返回 Promise<T>。
- * 失败时抛出 AppError（后端序列化的结构），调用方用 try/catch 捕获。
+ * 调用后端命令并将非结构化异常统一转换为 AppError。
  *
- * @param operation - generated bindings 返回的命令 Promise
+ * @param command - Tauri command 名称
+ * @param args - command 参数
  */
-export async function call<T>(operation: Promise<T>): Promise<T> {
+export async function invoke<T>(
+  command: string,
+  args?: Record<string, unknown>,
+): Promise<T> {
   try {
-    return await operation;
+    return await tauriInvoke<T>(command, args);
   } catch (e) {
-    // 后端返回的 AppError 已是对象结构；若不是则包装为 Generic
+    // 后端 AppError 已满足合同，未知异常才补齐统一字段。
     if (e && typeof e === "object" && "kind" in e) {
       throw e as AppError;
     }
@@ -28,13 +28,4 @@ export async function call<T>(operation: Promise<T>): Promise<T> {
       error_code: null,
     } satisfies AppError;
   }
-}
-
-/**
- * 将返回 null 的 Rust command 转换为 Promise<void>。
- *
- * @param operation - generated bindings 返回的命令 Promise
- */
-export async function discard(operation: Promise<null>): Promise<void> {
-  await call(operation);
 }

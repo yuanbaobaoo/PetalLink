@@ -6,9 +6,9 @@ import SidebarTreeNode from "./SidebarTreeNode.vue";
 import { useFileBrowserStore, ROOT } from "@/stores/fileBrowser";
 import { useAuthStore } from "@/stores/auth";
 import { useUpdaterStore } from "@/stores/updater";
+import { commands } from "@/api/generated";
+import type { DriveAbout } from "@/api/generated";
 import * as authApi from "@/api/auth";
-import * as driveApi from "@/api/drive";
-import type { DriveAbout } from "@/api/drive";
 import { formatFileSize } from "@/utils/format";
 
 // 账号加载中的占位文本
@@ -45,7 +45,7 @@ const quotaPercent = computed(() => {
  * 挂载后获取存储配额信息
  */
 onMounted(async () => {
-  try { about.value = await driveApi.getAbout(); } catch { about.value = null; }
+  try { about.value = await commands.driveGetAbout(); } catch { about.value = null; }
 });
 
 /**

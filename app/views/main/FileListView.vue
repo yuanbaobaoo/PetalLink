@@ -3,9 +3,9 @@
 import { ref, computed, watch, nextTick } from "vue";
 import { useFileBrowserStore } from "@/stores/fileBrowser";
 import { useSyncStore } from "@/stores/sync";
+import { commands } from "@/api/generated";
+import type { DriveFile, FreeableItem } from "@/api/generated";
 import * as driveApi from "@/api/drive";
-import type { DriveFile } from "@/api/drive";
-import * as syncApi from "@/api/sync";
 import {
   MateIcon, MateCheckbox, MateButton, MateDialog, MateTextField,
   MateCircularProgress, MateEmpty,
@@ -133,7 +133,7 @@ const propsTarget = ref<DriveFile | null>(null);
 // 释放空间预览对话框状态
 const showFreeUpDialog = ref(false);
 // 释放空间预览候选项（用户确认后据此批量执行）
-const freeUpPreviewItems = ref<syncApi.FreeableItem[]>([]);
+const freeUpPreviewItems = ref<FreeableItem[]>([]);
 // 释放空间预览执行中标记
 const freeUpConfirmLoading = ref(false);
 // 释放空间预览候选项总字节数
@@ -161,7 +161,7 @@ async function refreshBatchStatus(): Promise<void> {
   if (ids.length === 0) return;
   try {
     // 后端返回的 fileId 到本地状态映射。
-    const map = await syncApi.getBatchFileStatus(ids);
+    const map = await commands.syncBatchFileStatus(ids);
     fileStatuses.value = map;
   } catch {
     // 批量查询失败时清空缓存，回退到默认云朵图标
@@ -169,11 +169,6 @@ async function refreshBatchStatus(): Promise<void> {
   }
 }
 
-/**
- * 获取文件同步状态字符串
- *
- * @param f - 文件对象
- */
 function getFileStatus(f: DriveFile): string {
   return fileStatuses.value[f.id] ?? "not_synced";
 }
@@ -189,11 +184,6 @@ function isThumbnailType(f: DriveFile): boolean {
   return mime.startsWith("image/") || mime.startsWith("video/");
 }
 
-/**
- * 获取文件缩略图 URL
- *
- * @param f - 文件对象
- */
 function thumbUrl(f: DriveFile): string {
   return thumbUrls.value[f.id] ?? "";
 }
@@ -299,11 +289,6 @@ function relPathOf(f: DriveFile): string {
   return segs.join("/");
 }
 
-/**
- * 同步状态图标名：根据实际批量查询结果返回对应图标
- *
- * @param f - 文件对象
- */
 function syncStatusIcon(f: DriveFile): string {
   // 当前文件的批量状态缓存。
   const status = getFileStatus(f);
@@ -312,11 +297,6 @@ function syncStatusIcon(f: DriveFile): string {
   return "cloud";
 }
 
-/**
- * 同步状态描述文案
- *
- * @param f - 文件对象
- */
 function syncStatusText(f: DriveFile): string {
   // 当前文件的批量状态缓存。
   const status = getFileStatus(f);
@@ -403,7 +383,7 @@ async function doSyncFolder(f: DriveFile): Promise<void> {
   showToast(`已开始同步文件夹「${f.name}」，进度见传输队列`);
   // 后端命令只负责入队，等待调用结果不会阻塞实际后台同步。
   try {
-    await syncApi.syncFolderRecursive(f.id, rel);
+    await commands.syncFolderRecursive(f.id, rel);
   } catch (e) {
     showToast("同步失败：" + extractErrorMessage(e), { variant: "error" });
   }
@@ -421,7 +401,7 @@ async function handleSyncFile(f: DriveFile): Promise<void> {
   const dest = `${mountDir.value}/${relPathOf(f)}`;
   downloading.value = { open: true, name: f.name };
   try {
-    await syncApi.downloadOnDemand(f.id, dest);
+    await commands.syncDownloadOnDemand(f.id, dest);
     showToast(`已同步「${f.name}」`);
     // 下载完成后磁盘 xattr 已变（state=downloaded），重新拉批量状态刷新图标（云端→已同步）
     refreshBatchStatus();
@@ -447,7 +427,7 @@ async function handleShowActionMenu(e: MouseEvent, f: DriveFile): Promise<void> 
     if (driveApi.isFolder(f)) {
       canFreeUp = true;
     } else {
-      try { canFreeUp = await syncApi.checkSafeFreeUp(relPathOf(f), f.id) === "safe"; } catch {}
+      try { canFreeUp = await commands.syncCheckSafeFreeUp(relPathOf(f), f.id) === "safe"; } catch {}
     }
   }
   contextMenu.value = { show: true, x: e.clientX, y: e.clientY, file: f, canFreeUp };
@@ -511,15 +491,10 @@ async function handleConfirmRename(): Promise<void> {
   const target = renameTarget.value;
   await fileOp.runAction(
     { errorPrefix: "重命名", successToast: "已重命名" },
-    async () => { await driveApi.renameFile(target.id, newName); },
+    async () => { await commands.driveRenameFile(target.id, newName); },
   );
 }
 
-/**
- * 显示文件属性
- *
- * @param f - 文件对象
- */
 function handleShowProps(f: DriveFile): void {
   propsTarget.value = f; showPropsDialog.value = true; closeMenu();
 }
@@ -535,7 +510,7 @@ async function handleDelete(f: DriveFile): Promise<void> {
   // ★ 检查本地同步状态，决定删除确认文案
   let localStatus = "not_synced";
   if (sync.mountConfigured) {
-    try { localStatus = await syncApi.checkFileLocalStatus(f.id); } catch { /* ignore */ }
+    try { localStatus = await commands.syncCheckFileLocalStatus(f.id); } catch { /* ignore */ }
   }
   // 文件夹与文件使用不同的风险提示。
   const isFolder = driveApi.isFolder(f);
@@ -556,7 +531,7 @@ async function handleDelete(f: DriveFile): Promise<void> {
   if (!ok) return;
   // 手动处理而非 runAction，以区分「真删除失败」与「文件已删但留痕失败」。
   try {
-    await driveApi.deleteFile(f.id, f.name);
+    await commands.driveDeleteFile(f.id, f.name);
     showToast("已删除");
   } catch (e) {
     // 错误信息
@@ -583,7 +558,7 @@ async function handleFreeUpSpace(f: DriveFile): Promise<void> {
   // 文件夹递归枚举子树可释放文件；单文件只取自身（后端按 SYNCED 基线过滤）
   try {
     // 可释放候选清单（文件夹递归、单文件取自身）
-    const items = await syncApi.listFreeableInFolder(relPathOf(f));
+    const items = await commands.syncListFreeableInFolder(relPathOf(f));
     if (items.length === 0) {
       showToast(driveApi.isFolder(f) ? "该目录下没有可释放的文件" : "该文件未同步到本地，无可释放项", { variant: "warning" });
       return;
@@ -605,7 +580,7 @@ async function handleConfirmFreeUp(): Promise<void> {
   freeUpConfirmLoading.value = true;
   try {
     // 批量释放结果（成功/跳过计数与原因）
-    const result = await syncApi.freeUpBatch(items);
+    const result = await commands.syncFreeUpBatch(items);
     // 跳过项附带前若干条原因，便于用户定位未释放文件。
     const skipDetail = result.skippedCount > 0 && result.errors.length > 0
       ? `\n跳过 ${result.skippedCount} 项：\n${result.errors.slice(0, 5).join("\n")}${result.errors.length > 5 ? `\n…等 ${result.errors.length} 条` : ""}`
@@ -642,7 +617,7 @@ async function handleBulkDelete(): Promise<void> {
       for (const id of checked.value) {
         try {
           // 当前文件的本地同步状态。
-          const status = await syncApi.checkFileLocalStatus(id);
+          const status = await commands.syncCheckFileLocalStatus(id);
           if (status === "synced") syncedCount++;
         } catch { /* ignore */ }
       }
@@ -674,7 +649,7 @@ async function handleBulkDelete(): Promise<void> {
         for (const f of sortedFiles.value) {
           if (!checked.value.has(f.id)) continue;
           try {
-            await driveApi.deleteFile(f.id, f.name);
+            await commands.driveDeleteFile(f.id, f.name);
             deletedCount++;
           } catch (e) {
             // 错误信息
@@ -722,7 +697,7 @@ async function handleBulkDownload(): Promise<void> {
       async () => {
         for (const f of sortedFiles.value) {
           if (!checked.value.has(f.id) || driveApi.isFolder(f)) continue;
-          try { await syncApi.downloadOnDemand(f.id, `${mountDir.value}/${relPathOf(f)}`); n++; } catch { /* 部分失败静默 */ }
+          try { await commands.syncDownloadOnDemand(f.id, `${mountDir.value}/${relPathOf(f)}`); n++; } catch { /* 部分失败静默 */ }
         }
       },
     );
@@ -740,14 +715,14 @@ async function handleBulkFreeUp(): Promise<void> {
     // 逐个选中项枚举可释放候选项（文件取自身、目录递归子树），合并进同一预览弹窗。
     // 枚举失败收集原因：全部失败时报错；部分失败时预览弹窗提示清单可能不完整。
     // 合并后的全部可释放候选清单
-    const all: syncApi.FreeableItem[] = [];
+    const all: FreeableItem[] = [];
     // 枚举失败项的原因（用于部分失败提示）
     const enumErrors: string[] = [];
     for (const f of sortedFiles.value) {
       if (!checked.value.has(f.id)) continue;
       try {
         // 当前选中项的可释放候选
-        const items = await syncApi.listFreeableInFolder(relPathOf(f));
+        const items = await commands.syncListFreeableInFolder(relPathOf(f));
         all.push(...items);
       } catch (e) {
         enumErrors.push(`${f.name}：${extractErrorMessage(e)}`);
@@ -769,11 +744,6 @@ async function handleBulkFreeUp(): Promise<void> {
   });
 }
 
-/**
- * 排序切换：同字段翻转方向，不同字段切换字段并默认升序
- *
- * @param field - 排序字段
- */
 function handleSort(field: "name" | "size" | "modifiedTime"): void {
   if (sortField.value === field) sortAsc.value = !sortAsc.value;
   else { sortField.value = field; sortAsc.value = true; }

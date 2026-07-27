@@ -3,8 +3,6 @@
  */
 import { check } from "@tauri-apps/plugin-updater";
 import type { Update } from "@tauri-apps/plugin-updater";
-import { commands } from "./generated";
-import { call } from "./tauri";
 
 /**
  * 更新信息（前端可用）
@@ -83,11 +81,4 @@ export async function downloadAndInstall(
         break;
     }
   });
-}
-
-/**
- * 检查是否有进行中的传输任务（PENDING / RUNNING）
- */
-export function hasActiveTransfers(): Promise<boolean> {
-  return call(commands.transferHasActive());
 }

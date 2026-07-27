@@ -2,10 +2,9 @@
  * Drive API —— 云盘文件操作。
  */
 import { commands } from "./generated";
-import { call, discard } from "./tauri";
 export { DELETE_TRACE_ERROR_PREFIX } from "./generated";
-export type { DriveAbout, DriveFile, FileCategory, FileListResult } from "./generated";
-import type { DriveAbout, DriveFile } from "./generated";
+export type { DriveFile, FileCategory, FileListResult } from "./generated";
+import type { DriveFile } from "./generated";
 
 /**
  * 是否文件夹（大小写不敏感，兼容后端返回 "Folder" / "folder"）
@@ -44,7 +43,7 @@ export function fileTypeIcon(f: DriveFile): string {
  */
 export async function listFiles(parentId?: string): Promise<DriveFile[]> {
   // 首屏列表结果。
-  const result = await call(commands.driveList(parentId || null, null, null));
+  const result = await commands.driveList(parentId || null, null, null);
   // folders-first 排序
   const folders = result.files.filter(isFolder);
   // 非目录内容保留服务端原有顺序。
@@ -60,42 +59,12 @@ export async function listFiles(parentId?: string): Promise<DriveFile[]> {
  */
 export async function searchFiles(keyword: string, parentId?: string): Promise<DriveFile[]> {
   // 搜索结果仍按目录优先展示。
-  const result = await call(commands.driveSearch(keyword, parentId || null, null));
+  const result = await commands.driveSearch(keyword, parentId || null, null);
   // 匹配的目录。
   const folders = result.files.filter(isFolder);
   // 匹配的普通文件。
   const others = result.files.filter((f) => !isFolder(f));
   return [...folders, ...others];
-}
-
-/**
- * 创建文件夹
- *
- * @param name - 文件夹名称
- * @param parentId - 父目录 ID
- */
-export function createFolder(name: string, parentId?: string): Promise<DriveFile> {
-  return call(commands.driveCreateFolder(name, parentId || null));
-}
-
-/**
- * 删除文件（软删除进回收站）
- *
- * @param id - 文件 ID
- * @param name - 文件名（无本地基线时用于传输队列留痕显示，可选）
- */
-export function deleteFile(id: string, name?: string): Promise<void> {
-  return discard(commands.driveDeleteFile(id, name ?? null));
-}
-
-/**
- * 重命名文件
- *
- * @param id - 文件 ID
- * @param newName - 新名称
- */
-export function renameFile(id: string, newName: string): Promise<DriveFile> {
-  return call(commands.driveRenameFile(id, newName));
 }
 
 /**
@@ -106,36 +75,9 @@ export function renameFile(id: string, newName: string): Promise<DriveFile> {
 export async function getThumbnail(fileId: string): Promise<string | null> {
   try {
     // 后端已保留或识别真实图片 MIME 的 data URL
-    const dataUrl = await call(commands.driveGetThumbnail(fileId));
+    const dataUrl = await commands.driveGetThumbnail(fileId);
     return dataUrl.startsWith("data:image/") ? dataUrl : null;
   } catch {
     return null;
   }
-}
-
-/**
- * 获取配额信息
- */
-export function getAbout(): Promise<DriveAbout> {
-  return call(commands.driveGetAbout());
-}
-
-/**
- * 下载文件到本地路径
- *
- * @param fileId - 文件 ID
- * @param destPath - 目标本地路径
- */
-export function downloadFile(fileId: string, destPath: string): Promise<void> {
-  return discard(commands.driveDownloadFile(fileId, destPath));
-}
-
-/**
- * 上传本地文件到云端
- *
- * @param localPath - 本地文件路径
- * @param parentId - 目标父目录 ID
- */
-export function uploadFile(localPath: string, parentId?: string): Promise<DriveFile> {
-  return call(commands.driveUploadFile(localPath, parentId || null));
 }

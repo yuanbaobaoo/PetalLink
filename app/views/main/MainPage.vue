@@ -10,8 +10,8 @@ import SyncSetupBanner from "./SyncSetupBanner.vue";
 import TransferPopover from "./TransferPopover.vue";
 import { useFileBrowserStore } from "@/stores/fileBrowser";
 import { useSyncStore } from "@/stores/sync";
+import { commands } from "@/api/generated";
 import * as driveApi from "@/api/drive";
-import * as platformApi from "@/api/platform";
 import * as configApi from "@/api/config";
 import { useAsyncAction } from "@/composables/useAsyncAction";
 
@@ -71,7 +71,7 @@ function handleClearSearch(): void { searchKeyword.value = ""; searchResults.val
  */
 async function handleOpenInFinder(): Promise<void> {
   await runFinder(async () => {
-    try { const c = await configApi.loadConfig(); await platformApi.openInFinder(c.mount_dir); } catch {}
+    try { const c = await configApi.loadConfig(); await commands.openInFinder(c.mount_dir); } catch {}
   });
 }
 

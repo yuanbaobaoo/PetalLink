@@ -75,19 +75,6 @@ pub fn upsert(conn: &Connection, item: &SyncItem) -> AppResult<()> {
     Ok(())
 }
 
-/// 按 local_path 删除记录。
-#[allow(dead_code)]
-pub fn delete_by_local_path(conn: &Connection, local_path: &str) -> AppResult<()> {
-    db_err!(
-        "删除",
-        conn.execute(
-            "DELETE FROM sync_items WHERE local_path = ?1",
-            params![local_path],
-        )
-    );
-    Ok(())
-}
-
 /// 清空全部同步记录（退出登录/清空缓存用）。
 pub fn delete_all(conn: &Connection) -> AppResult<()> {
     db_err!("清空", conn.execute("DELETE FROM sync_items", []));

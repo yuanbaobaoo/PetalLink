@@ -4,6 +4,7 @@ import { ref } from "vue";
 import { useSyncStore } from "@/stores/sync";
 import { useFileBrowserStore } from "@/stores/fileBrowser";
 import { MateInfoBanner, MateButton } from "@/components/mate";
+import { commands } from "@/api/generated";
 import * as configApi from "@/api/config";
 import { open } from "@tauri-apps/plugin-dialog";
 import { extractErrorMessage } from "@/utils/error";
@@ -40,7 +41,7 @@ async function handleSelectDir(): Promise<void> {
     const config = await configApi.loadConfig();
     config.mount_dir = selected;
     config.mount_configured = true;
-    await configApi.saveConfig(config);
+    await commands.configSave(config);
     await sync.init();
     // 刷新文件列表（引擎在 saveConfig 内已启动，正在 BFS + 创建本地占位符）
     await browser.loadRoot();

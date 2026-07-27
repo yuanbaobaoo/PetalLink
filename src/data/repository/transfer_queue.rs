@@ -444,29 +444,6 @@ pub(crate) fn transition_transfer_in_transaction(
     Ok(updated)
 }
 
-/// 按状态+方向查询传输任务（按 created_at 倒序）。对齐 dart 传输队列列表。
-#[allow(dead_code)]
-pub fn list_transfers(
-    conn: &Connection,
-    direction: Option<i32>,
-    state_filter: Option<i32>,
-) -> AppResult<Vec<TransferTask>> {
-    match (direction, state_filter) {
-        (Some(d), Some(s)) => {
-            let mut stmt = db_err!(
-                "查询",
-                conn.prepare(
-                    "SELECT * FROM transfer_queue WHERE direction = ?1 AND state = ?2 ORDER BY created_at DESC",
-                )
-            );
-            collect_tasks(stmt.query_map(params![d, s], TransferTask::from_row))
-        }
-        (Some(d), None) => list_transfers_with_dir(conn, d),
-        (None, Some(s)) => list_transfers_with_state(conn, s),
-        (None, None) => list_all_transfers(conn),
-    }
-}
-
 /// 收集迭代结果为 Vec<TransferTask>；任一行损坏时整体失败，禁止把活动任务漏读为空闲。
 /// 接收 query_map 返回的 MappedRows（迭代产出 rusqlite::Result<TransferTask>）。
 fn collect_tasks<I>(rows_result: rusqlite::Result<I>) -> AppResult<Vec<TransferTask>>
@@ -479,26 +456,6 @@ where
         tasks.push(task.map_err(|error| AppError::generic(format!("读取传输任务失败：{error}")))?);
     }
     Ok(tasks)
-}
-
-/// 按方向查询传输任务。
-#[allow(dead_code)]
-fn list_transfers_with_dir(conn: &Connection, d: i32) -> AppResult<Vec<TransferTask>> {
-    let mut stmt = db_err!(
-        "查询",
-        conn.prepare("SELECT * FROM transfer_queue WHERE direction = ?1 ORDER BY created_at DESC")
-    );
-    collect_tasks(stmt.query_map(params![d], TransferTask::from_row))
-}
-
-/// 按持久化状态查询传输任务。
-#[allow(dead_code)]
-fn list_transfers_with_state(conn: &Connection, s: i32) -> AppResult<Vec<TransferTask>> {
-    let mut stmt = db_err!(
-        "查询",
-        conn.prepare("SELECT * FROM transfer_queue WHERE state = ?1 ORDER BY created_at DESC")
-    );
-    collect_tasks(stmt.query_map(params![s], TransferTask::from_row))
 }
 
 /// 查询指定持久化状态是否至少存在一个传输任务。

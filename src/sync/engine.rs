@@ -32,14 +32,11 @@ mod retry;
 pub(crate) use coordination::{ActivityGuard, FolderSyncGuard};
 use coordination::{ActivityTracker, CycleCoordinator};
 
-use crate::drive::download_api::DownloadApi;
 use crate::drive::files_api::FilesApi;
 use crate::drive::models::DriveFile;
-use crate::drive::upload_api::UploadApi;
 use crate::error::{AppError, AppResult};
 use crate::mount::local_watcher::LocalWatcher;
 use crate::mount::manager::MountManager;
-use crate::sync::conflict::ConflictResolver;
 use crate::sync::executor::SyncExecutor;
 use crate::sync::planner::SyncPlanner;
 use crate::sync::state::SyncGlobalState;
@@ -113,15 +110,9 @@ pub struct SyncEngine {
     files_api: Arc<FilesApi>,
     changes_api: Arc<crate::drive::changes_api::ChangesApi>,
     start_cursor_source: Arc<dyn StartCursorSource>,
-    #[allow(dead_code)]
-    download_api: Arc<DownloadApi>,
-    #[allow(dead_code)]
-    upload_api: Arc<UploadApi>,
     mount: Option<Arc<MountManager>>,
     db: Arc<Mutex<Connection>>,
     planner: SyncPlanner,
-    #[allow(dead_code)]
-    conflict: Arc<Mutex<ConflictResolver>>,
     executor: Option<SyncExecutor>,
     task_runner: Option<Arc<TaskRunner>>,
     cycle: CycleCoordinator,
@@ -148,8 +139,6 @@ pub struct SyncEngine {
     /// 云端定时刷新间隔（秒）。0 = 关闭。到期后全量 BFS 重拉云端树，使云端变更自动同步到本地。
     poll_interval_secs: u32,
     state_tx: broadcast::Sender<SyncGlobalState>,
-    #[allow(dead_code)]
-    is_first_time: Mutex<bool>,
     /// 本地监听器句柄（保活，防止 FSEvents 提前释放）
     watcher: Mutex<Option<Arc<LocalWatcher>>>,
     /// 是否已 shutdown。detached watcher 任务每次 cycle 前检查此标志，

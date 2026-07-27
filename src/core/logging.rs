@@ -60,24 +60,10 @@ pub struct LogRecord {
 /// 全局日志环形缓冲（newest-first，对齐 dart `logBuffer.insert(0)`）。
 static LOG_BUFFER: Mutex<Vec<LogRecord>> = Mutex::new(Vec::new());
 
-/// 当前日志等级（可运行时调整，对齐 dart `currentLevel`）
-#[allow(dead_code)]
-static CURRENT_LEVEL: Mutex<Level> = Mutex::new(Level::INFO);
-
 /// 返回缓冲中所有日志的快照（newest-first）。
 /// 对齐 dart `logBuffer`（直接读取全局 List）。
 pub fn snapshot() -> Vec<LogRecord> {
     LOG_BUFFER.lock().clone()
-}
-
-/// 按 level 过滤后的快照（前端日志查看页筛选用）。
-#[allow(dead_code)]
-pub fn snapshot_filtered(level: Option<LogLevel>) -> Vec<LogRecord> {
-    let buf = LOG_BUFFER.lock();
-    match level {
-        None => buf.clone(),
-        Some(filter) => buf.iter().filter(|r| r.level == filter).cloned().collect(),
-    }
 }
 
 /// 追加一条日志到缓冲（newest-first，溢出裁剪尾部）。
@@ -99,40 +85,6 @@ fn push_into(buf: &mut Vec<LogRecord>, record: LogRecord) {
 /// 清空缓冲（日志查看页「清空」按钮）。
 pub fn clear() {
     LOG_BUFFER.lock().clear();
-}
-
-/// 获取当前生效的日志等级。
-#[allow(dead_code)]
-pub fn current_level() -> Level {
-    *CURRENT_LEVEL.lock()
-}
-
-/// 运行时调整日志等级（设置页临时调到 TRACE 排查 HTTP）。
-#[allow(dead_code)]
-pub fn update_level(level: Level) {
-    *CURRENT_LEVEL.lock() = level;
-    tracing::info!(level = %level, "日志等级已调整");
-}
-
-/// 记录一条业务日志（不依赖 tracing 的 macro，直接入缓冲 + 输出）。
-/// 供无法接入 tracing span 的简单场景使用。
-#[allow(dead_code)]
-pub fn log(level: LogLevel, logger_name: &str, message: &str) {
-    let record = LogRecord {
-        level,
-        logger_name: logger_name.to_string(),
-        message: message.to_string(),
-        time_ms: chrono::Utc::now().timestamp_millis(),
-    };
-    // 输出到 tracing（实际终端/文件输出）
-    match level {
-        LogLevel::Error => tracing::error!(target = logger_name, "{}", message),
-        LogLevel::Warn => tracing::warn!(target = logger_name, "{}", message),
-        LogLevel::Info => tracing::info!(target = logger_name, "{}", message),
-        LogLevel::Debug => tracing::debug!(target = logger_name, "{}", message),
-        LogLevel::Trace => tracing::trace!(target = logger_name, "{}", message),
-    }
-    push(record);
 }
 
 // ===== tracing Layer：喂环形缓冲（供设置页日志查看）=====

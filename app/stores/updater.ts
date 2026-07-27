@@ -3,6 +3,7 @@
  */
 import { defineStore } from "pinia";
 import { ref, computed } from "vue";
+import { commands } from "@/api/generated";
 import * as updaterApi from "@/api/updater";
 import type { UpdateInfo, DownloadProgress } from "@/api/updater";
 
@@ -197,7 +198,7 @@ export const useUpdaterStore = defineStore("updater", () => {
     while (Date.now() - startTime < maxWaitMs) {
       try {
       // 后端当前是否仍有活跃传输。
-      const hasActive = await updaterApi.hasActiveTransfers();
+        const hasActive = await commands.transferHasActive();
         if (!hasActive) {
           phase.value = "ready";
           dialogOpen.value = true; // 传输完成 → 重新弹出对话框提示重启

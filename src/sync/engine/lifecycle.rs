@@ -33,13 +33,10 @@ async fn wait_for_schedule_change_or_recheck(
 }
 
 impl SyncEngine {
-    #[allow(clippy::too_many_arguments)]
     /// 创建尚未绑定挂载目录与执行器的同步引擎。
     pub fn new(
         files_api: Arc<FilesApi>,
         changes_api: Arc<crate::drive::changes_api::ChangesApi>,
-        download_api: Arc<DownloadApi>,
-        upload_api: Arc<UploadApi>,
         db: Arc<Mutex<Connection>>,
         status_aggregator: Arc<StatusAggregator>,
         skip_patterns: Vec<String>,
@@ -53,12 +50,9 @@ impl SyncEngine {
             files_api,
             changes_api,
             start_cursor_source,
-            download_api,
-            upload_api,
             mount: None,
             db,
             planner: SyncPlanner,
-            conflict: Arc::new(Mutex::new(ConflictResolver::new())),
             executor: None,
             task_runner: None,
             cycle: CycleCoordinator::default(),
@@ -78,7 +72,6 @@ impl SyncEngine {
             debounce_secs,
             poll_interval_secs,
             state_tx,
-            is_first_time: Mutex::new(true),
             watcher: Mutex::new(None),
             shutdown: Mutex::new(false),
             shutdown_tx,

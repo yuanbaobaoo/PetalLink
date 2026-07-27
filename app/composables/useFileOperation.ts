@@ -77,7 +77,7 @@ export interface FileOperationOptions {
  * async function handleDelete(f) {
  *   if (!guard()) return;
  *   if (!(await confirmDialog(...))) return;
- *   await runAction({ errorPrefix: "删除", successToast: "已删除" }, () => driveApi.deleteFile(f.id));
+ *   await runAction({ errorPrefix: "删除", successToast: "已删除" }, () => commands.driveDeleteFile(f.id, f.name));
  * }
  * ```
  */

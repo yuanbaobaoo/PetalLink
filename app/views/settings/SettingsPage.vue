@@ -3,9 +3,9 @@
 import { ref, computed, onMounted } from "vue";
 import { MateNavItem, MateSectionHeader, MateStepper, MateNumberField, MateTextField, MateSwitch, MateButton, MateInfoBanner, MateLogoWithText, MateIcon } from "@/components/mate";
 import { confirmDialog, showToast } from "@/components/mate";
+import { commands } from "@/api/generated";
+import type { DriveAbout } from "@/api/generated";
 import * as configApi from "@/api/config";
-import * as platformApi from "@/api/platform";
-import * as driveApi from "@/api/drive";
 import * as authApi from "@/api/auth";
 import LogViewerPage from "@/views/settings/LogViewerPage.vue";
 import { useAuthStore } from "@/stores/auth";
@@ -82,7 +82,7 @@ const userLabel = computed(() => authApi.primaryLabel(userInfo.value) ?? "未获
 // 当前账号头像字符。
 const userInitial = computed(() => authApi.initial(userInfo.value) ?? "华");
 // 存储配额
-const about = ref<driveApi.DriveAbout | null>(null);
+const about = ref<DriveAbout | null>(null);
 // 应用版本号
 const appVersion = ref("");
 
@@ -108,11 +108,11 @@ onMounted(async () => {
     oauthPort.value = config.oauth_callback_port;
     pollIntervalSec.value = config.poll_interval_sec;
   } catch {}
-  try { autoLaunch.value = await platformApi.launchAtLoginIsEnabled(); } catch {}
+  try { autoLaunch.value = await commands.launchAtLoginIsEnabled(); } catch {}
   // 托盘图标以运行时实际状态为准（配置只是持久化目标值）
-  try { showTrayIcon.value = await platformApi.trayIsVisible(); } catch {}
-  try { about.value = await driveApi.getAbout(); } catch {}
-  try { appVersion.value = await platformApi.getAppVersion(); } catch {}
+  try { showTrayIcon.value = await commands.trayIsVisible(); } catch {}
+  try { about.value = await commands.driveGetAbout(); } catch {}
+  try { appVersion.value = await commands.appGetVersion(); } catch {}
   saved.value = true;
 });
 
@@ -124,7 +124,7 @@ async function handleSave(): Promise<void> {
   saving.value = true; errorMessage.value = null;
   try {
     // 所有配置一次提交，避免局部成功导致界面与磁盘不一致。
-    await configApi.saveConfig({
+    await commands.configSave({
       oauth_redirect_uri: `http://127.0.0.1:${oauthPort.value}/oauth/callback`,
       oauth_callback_port: oauthPort.value,
       mount_dir: mountDir.value,
@@ -169,7 +169,7 @@ async function handleReset(): Promise<void> {
 async function onToggleAutoLaunch(v: boolean): Promise<void> {
   autoLaunch.value = v;
   // 后端返回是否实际切换成功。
-  const ok = await platformApi.launchAtLoginSetEnabled(v);
+  const ok = await commands.launchAtLoginSetEnabled(v);
   if (!ok) { autoLaunch.value = !v; showToast("设置开机自启失败", { variant: "error" }); }
 }
 
@@ -181,7 +181,7 @@ async function onToggleAutoLaunch(v: boolean): Promise<void> {
 async function onToggleTrayIcon(v: boolean): Promise<void> {
   showTrayIcon.value = v;
   try {
-    await platformApi.traySetVisible(v);
+    await commands.traySetVisible(v);
   } catch {
     showTrayIcon.value = !v;
     showToast("设置托盘图标失败", { variant: "error" });
@@ -201,7 +201,7 @@ async function handleClearCache(): Promise<void> {
     if (!ok) return;
     // 后端 app_clear_cache 会停引擎+删 config+relaunch（进程将替换），先提示再调，不依赖返回
     showToast("正在清空并重启…");
-    try { await configApi.clearCache(); } catch { /* 进程将重启，忽略响应 */ }
+    try { await commands.appClearCache(); } catch { /* 进程将重启，忽略响应 */ }
   });
 }
 

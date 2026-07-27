@@ -5,8 +5,8 @@ import { save } from "@tauri-apps/plugin-dialog";
 import { MateButton, MateTag, MateEmpty, MateCircularProgress } from "@/components/mate";
 import { showToast } from "@/components/mate";
 import { useAsyncAction } from "@/composables/useAsyncAction";
-import * as logsApi from "@/api/logs";
-import type { LogRecord } from "@/api/logs";
+import { commands } from "@/api/generated";
+import type { LogRecord } from "@/api/generated";
 import { formatDateTime } from "@/utils/format";
 
 withDefaults(defineProps<{
@@ -65,7 +65,7 @@ onUnmounted(() => {
 async function load(): Promise<void> {
   try {
     // 后端返回的日志数据。
-    const data = await logsApi.listLogs();
+    const data = await commands.logsList();
     records.value = data;
   } catch {
     // 轮询失败静默保留旧数据，不覆盖为空
@@ -104,7 +104,7 @@ function fmtTime(ms: number): string {
 async function handleClearLogs(): Promise<void> {
   await runClear(async () => {
     try {
-      await logsApi.clearLogs();
+      await commands.logsClear();
       records.value = [];
       showToast("已清空日志缓冲");
     } catch {
@@ -127,7 +127,7 @@ async function handleExportLogs(): Promise<void> {
     });
     if (!path) return;
     try {
-      await logsApi.exportLogs(path);
+      await commands.logsExport(path);
       showToast("日志已导出");
     } catch (e) {
       showToast("导出失败：" + String(e));

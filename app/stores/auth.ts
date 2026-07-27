@@ -5,8 +5,9 @@
  */
 import { defineStore } from "pinia";
 import { ref } from "vue";
+import { commands } from "@/api/generated";
+import type { UserInfo } from "@/api/generated";
 import type { AppError } from "@/api/tauri";
-import * as authApi from "@/api/auth";
 import { useSyncStore } from "@/stores/sync";
 
 /**
@@ -35,7 +36,7 @@ export const useAuthStore = defineStore("auth", () => {
   // OAuth 回调端口
   const callbackPort = ref(DEFAULT_PORT);
   // 用户信息（登录后拉取）
-  const userInfo = ref<authApi.UserInfo | null>(null);
+  const userInfo = ref<UserInfo | null>(null);
 
   /**
    * 启动时恢复登录态。
@@ -44,15 +45,15 @@ export const useAuthStore = defineStore("auth", () => {
   async function restore(): Promise<void> {
     loading.value = true;
     try {
-      secretConfigured.value = await authApi.checkSecret();
+      secretConfigured.value = await commands.authCheckSecret();
       // 后端恢复的认证状态。
-      const state = await authApi.restore();
+      const state = await commands.authRestore();
       callbackPort.value = state.callback_port;
       status.value = state.logged_in ? "loggedIn" : "loggedOut";
       // restore 成功后立即拉 userInfo
       if (state.logged_in) {
         try {
-          userInfo.value = await authApi.getUserInfo();
+          userInfo.value = await commands.authGetUserInfo();
         } catch (e) {
           console.warn("[auth] getUserInfo failed:", e);
         }
@@ -75,12 +76,12 @@ export const useAuthStore = defineStore("auth", () => {
     loading.value = true;
     errorMessage.value = null;
     try {
-      await authApi.login(callbackPort.value);
+      await commands.authLogin(callbackPort.value);
       status.value = "loggedIn";
       loading.value = false;
       // 登录成功后立即拉用户信息
       try {
-        userInfo.value = await authApi.getUserInfo();
+        userInfo.value = await commands.authGetUserInfo();
       } catch (e) {
         console.warn("[auth] login getUserInfo failed:", e);
       }
@@ -111,7 +112,7 @@ export const useAuthStore = defineStore("auth", () => {
    * 取消正在进行的授权
    */
   async function cancelLogin(): Promise<void> {
-    await authApi.cancelLogin();
+    await commands.authCancelLogin();
     status.value = "loggedOut";
     loading.value = false;
   }
@@ -128,7 +129,7 @@ export const useAuthStore = defineStore("auth", () => {
    * 退出登录
    */
   async function logout(): Promise<void> {
-    await authApi.logout();
+    await commands.authLogout();
     status.value = "loggedOut";
   }
 

@@ -193,6 +193,10 @@ pub fn builder() -> Builder<Wry> {
             commands::drive::DELETE_TRACE_ERROR_PREFIX,
         )
         .constant(
+            "SYNC_USER_MESSAGE_RULES",
+            crate::sync::user_messages::ipc_user_message_rules(),
+        )
+        .constant(
             "TRANSFER_DIR",
             TransferDirectionConstants {
                 upload: repository::transfer_direction::UPLOAD,
@@ -263,6 +267,10 @@ pub fn export_bindings() {
 
 /// 将生成器输出的 JSDoc 转为项目统一使用的行注释。
 fn normalize_generated_comments(source: &str) -> String {
+    let source = source.replace(
+        "import { invoke as __TAURI_INVOKE } from \"@tauri-apps/api/core\";",
+        "import { invoke as __TAURI_INVOKE } from \"./tauri\";",
+    );
     let mut output = String::with_capacity(source.len());
     let mut doc_indent = "";
     let mut in_doc = false;
@@ -343,5 +351,6 @@ mod tests {
         let generated =
             std::fs::read_to_string(super::bindings_path()).expect("读取生成 bindings 失败");
         assert!(!generated.contains("/**"));
+        assert!(generated.contains("import { invoke as __TAURI_INVOKE } from \"./tauri\";"));
     }
 }

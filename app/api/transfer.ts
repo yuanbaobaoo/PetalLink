@@ -8,7 +8,6 @@ import {
   TRANSFER_OPERATION,
   TRANSFER_STATE,
 } from "./generated";
-import { call, discard } from "./tauri";
 import type { TransferTask as GeneratedTransferTask } from "./generated";
 export {
   TRANSFER_DIR,
@@ -80,38 +79,8 @@ export function canRetryTransferTask(task: TransferTask): boolean {
 }
 
 /**
- * 列举全部传输任务
+ * 读取并收窄后端传输状态数值。
  */
-export function listAllTransfers(): Promise<TransferTask[]> {
-  return call(commands.transferListAll()) as Promise<TransferTask[]>;
-}
-
-/**
- * 清除已完成
- */
-export function clearCompleted(): Promise<void> {
-  return discard(commands.transferClearCompleted());
-}
-
-/**
- * 清除失败项
- */
-export function clearFailed(): Promise<void> {
-  return discard(commands.transferClearFailed());
-}
-
-/**
- * 清除已完成+失败
- */
-export function clearFinished(): Promise<void> {
-  return discard(commands.transferClearFinished());
-}
-
-/**
- * 重试单个传输任务；Failed 重放，RestartRequired 请求重新规划。
- *
- * @param taskId - 传输任务 ID
- */
-export function retryTransfer(taskId: number): Promise<void> {
-  return discard(commands.transferRetry(taskId));
+export async function listAllTransfers(): Promise<TransferTask[]> {
+  return await commands.transferListAll() as TransferTask[];
 }

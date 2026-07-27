@@ -325,8 +325,6 @@ fn ensure_engine_started_owned(app: &AppHandle) -> AppResult<()> {
     let mut engine = SyncEngine::new(
         FILES_API.clone(),
         CHANGES_API.clone(),
-        DOWNLOAD_API.clone(),
-        UPLOAD_API.clone(),
         DB.clone(),
         STATUS_AGGREGATOR.clone(),
         config.skip_patterns.clone(),

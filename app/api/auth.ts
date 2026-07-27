@@ -1,10 +1,8 @@
 /**
- * Auth API —— 封装后端 auth 命令。
+ * Auth 展示适配。
  */
-import { commands } from "./generated";
-import { call, discard } from "./tauri";
-export type { AuthState, TokenPair, UserInfo } from "./generated";
-import type { AuthState, TokenPair, UserInfo } from "./generated";
+export type { UserInfo } from "./generated";
+import type { UserInfo } from "./generated";
 
 // 匿名账号的显示名称
 const ANONYMOUS_LABEL = "匿名账号";
@@ -55,53 +53,4 @@ export function initial(u?: UserInfo | null): string | null {
   if (!label) return null;
   // 取第一个 Unicode 字符（CJK 安全）
   return Array.from(label)[0] ?? null;
-}
-
-/**
- * 检查 client_secret 是否已配置
- */
-export function checkSecret(): Promise<boolean> {
-  return call(commands.authCheckSecret());
-}
-
-/**
- * 启动时恢复登录态
- */
-export function restore(): Promise<AuthState> {
-  return call(commands.authRestore());
-}
-
-/**
- * 发起 OAuth 登录
- */
-export function login(port: number): Promise<TokenPair> {
-  return call(commands.authLogin(port));
-}
-
-/**
- * 取消正在进行的授权
- */
-export function cancelLogin(): Promise<void> {
-  return discard(commands.authCancelLogin());
-}
-
-/**
- * 退出登录
- */
-export function logout(): Promise<void> {
-  return discard(commands.authLogout());
-}
-
-/**
- * 拉取当前用户信息
- */
-export function getUserInfo(): Promise<UserInfo> {
-  return call(commands.authGetUserInfo());
-}
-
-/**
- * 检查是否已登录
- */
-export function isLoggedIn(): Promise<boolean> {
-  return call(commands.authIsLoggedIn());
 }

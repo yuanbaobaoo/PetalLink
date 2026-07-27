@@ -8,8 +8,6 @@ pub mod cache_paths;
 pub mod config;
 /// 配置文件持久化。
 pub mod config_store;
-/// 开发环境凭据加载。
-pub mod env_loader;
 /// 日志收集与文件保留。
 pub mod logging;
 /// 网络状态探测与发布。

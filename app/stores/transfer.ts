@@ -3,6 +3,7 @@
  */
 import { defineStore } from "pinia";
 import { ref, computed } from "vue";
+import { commands } from "@/api/generated";
 import * as transferApi from "@/api/transfer";
 import type { TransferTask } from "@/api/transfer";
 import { TRANSFER_DIR, TRANSFER_STATE } from "@/api/transfer";
@@ -94,7 +95,7 @@ export const useTransferStore = defineStore("transfer", () => {
    * 清除已完成
    */
   async function clearCompleted(): Promise<void> {
-    await transferApi.clearCompleted();
+    await commands.transferClearCompleted();
     await loadAll();
   }
 
@@ -102,7 +103,7 @@ export const useTransferStore = defineStore("transfer", () => {
    * 清除失败项
    */
   async function clearFailed(): Promise<void> {
-    await transferApi.clearFailed();
+    await commands.transferClearFailed();
     await loadAll();
   }
 
@@ -110,7 +111,7 @@ export const useTransferStore = defineStore("transfer", () => {
    * 清除已完成+失败
    */
   async function clearFinished(): Promise<void> {
-    await transferApi.clearFinished();
+    await commands.transferClearFinished();
     await loadAll();
   }
 
@@ -120,7 +121,7 @@ export const useTransferStore = defineStore("transfer", () => {
    * @param taskId - 传输任务 ID
    */
   async function retry(taskId: number): Promise<void> {
-    await transferApi.retryTransfer(taskId);
+    await commands.transferRetry(taskId);
     await loadAll();
   }
 

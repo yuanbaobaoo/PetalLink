@@ -1,6 +1,6 @@
 // 此文件由 Tauri Specta 自动生成，禁止手动修改。
 
-import { invoke as __TAURI_INVOKE } from "@tauri-apps/api/core";
+import { invoke as __TAURI_INVOKE } from "./tauri";
 import * as __TAURI_EVENT from "@tauri-apps/api/event";
 
 // 命令
@@ -131,6 +131,8 @@ export const events = {
 
 // 常量
 export const DELETE_TRACE_ERROR_PREFIX = "TRACE_FAILED:" as const;
+
+export const SYNC_USER_MESSAGE_RULES = [{"message":"云端文件已更新。为避免覆盖，请同步索引后重试。","patterns":["远端文件已在规划后变化","云端文件版本已变化"]},{"message":"文件正在编辑，保存并关闭后会自动继续。","patterns":["用户正在编辑","文件正在编辑"]},{"message":"文件仍在变化，稳定后会自动继续。","patterns":["文件尚不稳定","文件仍在变化"]},{"message":"本地文件已发生变化，请重新检查并重试。","patterns":["本地上传源已变化","本地上传源在执行前发生变化","本地源已变化","下载目标已出现本地内容","更新下载目标已变化","更新下载目标已不存在"]},{"message":"文件同步信息不完整，请同步索引后重试。","patterns":["缺少 fileId","缺少真实 fileId","缺少 parentId","缺少 operation","operation 与 direction 不一致","缺少云端版本","缺少云端版本快照"]},{"message":"续传信息已失效，请重新开始上传。","patterns":["session_url","上传断点","安全重放"]},{"message":"没有找到可用于核对的同步记录，暂时无法释放空间。","patterns":["找不到与路径匹配的成功同步基线"]},{"message":"本地文件已更改，无法释放空间。","patterns":["本地内容与最后成功同步基线不一致"]},{"message":"云端文件信息已变化，请同步索引后重试。","patterns":["可信云树中不存在同一 fileId"]},{"message":"云端文件已变化，无法释放空间。","patterns":["远端副本不存在、已回收、大小或版本与成功基线不一致"]},{"message":"检查期间本地文件发生变化，无法释放空间。","patterns":["远端核验期间本地文件已变化"]},{"message":"云端文件仍在更新，请稍后再试。","patterns":["云端索引尚未追平"]},{"message":"文件状态已变化，请同步索引后重试。","patterns":["释放租约已失效"]},{"message":"文件状态已变化，请重新检查并重试。","patterns":["重新规划"]},{"message":"正在确认同步结果，请稍后查看。","patterns":["远端核验"]}] as const;
 
 export const TRANSFER_DIR = {"DELETE":2,"DOWNLOAD":1,"DOWNLOAD_UPDATE":3,"UPLOAD":0} as const;
 

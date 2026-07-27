@@ -6,10 +6,8 @@ use parking_lot::Mutex;
 use petal_link_lib::auth::service::AuthService;
 use petal_link_lib::drive::changes_api::ChangesApi;
 use petal_link_lib::drive::client::DriveClient;
-use petal_link_lib::drive::download_api::DownloadApi;
 use petal_link_lib::drive::files_api::FilesApi;
 use petal_link_lib::drive::models::DriveFile;
-use petal_link_lib::drive::upload_api::UploadApi;
 use petal_link_lib::sync::engine::SyncEngine;
 use petal_link_lib::sync::state::{ActionResult, SyncAction, SyncActionType};
 use petal_link_lib::sync::status_aggregator::StatusAggregator;
@@ -62,14 +60,10 @@ fn new_engine() -> (SyncEngine, Arc<Mutex<Connection>>) {
     let auth = Arc::new(AuthService::new());
     let client = Arc::new(DriveClient::new(auth));
     let files_api = Arc::new(FilesApi::new(client.clone()));
-    let changes_api = Arc::new(ChangesApi::new(client.clone()));
-    let download_api = Arc::new(DownloadApi::new(client.clone()));
-    let upload_api = Arc::new(UploadApi::new(client));
+    let changes_api = Arc::new(ChangesApi::new(client));
     let engine = SyncEngine::new(
         files_api,
         changes_api,
-        download_api,
-        upload_api,
         db.clone(),
         Arc::new(StatusAggregator::default()),
         Vec::new(),

@@ -3,6 +3,7 @@
  *
  * 替代散布在各视图/组件中的 `(e as { message?: string }).message ?? String(e)` 模式。
  */
+import { SYNC_USER_MESSAGE_RULES } from "@/api/generated";
 
 /**
  * 将内部同步错误转换为用户能理解的提示。
@@ -13,79 +14,13 @@
  * @returns 用户侧提示
  */
 export function formatUserMessage(message: string): string {
-  // 并发写冲突统一提示用户先刷新云端基线。
-  if (
-    message.includes("远端文件已在规划后变化")
-    || message.includes("云端文件版本已变化")
-  ) {
-    return "云端文件已更新。为避免覆盖，请同步索引后重试。";
+  // Rust 同源规则同时兼容新错误和数据库中的历史技术文案。
+  for (const rule of SYNC_USER_MESSAGE_RULES) {
+    if (rule.patterns.some((pattern) => message.includes(pattern))) {
+      return rule.message;
+    }
   }
-  // 编辑中和未稳定属于可自动恢复的本地暂态。
-  if (
-    message.includes("用户正在编辑")
-    || message.includes("文件正在编辑")
-  ) {
-    return "文件正在编辑，保存并关闭后会自动继续。";
-  }
-  // 本地快照失效需要重新规划，不能继续复用旧任务。
-  if (
-    message.includes("文件尚不稳定")
-    || message.includes("文件仍在变化")
-  ) {
-    return "文件仍在变化，稳定后会自动继续。";
-  }
-  // 合同字段缺失通常来自旧任务或尚未追平的索引。
-  if (
-    message.includes("本地上传源已变化")
-    || message.includes("本地上传源在执行前发生变化")
-    || message.includes("本地源已变化")
-    || message.includes("下载目标已出现本地内容")
-    || message.includes("更新下载目标已变化")
-    || message.includes("更新下载目标已不存在")
-  ) {
-    return "本地文件已发生变化，请重新检查并重试。";
-  }
-  // 断点会话不可信时必须重新开始，避免错误续传。
-  if (
-    message.includes("缺少 fileId")
-    || message.includes("缺少真实 fileId")
-    || message.includes("缺少 parentId")
-    || message.includes("缺少 operation")
-    || message.includes("operation 与 direction 不一致")
-    || message.includes("缺少云端版本")
-    || message.includes("缺少云端版本快照")
-  ) {
-    return "文件同步信息不完整，请同步索引后重试。";
-  }
-  if (
-    message.includes("session_url")
-    || message.includes("上传断点")
-    || message.includes("安全重放")
-  ) {
-    return "续传信息已失效，请重新开始上传。";
-  }
-  // 释放空间错误按核验阶段映射为可执行建议。
-  if (message.includes("找不到与路径匹配的成功同步基线")) {
-    return "没有找到可用于核对的同步记录，暂时无法释放空间。";
-  }
-  if (message.includes("本地内容与最后成功同步基线不一致")) {
-    return "本地文件已更改，无法释放空间。";
-  }
-  if (message.includes("可信云树中不存在同一 fileId")) {
-    return "云端文件信息已变化，请同步索引后重试。";
-  }
-  if (message.includes("远端副本不存在、已回收、大小或版本与成功基线不一致")) {
-    return "云端文件已变化，无法释放空间。";
-  }
-  if (message.includes("远端核验期间本地文件已变化")) {
-    return "检查期间本地文件发生变化，无法释放空间。";
-  }
-  if (message.includes("云端索引尚未追平")) {
-    return "云端文件仍在更新，请稍后再试。";
-  }
-  if (message.includes("释放租约已失效")) {
-    return "文件状态已变化，请同步索引后重试。";
-  }
+
   // 持久化状态机名称不直接暴露给普通用户。
   if (message.includes("WaitingForNetwork")) {
     return "网络不可用，恢复后会自动继续。";
@@ -101,13 +36,6 @@ export function formatUserMessage(message: string): string {
   }
   if (message.includes("BlockedByActiveIntent")) {
     return "该文件正在执行其他同步任务，请稍后再试。";
-  }
-  // 兼容历史任务中保存的旧错误措辞。
-  if (message.includes("重新规划")) {
-    return "文件状态已变化，请重新检查并重试。";
-  }
-  if (message.includes("远端核验")) {
-    return "正在确认同步结果，请稍后查看。";
   }
   return message;
 }

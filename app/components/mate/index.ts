@@ -23,7 +23,6 @@ export { default as MateSearchField } from "./MateSearchField.vue";
 export { default as MateSwitch } from "./MateSwitch.vue";
 export { default as MateCheckbox } from "./MateCheckbox.vue";
 export { default as MateRadio } from "./MateRadio.vue";
-export { default as MateRadioGroup } from "./MateRadioGroup.vue";
 
 // ===== 进度 =====
 export { default as MateLinearProgress } from "./MateLinearProgress.vue";
@@ -49,11 +48,3 @@ export { default as MateTag } from "./MateTag.vue";
 export type { TagTheme, TagSize } from "./MateTag.vue";
 export { default as MateNavItem } from "./MateNavItem.vue";
 export { default as MateSectionHeader } from "./MateSectionHeader.vue";
-export { default as MateStatChip } from "./MateStatChip.vue";
-export { default as MateSpinningIcon } from "./MateSpinningIcon.vue";
-
-// ===== 基础设施 =====
-export { default as MateHover } from "./MateHover.vue";
-export { default as MateVerticalSeparator } from "./MateVerticalSeparator.vue";
-export { default as MateBottomDivider } from "./MateBottomDivider.vue";
-export { default as MateScaffold } from "./MateScaffold.vue";
