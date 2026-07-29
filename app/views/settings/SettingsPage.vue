@@ -6,14 +6,15 @@ import { confirmDialog, showToast } from "@/components/mate";
 import { commands } from "@/api/generated";
 import type { DriveAbout } from "@/api/generated";
 import * as configApi from "@/api/config";
+import type { AppConfig } from "@/api/config";
 import * as authApi from "@/api/auth";
 import LogViewerPage from "@/views/settings/LogViewerPage.vue";
 import { useAuthStore } from "@/stores/auth";
 import { useUpdaterStore } from "@/stores/updater";
 import { useAsyncAction } from "@/composables/useAsyncAction";
-import { open } from "@tauri-apps/plugin-dialog";
+import { selectAndConfigureSyncDirectory } from "@/composables/useSyncDirectorySetup";
 import { formatFileSize } from "@/utils/format";
-import { isEmptyDir } from "@/utils/fs";
+import { extractErrorMessage } from "@/utils/error";
 
 // 当前认证状态。
 const auth = useAuthStore();
@@ -56,6 +57,8 @@ const skipPatterns = ref(".DS_Store, .tmp, ~$*, .Trash");
 const mountDir = ref("");
 // 是否已经配置同步目录。
 const mountConfigured = ref(false);
+// 最近一次成功加载或保存的完整配置，用于保留未展示字段。
+const loadedConfig = ref<AppConfig | null>(null);
 // OAuth 设置
 const oauthPort = ref(9999);
 // 开机自启
@@ -100,6 +103,7 @@ onMounted(async () => {
   try {
     // 当前持久化配置。
     const config = await configApi.loadConfig();
+    loadedConfig.value = config;
     concurrency.value = config.concurrency;
     debounceSec.value = config.debounce_sec;
     skipPatterns.value = config.skip_patterns.join(", ");
@@ -117,6 +121,48 @@ onMounted(async () => {
 });
 
 /**
+ * 将设置页当前表单转换为一次性提交的完整配置。
+ */
+function buildFormConfig(): AppConfig {
+  // 去除空白与空项后的 skipPatterns。
+  const normalizedSkipPatterns = skipPatterns.value
+    .split(",")
+    .map((pattern) => pattern.trim())
+    .filter((pattern) => pattern);
+
+  // 首次加载失败时仍可由当前表单生成后端要求的完整安全配置。
+  const fallbackConfig: AppConfig = {
+    oauth_redirect_uri: `http://127.0.0.1:${oauthPort.value}/oauth/callback`,
+    oauth_callback_port: oauthPort.value,
+    mount_dir: mountDir.value,
+    mount_configured: mountConfigured.value,
+    concurrency: concurrency.value,
+    poll_interval_sec: pollIntervalSec.value,
+    debounce_sec: debounceSec.value,
+    skip_patterns: normalizedSkipPatterns,
+    sort_field: "name",
+    sort_order: "ascending",
+    show_tray_icon: showTrayIcon.value,
+  };
+
+  // 以完整持久化快照为底稿，避免选择目录覆盖隐藏或未来新增字段。
+  const baseConfig = loadedConfig.value ?? fallbackConfig;
+
+  return {
+    ...baseConfig,
+    oauth_redirect_uri: `http://127.0.0.1:${oauthPort.value}/oauth/callback`,
+    oauth_callback_port: oauthPort.value,
+    mount_dir: mountDir.value,
+    mount_configured: mountConfigured.value,
+    concurrency: concurrency.value,
+    poll_interval_sec: pollIntervalSec.value,
+    debounce_sec: debounceSec.value,
+    skip_patterns: normalizedSkipPatterns,
+    show_tray_icon: showTrayIcon.value,
+  };
+}
+
+/**
  * 保存当前设置表单。
  */
 async function handleSave(): Promise<void> {
@@ -124,19 +170,9 @@ async function handleSave(): Promise<void> {
   saving.value = true; errorMessage.value = null;
   try {
     // 所有配置一次提交，避免局部成功导致界面与磁盘不一致。
-    await commands.configSave({
-      oauth_redirect_uri: `http://127.0.0.1:${oauthPort.value}/oauth/callback`,
-      oauth_callback_port: oauthPort.value,
-      mount_dir: mountDir.value,
-      mount_configured: mountConfigured.value,
-      concurrency: concurrency.value,
-      poll_interval_sec: pollIntervalSec.value,
-      debounce_sec: debounceSec.value,
-      skip_patterns: skipPatterns.value.split(",").map(s => s.trim()).filter(s => s),
-      sort_field: "name",
-      sort_order: "ascending",
-      show_tray_icon: showTrayIcon.value,
-    });
+    const config = buildFormConfig();
+    await commands.configSave(config);
+    loadedConfig.value = config;
     saved.value = true;
     showToast("配置已保存");
   } catch (e) { errorMessage.value = String(e); }
@@ -150,6 +186,7 @@ async function handleReset(): Promise<void> {
   try {
     // 当前持久化配置。
     const config = await configApi.loadConfig();
+    loadedConfig.value = config;
     concurrency.value = config.concurrency;
     debounceSec.value = config.debounce_sec;
     skipPatterns.value = config.skip_patterns.join(", ");
@@ -236,29 +273,29 @@ async function handleCheckUpdate(): Promise<void> {
 }
 
 /**
- * 选择并校验新的同步目录。
+ * 通过统一入口选择目录并提交当前完整设置表单。
  */
 async function handleSelectDir(): Promise<void> {
   await runSelectDir(async () => {
     try {
-      // 用户选择的目录路径。
-      const selected = await open({ directory: true, multiple: false, title: "选择同步目录" });
-      if (selected && typeof selected === "string") {
-        // 校验：必须空目录（过滤隐藏文件 + skipPatterns）
-        let isEmpty = false;
-        try {
-          isEmpty = await isEmptyDir(selected);
-        } catch {
-          // 无法读取目录时按非空处理，避免覆盖未知内容。
-          isEmpty = false;
-        }
-        if (!isEmpty) {
-          showToast("所选目录不为空，请选择一个空目录", { variant: "warning" });
-          return;
-        }
-        mountDir.value = selected; mountConfigured.value = true; saved.value = false;
-      }
-    } catch {}
+      // 当前表单配置必须与新目录在同一事务中提交，避免未保存编辑丢失。
+      const config = buildFormConfig();
+      // 统一目录配置结果。
+      const result = await selectAndConfigureSyncDirectory(config);
+      if (!result) return;
+      mountDir.value = result.path;
+      mountConfigured.value = true;
+      loadedConfig.value = {
+        ...config,
+        mount_dir: result.path,
+        mount_configured: true,
+        skip_patterns: [...config.skip_patterns],
+      };
+      saved.value = true;
+      showToast("配置已保存");
+    } catch (e) {
+      showToast("配置同步目录失败：" + extractErrorMessage(e), { variant: "error" });
+    }
   });
 }
 

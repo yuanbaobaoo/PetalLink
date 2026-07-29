@@ -79,7 +79,7 @@ export const commands = {
 	syncItemsByFolder: (folderLocalPath: string) => __TAURI_INVOKE<SyncItem[]>("sync_items_by_folder", { folderLocalPath }),
 	// 读取并校验当前持久化配置。
 	configLoad: () => __TAURI_INVOKE<AppConfig>("config_load"),
-	// 保存配置；挂载目录变化时停止旧运行时、清理缓存并重启，首次配置时启动同步引擎。
+	// 保存配置；挂载目录变化时停止旧运行时、清理缓存并重启，运行参数变化时原位重建引擎。
 	configSave: (config: AppConfig) => __TAURI_INVOKE<null>("config_save", { config }),
 	// 切换托盘图标显示：持久化到配置并立即生效（对齐开机自启开关的即时生效模式）。
 	traySetVisible: (visible: boolean) => __TAURI_INVOKE<null>("tray_set_visible", { visible }),
@@ -385,9 +385,7 @@ export type SyncGlobalState_Deserialize = {
 	// 是否有目录结构变更（触发前端目录重拉）
 	content_changed: boolean,
 	// 当前同步阶段（供前端状态条精确显示）。None = 空闲。
-	// 值：indexing-startup / indexing-manual / indexing-auto-full /
-	// querying-changes / syncing-auto-incremental /
-	// syncing-local / syncing-manual / syncing-retry / syncing-startup
+	// 值由本模块 `SYNC_PHASE_*` 常量定义；运行中不得为空。
 	sync_phase?: string | null,
 };
 
@@ -422,9 +420,7 @@ export type SyncGlobalState_Serialize = {
 	// 是否有目录结构变更（触发前端目录重拉）
 	content_changed: boolean,
 	// 当前同步阶段（供前端状态条精确显示）。None = 空闲。
-	// 值：indexing-startup / indexing-manual / indexing-auto-full /
-	// querying-changes / syncing-auto-incremental /
-	// syncing-local / syncing-manual / syncing-retry / syncing-startup
+	// 值由本模块 `SYNC_PHASE_*` 常量定义；运行中不得为空。
 	sync_phase?: string | null,
 };
 

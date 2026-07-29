@@ -60,7 +60,10 @@ export const useSyncStore = defineStore("sync", () => {
 
   // 进度
   const progress = computed(() => {
-    if (total.value === 0) return 1.0;
+    // 首次同步动作尚未写入 sync_items 时使用不确定态，不能把空表解释成 100%。
+    if (total.value === 0) {
+      return isRunning.value || isIndexing.value ? null : 1.0;
+    }
     return completed.value / total.value;
   });
 
@@ -113,6 +116,17 @@ export const useSyncStore = defineStore("sync", () => {
   }
 
   /**
+   * 在配置提交成功后立即应用挂载事实，避免瞬时配置重读失败回退为未配置。
+   *
+   * @param path - 已持久化的同步目录
+   */
+  function applyMountConfiguration(path: string): void {
+    mountConfigured.value = true;
+    mountDir.value = path;
+    setupPhase.value = "active";
+  }
+
+  /**
    * 初始化：加载配置判断阶段；配置就绪时主动拉一次当前同步状态，
    * 避免错过配置完成前已发出的 is_indexing 事件（BFS 可能先于 init 启动）。
    */
@@ -138,7 +152,8 @@ export const useSyncStore = defineStore("sync", () => {
         }
       }
     } catch {
-      setupPhase.value = "needsSetup";
+      // 已由成功保存提交的挂载事实不得因瞬时配置读取失败被回退。
+      if (!mountConfigured.value) setupPhase.value = "needsSetup";
     }
   }
 
@@ -170,7 +185,7 @@ export const useSyncStore = defineStore("sync", () => {
     isRunning, isIndexing, indexingScannedFolders, indexingDiscoveredItems,
     syncPhase, lastSyncTime, contentChanged,
     mountConfigured, setupPhase, mountDir, progress, hasActiveTransfer,
-    init, applyState, triggerManualRefresh, retryFailed,
+    init, applyState, applyMountConfiguration, triggerManualRefresh, retryFailed,
     sidebarRefresh,
   };
 });

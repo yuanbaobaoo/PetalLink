@@ -9,7 +9,18 @@ use crate::core::config_store::ConfigStore;
 use crate::error::AppResult;
 use crate::mount::manager::MountManager;
 
-use super::{drop_runtime_async, ensure_engine_started, relaunch, set_mount_manager};
+use super::{drop_runtime_async, install_runtime_with_mount, relaunch, replace_runtime_with_mount};
+
+/// 串行化完整配置保存事务，避免两个请求基于同一旧快照交错替换运行时。
+static CONFIG_SAVE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// 判断需要重建同步引擎才能生效的运行参数是否变化。
+fn runtime_settings_changed(old: &AppConfig, new: &AppConfig) -> bool {
+    old.concurrency != new.concurrency
+        || old.poll_interval_sec != new.poll_interval_sec
+        || old.debounce_sec != new.debounce_sec
+        || old.skip_patterns != new.skip_patterns
+}
 
 /// 读取并校验当前持久化配置。
 #[tauri::command]
@@ -29,16 +40,17 @@ pub fn tray_set_visible(app: AppHandle, visible: bool) -> AppResult<()> {
     Ok(())
 }
 
-/// 保存配置；挂载目录变化时停止旧运行时、清理缓存并重启，首次配置时启动同步引擎。
+/// 保存配置；挂载目录变化时停止旧运行时、清理缓存并重启，运行参数变化时原位重建引擎。
 #[tauri::command]
 #[specta::specta]
 pub async fn config_save(app: AppHandle, config: AppConfig) -> AppResult<()> {
-    let old = ConfigStore::load().ok();
-    let old_configured = old.as_ref().map(|c| c.mount_configured).unwrap_or(false);
-    let old_abs = old.as_ref().map(|c| c.expanded_mount_dir());
+    let _save_transaction = CONFIG_SAVE_LOCK.lock().await;
+    let old = ConfigStore::load()?;
+    let old_configured = old.mount_configured;
+    let old_abs = old.expanded_mount_dir();
     let new_abs = config.expanded_mount_dir();
-    let dir_changed =
-        old_configured && config.mount_configured && old_abs.as_ref() != Some(&new_abs);
+    let dir_changed = old_configured && config.mount_configured && old_abs != new_abs;
+    let runtime_changed = runtime_settings_changed(&old, &config);
 
     ConfigStore::save(&config)?;
     // 保存/导入路径也可能改托盘可见性，与运行时状态对齐
@@ -47,9 +59,7 @@ pub async fn config_save(app: AppHandle, config: AppConfig) -> AppResult<()> {
     // 切换或取消挂载目录
     if old_configured && (!config.mount_configured || dir_changed) {
         drop_runtime_async().await;
-        if let Some(old_abs) = old_abs {
-            crate::core::cache_paths::clear_cache_files(&old_abs.to_string_lossy());
-        }
+        crate::core::cache_paths::clear_cache_files(&old_abs.to_string_lossy());
         crate::core::cache_paths::clear_cache_files(&new_abs.to_string_lossy());
         tracing::info!("挂载目录变更，relaunch");
         relaunch(&app);
@@ -58,17 +68,21 @@ pub async fn config_save(app: AppHandle, config: AppConfig) -> AppResult<()> {
 
     // 首次配置并启动引擎
     if !old_configured && config.mount_configured {
-        let m = Arc::new(MountManager::new(&new_abs));
-        m.ensure_mount_dir()?;
-        set_mount_manager(m);
-        ensure_engine_started(&app)?;
+        let mount = Arc::new(MountManager::new(&new_abs));
+        install_runtime_with_mount(&app, mount)?;
         return Ok(());
     }
 
-    // 更新挂载管理器
-    let m = Arc::new(MountManager::new(&new_abs));
-    m.ensure_mount_dir()?;
-    set_mount_manager(m);
+    // 运行参数属于引擎生命周期快照；安全关闭旧周期后原目录重建，不破坏可信 checkpoint。
+    if old_configured && config.mount_configured && runtime_changed {
+        let mount = Arc::new(MountManager::new(&new_abs));
+        replace_runtime_with_mount(&app, mount).await?;
+        return Ok(());
+    }
+
+    // 更新挂载管理器；若此前启动失败导致引擎缺失，同一入口会同时完成恢复安装。
+    let mount = Arc::new(MountManager::new(&new_abs));
+    install_runtime_with_mount(&app, mount)?;
     Ok(())
 }
 
@@ -85,4 +99,31 @@ pub fn config_export_json() -> AppResult<String> {
 #[specta::specta]
 pub fn config_import_json(json_str: String) -> AppResult<AppConfig> {
     ConfigStore::import_from_json(&json_str)
+}
+
+/// 覆盖配置保存时引擎重建边界的核心合同。
+#[cfg(test)]
+mod tests {
+    use super::runtime_settings_changed;
+    use crate::core::config::AppConfig;
+
+    /// skipPatterns 变化必须重建引擎，使预编译 matcher 立即生效。
+    #[test]
+    fn skip_pattern_change_requires_runtime_rebuild() {
+        let old = AppConfig::default();
+        let mut new = old.clone();
+        new.skip_patterns.push("*.cache".to_string());
+
+        assert!(runtime_settings_changed(&old, &new));
+    }
+
+    /// 纯展示设置变化不得中断正在运行的同步引擎。
+    #[test]
+    fn tray_visibility_change_does_not_require_runtime_rebuild() {
+        let old = AppConfig::default();
+        let mut new = old.clone();
+        new.show_tray_icon = !old.show_tray_icon;
+
+        assert!(!runtime_settings_changed(&old, &new));
+    }
 }

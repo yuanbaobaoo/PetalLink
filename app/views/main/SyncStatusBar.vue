@@ -12,29 +12,40 @@ const sync = useSyncStore();
 // 传输 store
 const transfer = useTransferStore();
 
+// 后端同步阶段对应的精确用户文案。
+const SYNC_PHASE_TEXT: Readonly<Record<string, string>> = {
+  "indexing-startup": "正在首次读取云端文件…",
+  "indexing-manual": "正在刷新云端文件…",
+  "indexing-auto-full": "正在重新检查全部云端文件…",
+  "querying-changes": "正在检查云端更新…",
+  "syncing-auto-incremental": "正在同步云端变更…",
+  "syncing-local": "正在同步本地变更…",
+  "syncing-manual": "正在同步…",
+  "syncing-retry": "正在重试失败项…",
+  "syncing-startup": "正在继续上次未完成的同步…",
+  "planning-startup": "正在分析首次同步内容…",
+  "planning-sync": "正在分析同步内容…",
+  "materializing-local": "正在创建本地目录和占位文件…",
+  "executing-actions": "正在执行同步操作…",
+};
+
 // 状态文案：根据 sync_phase 精确显示当前操作场景
 const statusText = computed(() => {
-  switch (sync.syncPhase) {
-    case "indexing-startup": return "正在首次读取云端文件…";
-    case "indexing-manual": return "正在刷新云端文件…";
-    case "indexing-auto-full": return "正在重新检查全部云端文件…";
-    case "querying-changes": return "正在检查云端更新…";
-    case "syncing-auto-incremental": return "正在同步云端变更…";
-    case "syncing-local": return "正在同步本地变更…";
-    case "syncing-manual": return "正在同步…";
-    case "syncing-retry": return "正在重试失败项…";
-    case "syncing-startup": return "正在继续上次未完成的同步…";
-    default:
-      // 无 sync cycle 时仍按持久化传输队列区分活动态，不能把等待/退避/核验显示为完成。
-      if (transfer.verifyingRemote) return "正在确认同步结果…";
-      if (sync.uploading || sync.downloading || transfer.running) return "同步中";
-      if (sync.waitingNetwork || transfer.waitingNetwork) return "等待网络恢复…";
-      if (transfer.backingOff) return "等待下次重试…";
-      if (transfer.restartRequired) return "有文件需要重新检查…";
-      if (transfer.pending) return "等待传输…";
-      if (sync.failed) return "同步存在失败项";
-      return "同步完成";
-  }
+  // 已知后端阶段优先于聚合队列状态。
+  const phaseText = sync.syncPhase ? SYNC_PHASE_TEXT[sync.syncPhase] : undefined;
+  if (phaseText) return phaseText;
+
+  // 无精确 phase 时仍按持久化传输队列区分活动态。
+  if (transfer.verifyingRemote) return "正在确认同步结果…";
+  if (sync.uploading || sync.downloading || transfer.running) return "同步中";
+  if (sync.waitingNetwork || transfer.waitingNetwork) return "等待网络恢复…";
+  if (transfer.backingOff) return "等待下次重试…";
+  if (transfer.restartRequired) return "有文件需要重新检查…";
+  if (transfer.pending) return "等待传输…";
+  // 运行态字段是最终防线，漏 phase 时也不得误报完成。
+  if (sync.isRunning || sync.isIndexing) return "正在同步…";
+  if (sync.failed) return "同步存在失败项";
+  return "同步完成";
 });
 
 // 上次同步时间（格式化 HH:MM）

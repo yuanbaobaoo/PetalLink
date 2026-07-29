@@ -631,7 +631,7 @@ impl SyncEngine {
     pub(super) async fn scan_local(&self) -> AppResult<HashMap<String, LocalFileEntry>> {
         match &self.mount {
             Some(m) => Ok(m
-                .scan_local(&self.skip_patterns)
+                .scan_local(self.skip_matcher.clone())
                 .await?
                 .into_iter()
                 .map(|e| (e.relative_path.clone(), e))

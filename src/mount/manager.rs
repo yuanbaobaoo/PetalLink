@@ -10,9 +10,10 @@
 //! - 0 字节且非占位 → 拒绝删除（保护用户空文件如 .gitkeep）
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::error::{AppError, AppResult};
-use crate::mount::skip::should_skip;
+use crate::mount::skip::SkipMatcher;
 
 // ===== xattr 键常量 =====
 /// xattr 键：云端文件 ID
@@ -385,16 +386,18 @@ impl MountManager {
     /// 扫描挂载目录，返回全部非跳过文件的条目。
     /// 对齐 dart `scanLocal`。
     /// 大目录在独立线程池执行以避免阻塞 tokio runtime。
-    pub async fn scan_local(&self, skip_patterns: &[String]) -> AppResult<Vec<LocalFileEntry>> {
+    pub(crate) async fn scan_local(
+        &self,
+        skip_matcher: Arc<SkipMatcher>,
+    ) -> AppResult<Vec<LocalFileEntry>> {
         let mount = self.mount_dir.clone();
         // ★ 挂载目录为空时跳过扫描，返回空列表（避免误扫根目录或判断"本地无"误删云端）
         if mount.to_string_lossy().is_empty() {
             tracing::warn!("scan_local 跳过：挂载目录未配置");
             return Ok(Vec::new());
         }
-        let patterns = skip_patterns.to_vec();
         // 用 spawn_blocking 避免阻塞 tokio worker（对齐 dart Isolate.run）
-        tokio::task::spawn_blocking(move || scan_local_sync(&mount, &patterns))
+        tokio::task::spawn_blocking(move || scan_local_sync(&mount, &skip_matcher))
             .await
             .map_err(|e| AppError::generic(format!("扫描线程异常：{e}")))?
     }
@@ -670,9 +673,9 @@ async fn set_finder_label_async(path: String, gray: bool) -> std::io::Result<()>
 // ===== 同步扫描 =====
 
 /// 同步扫描目录（在 spawn_blocking 中执行）。
-fn scan_local_sync(mount_dir: &Path, skip_patterns: &[String]) -> AppResult<Vec<LocalFileEntry>> {
+fn scan_local_sync(mount_dir: &Path, skip_matcher: &SkipMatcher) -> AppResult<Vec<LocalFileEntry>> {
     let mut entries = Vec::new();
-    scan_recursive(mount_dir, mount_dir, skip_patterns, &mut entries)
+    scan_recursive(mount_dir, mount_dir, skip_matcher, &mut entries)
         .map_err(|e| AppError::generic(format!("扫描目录失败：{e}")))?;
     Ok(entries)
 }
@@ -681,7 +684,7 @@ fn scan_local_sync(mount_dir: &Path, skip_patterns: &[String]) -> AppResult<Vec<
 fn scan_recursive(
     base: &Path,
     current: &Path,
-    skip_patterns: &[String],
+    skip_matcher: &SkipMatcher,
     out: &mut Vec<LocalFileEntry>,
 ) -> std::io::Result<()> {
     for entry in std::fs::read_dir(current)? {
@@ -691,7 +694,7 @@ fn scan_recursive(
         let name_str = name.to_string_lossy();
 
         // 跳过内部文件
-        if should_skip(&name_str, skip_patterns) {
+        if skip_matcher.should_skip(&name_str) {
             continue;
         }
 
@@ -719,7 +722,7 @@ fn scan_recursive(
                 is_placeholder: false,
             });
             // 递归进入子目录
-            scan_recursive(base, &abs, skip_patterns, out)?;
+            scan_recursive(base, &abs, skip_matcher, out)?;
         } else if file_type.is_file() {
             let size = meta.len();
             // 占位符判断用 xattr state，而非 0 字节（用户空文件如 .gitkeep 不是占位符）

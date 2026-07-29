@@ -161,6 +161,50 @@ describe("SyncStatusBar 活动态与失败事实", () => {
     expect(wrapper.text()).not.toContain("同步完成");
   });
 
+  it.each([
+    ["planning-startup", "正在分析首次同步内容…"],
+    ["planning-sync", "正在分析同步内容…"],
+    ["materializing-local", "正在创建本地目录和占位文件…"],
+    ["executing-actions", "正在执行同步操作…"],
+  ] as const)("同步阶段 %s 显示精确文案", (phase, expectedText) => {
+    // 当前同步状态。
+    const sync = useSyncStore();
+    sync.syncPhase = phase;
+    sync.isRunning = true;
+
+    // 当前组件测试包装器。
+    const wrapper = shallowMount(SyncStatusBar);
+
+    expect(wrapper.text()).toContain(expectedText);
+    expect(wrapper.text()).not.toContain("同步完成");
+  });
+
+  it("运行中缺少精确 phase 时仍不得显示同步完成", () => {
+    // 当前同步状态。
+    const sync = useSyncStore();
+    sync.syncPhase = null;
+    sync.isRunning = true;
+
+    // 当前组件测试包装器。
+    const wrapper = shallowMount(SyncStatusBar);
+
+    expect(wrapper.text()).toContain("正在同步…");
+    expect(wrapper.text()).not.toContain("同步完成");
+  });
+
+  it("索引中缺少精确 phase 时仍不得显示同步完成", () => {
+    // 当前同步状态。
+    const sync = useSyncStore();
+    sync.syncPhase = null;
+    sync.isIndexing = true;
+
+    // 当前组件测试包装器。
+    const wrapper = shallowMount(SyncStatusBar);
+
+    expect(wrapper.text()).toContain("正在同步…");
+    expect(wrapper.text()).not.toContain("同步完成");
+  });
+
   it("权威快照 waitingNetwork 使用等待网络文案而非泛化的同步中", () => {
     // 当前同步状态。
     const sync = useSyncStore();

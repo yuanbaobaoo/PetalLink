@@ -24,7 +24,7 @@ use std::time::Duration;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::{mpsc, Mutex};
 
-use crate::mount::skip::should_skip;
+use crate::mount::skip::SkipMatcher;
 
 /// 被通知的变更路径集合（相对路径）
 pub type ChangeSet = Vec<String>;
@@ -37,8 +37,8 @@ const WARMUP_SECS: u64 = 2;
 pub struct LocalWatcher {
     /// 挂载目录
     mount_dir: PathBuf,
-    /// 跳过模式
-    skip_patterns: Vec<String>,
+    /// 跨 watcher 生命周期共享的预编译跳过规则。
+    skip_matcher: Arc<SkipMatcher>,
     /// debounce 定时器（tokio timer handle）
     debounce_secs: u32,
     /// 当前待冲刷的路径集合
@@ -65,11 +65,15 @@ pub struct LocalWatcher {
 impl LocalWatcher {
     /// 创建新监视器（未启动）。
     /// `on_change` 回调接收变更的相对路径集合。
-    pub fn new(mount_dir: &Path, skip_patterns: Vec<String>, debounce_secs: u32) -> Self {
+    pub(crate) fn new(
+        mount_dir: &Path,
+        skip_matcher: Arc<SkipMatcher>,
+        debounce_secs: u32,
+    ) -> Self {
         let (change_tx, _) = tokio::sync::broadcast::channel(256);
         Self {
             mount_dir: mount_dir.to_path_buf(),
-            skip_patterns,
+            skip_matcher,
             debounce_secs,
             pending: Arc::new(Mutex::new(Vec::new())),
             timer_cancel: Arc::new(Mutex::new(None)),
@@ -165,7 +169,7 @@ impl LocalWatcher {
         }
 
         let mount = self.mount_dir.clone();
-        let skip_patterns = self.skip_patterns.clone();
+        let skip_matcher = self.skip_matcher.clone();
         let debounce_secs = self.debounce_secs;
         let pending = self.pending.clone();
         let timer_cancel = self.timer_cancel.clone();
@@ -190,7 +194,7 @@ impl LocalWatcher {
                         if current_generation.load(Ordering::Acquire) != generation {
                             break;
                         }
-                        let paths = extract_relative_paths(&event, &mount, &skip_patterns);
+                        let paths = extract_relative_paths(&event, &mount, &skip_matcher);
                         if paths.is_empty() {
                             continue;
                         }
@@ -290,7 +294,7 @@ impl LocalWatcher {
 fn extract_relative_paths(
     event: &Event,
     mount_dir: &Path,
-    skip_patterns: &[String],
+    skip_matcher: &SkipMatcher,
 ) -> Vec<String> {
     let mut paths = Vec::new();
     for p in &event.paths {
@@ -300,7 +304,7 @@ fn extract_relative_paths(
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
         // 跳过应排除的文件
-        if should_skip(&name, skip_patterns) {
+        if skip_matcher.should_skip(&name) {
             tracing::debug!(path = %p.display(), "watcher: 跳过排除文件");
             continue;
         }

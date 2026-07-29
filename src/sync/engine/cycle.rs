@@ -4,10 +4,17 @@
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::data::repository;
 use crate::error::{AppError, AppResult};
 use crate::sync::planner::SyncSnapshot;
+use crate::sync::state::{
+    SyncAction, SyncActionType, SYNC_PHASE_EXECUTING_ACTIONS, SYNC_PHASE_MATERIALIZING_LOCAL,
+    SYNC_PHASE_PLANNING_STARTUP, SYNC_PHASE_PLANNING_SYNC, SYNC_PHASE_SYNCING_AUTO_INCREMENTAL,
+    SYNC_PHASE_SYNCING_LOCAL, SYNC_PHASE_SYNCING_MANUAL, SYNC_PHASE_SYNCING_RETRY,
+    SYNC_PHASE_SYNCING_STARTUP,
+};
 use crate::sync::transfer_state::TransferState;
 
 use super::action_filters::{
@@ -17,6 +24,45 @@ use super::action_filters::{
 };
 use super::coordination::CycleRequest;
 use super::{recoverable_cycle_retry_delay, ResetFlag, SyncEngine};
+
+/// 返回周期刚取得 owner 时应发布的活动阶段。
+fn active_phase_for_trigger(triggered_by: &str) -> &'static str {
+    match triggered_by {
+        "local-watcher" => SYNC_PHASE_SYNCING_LOCAL,
+        "manual-refresh" => SYNC_PHASE_SYNCING_MANUAL,
+        "retry-failed" | "retry-replan" => SYNC_PHASE_SYNCING_RETRY,
+        "startup-resume" => SYNC_PHASE_SYNCING_STARTUP,
+        _ => SYNC_PHASE_SYNCING_AUTO_INCREMENTAL,
+    }
+}
+
+/// 返回可信快照进入动作规划时应发布的阶段。
+fn planning_phase_for_trigger(triggered_by: &str) -> &'static str {
+    if triggered_by == "startup-resume" {
+        SYNC_PHASE_PLANNING_STARTUP
+    } else {
+        SYNC_PHASE_PLANNING_SYNC
+    }
+}
+
+/// 根据动作集合区分本地物化与通用同步执行。
+fn execution_phase_for_actions(actions: &[SyncAction]) -> &'static str {
+    let executable_actions = actions
+        .iter()
+        .filter(|action| action.action_type != SyncActionType::Skip);
+    let materializes_only_local_tree = executable_actions.clone().next().is_some_and(|_| {
+        executable_actions.clone().all(|action| {
+            action.action_type == SyncActionType::CreatePlaceholder
+                || (action.action_type == SyncActionType::CreateFolder
+                    && action.cloud_file.is_some())
+        })
+    });
+    if materializes_only_local_tree {
+        SYNC_PHASE_MATERIALIZING_LOCAL
+    } else {
+        SYNC_PHASE_EXECUTING_ACTIONS
+    }
+}
 
 impl SyncEngine {
     /// 合并后台周期请求并安排 drain。
@@ -226,15 +272,7 @@ impl SyncEngine {
             self.update_runtime_and_broadcast(|runtime| {
                 runtime.is_running = true;
                 if runtime.sync_phase.is_none() {
-                    runtime.sync_phase = match triggered_by {
-                        "local-watcher" => Some("syncing-local".to_string()),
-                        "manual-refresh" => Some("syncing-manual".to_string()),
-                        "retry-failed" | "retry-replan" => {
-                            Some("syncing-retry".to_string())
-                        }
-                        "startup-resume" => Some("syncing-startup".to_string()),
-                        _ => None, // 自动刷新阶段由上层设置
-                    };
+                    runtime.sync_phase = Some(active_phase_for_trigger(triggered_by).to_string());
                 }
             })?;
 
@@ -535,12 +573,26 @@ impl SyncEngine {
             is_startup_resume: triggered_by == "startup-resume",
             cloud_tree_trusted,
         };
+
+        // checkpoint 已可信且本地扫描完成后才进入规划；此阶段仍禁止误报空闲。
+        self.update_runtime_and_broadcast(|runtime| {
+            runtime.sync_phase = Some(planning_phase_for_trigger(triggered_by).to_string());
+        })?;
+        let planning_started = Instant::now();
+        let planner_started = Instant::now();
         let mut actions = self.planner.plan(&snapshot);
-        filter_skipped_paths(&mut actions, &self.skip_patterns);
+        let planner_ms = planner_started.elapsed().as_millis() as u64;
+        let skip_filter_started = Instant::now();
+        filter_skipped_paths(&mut actions, &self.skip_matcher);
+        let skip_filter_ms = skip_filter_started.elapsed().as_millis() as u64;
+
         // 用 xattr fileId 识别同目录改名，避免误判为上传加删除。
+        let rename_started = Instant::now();
         if cloud_tree_trusted {
             self.detect_renames(&mut actions)?;
         }
+        let rename_ms = rename_started.elapsed().as_millis() as u64;
+        let other_filters_started = Instant::now();
         let transfer_tasks = repository::list_all_transfers(&self.db.lock())?;
         filter_active_transfer_actions(&mut actions, &snapshot.db, &transfer_tasks);
         filter_anti_oscillation(&mut actions, &self.recently_deleted_paths.lock());
@@ -561,6 +613,18 @@ impl SyncEngine {
 
         // 子项需要备份时保留目录，确保备份副本有落点。
         preserve_dirs_with_pending_backups(&mut actions);
+        let other_filters_ms = other_filters_started.elapsed().as_millis() as u64;
+        let planning_total_ms = planning_started.elapsed().as_millis() as u64;
+        tracing::info!(
+            triggered_by,
+            actions = actions.len(),
+            planner_ms,
+            skip_filter_ms,
+            rename_ms,
+            other_filters_ms,
+            planning_total_ms,
+            "同步规划完成"
+        );
 
         // 无动作时清零计数并发布空闲状态。
         if actions.is_empty() {
@@ -583,6 +647,11 @@ impl SyncEngine {
             return Ok(());
         }
 
+        // 动作执行阶段保持运行态；包含云端文件落盘时发布更精确的物化文案。
+        let execution_phase = execution_phase_for_actions(&actions);
+        self.update_runtime_and_broadcast(|runtime| {
+            runtime.sync_phase = Some(execution_phase.to_string());
+        })?;
         tracing::info!(
             triggered_by,
             actions = actions.len(),
@@ -663,5 +732,127 @@ impl SyncEngine {
             self.update_runtime_and_broadcast(|runtime| runtime.content_changed = true)?;
         }
         result
+    }
+}
+
+/// 覆盖运行周期阶段不会在规划或本地物化期间回落为空闲的核心合同。
+#[cfg(test)]
+mod phase_tests {
+    use super::*;
+
+    /// 首次同步必须从启动阶段连续进入规划阶段。
+    #[test]
+    fn startup_phase_remains_active_during_planning() {
+        assert_eq!(
+            active_phase_for_trigger("startup-resume"),
+            SYNC_PHASE_SYNCING_STARTUP
+        );
+        assert_eq!(
+            planning_phase_for_trigger("startup-resume"),
+            SYNC_PHASE_PLANNING_STARTUP
+        );
+    }
+
+    /// 所有非启动触发器也必须映射到非空活动阶段和通用规划阶段。
+    #[test]
+    fn non_startup_triggers_remain_active_during_planning() {
+        for triggered_by in [
+            "auto-cloud-refresh",
+            "network-recovery",
+            "local-watcher",
+            "manual-refresh",
+            "retry-failed",
+        ] {
+            assert!(!active_phase_for_trigger(triggered_by).is_empty());
+            assert_eq!(
+                planning_phase_for_trigger(triggered_by),
+                SYNC_PHASE_PLANNING_SYNC
+            );
+        }
+    }
+
+    /// 云端文件与目录动作必须使用本地物化阶段。
+    #[test]
+    fn cloud_only_actions_use_materializing_phase() {
+        let action = SyncAction {
+            action_type: SyncActionType::CreatePlaceholder,
+            relative_path: Some("cloud.txt".to_string()),
+            file_id: Some("file-id".to_string()),
+            parent_file_id: None,
+            local_path: None,
+            cloud_file: None,
+            reason: None,
+        };
+
+        assert_eq!(
+            execution_phase_for_actions(&[action]),
+            SYNC_PHASE_MATERIALIZING_LOCAL
+        );
+    }
+
+    /// 不包含本地树物化的动作必须使用通用执行阶段。
+    #[test]
+    fn transfer_actions_use_generic_execution_phase() {
+        let action = SyncAction {
+            action_type: SyncActionType::Upload,
+            relative_path: Some("local.txt".to_string()),
+            file_id: None,
+            parent_file_id: None,
+            local_path: Some("/mount/local.txt".to_string()),
+            cloud_file: None,
+            reason: None,
+        };
+
+        assert_eq!(
+            execution_phase_for_actions(&[action]),
+            SYNC_PHASE_EXECUTING_ACTIONS
+        );
+    }
+
+    /// 云端目录物化属于本地树创建，本地新目录上传不属于。
+    #[test]
+    fn create_folder_phase_depends_on_cloud_origin() {
+        let mut cloud_folder = test_action(SyncActionType::CreateFolder);
+        cloud_folder.cloud_file = Some(crate::drive::models::DriveFile {
+            id: "folder-id".to_string(),
+            name: "cloud-folder".to_string(),
+            mime_type: Some("application/vnd.huawei-apps.folder".to_string()),
+            ..Default::default()
+        });
+        let local_folder = test_action(SyncActionType::CreateFolder);
+
+        assert_eq!(
+            execution_phase_for_actions(&[cloud_folder]),
+            SYNC_PHASE_MATERIALIZING_LOCAL
+        );
+        assert_eq!(
+            execution_phase_for_actions(&[local_folder]),
+            SYNC_PHASE_EXECUTING_ACTIONS
+        );
+    }
+
+    /// 占位创建与其他动作混合时使用通用执行阶段，避免长传输误显示为物化。
+    #[test]
+    fn mixed_actions_use_generic_execution_phase() {
+        let placeholder = test_action(SyncActionType::CreatePlaceholder);
+        let upload = test_action(SyncActionType::Upload);
+
+        assert_eq!(
+            execution_phase_for_actions(&[placeholder, upload]),
+            SYNC_PHASE_EXECUTING_ACTIONS
+        );
+    }
+
+    /// 构造阶段分类测试所需的最小同步动作。
+    fn test_action(action_type: SyncActionType) -> SyncAction {
+        SyncAction {
+            action_type,
+            relative_path: Some("entry".to_string()),
+            file_id: Some("file-id".to_string()),
+            parent_file_id: None,
+            local_path: None,
+            cloud_file: None,
+            reason: None,
+        }
     }
 }

@@ -37,6 +37,7 @@ use crate::drive::models::DriveFile;
 use crate::error::{AppError, AppResult};
 use crate::mount::local_watcher::LocalWatcher;
 use crate::mount::manager::MountManager;
+use crate::mount::skip::SkipMatcher;
 use crate::sync::executor::SyncExecutor;
 use crate::sync::planner::SyncPlanner;
 use crate::sync::state::SyncGlobalState;
@@ -134,7 +135,7 @@ pub struct SyncEngine {
     status_aggregator: Arc<StatusAggregator>,
     running: Mutex<bool>,
     mount_dir: Mutex<Option<String>>,
-    skip_patterns: Vec<String>,
+    skip_matcher: Arc<SkipMatcher>,
     debounce_secs: u32,
     /// 云端定时刷新间隔（秒）。0 = 关闭。到期后全量 BFS 重拉云端树，使云端变更自动同步到本地。
     poll_interval_secs: u32,

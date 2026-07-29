@@ -2,53 +2,35 @@
 <script setup lang="ts">
 import { ref } from "vue";
 import { useSyncStore } from "@/stores/sync";
-import { useFileBrowserStore } from "@/stores/fileBrowser";
 import { MateInfoBanner, MateButton } from "@/components/mate";
-import { commands } from "@/api/generated";
 import * as configApi from "@/api/config";
-import { open } from "@tauri-apps/plugin-dialog";
+import { useAsyncAction } from "@/composables/useAsyncAction";
 import { extractErrorMessage } from "@/utils/error";
-import { isEmptyDir } from "@/utils/fs";
+import { selectAndConfigureSyncDirectory } from "@/composables/useSyncDirectorySetup";
 
 // 当前同步状态。
 const sync = useSyncStore();
-// 当前文件浏览器状态。
-const browser = useFileBrowserStore();
 // 当前操作的错误提示。
 const errorMessage = ref("");
+// 目录选择按钮的互斥执行状态。
+const { loading: selectDirLoading, run: runSelectDir } = useAsyncAction();
 
 /**
- * 选择同步目录：原生目录选择器 → 校验空目录 → 保存配置 → 重新评估阶段
+ * 通过统一入口选择并首次配置同步目录。
  */
 async function handleSelectDir(): Promise<void> {
-  // 当前选项是否选中或用户选择结果。
-  const selected = await open({ directory: true, multiple: false, title: "选择同步目录" });
-  if (!selected || typeof selected !== "string") return;
-
-  // 校验：必须空目录（过滤隐藏文件 + skipPatterns 后）
-  try {
-    if (!(await isEmptyDir(selected))) {
-      errorMessage.value = "所选目录不为空。请选择一个空目录作为同步目录，避免与已有文件冲突。";
-      return;
+  await runSelectDir(async () => {
+    try {
+      // 首次配置基于当前完整持久化配置提交。
+      const config = await configApi.loadConfig();
+      // 统一目录配置结果。
+      const result = await selectAndConfigureSyncDirectory(config);
+      if (!result) return;
+      errorMessage.value = "";
+    } catch (e) {
+      errorMessage.value = "配置同步目录失败：" + extractErrorMessage(e);
     }
-  } catch (e) {
-    errorMessage.value = "检查目录失败：" + extractErrorMessage(e);
-    return;
-  }
-
-  try {
-    // 当前持久化配置。
-    const config = await configApi.loadConfig();
-    config.mount_dir = selected;
-    config.mount_configured = true;
-    await commands.configSave(config);
-    await sync.init();
-    // 刷新文件列表（引擎在 saveConfig 内已启动，正在 BFS + 创建本地占位符）
-    await browser.loadRoot();
-    errorMessage.value = "";
-  } catch (e) {
-    errorMessage.value = "配置同步目录失败：" + extractErrorMessage(e);
-  }
+  });
 }
 
 /**
@@ -88,7 +70,15 @@ async function handleRetry(): Promise<void> {
     <MateInfoBanner variant="info" class="setup-banner__inner">
       尚未配置同步目录，选择一个空目录开始同步
       <template #action>
-        <MateButton variant="text" icon="folder-open" @click="handleSelectDir">选择目录</MateButton>
+        <MateButton
+          variant="text"
+          icon="folder-open"
+          :loading="selectDirLoading"
+          :disabled="selectDirLoading"
+          @click="handleSelectDir"
+        >
+          选择目录
+        </MateButton>
       </template>
     </MateInfoBanner>
   </div>

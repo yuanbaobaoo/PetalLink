@@ -2,6 +2,8 @@
 
 use std::sync::atomic::Ordering;
 
+use crate::sync::state::SYNC_PHASE_SYNCING_STARTUP;
+
 use super::coordination::{network_listener_loop, watcher_listener_loop, TaskRunnerActivityGate};
 use super::*;
 
@@ -68,7 +70,7 @@ impl SyncEngine {
             status_aggregator,
             running: Mutex::new(false),
             mount_dir: Mutex::new(None),
-            skip_patterns,
+            skip_matcher: Arc::new(SkipMatcher::new(&skip_patterns)),
             debounce_secs,
             poll_interval_secs,
             state_tx,
@@ -144,9 +146,9 @@ impl SyncEngine {
             .ok_or_else(|| AppError::generic("TaskRunner 未初始化"))
     }
 
-    /// 返回当前引擎使用的统一文件跳过规则。
-    pub(crate) fn skip_patterns(&self) -> &[String] {
-        &self.skip_patterns
+    /// 返回当前引擎共享的预编译文件跳过规则。
+    pub(crate) fn skip_matcher(&self) -> Arc<SkipMatcher> {
+        self.skip_matcher.clone()
     }
 
     /// 判断引擎是否已进入运行生命周期。
@@ -249,7 +251,10 @@ impl SyncEngine {
         }
         *self.running.lock() = true;
 
-        if let Err(error) = self.update_runtime_and_broadcast(|runtime| runtime.is_running = true) {
+        if let Err(error) = self.update_runtime_and_broadcast(|runtime| {
+            runtime.is_running = true;
+            runtime.sync_phase = Some(SYNC_PHASE_SYNCING_STARTUP.to_string());
+        }) {
             self.restore_idle_runtime_after_error();
             return Err(error);
         }
@@ -342,7 +347,7 @@ impl SyncEngine {
         if let Some(ref m) = self.mount {
             let watcher = Arc::new(LocalWatcher::new(
                 m.mount_dir(),
-                self.skip_patterns.clone(),
+                self.skip_matcher.clone(),
                 self.debounce_secs,
             ));
             if let Err(e) = watcher.start().await {

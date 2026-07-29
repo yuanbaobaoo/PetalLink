@@ -70,6 +70,7 @@ async fn sync_folder_recursive_impl(
 ) -> AppResult<i64> {
     let m = mount()?;
     let task_runner = eng.task_runner()?;
+    let skip_matcher = eng.skip_matcher();
     crate::core::paths::validate_relative_path(rel_path, true)?;
     let dest_dir = crate::core::paths::safe_join_under(m.mount_dir(), rel_path, true)?;
     tracing::info!(folder_id, rel = %rel_path, "sync_folder_recursive: 开始递归同步");
@@ -86,7 +87,7 @@ async fn sync_folder_recursive_impl(
         let _operation = eng.begin_external_activity()?;
         let children = FILES_API.list_all(Some(id.as_str())).await?;
         for f in children {
-            if crate::mount::skip::should_skip(&f.name, eng.skip_patterns()) {
+            if skip_matcher.should_skip(&f.name) {
                 continue;
             }
             crate::core::paths::validate_path_segment(&f.name)?;
@@ -119,10 +120,15 @@ async fn sync_folder_recursive_impl(
 
     // 扫描本地真实文件，排除临时文件与占位符。
     let dest_dir_clone = dest_dir.clone();
-    let skip_patterns = eng.skip_patterns().to_vec();
+    let local_skip_matcher = skip_matcher.clone();
     let local_files: HashMap<String, PathBuf> = tokio::task::spawn_blocking(move || {
         let mut out: HashMap<String, PathBuf> = HashMap::new();
-        let _ = scan_dir_for_real_files(&dest_dir_clone, &dest_dir_clone, &skip_patterns, &mut out);
+        let _ = scan_dir_for_real_files(
+            &dest_dir_clone,
+            &dest_dir_clone,
+            &local_skip_matcher,
+            &mut out,
+        );
         out
     })
     .await
@@ -393,7 +399,7 @@ async fn sync_folder_recursive_impl(
 fn scan_dir_for_real_files(
     base: &Path,
     current: &Path,
-    skip_patterns: &[String],
+    skip_matcher: &crate::mount::skip::SkipMatcher,
     out: &mut HashMap<String, PathBuf>,
 ) -> std::io::Result<()> {
     for entry in std::fs::read_dir(current)? {
@@ -401,11 +407,11 @@ fn scan_dir_for_real_files(
         let path = entry.path();
         let ft = entry.file_type()?;
         let name = entry.file_name().to_string_lossy().to_string();
-        if crate::mount::skip::should_skip(&name, skip_patterns) {
+        if skip_matcher.should_skip(&name) {
             continue;
         }
         if ft.is_dir() {
-            scan_dir_for_real_files(base, &path, skip_patterns, out)?;
+            scan_dir_for_real_files(base, &path, skip_matcher, out)?;
         } else if ft.is_file() {
             let meta = entry.metadata()?;
             // 跳过占位符（xattr state=placeholder），0 字节用户文件（如空配置）不是占位符
@@ -449,9 +455,10 @@ mod tests {
         std::fs::write(nested_dir.join("keep.txt"), b"content").unwrap();
         std::fs::write(trash_dir.join("deleted.txt"), b"content").unwrap();
         let skip_patterns = vec![".DS_Store".to_string(), ".Trash".to_string()];
+        let skip_matcher = crate::mount::skip::SkipMatcher::new(&skip_patterns);
         let mut files = HashMap::new();
 
-        scan_dir_for_real_files(temp_dir.path(), temp_dir.path(), &skip_patterns, &mut files)
+        scan_dir_for_real_files(temp_dir.path(), temp_dir.path(), &skip_matcher, &mut files)
             .unwrap();
 
         assert_eq!(files.len(), 1);

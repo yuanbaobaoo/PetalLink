@@ -3,94 +3,130 @@
 //! 对齐 `legacy/lib/mount/mount_manager.dart` 的 `_shouldSkipNameTopLevel` +
 //! `local_watcher.dart` 的 `_shouldSkip` + `sync_engine.dart` 的 `_shouldSkipName`。
 //!
-//! 四处硬编码过滤（v1.8 全局过滤，无论用户如何配置 skipPatterns）：
+//! 四类统一过滤（v1.8 全局过滤，无论用户如何配置 skipPatterns）：
 //! 1. `.hwcloud_` 前缀（内部缓存/快照文件）
 //! 2. `.hwcloud_placeholder` 后缀（旧版占位符）
 //! 3. `.tmp` 后缀（下载原子写临时文件）
 //! 4. 用户配置的 skipPatterns（简化 glob）
 
+use std::collections::HashSet;
+
 use regex::Regex;
 
-/// 判断文件名是否应被跳过（不参与同步）。
-///
-/// 统一逻辑，供 scanLocal / local_watcher / sync_engine 复用。
-pub fn should_skip(name: &str, skip_patterns: &[String]) -> bool {
-    // 1. .hwcloud_ 前缀（内部文件，硬编码全局过滤）
-    if name.starts_with(crate::constants::INTERNAL_FILE_PREFIX) {
-        return true;
+/// 预编译并统一执行内部规则与用户 skipPatterns。
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SkipMatcher {
+    exact_patterns: HashSet<String>,
+    wildcard_patterns: Vec<Regex>,
+}
+
+impl SkipMatcher {
+    /// 将配置规则编译为可跨扫描、watcher 与规划阶段复用的匹配器。
+    pub(crate) fn new(skip_patterns: &[String]) -> Self {
+        let mut matcher = Self::default();
+        for pattern in skip_patterns {
+            if pattern.contains('*') || pattern.contains('?') {
+                let regex_pattern = glob_regex_pattern(pattern);
+                match Regex::new(&regex_pattern) {
+                    Ok(regex) => matcher.wildcard_patterns.push(regex),
+                    Err(error) => {
+                        tracing::warn!(pattern, %error, "skipPattern 编译失败，本条规则不生效");
+                    }
+                }
+            } else {
+                matcher.exact_patterns.insert(pattern.clone());
+            }
+        }
+        matcher
     }
-    // 2. 旧版占位符后缀
-    if name.ends_with(".hwcloud_placeholder") {
-        return true;
-    }
-    // 3. .tmp 后缀（下载原子写临时文件）
-    if name.ends_with(crate::constants::TMP_SUFFIX) {
-        return true;
-    }
-    // 4. 用户配置的 skipPatterns（简化 glob 匹配）
-    for pattern in skip_patterns {
-        if glob_matches(pattern, name) {
+
+    /// 判断单个文件名是否命中内部规则或用户配置。
+    pub(crate) fn should_skip(&self, name: &str) -> bool {
+        // 内部缓存、旧占位符和下载临时文件不受用户配置影响。
+        if name.starts_with(crate::constants::INTERNAL_FILE_PREFIX)
+            || name.ends_with(".hwcloud_placeholder")
+            || name.ends_with(crate::constants::TMP_SUFFIX)
+        {
             return true;
         }
+        self.exact_patterns.contains(name)
+            || self
+                .wildcard_patterns
+                .iter()
+                .any(|pattern| pattern.is_match(name))
     }
-    false
+
+    /// 判断规范相对路径中是否包含任一应跳过的目录或文件名。
+    pub(crate) fn should_skip_relative_path(&self, relative_path: &str) -> bool {
+        relative_path
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .any(|segment| self.should_skip(segment))
+    }
 }
 
-/// 判断规范相对路径中是否包含任一应跳过的目录或文件名。
-pub fn should_skip_relative_path(relative_path: &str, skip_patterns: &[String]) -> bool {
-    relative_path
-        .split('/')
-        .filter(|segment| !segment.is_empty())
-        .any(|segment| should_skip(segment, skip_patterns))
-}
-
-/// 简化 glob 匹配（对齐 dart `_shouldSkipNameTopLevel` 的 glob 实现）。
-/// `*` → `.*`，`?` → `.`，转义 `\` 和 `.`，全匹配。
-pub fn glob_matches(pattern: &str, name: &str) -> bool {
-    // 构建 regex：* → .*, ? → ., 转义特殊字符
+/// 将简化 glob 转换为全匹配正则；所有正则元字符在通配转换前转义。
+fn glob_regex_pattern(pattern: &str) -> String {
     let mut regex_str = String::with_capacity(pattern.len() + 4);
     regex_str.push('^');
-    for c in pattern.chars() {
-        match c {
+    for character in pattern.chars() {
+        match character {
             '*' => regex_str.push_str(".*"),
             '?' => regex_str.push('.'),
             '\\' | '.' | '+' | '(' | ')' | '[' | ']' | '{' | '}' | '^' | '$' | '|' => {
                 regex_str.push('\\');
-                regex_str.push(c);
+                regex_str.push(character);
             }
-            _ => regex_str.push(c),
+            _ => regex_str.push(character),
         }
     }
     regex_str.push('$');
-    match Regex::new(&regex_str) {
-        Ok(re) => re.is_match(name),
-        Err(_) => false,
-    }
+    regex_str
 }
 
 /// 覆盖只能通过内部统一规则入口验证的路径级跳过合同。
 #[cfg(test)]
 mod tests {
-    use super::{should_skip, should_skip_relative_path};
+    use super::SkipMatcher;
 
     /// 文件名与任意层级相对路径必须使用同一组 skipPatterns。
     #[test]
     fn relative_path_skip_matches_entry_name_rules() {
         let patterns = vec![".DS_Store".to_string(), "~$*".to_string()];
+        let matcher = SkipMatcher::new(&patterns);
 
-        assert!(should_skip(".DS_Store", &patterns));
-        assert!(should_skip_relative_path(
-            "projects/legal/.DS_Store",
-            &patterns
-        ));
-        assert!(should_skip_relative_path(
-            "projects/~$contract.docx",
-            &patterns
-        ));
-        assert!(should_skip_relative_path("projects/cache.tmp", &patterns));
-        assert!(!should_skip_relative_path(
-            "projects/contract.docx",
-            &patterns
-        ));
+        assert!(matcher.should_skip(".DS_Store"));
+        assert!(matcher.should_skip_relative_path("projects/legal/.DS_Store"));
+        assert!(matcher.should_skip_relative_path("projects/~$contract.docx"));
+        assert!(matcher.should_skip_relative_path("projects/cache.tmp"));
+        assert!(!matcher.should_skip_relative_path("projects/contract.docx"));
+    }
+
+    /// 正则元字符必须保持普通文件名语义，仅星号和问号作为通配符。
+    #[test]
+    fn matcher_escapes_regex_metacharacters() {
+        let patterns = vec![
+            "report+[1](draft).*".to_string(),
+            "literal+(copy)".to_string(),
+        ];
+        let matcher = SkipMatcher::new(&patterns);
+
+        assert!(matcher.should_skip("report+[1](draft).pdf"));
+        assert!(matcher.should_skip("literal+(copy)"));
+        assert!(!matcher.should_skip("report1draft.pdf"));
+    }
+
+    /// 问号、Unicode 与内建规则必须在预编译后保持原有名称匹配语义。
+    #[test]
+    fn matcher_supports_question_unicode_and_builtin_rules() {
+        let patterns = vec!["报告-?.txt".to_string()];
+        let matcher = SkipMatcher::new(&patterns);
+
+        assert!(matcher.should_skip("报告-甲.txt"));
+        assert!(!matcher.should_skip("报告-甲乙.txt"));
+        assert!(matcher.should_skip(".hwcloud_cache.json"));
+        assert!(matcher.should_skip("legacy.hwcloud_placeholder"));
+        assert!(matcher.should_skip("download.tmp"));
+        assert!(!matcher.should_skip("download.tmp.txt"));
     }
 }

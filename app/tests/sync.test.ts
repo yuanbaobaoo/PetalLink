@@ -1,6 +1,7 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import type { SyncGlobalState } from "@/api/sync";
+import * as configApi from "@/api/config";
 import { useSyncStore } from "@/stores/sync";
 
 /**
@@ -30,7 +31,10 @@ function snapshot(overrides: Partial<SyncGlobalState> = {}): SyncGlobalState {
 }
 
 describe("sync store 权威快照字段", () => {
-  beforeEach(() => setActivePinia(createPinia()));
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    vi.restoreAllMocks();
+  });
 
   it("接收 waiting_network 并保持等待态为活动中", () => {
     // 当前测试使用的 Store 实例。
@@ -60,5 +64,54 @@ describe("sync store 权威快照字段", () => {
     expect(store.revision).toBe(8);
     expect(store.failed).toBe(0);
     expect(store.failedItems).toEqual([]);
+  });
+
+  it("首次同步运行中且数据库尚为空时使用不确定进度", () => {
+    // 当前测试使用的 Store 实例。
+    const store = useSyncStore();
+    store.applyState(snapshot({
+      revision: 2,
+      total: 0,
+      completed: 0,
+      failed: 0,
+      failed_items: [],
+      is_running: true,
+    }));
+
+    expect(store.progress).toBeNull();
+
+    store.applyState(snapshot({
+      revision: 3,
+      total: 0,
+      completed: 0,
+      failed: 0,
+      failed_items: [],
+      is_running: false,
+    }));
+    expect(store.progress).toBe(1);
+  });
+
+  it("配置保存成功后可直接提交权威挂载状态", () => {
+    // 当前测试使用的 Store 实例。
+    const store = useSyncStore();
+
+    store.applyMountConfiguration("/Users/test/PetalLink");
+
+    expect(store.mountConfigured).toBe(true);
+    expect(store.mountDir).toBe("/Users/test/PetalLink");
+    expect(store.setupPhase).toBe("active");
+  });
+
+  it("已提交挂载事实不因紧随其后的配置读取失败而回退", async () => {
+    // 当前测试使用的 Store 实例。
+    const store = useSyncStore();
+    vi.spyOn(configApi, "loadConfig").mockRejectedValue(new Error("temporary read failure"));
+    store.applyMountConfiguration("/Users/test/PetalLink");
+
+    await store.init();
+
+    expect(store.mountConfigured).toBe(true);
+    expect(store.mountDir).toBe("/Users/test/PetalLink");
+    expect(store.setupPhase).toBe("active");
   });
 });

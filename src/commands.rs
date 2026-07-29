@@ -114,6 +114,7 @@ static SYNC_ENGINE: Mutex<Option<Arc<SyncEngine>>> = Mutex::new(None);
 /// 串行协调同步引擎安装与替换，防止两个生命周期交叠。
 struct EngineOwnershipProtocol {
     gate: Mutex<()>,
+    replacement_gate: tokio::sync::Mutex<()>,
     replacements: AtomicUsize,
 }
 
@@ -122,6 +123,7 @@ impl EngineOwnershipProtocol {
     const fn new() -> Self {
         Self {
             gate: Mutex::new(()),
+            replacement_gate: tokio::sync::Mutex::const_new(()),
             replacements: AtomicUsize::new(0),
         }
     }
@@ -228,6 +230,7 @@ pub fn drop_runtime() {
 
 /// 异步释放运行时，并等待旧同步周期与已提交任务完成结算。
 pub async fn drop_runtime_async() {
+    let _replacement_operation = ENGINE_OWNERSHIP.replacement_gate.lock().await;
     let _replacement = ENGINE_OWNERSHIP.begin_replacement();
     let engine = {
         let _gate = ENGINE_OWNERSHIP.gate.lock();
@@ -238,6 +241,42 @@ pub async fn drop_runtime_async() {
     if let Some(engine) = engine {
         engine.shutdown().await;
     }
+}
+
+/// 在同一替换事务中关闭旧引擎，并以指定挂载目录安装新引擎。
+pub(crate) async fn replace_runtime_with_mount(
+    app: &AppHandle,
+    mount: Arc<MountManager>,
+) -> AppResult<()> {
+    mount.ensure_mount_dir()?;
+    let _replacement_operation = ENGINE_OWNERSHIP.replacement_gate.lock().await;
+    let _replacement = ENGINE_OWNERSHIP.begin_replacement();
+    let old_engine = {
+        let _gate = ENGINE_OWNERSHIP.gate.lock();
+        let engine = SYNC_ENGINE.lock().take();
+        *MOUNT_MANAGER.lock() = None;
+        engine
+    };
+    if let Some(engine) = old_engine {
+        engine.shutdown().await;
+    }
+    {
+        let _gate = ENGINE_OWNERSHIP.gate.lock();
+        *MOUNT_MANAGER.lock() = Some(mount);
+        ensure_engine_started_owned(app)
+    }
+}
+
+/// 在同一所有权门禁内安装挂载管理器，并按持久化配置补齐缺失的同步引擎。
+pub(crate) fn install_runtime_with_mount(
+    app: &AppHandle,
+    mount: Arc<MountManager>,
+) -> AppResult<()> {
+    mount.ensure_mount_dir()?;
+    ENGINE_OWNERSHIP.install(|| {
+        *MOUNT_MANAGER.lock() = Some(mount);
+        ensure_engine_started_owned(app)
+    })
 }
 
 /// 重启 App：fork 独立 shell 子进程（sleep 后 open -n）+ 当前进程退出。
@@ -388,4 +427,34 @@ pub fn emit_sync_state(app: &AppHandle, state: &SyncGlobalState) {
 /// 推送目录内容变更通知（触发前端 folderChildren 刷新）
 pub fn emit_folder_content_changed(app: &AppHandle) {
     let _ = crate::ipc::FolderContentChangedEvent.emit(app);
+}
+
+/// 覆盖同步引擎安装与替换互斥边界的核心合同。
+#[cfg(test)]
+mod engine_ownership_tests {
+    use super::EngineOwnershipProtocol;
+
+    /// 活动替换事务存在时，普通安装必须被拒绝。
+    #[test]
+    fn active_replacement_blocks_installation() {
+        let protocol = EngineOwnershipProtocol::new();
+        let replacement = protocol.begin_replacement();
+
+        assert!(protocol.install(|| Ok(())).is_err());
+
+        drop(replacement);
+        assert!(protocol.install(|| Ok(())).is_ok());
+    }
+
+    /// 异步替换门必须串行覆盖完整的关闭与重新安装区间。
+    #[tokio::test]
+    async fn replacement_operations_are_serialized() {
+        let protocol = EngineOwnershipProtocol::new();
+        let first_operation = protocol.replacement_gate.lock().await;
+
+        assert!(protocol.replacement_gate.try_lock().is_err());
+
+        drop(first_operation);
+        assert!(protocol.replacement_gate.try_lock().is_ok());
+    }
 }

@@ -3,20 +3,20 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::data::repository::TransferTask;
-use crate::mount::skip::should_skip_relative_path;
+use crate::mount::skip::SkipMatcher;
 use crate::sync::path_recovery::BlockedPathChange;
 use crate::sync::planner::DbSnapshotEntry;
 use crate::sync::state::{SyncAction, SyncActionType};
 use crate::sync::transfer_state::TransferState;
 
 /// 移除命中统一 skip 规则的动作，保证本地扫描与双向规划口径一致。
-pub(super) fn filter_skipped_paths(actions: &mut Vec<SyncAction>, skip_patterns: &[String]) {
+pub(super) fn filter_skipped_paths(actions: &mut Vec<SyncAction>, skip_matcher: &SkipMatcher) {
     let before = actions.len();
     actions.retain(|action| {
         !action
             .relative_path
             .as_deref()
-            .is_some_and(|path| should_skip_relative_path(path, skip_patterns))
+            .is_some_and(|path| skip_matcher.should_skip_relative_path(path))
     });
     let skipped = before.saturating_sub(actions.len());
     if skipped > 0 {
@@ -402,6 +402,7 @@ mod tests {
     #[test]
     fn skipped_cloud_delete_action_is_removed() {
         let skip_patterns = vec![".DS_Store".to_string()];
+        let skip_matcher = SkipMatcher::new(&skip_patterns);
         let mut actions = vec![
             SyncAction {
                 action_type: SyncActionType::DeleteFromCloud,
@@ -423,7 +424,7 @@ mod tests {
             },
         ];
 
-        filter_skipped_paths(&mut actions, &skip_patterns);
+        filter_skipped_paths(&mut actions, &skip_matcher);
 
         assert_eq!(actions.len(), 1);
         assert_eq!(

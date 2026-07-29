@@ -5,6 +5,33 @@
 use serde::Serialize;
 use specta::Type;
 
+/// 首次启动正在构建云端索引。
+pub(crate) const SYNC_PHASE_INDEXING_STARTUP: &str = "indexing-startup";
+/// 手动刷新正在构建云端索引。
+pub(crate) const SYNC_PHASE_INDEXING_MANUAL: &str = "indexing-manual";
+/// 自动刷新正在执行全量云端索引。
+pub(crate) const SYNC_PHASE_INDEXING_AUTO_FULL: &str = "indexing-auto-full";
+/// 正在读取 Changes 增量。
+pub(crate) const SYNC_PHASE_QUERYING_CHANGES: &str = "querying-changes";
+/// 自动刷新正在同步云端变化。
+pub(crate) const SYNC_PHASE_SYNCING_AUTO_INCREMENTAL: &str = "syncing-auto-incremental";
+/// 本地 watcher 触发的同步正在运行。
+pub(crate) const SYNC_PHASE_SYNCING_LOCAL: &str = "syncing-local";
+/// 手动同步正在运行。
+pub(crate) const SYNC_PHASE_SYNCING_MANUAL: &str = "syncing-manual";
+/// 失败重试正在运行。
+pub(crate) const SYNC_PHASE_SYNCING_RETRY: &str = "syncing-retry";
+/// 启动恢复同步正在运行。
+pub(crate) const SYNC_PHASE_SYNCING_STARTUP: &str = "syncing-startup";
+/// 首次同步正在规划可信快照对应的动作。
+pub(crate) const SYNC_PHASE_PLANNING_STARTUP: &str = "planning-startup";
+/// 非首次同步正在规划可信快照对应的动作。
+pub(crate) const SYNC_PHASE_PLANNING_SYNC: &str = "planning-sync";
+/// 正在把可信云端文件树物化为本地目录和占位文件。
+pub(crate) const SYNC_PHASE_MATERIALIZING_LOCAL: &str = "materializing-local";
+/// 正在执行不属于本地物化的同步动作。
+pub(crate) const SYNC_PHASE_EXECUTING_ACTIONS: &str = "executing-actions";
+
 /// 同步动作类型（对齐 dart SyncActionType 枚举）
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -75,9 +102,7 @@ pub struct SyncGlobalState {
     /// 是否有目录结构变更（触发前端目录重拉）
     pub content_changed: bool,
     /// 当前同步阶段（供前端状态条精确显示）。None = 空闲。
-    /// 值：indexing-startup / indexing-manual / indexing-auto-full /
-    ///     querying-changes / syncing-auto-incremental /
-    ///     syncing-local / syncing-manual / syncing-retry / syncing-startup
+    /// 值由本模块 `SYNC_PHASE_*` 常量定义；运行中不得为空。
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub sync_phase: Option<String>,
 }

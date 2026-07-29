@@ -10,10 +10,28 @@ use crate::data::repository;
 use crate::drive::models::DriveFile;
 use crate::error::{AppError, AppResult};
 use crate::sync::cloud_tree;
+use crate::sync::state::{
+    SYNC_PHASE_INDEXING_AUTO_FULL, SYNC_PHASE_INDEXING_MANUAL, SYNC_PHASE_INDEXING_STARTUP,
+    SYNC_PHASE_PLANNING_STARTUP, SYNC_PHASE_QUERYING_CHANGES, SYNC_PHASE_SYNCING_AUTO_INCREMENTAL,
+    SYNC_PHASE_SYNCING_MANUAL,
+};
+use crate::sync::status_aggregator::RuntimeStatus;
 use crate::sync::task_runner::RecoveredCloudFile;
 
 use super::action_filters::is_blocked_path_identity;
 use super::{SyncEngine, INCREMENTAL_FORCED_FULL_THRESHOLD};
+
+/// 结束索引标记；仅成功刷新可推进阶段，失败时保留活动 phase 等待原子错误终态。
+fn finish_indexing_phase(
+    runtime: &mut RuntimeStatus,
+    refresh_succeeded: bool,
+    success_phase: &str,
+) {
+    runtime.is_indexing = false;
+    if refresh_succeeded {
+        runtime.sync_phase = Some(success_phase.to_string());
+    }
+}
 
 impl SyncEngine {
     /// 将任务恢复确认的远端写入合并并原子持久化到当前可信检查点。
@@ -159,12 +177,12 @@ impl SyncEngine {
             self.set_cloud_tree_trusted(false);
             self.update_runtime_and_broadcast(|runtime| {
                 runtime.is_indexing = true;
-                runtime.sync_phase = Some("indexing-startup".to_string());
+                runtime.sync_phase = Some(SYNC_PHASE_INDEXING_STARTUP.to_string());
             })?;
             let refresh_result = self.build_and_commit_full_checkpoint(&abs_dir).await;
+            let refresh_succeeded = refresh_result.is_ok();
             let reset_result = self.update_runtime_and_broadcast(|runtime| {
-                runtime.is_indexing = false;
-                runtime.sync_phase = None;
+                finish_indexing_phase(runtime, refresh_succeeded, SYNC_PHASE_PLANNING_STARTUP);
             });
             if refresh_result.is_err() {
                 self.set_cloud_tree_trusted(false);
@@ -277,14 +295,14 @@ impl SyncEngine {
         // 刷新期间显式发布索引状态。
         self.update_runtime_and_broadcast(|runtime| {
             runtime.is_indexing = true;
-            runtime.sync_phase = Some("indexing-manual".to_string());
+            runtime.sync_phase = Some(SYNC_PHASE_INDEXING_MANUAL.to_string());
         })?;
         // 无论成功失败都复位索引状态。
         let refresh_result = self.build_and_commit_full_checkpoint(&abs_dir).await;
         self.ensure_cycle_active()?;
+        let refresh_succeeded = refresh_result.is_ok();
         let reset_result = self.update_runtime_and_broadcast(|runtime| {
-            runtime.is_indexing = false;
-            runtime.sync_phase = None;
+            finish_indexing_phase(runtime, refresh_succeeded, SYNC_PHASE_SYNCING_MANUAL);
         });
         match refresh_result {
             Ok(()) => {
@@ -324,11 +342,15 @@ impl SyncEngine {
             .as_ref()
             .map(|changed| *changed)
             .unwrap_or(false);
+        let refresh_succeeded = refresh_result.is_ok();
 
-        // 无论成败都复位索引状态。
+        // 成功时直接进入同步阶段，避免运行中短暂发布空 phase。
         let reset_result = self.update_runtime_and_broadcast(|runtime| {
-            runtime.is_indexing = false;
-            runtime.sync_phase = None;
+            finish_indexing_phase(
+                runtime,
+                refresh_succeeded,
+                SYNC_PHASE_SYNCING_AUTO_INCREMENTAL,
+            );
             runtime.content_changed = changed;
         });
 
@@ -341,7 +363,6 @@ impl SyncEngine {
                 return Err(error);
             }
         }
-        self.set_phase("syncing-auto-incremental")?;
         Ok(())
     }
 
@@ -362,7 +383,7 @@ impl SyncEngine {
         // 已校验 checkpoint 可用于增量重放，但 catch-up 前仍保持不可信。
         if !force_full {
             if let Some(cursor) = saved_cursor.filter(|cursor| !cursor.trim().is_empty()) {
-                self.set_phase("querying-changes")?;
+                self.set_phase(SYNC_PHASE_QUERYING_CHANGES)?;
                 let incremental = async {
                     let (changes, final_cursor) =
                         self.changes_api.list_all_changes(&cursor).await?;
@@ -402,7 +423,7 @@ impl SyncEngine {
             }
         }
 
-        self.set_phase("indexing-auto-full")?;
+        self.set_phase(SYNC_PHASE_INDEXING_AUTO_FULL)?;
         // 全量 BFS 不做差异比对，保守视为有变更
         self.build_and_commit_full_checkpoint(abs_dir)
             .await
@@ -575,5 +596,46 @@ impl SyncEngine {
             tree.insert(new_path, file);
         }
         Ok(())
+    }
+}
+
+/// 覆盖索引退出时活动 phase 连续性的核心合同。
+#[cfg(test)]
+mod phase_tests {
+    use super::{finish_indexing_phase, RuntimeStatus, SYNC_PHASE_PLANNING_STARTUP};
+
+    /// 刷新失败只退出 indexing，必须保留原活动 phase 供错误终态原子清理。
+    #[test]
+    fn failed_refresh_preserves_active_phase() {
+        let mut runtime = RuntimeStatus {
+            is_running: true,
+            is_indexing: true,
+            sync_phase: Some("indexing-startup".to_string()),
+            ..RuntimeStatus::default()
+        };
+
+        finish_indexing_phase(&mut runtime, false, SYNC_PHASE_PLANNING_STARTUP);
+
+        assert!(!runtime.is_indexing);
+        assert_eq!(runtime.sync_phase.as_deref(), Some("indexing-startup"));
+    }
+
+    /// 刷新成功退出 indexing 并直接推进至下一活动阶段。
+    #[test]
+    fn successful_refresh_advances_phase() {
+        let mut runtime = RuntimeStatus {
+            is_running: true,
+            is_indexing: true,
+            sync_phase: Some("indexing-startup".to_string()),
+            ..RuntimeStatus::default()
+        };
+
+        finish_indexing_phase(&mut runtime, true, SYNC_PHASE_PLANNING_STARTUP);
+
+        assert!(!runtime.is_indexing);
+        assert_eq!(
+            runtime.sync_phase.as_deref(),
+            Some(SYNC_PHASE_PLANNING_STARTUP)
+        );
     }
 }
