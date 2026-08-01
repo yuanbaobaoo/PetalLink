@@ -21,18 +21,7 @@ pub fn transfer_list_all() -> AppResult<Vec<repository::TransferTask>> {
 #[tauri::command]
 #[specta::specta]
 pub fn transfer_has_active() -> AppResult<bool> {
-    let conn = DB.lock();
-    let count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM transfer_queue WHERE state IN (?1, ?2)",
-            rusqlite::params![
-                repository::transfer_state::PENDING,
-                repository::transfer_state::RUNNING
-            ],
-            |row| row.get(0),
-        )
-        .map_err(|e| AppError::generic(format!("查询传输状态失败：{e}")))?;
-    Ok(count > 0)
+    Ok(super::active_transfer_count()? > 0)
 }
 
 /// 删除指定终态的传输历史，并在同一数据库视图上生成状态快照。

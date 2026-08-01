@@ -346,6 +346,7 @@ impl TaskRunner {
                 transferred: Some(replacement.transferred),
                 resume_offset: Some(replacement.resume_offset),
                 attempt_count: Some(replacement.attempt_count),
+                verify_attempt_count: Some(replacement.verify_attempt_count),
             },
         )
         .map_err(transition_error)?;

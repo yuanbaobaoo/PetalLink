@@ -744,6 +744,7 @@ impl SyncExecutor {
                 .as_ref()
                 .and_then(|file| file.edited_time.map(|time| time.timestamp_millis())),
             attempt_count: 0,
+            verify_attempt_count: 0,
             next_retry_at: None,
             error_kind: None,
             remote_result_file_id: None,

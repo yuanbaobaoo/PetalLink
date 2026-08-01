@@ -184,6 +184,22 @@ pub fn try_sync_engine() -> Option<Arc<SyncEngine>> {
     SYNC_ENGINE.lock().clone()
 }
 
+/// 统计非终态传输任务数（Pending/Running/WaitingForNetwork/BackingOff/VerifyingRemote/RestartRequired）。
+/// 用于「清空缓存」「退出登录」等高风险操作前的活动传输守卫；终态 Completed/Failed/Canceled 不计入。
+pub(crate) fn active_transfer_count() -> AppResult<i64> {
+    let conn = DB.lock();
+    conn.query_row(
+        "SELECT COUNT(*) FROM transfer_queue WHERE state NOT IN (?1, ?2, ?3)",
+        rusqlite::params![
+            repository::transfer_state::COMPLETED,
+            repository::transfer_state::FAILED,
+            repository::transfer_state::CANCELED
+        ],
+        |row| row.get(0),
+    )
+    .map_err(|e| AppError::generic(format!("查询活动传输任务失败：{e}")))
+}
+
 /// 清理已配置但失去登录态的孤儿同步状态。
 pub fn cleanup_orphan_state() {
     // 守卫：必须确实有旧同步配置才清

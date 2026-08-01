@@ -527,6 +527,8 @@ export type TransferTask = {
 	expected_cloud_edited_time: number | null,
 	// 已消耗的持久化尝试次数。
 	attempt_count: number,
+	// 远端核验专用尝试次数，独立于全局重试预算 `attempt_count`，避免核验循环虚增预算。
+	verify_attempt_count: number,
 	// 下一次允许重试的时间戳。
 	next_retry_at: number | null,
 	// 结构化错误类型（见 `TransferErrorKind`）。

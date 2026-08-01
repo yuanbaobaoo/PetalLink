@@ -458,6 +458,7 @@ mod tests {
             source_size: Some(4),
             expected_cloud_edited_time: Some(1),
             attempt_count: 1,
+            verify_attempt_count: 0,
             next_retry_at: None,
             error_kind: None,
             remote_result_file_id: Some(file_id.to_string()),

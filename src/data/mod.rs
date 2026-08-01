@@ -2,7 +2,7 @@
 //!
 //! 对齐 `legacy/lib/data/`（database.dart + tables/sync_items.dart + tables/transfer_queue.dart）。
 //!
-//! 使用 rusqlite（bundled），schemaVersion=5，启用外键约束。
+//! 使用 rusqlite（bundled），schemaVersion=6，启用外键约束。
 //! DB 文件：`<Application Support>/io.github.yuanbaobaoo.PetalLink/petal_link.db`。
 
 /// SQLite 结构迁移。
@@ -17,8 +17,8 @@ use rusqlite::Connection;
 use crate::core::config_store::{support_dir, ConfigStore};
 use crate::error::{AppError, AppResult};
 
-/// 当前 schema 版本（v5：持久化传输状态机上下文）
-pub const SCHEMA_VERSION: u32 = 5;
+/// 当前 schema 版本（v6：传输队列新增远端核验专用计数 verify_attempt_count）
+pub const SCHEMA_VERSION: u32 = 6;
 
 /// DB 文件名
 pub const DB_FILE_NAME: &str = "petal_link.db";

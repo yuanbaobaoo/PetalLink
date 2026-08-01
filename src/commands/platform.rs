@@ -59,6 +59,13 @@ pub fn tray_is_visible() -> bool {
 #[tauri::command]
 #[specta::specta]
 pub async fn app_clear_cache(app: AppHandle) -> AppResult<()> {
+    // 守卫：有非终态传输任务时禁止清空，避免删掉 VerifyingRemote 任务的 remote_result_file_id
+    // 等免重传凭证，导致已上传文件无法核验、被迫全量重传。
+    if super::active_transfer_count()? > 0 {
+        return Err(AppError::generic(
+            "有文件正在上传/下载，请等待传输完成后再清空缓存",
+        ));
+    }
     // 停止运行时
     drop_runtime_async().await;
     // 清除登录状态

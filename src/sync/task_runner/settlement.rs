@@ -200,7 +200,10 @@ impl TaskRunner {
             .ok_or_else(|| PreflightFailure::validation("成功核验缺少本地路径"))?;
         match operation {
             TransferOperation::Create | TransferOperation::Update => {
-                // 上传必须得到完整且与源快照一致的远端资源。
+                // 上传必须得到与源快照一致的远端资源。身份确认只依赖 id/名称/大小（+内容哈希），
+                // 不要求 edited_time：华为上传完成后常延迟返回该字段，若作为硬条件会让已传成功的
+                // 文件在核验阶段永远无法结算（免重传恢复也因此失效）。缺失版本时间由 settle_success
+                // 保留旧基线，交由下一轮 planner 按 mtime/size 复核。
                 let cloud = output
                     .cloud_file
                     .as_ref()
@@ -208,7 +211,6 @@ impl TaskRunner {
                 if cloud.id.trim().is_empty()
                     || cloud.name.trim().is_empty()
                     || cloud.name != running.name
-                    || cloud.edited_time.is_none()
                     || cloud.size != running.source_size.unwrap_or(-1)
                     || (operation == TransferOperation::Update
                         && running.file_id.as_deref() != Some(cloud.id.as_str()))
@@ -355,6 +357,8 @@ impl TaskRunner {
                     finished_at: ColumnPatch::Set(finished_at),
                     remote_result_file_id: ColumnPatch::Set(file_id.clone()),
                     transferred: Some(running.total_size),
+                    // 成功结算后核验计数归零，便于审计与后续重新核验从头计。
+                    verify_attempt_count: Some(0),
                     ..Default::default()
                 },
             )

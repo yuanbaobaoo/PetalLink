@@ -64,6 +64,7 @@ fn open_database(path: &std::path::Path) -> Connection {
                 source_size INTEGER,
                 expected_cloud_edited_time INTEGER,
                 attempt_count INTEGER NOT NULL DEFAULT 0,
+                verify_attempt_count INTEGER NOT NULL DEFAULT 0,
                 next_retry_at INTEGER,
                 error_kind INTEGER,
                 remote_result_file_id TEXT,

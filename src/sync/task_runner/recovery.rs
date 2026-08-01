@@ -11,6 +11,10 @@ use crate::data::repository::{self, ColumnPatch, TransferPatch, TransferTask};
 use crate::error::AppResult;
 use crate::sync::transfer_state::{TransferErrorKind, TransferOperation, TransferState};
 
+/// 远端核验的最大自动次数。Ambiguous/核验不可用达到上限后转 Failed 交人工重试，
+/// 避免任务在网络长期异常或云端始终不返回完整元数据时在 VerifyingRemote 永久循环。
+const MAX_VERIFY_ATTEMPTS: i64 = 60;
+
 impl TaskRunner {
     /// 将保存了远端结果 ID 的 RestartRequired 恢复为待核验状态。
     pub fn promote_ambiguous_restarts(&self) -> AppResult<usize> {
@@ -71,6 +75,21 @@ impl TaskRunner {
                     disposition: TaskDisposition::Completed,
                 };
                 if let Err(failure) = self.validate_success_outcome(task, &outcome) {
+                    // 已确认提交但结算合同持续不满足时，同样不能无限重试。
+                    // 核验计数独立于全局重试预算（attempt_count），避免虚增预算导致重传被误判耗尽。
+                    let attempts = task.verify_attempt_count.saturating_add(1);
+                    if failure.target == TransferState::VerifyingRemote
+                        && attempts >= MAX_VERIFY_ATTEMPTS
+                    {
+                        self.transition_failure(
+                            task,
+                            TransferState::Failed,
+                            failure.kind,
+                            "远端写入已确认，但结果多次无法安全结算，已停止自动重试，请手动重试",
+                        )?;
+                        self.notify_best_effort();
+                        return Ok(None);
+                    }
                     let patch = TransferPatch {
                         error_kind: ColumnPatch::Set(failure.kind),
                         error_message: ColumnPatch::Set(format!(
@@ -83,6 +102,7 @@ impl TaskRunner {
                             ColumnPatch::Clear
                         },
                         remote_result_file_id: ColumnPatch::Set(file.id),
+                        verify_attempt_count: Some(attempts),
                         ..Default::default()
                     };
                     if failure.target == TransferState::VerifyingRemote {
@@ -125,6 +145,8 @@ impl TaskRunner {
                     next_retry_at: ColumnPatch::Clear,
                     finished_at: ColumnPatch::Clear,
                     remote_result_file_id: ColumnPatch::Clear,
+                    // 已确认未提交并重放，核验计数归零，重传后若再核验从头计。
+                    verify_attempt_count: Some(0),
                     ..Default::default()
                 };
                 let restart = if session_expired {
@@ -168,6 +190,19 @@ impl TaskRunner {
                 } else {
                     TransferErrorKind::RemoteAmbiguous
                 };
+                // 核验次数到达上限后停止自动重试，转 Failed 交人工重试，避免永久循环。
+                // 计数用独立的 verify_attempt_count，不消耗全局重试预算。
+                let attempts = task.verify_attempt_count.saturating_add(1);
+                if attempts >= MAX_VERIFY_ATTEMPTS {
+                    self.transition_failure(
+                        task,
+                        TransferState::Failed,
+                        error_kind,
+                        "云端结果多次确认仍不确定，已停止自动重试，请手动重试",
+                    )?;
+                    self.notify_best_effort();
+                    return Ok(None);
+                }
                 {
                     let conn = self.db.lock();
                     repository::patch_transfer_in_state(
@@ -180,6 +215,7 @@ impl TaskRunner {
                             error_kind: ColumnPatch::Set(error_kind),
                             error_message: ColumnPatch::Set(message),
                             next_retry_at: ColumnPatch::Set((self.now_ms)().saturating_add(60_000)),
+                            verify_attempt_count: Some(attempts),
                             ..Default::default()
                         },
                     )
@@ -191,6 +227,19 @@ impl TaskRunner {
             Err(error) => {
                 // 核验基础设施暂不可用不改变写入事实，只缩短重试间隔。
                 tracing::warn!(task_id = task.id, %error, "远端写入核验暂不可用，保留歧义状态");
+                // 核验不可用达到上限后转 Failed 交人工重试，避免网络长期异常时永久重试。
+                // 计数用独立的 verify_attempt_count，不消耗全局重试预算。
+                let attempts = task.verify_attempt_count.saturating_add(1);
+                if attempts >= MAX_VERIFY_ATTEMPTS {
+                    self.transition_failure(
+                        task,
+                        TransferState::Failed,
+                        TransferErrorKind::RemoteAmbiguous,
+                        "远端核验持续不可用（网络或服务异常），已停止自动重试，请检查网络后手动重试",
+                    )?;
+                    self.notify_best_effort();
+                    return Ok(None);
+                }
                 {
                     let conn = self.db.lock();
                     repository::patch_transfer_in_state(
@@ -201,6 +250,7 @@ impl TaskRunner {
                         TransferPatch {
                             error_message: ColumnPatch::Set(format!("远端核验暂不可用：{error}")),
                             next_retry_at: ColumnPatch::Set((self.now_ms)().saturating_add(15_000)),
+                            verify_attempt_count: Some(attempts),
                             ..Default::default()
                         },
                     )

@@ -36,6 +36,7 @@ function task(id: number, state: TransferState): TransferTask {
     source_size: 100,
     expected_cloud_edited_time: null,
     attempt_count: 0,
+    verify_attempt_count: 0,
     next_retry_at: null,
     error_kind: null,
     remote_result_file_id: null,

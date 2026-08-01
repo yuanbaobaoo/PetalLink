@@ -9,7 +9,7 @@ use crate::auth::token_store::TokenStore;
 use crate::auth::user_info_api::UserInfoApi;
 use crate::core::config_store::ConfigStore;
 use crate::data::repository;
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 
 use super::{drop_runtime_async, AUTH_SERVICE, DB};
 
@@ -100,6 +100,12 @@ pub async fn auth_cancel_login() -> AppResult<()> {
 #[tauri::command]
 #[specta::specta]
 pub async fn auth_logout() -> AppResult<()> {
+    // 守卫：有非终态传输任务时禁止退出，避免清空账号缓存时删掉免重传凭证。
+    if super::active_transfer_count()? > 0 {
+        return Err(AppError::generic(
+            "有文件正在上传/下载，请等待传输完成后再退出登录",
+        ));
+    }
     // 清空当前账号同步状态
     drop_runtime_async().await;
     clear_account_caches();

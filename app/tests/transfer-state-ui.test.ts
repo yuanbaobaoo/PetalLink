@@ -57,6 +57,7 @@ function task(
     source_size: 100,
     expected_cloud_edited_time: direction === TRANSFER_DIR.UPLOAD ? null : 1,
     attempt_count: 0,
+    verify_attempt_count: 0,
     next_retry_at: null,
     error_kind: null,
     remote_result_file_id: null,

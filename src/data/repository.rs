@@ -174,6 +174,8 @@ pub struct TransferTask {
     pub expected_cloud_edited_time: Option<i64>,
     /// 已消耗的持久化尝试次数。
     pub attempt_count: i64,
+    /// 远端核验专用尝试次数，独立于全局重试预算 `attempt_count`，避免核验循环虚增预算。
+    pub verify_attempt_count: i64,
     /// 下一次允许重试的时间戳。
     pub next_retry_at: Option<i64>,
     /// 结构化错误类型（见 `TransferErrorKind`）。
@@ -213,6 +215,8 @@ pub struct TransferPatch {
     pub resume_offset: Option<i64>,
     /// `Some` 替换非空尝试次数，`None` 保留原值。
     pub attempt_count: Option<i64>,
+    /// `Some` 替换远端核验尝试次数，`None` 保留原值。
+    pub verify_attempt_count: Option<i64>,
 }
 
 /// 仅在任务仍为同一运行版本时写入的进度与会话补丁。

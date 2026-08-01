@@ -652,6 +652,7 @@ pub async fn sync_download_on_demand(
         source_size: destination_snapshot.map(|snapshot| snapshot.1),
         expected_cloud_edited_time: Some(cloud_edited_time),
         attempt_count: 0,
+        verify_attempt_count: 0,
         next_retry_at: None,
         error_kind: None,
         remote_result_file_id: None,

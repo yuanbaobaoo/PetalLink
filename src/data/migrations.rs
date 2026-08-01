@@ -57,6 +57,9 @@ pub fn run_with_mount(conn: &Connection, mount_root: Option<&Path>) -> AppResult
         if current < 5 {
             upgrade_to_v5(&transaction, mount_root)?;
         }
+        if current < 6 {
+            upgrade_to_v6(&transaction)?;
+        }
     }
 
     set_version(&transaction, SCHEMA_VERSION)?;
@@ -110,6 +113,7 @@ fn create_all(conn: &Connection) -> AppResult<()> {
             source_size INTEGER,
             expected_cloud_edited_time INTEGER,
             attempt_count INTEGER NOT NULL DEFAULT 0,
+            verify_attempt_count INTEGER NOT NULL DEFAULT 0,
             next_retry_at INTEGER,
             error_kind INTEGER,
             remote_result_file_id TEXT,
@@ -151,6 +155,17 @@ fn upgrade_to_v3(conn: &Connection) -> AppResult<()> {
 /// v4: TransferQueue 加 session_url（华为 resume 上传的 Location 头会话 URL，断点续传必需）。
 fn upgrade_to_v4(conn: &Connection) -> AppResult<()> {
     add_column_if_missing(conn, "transfer_queue", "session_url", "TEXT")?;
+    Ok(())
+}
+
+/// v6: TransferQueue 加 verify_attempt_count（远端核验专用计数，独立于全局重试预算 attempt_count）。
+fn upgrade_to_v6(conn: &Connection) -> AppResult<()> {
+    add_column_if_missing(
+        conn,
+        "transfer_queue",
+        "verify_attempt_count",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
     Ok(())
 }
 

@@ -11,6 +11,7 @@ import * as authApi from "@/api/auth";
 import LogViewerPage from "@/views/settings/LogViewerPage.vue";
 import { useAuthStore } from "@/stores/auth";
 import { useUpdaterStore } from "@/stores/updater";
+import { useTransferStore } from "@/stores/transfer";
 import { useAsyncAction } from "@/composables/useAsyncAction";
 import { selectAndConfigureSyncDirectory } from "@/composables/useSyncDirectorySetup";
 import { formatFileSize } from "@/utils/format";
@@ -20,6 +21,8 @@ import { extractErrorMessage } from "@/utils/error";
 const auth = useAuthStore();
 // 应用更新状态。
 const updater = useUpdaterStore();
+// 传输队列状态（用于传输中禁用清空缓存/退出登录）。
+const transfer = useTransferStore();
 
 type TabKey = "syncDir" | "transfer" | "advanced" | "account" | "logs" | "about";
 // 当前激活的 Tab
@@ -78,6 +81,11 @@ const { loading: logoutLoading, run: runLogout } = useAsyncAction();
 // 选择目录按钮的互斥执行状态。
 const { loading: selectDirLoading, run: runSelectDir } = useAsyncAction();
 
+// 是否有非终态传输任务（上传/下载进行中或待确认）。
+const transferBusy = computed(() => transfer.hasActiveTasks);
+// 传输中禁用清空缓存/退出登录的统一提示。
+const TRANSFER_BUSY_TIP = "有文件正在上传/下载，请等待传输完成后再操作";
+
 // 用户信息
 const userInfo = computed(() => auth.userInfo);
 // 当前账号展示名。
@@ -117,6 +125,8 @@ onMounted(async () => {
   try { showTrayIcon.value = await commands.trayIsVisible(); } catch {}
   try { about.value = await commands.driveGetAbout(); } catch {}
   try { appVersion.value = await commands.appGetVersion(); } catch {}
+  // 进入设置页时刷新一次传输队列，保证清空缓存/退出登录的禁用状态准确。
+  try { await transfer.loadAll(); } catch {}
   saved.value = true;
 });
 
@@ -230,6 +240,11 @@ async function onToggleTrayIcon(v: boolean): Promise<void> {
  */
 async function handleClearCache(): Promise<void> {
   await runClearCache(async () => {
+    // 传输中禁止清空：清空会删掉免重传凭证，导致已上传文件被迫重传。
+    if (transferBusy.value) {
+      showToast(TRANSFER_BUSY_TIP, { variant: "error" });
+      return;
+    }
     // 高风险操作必须由用户显式确认。
     const ok = await confirmDialog({
       title: "清空缓存并重启", titleIcon: "alert", danger: true, confirmText: "确认清空",
@@ -247,6 +262,11 @@ async function handleClearCache(): Promise<void> {
  */
 async function handleLogout(): Promise<void> {
   await runLogout(async () => {
+    // 传输中禁止退出：退出会清空账号同步缓存并删掉免重传凭证。
+    if (transferBusy.value) {
+      showToast(TRANSFER_BUSY_TIP, { variant: "error" });
+      return;
+    }
     // 用户确认结果。
     const ok = await confirmDialog({
       title: "退出登录", titleIcon: "x", danger: true, confirmText: "退出",
@@ -419,7 +439,7 @@ function fmtSize(bytes: number): string {
                 <div class="setting-label">清空缓存并重启</div>
                 <div class="setting-desc">清除登录状态、同步数据库、同步快照与配置文件，然后重启 App。适用于排查同步异常或切换账号时使用。</div>
               </div>
-              <div class="setting-control"><MateButton variant="primary" icon="trash" danger :loading="clearLoading" :disabled="clearLoading" @click="handleClearCache">清空</MateButton></div>
+              <div class="setting-control"><MateButton variant="primary" icon="trash" danger :loading="clearLoading" :disabled="clearLoading || transferBusy" :tooltip="transferBusy ? TRANSFER_BUSY_TIP : ''" @click="handleClearCache">清空</MateButton></div>
             </div>
           </div>
         </section>
@@ -449,7 +469,7 @@ function fmtSize(bytes: number): string {
                 <div class="setting-label">退出登录</div>
                 <div class="setting-desc">清除本地 token 并返回登录页。后台进程仍会继续，可从菜单栏彻底退出。</div>
               </div>
-              <div class="setting-control"><MateButton variant="primary" icon="x" danger :loading="logoutLoading" :disabled="logoutLoading" @click="handleLogout">退出登录</MateButton></div>
+              <div class="setting-control"><MateButton variant="primary" icon="x" danger :loading="logoutLoading" :disabled="logoutLoading || transferBusy" :tooltip="transferBusy ? TRANSFER_BUSY_TIP : ''" @click="handleLogout">退出登录</MateButton></div>
             </div>
           </div>
         </section>

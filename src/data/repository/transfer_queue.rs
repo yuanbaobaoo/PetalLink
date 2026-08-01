@@ -36,6 +36,7 @@ impl TransferTask {
             source_size: row.get("source_size")?,
             expected_cloud_edited_time: row.get("expected_cloud_edited_time")?,
             attempt_count: row.get("attempt_count")?,
+            verify_attempt_count: row.get("verify_attempt_count")?,
             next_retry_at: row.get("next_retry_at")?,
             error_kind: row.get("error_kind")?,
             remote_result_file_id: row.get("remote_result_file_id")?,
@@ -69,9 +70,9 @@ pub fn insert_transfer(conn: &Connection, task: &TransferTask) -> AppResult<i64>
                  error_message, created_at, finished_at, server_id, upload_id, resume_offset,
                  session_url, relative_path, parent_file_id, operation, source_mtime,
                  source_size, expected_cloud_edited_time, attempt_count, next_retry_at,
-                 error_kind, remote_result_file_id, state_revision)
+                 error_kind, remote_result_file_id, state_revision, verify_attempt_count)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,
-                     ?17,?18,?19,?20,?21,?22,?23,?24,?25)",
+                     ?17,?18,?19,?20,?21,?22,?23,?24,?25,?26)",
             params![
                 task.direction,
                 task.file_id,
@@ -98,6 +99,7 @@ pub fn insert_transfer(conn: &Connection, task: &TransferTask) -> AppResult<i64>
                 task.error_kind,
                 task.remote_result_file_id,
                 task.state_revision,
+                task.verify_attempt_count,
             ],
         )
     );
@@ -229,6 +231,7 @@ pub fn patch_transfer_in_state(
         transferred,
         resume_offset,
         attempt_count,
+        verify_attempt_count,
     } = patch;
     let (error_kind_mode, error_kind) = nullable_patch(error_kind);
     let error_kind = error_kind.map(i32::from);
@@ -249,8 +252,9 @@ pub fn patch_transfer_in_state(
             transferred=CASE WHEN ?13 IS NULL THEN transferred ELSE ?13 END,
             resume_offset=CASE WHEN ?14 IS NULL THEN resume_offset ELSE ?14 END,
             attempt_count=CASE WHEN ?15 IS NULL THEN attempt_count ELSE ?15 END,
+            verify_attempt_count=CASE WHEN ?16 IS NULL THEN verify_attempt_count ELSE ?16 END,
             state_revision=state_revision+1
-         WHERE id=?16 AND state_revision=?17 AND state=?18",
+         WHERE id=?17 AND state_revision=?18 AND state=?19",
         params![
             error_kind_mode,
             error_kind,
@@ -267,6 +271,7 @@ pub fn patch_transfer_in_state(
             transferred,
             resume_offset,
             attempt_count,
+            verify_attempt_count,
             task_id,
             expected_revision,
             i32::from(expected_state),
@@ -380,6 +385,7 @@ pub(crate) fn transition_transfer_in_transaction(
         transferred,
         resume_offset,
         attempt_count,
+        verify_attempt_count,
     } = patch;
     let (error_kind_mode, error_kind) = nullable_patch(error_kind);
     let error_kind = error_kind.map(i32::from);
@@ -402,8 +408,9 @@ pub(crate) fn transition_transfer_in_transaction(
             transferred=CASE WHEN ?14 IS NULL THEN transferred ELSE ?14 END,
             resume_offset=CASE WHEN ?15 IS NULL THEN resume_offset ELSE ?15 END,
             attempt_count=CASE WHEN ?16 IS NULL THEN attempt_count ELSE ?16 END,
+            verify_attempt_count=CASE WHEN ?17 IS NULL THEN verify_attempt_count ELSE ?17 END,
             state_revision=state_revision+1
-         WHERE id=?17 AND state_revision=?18",
+         WHERE id=?18 AND state_revision=?19",
         params![
             i32::from(next_state),
             error_kind_mode,
@@ -421,6 +428,7 @@ pub(crate) fn transition_transfer_in_transaction(
             transferred,
             resume_offset,
             attempt_count,
+            verify_attempt_count,
             task_id,
             expected_revision,
         ],
