@@ -10,7 +10,7 @@ checksum = "fe438c63458706e03479442743baae6c88256498e6431708f6dfc520a26515d3"
 
 [[package]]
 name = "PetalLink"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "anyhow",
  "async-trait",
