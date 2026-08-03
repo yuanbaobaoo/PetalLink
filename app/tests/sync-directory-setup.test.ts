@@ -14,6 +14,8 @@ function config(overrides: Partial<AppConfig> = {}): AppConfig {
     oauth_callback_port: 9999,
     mount_dir: "",
     mount_configured: false,
+    virtual_drive_enabled: false,
+    virtual_mount_dir: "",
     concurrency: 6,
     poll_interval_sec: 60,
     debounce_sec: 3,

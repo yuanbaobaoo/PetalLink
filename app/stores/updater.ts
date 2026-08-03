@@ -6,6 +6,7 @@ import { ref, computed } from "vue";
 import { commands } from "@/api/generated";
 import * as updaterApi from "@/api/updater";
 import type { UpdateInfo, DownloadProgress } from "@/api/updater";
+import { extractErrorMessage } from "@/utils/error";
 
 // 定时检查间隔：每 1 小时检查一次
 export const CHECK_INTERVAL_MS = 60 * 60 * 1000;
@@ -43,6 +44,8 @@ export const useUpdaterStore = defineStore("updater", () => {
   const lastCheckTime = ref<number | null>(null);
   // 对话框是否打开（控制 UpdateDialog 显隐）
   const dialogOpen = ref(false);
+  // 当前平台是否已接入签名更新产物；null 表示尚未查询。
+  const updateSupported = ref<boolean | null>(null);
 
   // ---- 计算 ----
   const updateAvailable = computed(() => phase.value === "available");
@@ -60,9 +63,37 @@ export const useUpdaterStore = defineStore("updater", () => {
   // ---- 动作 ----
 
   /**
+   * 记录当前渠道没有适用于本机的更新。
+   */
+  function markUpToDate(): void {
+    updateInfo.value = null;
+    phase.value = "upToDate";
+    errorMessage.value = "";
+    dialogOpen.value = false;
+  }
+
+  /**
+   * 查询并缓存当前发行渠道的更新能力。
+   */
+  async function detectSupport(): Promise<boolean> {
+    if (updateSupported.value !== null) return updateSupported.value;
+    try {
+      updateSupported.value = await commands.updaterIsSupported();
+    } catch {
+      // 后端能力不可确认时默认关闭，避免反复触发无效网络请求。
+      updateSupported.value = false;
+    }
+    return updateSupported.value;
+  }
+
+  /**
    * 实际发起一次检查请求（不含节流），仅更新侧边栏提示，不弹对话框
    */
   async function doCheck(): Promise<void> {
+    if (!(await detectSupport())) {
+      lastCheckTime.value = Date.now();
+      return;
+    }
     try {
       // 最新更新元数据。
       const info = await updaterApi.checkForUpdate();
@@ -71,9 +102,14 @@ export const useUpdaterStore = defineStore("updater", () => {
         phase.value = "available";
         dismissed.value = false;
         dialogOpen.value = false; // 静默检查不弹窗
+      } else {
+        markUpToDate();
       }
-    } catch {
-      // 静默失败
+    } catch (error) {
+      if (updaterApi.isUpdatePlatformUnavailableError(error)) {
+        markUpToDate();
+      }
+      // 其他静默检查错误不打扰用户。
     }
     lastCheckTime.value = Date.now();
   }
@@ -113,6 +149,12 @@ export const useUpdaterStore = defineStore("updater", () => {
    * 手动检查更新（关于页 / 侧边栏点击），有更新时自动弹出对话框
    */
   async function manualCheck(): Promise<boolean> {
+    if (!(await detectSupport())) {
+      phase.value = "error";
+      errorMessage.value = "当前版本尚未接入自动更新";
+      lastCheckTime.value = Date.now();
+      return false;
+    }
     phase.value = "checking";
     errorMessage.value = "";
     try {
@@ -125,13 +167,17 @@ export const useUpdaterStore = defineStore("updater", () => {
         lastCheckTime.value = Date.now();
         return true;
       } else {
-        phase.value = "upToDate";
+        markUpToDate();
         lastCheckTime.value = Date.now();
         return false;
       }
     } catch (e) {
-      phase.value = "error";
-      errorMessage.value = String(e);
+      if (updaterApi.isUpdatePlatformUnavailableError(e)) {
+        markUpToDate();
+      } else {
+        phase.value = "error";
+        errorMessage.value = extractErrorMessage(e);
+      }
       lastCheckTime.value = Date.now();
       return false;
     }
@@ -159,8 +205,16 @@ export const useUpdaterStore = defineStore("updater", () => {
    * 下载并安装
    */
   async function downloadAndInstall(): Promise<void> {
-    phase.value = "downloading";
+    // 每次尝试（包括错误后的重试）都从全新的进度状态开始。
     downloadProgress.value = 0;
+    downloadTotal.value = 0;
+    downloaded.value = 0;
+    if (!(await detectSupport())) {
+      phase.value = "error";
+      errorMessage.value = "当前平台尚未接入自动更新";
+      return;
+    }
+    phase.value = "downloading";
     errorMessage.value = "";
     try {
       await updaterApi.downloadAndInstall((p: DownloadProgress) => {
@@ -173,14 +227,21 @@ export const useUpdaterStore = defineStore("updater", () => {
             99,
           );
         } else if (p.stage === "finished") {
+          if (downloadTotal.value > 0) {
+            downloaded.value = downloadTotal.value;
+          }
           downloadProgress.value = 100;
         }
       });
       // 下载安装完成 → 等待传输
       phase.value = "downloaded";
     } catch (e) {
-      phase.value = "error";
-      errorMessage.value = String(e);
+      if (updaterApi.isUpdatePlatformUnavailableError(e)) {
+        markUpToDate();
+      } else {
+        phase.value = "error";
+        errorMessage.value = extractErrorMessage(e);
+      }
     }
   }
 
@@ -227,7 +288,11 @@ export const useUpdaterStore = defineStore("updater", () => {
    */
   function closeDialog(): void {
     dialogOpen.value = false;
-    if (phase.value === "available" || phase.value === "upToDate" || phase.value === "error") {
+    if (
+      phase.value === "available"
+      || phase.value === "upToDate"
+      || phase.value === "error"
+    ) {
       // 保持 available 状态以便侧边栏继续显示提示
     }
   }
@@ -251,6 +316,7 @@ export const useUpdaterStore = defineStore("updater", () => {
     dismissed,
     lastCheckTime,
     dialogOpen,
+    updateSupported,
     // 计算
     updateAvailable,
     isChecking,
@@ -258,6 +324,7 @@ export const useUpdaterStore = defineStore("updater", () => {
     isUpdateDownloading,
     newVersion,
     // 动作
+    detectSupport,
     silentCheck,
     periodicCheck,
     checkOnFocus,

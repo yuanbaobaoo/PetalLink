@@ -98,6 +98,12 @@ async function registerGlobalListeners(): Promise<void> {
   } catch {}
 
   try {
+    await events.virtualDriveStatus.listen(({ payload }) => {
+      useSyncStore().applyVirtualDriveStatus(payload);
+    });
+  } catch {}
+
+  try {
     await events.uploadFailed.listen(({ payload }) => {
       // 提示中优先展示后端返回的文件名和错误。
       const name = payload?.name ?? "未知文件";
