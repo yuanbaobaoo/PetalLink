@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=PetalLink
+GenericName=Cloud Drive Client
+GenericName[zh_CN]=华为云盘客户端
+Comment=Synchronize Huawei Cloud Drive with a local directory
+Comment[zh_CN]=将华为云空间与本地目录双向同步
+Exec=petallink
+TryExec=petallink
+Icon=io.github.yuanbaobaoo.PetalLink
+Terminal=false
+Categories=Network;FileTransfer;
+Keywords=Huawei;Cloud;Drive;Sync;
+Keywords[zh_CN]=华为;云盘;同步;
+StartupNotify=true
+StartupWMClass=PetalLink
