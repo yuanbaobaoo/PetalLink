@@ -404,3 +404,32 @@ pub(super) async fn watcher_listener_loop<R>(
         }
     }
 }
+
+#[cfg(test)]
+mod activity_tracker_tests {
+    use super::*;
+
+    #[test]
+    fn shared_settlement_guard_blocks_overlapping_exclusive_only() {
+        let tracker = Arc::new(ActivityTracker::default());
+        let first = tracker.begin(Some("projects")).unwrap();
+        let nested = tracker.begin(Some("projects/report.txt")).unwrap();
+        let unrelated = tracker.begin(Some("photos")).unwrap();
+
+        assert!(
+            tracker.begin_exclusive("projects/report.txt").is_err(),
+            "祖先 shared guard 必须阻止后代 FUSE 写入"
+        );
+        assert!(
+            tracker.begin_exclusive("projects").is_err(),
+            "同路径 shared guard 必须阻止 FUSE rename/unlink"
+        );
+        assert!(
+            tracker.begin_exclusive("music").is_ok(),
+            "无关子树不应被结构结算阻塞"
+        );
+
+        drop((first, nested, unrelated));
+        assert!(tracker.begin_exclusive("projects").is_ok());
+    }
+}

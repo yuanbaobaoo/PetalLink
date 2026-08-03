@@ -1,4 +1,4 @@
-//! 全局常量 —— 华为云盘 macOS 客户端
+//! 全局常量 —— 华为云盘桌面客户端
 //!
 //! # 安全提醒
 //! `CLIENT_SECRET` 和 `CLIENT_ID` 切勿提交到仓库。解析优先级（高 → 低）：
@@ -29,7 +29,7 @@ pub const BUILD_SECRET: &str = match option_env!("HWCLOUD_CLIENT_SECRET") {
 /// 占位符 secret（仅作类型占位；登录会被拒绝）
 pub const PLACEHOLDER_SECRET: &str = "REPLACE_WITH_REAL_SECRET";
 
-/// 应用展示名（菜单栏标题、关于页等）
+/// 应用展示名（托盘标题、关于页等）
 pub const APP_NAME: &str = "PetalLink";
 
 /// 应用完整标题（窗口标题栏、关于页、任务切换器）
@@ -40,7 +40,7 @@ pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// **应用包标识**（正式版：io.github.yuanbaobaoo.PetalLink）
 ///
-/// dev 构建追加 `-dev` 后缀，隔离数据目录 / 单实例锁 / LaunchAgent，
+/// dev 构建追加 `-dev` 后缀，隔离数据目录 / 单实例锁 / 登录启动项，
 /// 避免 `cargo tauri dev` 与正式安装版读写同一份配置/数据库/缓存造成数据错乱。
 /// 单实例插件的 socket 由 tauri.conf.json 的 identifier 决定，需配合
 /// `cargo tauri dev --config tauri.dev.conf.json` 同步覆盖。

@@ -34,6 +34,25 @@ impl SyncEngine {
                 continue;
             }
             if let Some(db_entry) = db.get(rel) {
+                if entry.is_folder && db_entry.is_folder {
+                    if let Some(cloud_folder) = ct.get(rel) {
+                        if !cloud_folder.is_folder() || cloud_folder.id != db_entry.file_id {
+                            return Err(AppError::generic(format!(
+                                "目录 {rel} 的数据库与云端稳定身份不一致，拒绝继续规划"
+                            )));
+                        }
+                    }
+                    let mount = self.mount.as_ref().ok_or_else(|| {
+                        AppError::generic("同步挂载未初始化，无法核验目录稳定身份")
+                    })?;
+                    mount
+                        .ensure_folder_with_file_id(rel, &db_entry.file_id)
+                        .map_err(|error| {
+                            AppError::generic(format!(
+                                "目录 {rel} 的本地稳定身份不一致，拒绝继续规划：{error}"
+                            ))
+                        })?;
+                }
                 // 若 DB 记录标记为 DELETED 但用户重新粘贴了文件 → 复活为正常状态
                 if db_entry.status == repository::sync_status::DELETED {
                     let status = if entry.is_placeholder {
@@ -51,10 +70,21 @@ impl SyncEngine {
                 continue;
             }
 
-            // 可信云树中同路径、同类型的目录足以恢复目录身份；目录没有 fileId xattr，
-            // 可借此收敛远端创建成功但数据库基线尚未写入的崩溃窗口。
+            // 可信云树中同路径、同类型且本地 xattr 可绑定为同一 fileId 的目录，可以
+            // 恢复创建成功但数据库尚未写入的崩溃窗口。不同 xattr 必须 fail closed，
+            // 不能把恰好同名的另一目录覆盖成当前云端身份。
             if entry.is_folder {
                 if let Some(cloud_folder) = ct.get(rel).filter(|file| file.is_folder()) {
+                    let mount = self.mount.as_ref().ok_or_else(|| {
+                        AppError::generic("同步挂载未初始化，无法核验目录稳定身份")
+                    })?;
+                    mount
+                        .ensure_folder_with_file_id(rel, &cloud_folder.id)
+                        .map_err(|error| {
+                            AppError::generic(format!(
+                                "目录 {rel} 无法绑定可信云端身份，拒绝恢复基线：{error}"
+                            ))
+                        })?;
                     let metadata =
                         std::fs::symlink_metadata(&entry.absolute_path).map_err(|error| {
                             AppError::generic(format!("读取待恢复目录基线失败：{error}"))
@@ -95,7 +125,7 @@ impl SyncEngine {
                 .ok()
                 .and_then(|_| {
                     use crate::mount::manager::XATTR_FILE_ID;
-                    xattr::get(&entry.absolute_path, XATTR_FILE_ID)
+                    crate::platform::xattr::get(&entry.absolute_path, XATTR_FILE_ID)
                         .ok()
                         .flatten()
                         .and_then(|b| String::from_utf8(b).ok())
@@ -447,13 +477,25 @@ impl SyncEngine {
         use crate::mount::manager::XATTR_FILE_ID;
         use crate::sync::state::SyncActionType;
         let db = self.db.lock();
-        // 先收集全体 DB 记录（按 fileId 索引）
-        let db_by_id: std::collections::HashMap<String, crate::data::repository::SyncItem> =
-            repository::load_all(&db)?
-                .into_iter()
-                .filter(|r| !r.file_id.is_empty())
-                .map(|r| (r.file_id.clone(), r))
-                .collect();
+        // 先收集全体 DB 记录（按 fileId 索引）。重复 fileId 明确标成歧义，不能让
+        // HashMap 静默覆盖后挑任一路径执行远端 move。
+        let mut db_by_id: std::collections::HashMap<
+            String,
+            Option<crate::data::repository::SyncItem>,
+        > = std::collections::HashMap::new();
+        for record in repository::load_all(&db)?
+            .into_iter()
+            .filter(|record| !record.file_id.is_empty())
+        {
+            match db_by_id.entry(record.file_id.clone()) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(Some(record));
+                }
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    entry.insert(None);
+                }
+            }
+        }
         drop(db);
 
         let path_to_id = self.path_to_id.lock().clone();
@@ -464,14 +506,20 @@ impl SyncEngine {
         let mut renamed_sources = std::collections::HashSet::new();
         let mut superseded_cloud_paths = std::collections::HashSet::new();
         let mut deferred_replacement_sources = std::collections::HashSet::new();
+        let mut directory_moves = Vec::<(String, String, String)>::new();
         for action in actions.iter_mut() {
-            // 接纳两类候选：上传新文件（Upload，file_id 为空），以及孤儿占位符删除
+            // 接纳三类候选：上传新文件（Upload，file_id 为空）、本地新目录
+            // （CreateFolder，file_id 为空），以及孤儿占位符删除
             // （DeleteFromLocal + file_id 为空）。Finder 改名的纯占位符（0 字节）会被
             // planner 判为孤儿占位符 → DeleteFromLocal，但它仍带 XATTR_FILE_ID，
             // 借此可识别为同一文件的改名。合法的云端驱动 DeleteFromLocal 带 file_id，不会误命中。
             let is_orphan_placeholder_delete =
                 action.action_type == SyncActionType::DeleteFromLocal && action.file_id.is_none();
-            if !(action.action_type == SyncActionType::Upload || is_orphan_placeholder_delete)
+            let is_local_folder_create =
+                action.action_type == SyncActionType::CreateFolder && action.cloud_file.is_none();
+            if !(action.action_type == SyncActionType::Upload
+                || is_local_folder_create
+                || is_orphan_placeholder_delete)
                 || action.file_id.is_some()
             {
                 continue;
@@ -480,14 +528,34 @@ impl SyncEngine {
                 Some(p) => std::path::PathBuf::from(p),
                 None => continue,
             };
-            let xattr_id = std::fs::metadata(&local_path).ok().and_then(|_| {
-                xattr::get(&local_path, XATTR_FILE_ID)
-                    .ok()
-                    .flatten()
-                    .and_then(|b| String::from_utf8(b).ok())
-            });
+            let local_metadata = match std::fs::symlink_metadata(&local_path) {
+                Ok(metadata)
+                    if !metadata.file_type().is_symlink()
+                        && if is_local_folder_create {
+                            metadata.is_dir()
+                        } else {
+                            metadata.is_file()
+                        } =>
+                {
+                    metadata
+                }
+                _ => continue,
+            };
+            let xattr_id = crate::platform::xattr::get(&local_path, XATTR_FILE_ID)
+                .ok()
+                .flatten()
+                .and_then(|b| String::from_utf8(b).ok())
+                .filter(|file_id| !file_id.trim().is_empty());
             let Some(fid) = xattr_id else { continue };
             let Some(old_record) = db_by_id.get(&fid) else {
+                continue;
+            };
+            let Some(old_record) = old_record.as_ref() else {
+                tracing::warn!(
+                    file_id = %fid,
+                    new = action.relative_path.as_deref().unwrap_or("?"),
+                    "同一 fileId 存在多条同步基线，拒绝识别远端路径移动"
+                );
                 continue;
             };
             if Some(&old_record.local_path) == action.relative_path.as_ref() {
@@ -499,12 +567,23 @@ impl SyncEngine {
             else {
                 continue;
             };
+            if old_record.is_folder != local_metadata.is_dir()
+                || old_record.is_folder != cloud_file.is_folder()
+            {
+                tracing::warn!(
+                    old = %old_record.local_path,
+                    new = action.relative_path.as_deref().unwrap_or("?"),
+                    file_id = %fid,
+                    "稳定 fileId 的本地、数据库与云端类型不一致，拒绝识别路径移动"
+                );
+                continue;
+            }
             // 只有旧路径仍携带同一 fileId 才能证明是复制；旧路径若已被其他文件占用，
             // 仍应把携带稳定身份的新路径识别为移动，随后由下一周期处理旧路径的新文件。
             let old_abs = std::path::PathBuf::from(&mount_dir).join(&old_record.local_path);
             match std::fs::symlink_metadata(&old_abs) {
                 Ok(_) => {
-                    let old_owner = match xattr::get(&old_abs, XATTR_FILE_ID) {
+                    let old_owner = match crate::platform::xattr::get(&old_abs, XATTR_FILE_ID) {
                         Ok(owner) => owner,
                         Err(error) => {
                             tracing::warn!(
@@ -517,7 +596,39 @@ impl SyncEngine {
                         }
                     };
                     if old_owner.as_deref() == Some(fid.as_bytes()) {
-                        let _ = xattr::remove(&local_path, XATTR_FILE_ID);
+                        if let Err(error) =
+                            crate::platform::xattr::remove(&local_path, XATTR_FILE_ID)
+                        {
+                            let already_absent =
+                                crate::platform::xattr::get(&local_path, XATTR_FILE_ID)
+                                    .map_err(|verify_error| {
+                                        AppError::generic(format!(
+                                            "复制检测清理 fileId 失败且无法复核（{}）：{error}；{verify_error}",
+                                            local_path.display()
+                                        ))
+                                    })?
+                                    .is_none();
+                            if !already_absent {
+                                return Err(AppError::generic(format!(
+                                    "复制检测无法清除新路径的旧 fileId（{}）：{error}",
+                                    local_path.display()
+                                )));
+                            }
+                        }
+                        if crate::platform::xattr::get(&local_path, XATTR_FILE_ID)
+                            .map_err(|error| {
+                                AppError::generic(format!(
+                                    "复制检测复核新路径 fileId 失败（{}）：{error}",
+                                    local_path.display()
+                                ))
+                            })?
+                            .is_some()
+                        {
+                            return Err(AppError::generic(format!(
+                                "复制检测清除后 fileId 仍存在：{}",
+                                local_path.display()
+                            )));
+                        }
                         tracing::info!(
                             old = %old_record.local_path,
                             new = action.relative_path.as_deref().unwrap_or("?"),
@@ -547,6 +658,19 @@ impl SyncEngine {
             }
 
             let new_relative_path = action.relative_path.clone().unwrap_or_default();
+            if old_record.is_folder
+                && new_relative_path
+                    .strip_prefix(current_cloud_path.as_str())
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+            {
+                tracing::warn!(
+                    old = %current_cloud_path,
+                    new = %new_relative_path,
+                    file_id = %fid,
+                    "拒绝把云端目录移动到自身子树"
+                );
+                continue;
+            }
             let current_parent_path = current_cloud_path
                 .rsplit_once('/')
                 .map(|(parent, _)| parent)
@@ -583,13 +707,42 @@ impl SyncEngine {
             if current_cloud_path.as_str() != new_relative_path.as_str() {
                 superseded_cloud_paths.insert((current_cloud_path.clone(), fid.clone()));
             }
+            if old_record.is_folder {
+                directory_moves.push((
+                    old_record.local_path.clone(),
+                    new_relative_path.clone(),
+                    fid.clone(),
+                ));
+            }
             renamed_sources.insert((old_record.local_path.clone(), fid));
-            tracing::info!(reason = action.reason.as_deref(), "检测到本地文件路径变化");
+            tracing::info!(reason = action.reason.as_deref(), "检测到本地路径变化");
         }
         drop(ct);
 
         // fileId 证明为同一文件后，移除旧路径及其删除祖先，避免与移动并发回收目标文件。
+        // 目录移动只保留最外层根 MoveInCloud：旧/新两棵子树上的上传、建目录、删除、
+        // 占位和后代 Move 全部交给根移动后的下一轮版本对账，避免拆成大量破坏性动作。
         actions.retain(|action| {
+            if let Some(path) = action.relative_path.as_deref() {
+                for (old_root, new_root, root_file_id) in &directory_moves {
+                    let in_old_subtree = path == old_root
+                        || path
+                            .strip_prefix(old_root)
+                            .is_some_and(|suffix| suffix.starts_with('/'));
+                    let in_new_subtree = path == new_root
+                        || path
+                            .strip_prefix(new_root)
+                            .is_some_and(|suffix| suffix.starts_with('/'));
+                    if in_old_subtree || in_new_subtree {
+                        let is_root_move = action.action_type == SyncActionType::MoveInCloud
+                            && path == new_root
+                            && action.file_id.as_deref() == Some(root_file_id.as_str());
+                        if !is_root_move {
+                            return false;
+                        }
+                    }
+                }
+            }
             if let (Some(path), Some(file_id)) =
                 (action.relative_path.as_ref(), action.file_id.as_ref())
             {
@@ -762,5 +915,326 @@ impl SyncEngine {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::service::AuthService;
+    use crate::data::repository::{sync_status, SyncItem};
+    use crate::drive::changes_api::ChangesApi;
+    use crate::drive::client::DriveClient;
+    use crate::drive::files_api::FilesApi;
+    use crate::drive::models::FileCategory;
+    use crate::mount::manager::{MountManager, XATTR_FILE_ID};
+    use crate::sync::state::{SyncAction, SyncActionType};
+    use crate::sync::status_aggregator::StatusAggregator;
+    use parking_lot::Mutex;
+    use rusqlite::Connection;
+    use std::sync::Arc;
+
+    const SYNC_ITEMS_DDL: &str = "
+        CREATE TABLE sync_items (
+            file_id TEXT NOT NULL,
+            local_path TEXT NOT NULL,
+            parent_folder_id TEXT,
+            name TEXT NOT NULL,
+            is_folder INTEGER NOT NULL DEFAULT 0,
+            size INTEGER NOT NULL DEFAULT 0,
+            local_size INTEGER,
+            sha256 TEXT,
+            local_mtime INTEGER,
+            cloud_edited_time INTEGER,
+            last_sync_time INTEGER,
+            status INTEGER NOT NULL DEFAULT 0,
+            error_message TEXT,
+            PRIMARY KEY (file_id, local_path)
+        );
+    ";
+
+    fn test_engine(mount_root: &std::path::Path) -> (SyncEngine, Arc<Mutex<Connection>>) {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(SYNC_ITEMS_DDL).unwrap();
+        let db = Arc::new(Mutex::new(connection));
+        let auth = Arc::new(AuthService::new());
+        let client = Arc::new(DriveClient::new(auth));
+        let files_api = Arc::new(FilesApi::new(client.clone()));
+        let changes_api = Arc::new(ChangesApi::new(client));
+        let mut engine = SyncEngine::new(
+            files_api,
+            changes_api,
+            db.clone(),
+            Arc::new(StatusAggregator::default()),
+            Vec::new(),
+            0,
+            0,
+        );
+        engine.set_mount(Arc::new(MountManager::new(mount_root)));
+        (engine, db)
+    }
+
+    fn sync_item(file_id: &str, path: &str, is_folder: bool) -> SyncItem {
+        SyncItem {
+            file_id: file_id.into(),
+            local_path: path.into(),
+            parent_folder_id: None,
+            name: path.rsplit('/').next().unwrap().into(),
+            is_folder,
+            size: if is_folder { 0 } else { 7 },
+            local_size: Some(if is_folder { 0 } else { 7 }),
+            sha256: (!is_folder).then(|| format!("sha-{file_id}")),
+            local_mtime: Some(11),
+            cloud_edited_time: Some(22),
+            last_sync_time: Some(33),
+            status: sync_status::SYNCED,
+            error_message: None,
+        }
+    }
+
+    fn cloud_file(file_id: &str, name: &str, parent_id: &str, is_folder: bool) -> DriveFile {
+        DriveFile {
+            id: file_id.into(),
+            name: name.into(),
+            category: if is_folder {
+                FileCategory::Folder
+            } else {
+                FileCategory::Document
+            },
+            size: if is_folder { 0 } else { 7 },
+            parent_folder: Some(vec![parent_id.into()]),
+            ..Default::default()
+        }
+    }
+
+    fn assert_detect_directory_move_collapses_subtree(
+        old_root: &str,
+        new_root: &str,
+        source_parent_id: &str,
+        target_parent_id: &str,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let new_nested = format!("{new_root}/nested");
+        let new_file = format!("{new_nested}/note.txt");
+        std::fs::create_dir_all(temp.path().join(&new_nested)).unwrap();
+        std::fs::write(temp.path().join(&new_file), b"content").unwrap();
+        crate::platform::xattr::set(
+            &temp.path().join(new_root),
+            XATTR_FILE_ID,
+            b"folder-root-id",
+        )
+        .unwrap();
+
+        let (engine, db) = test_engine(temp.path());
+        let old_nested = format!("{old_root}/nested");
+        let old_file = format!("{old_nested}/note.txt");
+        for item in [
+            sync_item("folder-root-id", old_root, true),
+            sync_item("nested-folder-id", &old_nested, true),
+            sync_item("nested-file-id", &old_file, false),
+        ] {
+            repository::upsert(&db.lock(), &item).unwrap();
+        }
+        for (path, file) in [
+            (
+                old_root.to_string(),
+                cloud_file(
+                    "folder-root-id",
+                    old_root.rsplit('/').next().unwrap(),
+                    source_parent_id,
+                    true,
+                ),
+            ),
+            (
+                old_nested.clone(),
+                cloud_file("nested-folder-id", "nested", "folder-root-id", true),
+            ),
+            (
+                old_file.clone(),
+                cloud_file("nested-file-id", "note.txt", "nested-folder-id", false),
+            ),
+        ] {
+            engine.path_to_id_insert(path.clone(), file.id.clone());
+            engine.cloud_tree_insert(path, file);
+        }
+        let target_parent_path = new_root.rsplit_once('/').map(|(parent, _)| parent);
+        if let Some(target_parent_path) = target_parent_path {
+            engine.path_to_id_insert(target_parent_path.into(), target_parent_id.into());
+        }
+
+        let mut actions = vec![
+            SyncAction {
+                action_type: SyncActionType::CreateFolder,
+                relative_path: Some(new_root.into()),
+                file_id: None,
+                parent_file_id: None,
+                local_path: Some(temp.path().join(new_root).to_string_lossy().into_owned()),
+                cloud_file: None,
+                reason: None,
+            },
+            SyncAction {
+                action_type: SyncActionType::CreateFolder,
+                relative_path: Some(new_nested.clone()),
+                file_id: None,
+                parent_file_id: None,
+                local_path: Some(temp.path().join(&new_nested).to_string_lossy().into_owned()),
+                cloud_file: None,
+                reason: None,
+            },
+            SyncAction {
+                action_type: SyncActionType::Upload,
+                relative_path: Some(new_file.clone()),
+                file_id: None,
+                parent_file_id: None,
+                local_path: Some(temp.path().join(&new_file).to_string_lossy().into_owned()),
+                cloud_file: None,
+                reason: None,
+            },
+            SyncAction {
+                action_type: SyncActionType::DeleteFromCloud,
+                relative_path: Some(old_root.into()),
+                file_id: Some("folder-root-id".into()),
+                parent_file_id: None,
+                local_path: None,
+                cloud_file: None,
+                reason: None,
+            },
+            SyncAction {
+                action_type: SyncActionType::DeleteFromCloud,
+                relative_path: Some(old_nested),
+                file_id: Some("nested-folder-id".into()),
+                parent_file_id: None,
+                local_path: None,
+                cloud_file: None,
+                reason: None,
+            },
+            SyncAction {
+                action_type: SyncActionType::DeleteFromCloud,
+                relative_path: Some(old_file),
+                file_id: Some("nested-file-id".into()),
+                parent_file_id: None,
+                local_path: None,
+                cloud_file: None,
+                reason: None,
+            },
+        ];
+
+        engine.detect_renames(&mut actions).unwrap();
+
+        assert_eq!(
+            actions.len(),
+            1,
+            "目录根路径变化必须折叠旧/新子树全部派生动作"
+        );
+        let moved = &actions[0];
+        assert_eq!(moved.action_type, SyncActionType::MoveInCloud);
+        assert_eq!(moved.relative_path.as_deref(), Some(new_root));
+        assert_eq!(moved.file_id.as_deref(), Some("folder-root-id"));
+        assert_eq!(moved.parent_file_id.as_deref(), Some(target_parent_id));
+        assert!(moved
+            .cloud_file
+            .as_ref()
+            .is_some_and(|file| file.is_folder() && file.id == "folder-root-id"));
+    }
+
+    /// 同一父目录的嵌套目录改名只生成一次根 MoveInCloud。
+    #[test]
+    fn detect_same_parent_directory_rename_collapses_entire_subtree() {
+        assert_detect_directory_move_collapses_subtree(
+            "projects/old",
+            "projects/new",
+            "projects-id",
+            "projects-id",
+        );
+    }
+
+    /// 跨父目录移动同样只生成根 MoveInCloud，并解析新 parentFolder。
+    #[test]
+    fn detect_cross_parent_directory_move_collapses_entire_subtree() {
+        assert_detect_directory_move_collapses_subtree(
+            "projects/old",
+            "archive/new",
+            "projects-id",
+            "archive-id",
+        );
+    }
+
+    /// 重复 fileId 基线有歧义时必须保留普通本地动作，绝不能任选一路径远端移动。
+    #[test]
+    fn detect_directory_move_rejects_duplicate_file_id_baselines() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("new");
+        std::fs::create_dir(&target).unwrap();
+        crate::platform::xattr::set(&target, XATTR_FILE_ID, b"duplicate-folder-id").unwrap();
+        let (engine, db) = test_engine(temp.path());
+        repository::upsert(&db.lock(), &sync_item("duplicate-folder-id", "old-a", true)).unwrap();
+        repository::upsert(&db.lock(), &sync_item("duplicate-folder-id", "old-b", true)).unwrap();
+        engine.cloud_tree_insert(
+            "old-a".into(),
+            cloud_file("duplicate-folder-id", "old-a", "root", true),
+        );
+        let mut actions = vec![SyncAction {
+            action_type: SyncActionType::CreateFolder,
+            relative_path: Some("new".into()),
+            file_id: None,
+            parent_file_id: None,
+            local_path: Some(target.to_string_lossy().into_owned()),
+            cloud_file: None,
+            reason: None,
+        }];
+
+        engine.detect_renames(&mut actions).unwrap();
+
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].action_type, SyncActionType::CreateFolder);
+        assert!(actions[0].file_id.is_none());
+    }
+
+    /// 同路径目录已有不同稳定身份时必须阻断 reconcile，不能覆盖为云端身份。
+    #[test]
+    fn reconcile_rejects_directory_with_different_xattr_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let local_path = temp.path().join("occupied");
+        std::fs::create_dir(&local_path).unwrap();
+        crate::platform::xattr::set(&local_path, XATTR_FILE_ID, b"source-folder-id").unwrap();
+        let (engine, db) = test_engine(temp.path());
+        repository::upsert(
+            &db.lock(),
+            &sync_item("destination-folder-id", "occupied", true),
+        )
+        .unwrap();
+        engine.cloud_tree_insert(
+            "occupied".into(),
+            cloud_file("destination-folder-id", "occupied", "root", true),
+        );
+        let local = HashMap::from([(
+            "occupied".into(),
+            LocalFileEntry {
+                absolute_path: local_path,
+                relative_path: "occupied".into(),
+                size: 0,
+                mtime: 11,
+                is_folder: true,
+                is_placeholder: false,
+            },
+        )]);
+        let db_snapshot = engine.load_db_snapshot().unwrap();
+
+        let error = engine
+            .reconcile_db_records(&local, &db_snapshot, &[])
+            .unwrap_err();
+
+        assert!(error.to_string().contains("本地稳定身份不一致"));
+        let record = repository::find_by_file_id(&db.lock(), "destination-folder-id")
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.local_path, "occupied");
+        assert_eq!(
+            crate::platform::xattr::get(&temp.path().join("occupied"), XATTR_FILE_ID)
+                .unwrap()
+                .as_deref(),
+            Some(b"source-folder-id".as_slice()),
+            "reconcile 不得覆盖不同目录身份"
+        );
     }
 }

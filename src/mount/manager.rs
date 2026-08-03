@@ -1,12 +1,12 @@
-//! 本地镜像目录管理器 —— 占位符 + 本地扫描 + Finder 灰标。
+//! 本地镜像目录管理器 —— 占位符 + 本地扫描 + 平台视觉标记。
 //!
 //! 对齐 `legacy/lib/mount/mount_manager.dart`。
 //!
 //! # 占位符策略（v2, Files-On-Demand-lite）
 //! - 占位文件使用**真实文件名**（无后缀），0 字节。
-//! - 状态通过 xattr 3 个键追踪：com.hwcloud.fileId / com.hwcloud.state / com.hwcloud.size。
-//! - Finder 灰标（label index 7）= 未下载；无标签 = 已下载。
-//! - xattr 是数据源头（source of truth），Finder label 仅视觉反馈。
+//! - 状态通过 xattr 3 个逻辑键追踪：com.hwcloud.fileId / com.hwcloud.state / com.hwcloud.size。
+//! - macOS Finder 灰标（label index 7）= 未下载；Linux 不额外修改文件管理器标签。
+//! - xattr 是数据源头（source of truth），平台视觉标记仅作反馈。
 //! - 0 字节且非占位 → 拒绝删除（保护用户空文件如 .gitkeep）
 
 use std::path::{Path, PathBuf};
@@ -153,6 +153,54 @@ impl MountManager {
         if !full.exists() {
             std::fs::create_dir_all(&full)
                 .map_err(|e| AppError::generic(format!("创建目录失败：{e}")))?;
+        }
+        Ok(full)
+    }
+
+    /// 确保云端已知目录存在，并为目录根持久化稳定 fileId。
+    ///
+    /// 已有相同标记按幂等成功处理；已有不同标记时拒绝覆盖，避免把用户目录或另一云端
+    /// 身份错误绑定到当前目录。目录 xattr 让本地整目录改名可收敛为一次 Files:update。
+    pub fn ensure_folder_with_file_id(&self, rel_path: &str, file_id: &str) -> AppResult<PathBuf> {
+        if file_id.trim().is_empty() {
+            return Err(AppError::generic("目录 fileId 不能为空"));
+        }
+        let full = self.ensure_folder(rel_path)?;
+        let metadata = std::fs::symlink_metadata(&full)
+            .map_err(|error| AppError::generic(format!("读取云端目录失败：{error}")))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(AppError::generic(format!(
+                "云端目录目标不是安全的真实目录：{}",
+                full.display()
+            )));
+        }
+        match crate::platform::xattr::get(&full, XATTR_FILE_ID)
+            .map_err(|error| AppError::generic(format!("读取目录 fileId xattr 失败：{error}")))?
+        {
+            Some(existing) if existing == file_id.as_bytes() => {}
+            Some(_) => {
+                return Err(AppError::generic(format!(
+                    "目录已属于不同的云端 fileId，拒绝覆盖：{}",
+                    full.display()
+                )))
+            }
+            None => {
+                crate::platform::xattr::set(&full, XATTR_FILE_ID, file_id.as_bytes()).map_err(
+                    |error| AppError::generic(format!("写入目录 fileId xattr 失败：{error}")),
+                )?;
+                // 写后复核，确保文件系统确实保留了预期身份。
+                let written = crate::platform::xattr::get(&full, XATTR_FILE_ID)
+                    .map_err(|error| {
+                        AppError::generic(format!("复核目录 fileId xattr 失败：{error}"))
+                    })?
+                    .ok_or_else(|| AppError::generic("目录 fileId xattr 写入后缺失"))?;
+                if written != file_id.as_bytes() {
+                    return Err(AppError::generic(format!(
+                        "目录 fileId xattr 写入后身份不一致：{}",
+                        full.display()
+                    )));
+                }
+            }
         }
         Ok(full)
     }
@@ -355,7 +403,15 @@ impl MountManager {
         }
         tokio::fs::rename(local_path, &backup).await?;
         // 清掉备份的占位 xattr，避免被 sync 当新占位
-        let _ = self.clear_placeholder_xattr(&backup).await;
+        if let Err(error) = self.clear_placeholder_xattr(&backup).await {
+            return match tokio::fs::rename(&backup, local_path).await {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(AppError::generic(format!(
+                    "清理占位备份身份失败：{error}；回滚原路径也失败，内容保留于 {}：{rollback_error}",
+                    backup.display()
+                ))),
+            };
+        }
         tracing::info!(
             "占位被修改过，已备份：{} → {}",
             local_path.display(),
@@ -371,16 +427,19 @@ impl MountManager {
     /// ——副本保不住（修改冲突 / 删除冲突的副本都会丢）。清掉后副本下轮作为全新文件上传。
     pub async fn clear_placeholder_xattr(&self, local_path: &Path) -> AppResult<()> {
         let fp = local_path.to_string_lossy().to_string();
-        tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || -> AppResult<()> {
             let p = std::path::Path::new(&fp);
-            let _ = xattr::remove(p, XATTR_FILE_ID);
-            let _ = xattr::remove(p, XATTR_STATE);
-            let _ = xattr::remove(p, XATTR_SIZE);
-            let _ = xattr::remove(p, "com.apple.FinderInfo");
+            // 稳定 fileId 最后移除：前置清理失败时仍保留可恢复身份。
+            remove_logical_xattr_and_verify(p, XATTR_STATE)?;
+            remove_logical_xattr_and_verify(p, XATTR_SIZE)?;
+            #[cfg(target_os = "macos")]
+            ignore_missing_xattr(xattr::remove(p, "com.apple.FinderInfo"))
+                .map_err(|error| AppError::generic(format!("清 FinderInfo xattr 失败：{error}")))?;
+            remove_logical_xattr_and_verify(p, XATTR_FILE_ID)?;
+            Ok(())
         })
         .await
-        .map_err(|e| AppError::generic(format!("清 xattr 线程异常：{e}")))?;
-        Ok(())
+        .map_err(|e| AppError::generic(format!("清 xattr 线程异常：{e}")))?
     }
 
     /// 扫描挂载目录，返回全部非跳过文件的条目。
@@ -483,7 +542,7 @@ impl MountManager {
 
 /// 尽力读取非空 UTF-8 xattr；缺失、读取失败或损坏均返回空。
 fn read_xattr_string(path: &Path, key: &str) -> Option<String> {
-    xattr::get(path, key)
+    crate::platform::xattr::get(path, key)
         .ok()
         .flatten()
         .and_then(|bytes| String::from_utf8(bytes).ok())
@@ -513,9 +572,9 @@ fn collect_free_up_staging(current: &Path, output: &mut Vec<PathBuf>) -> AppResu
     Ok(())
 }
 
-/// 尽力移除释放空间恢复标记。
-fn clear_free_up_marker(path: &Path) {
-    let _ = xattr::remove(path, XATTR_FREE_UP_RELATIVE_PATH);
+/// 严格移除释放空间恢复标记，并读回确认没有残留。
+fn clear_free_up_marker(path: &Path) -> AppResult<()> {
+    remove_logical_xattr_and_verify(path, XATTR_FREE_UP_RELATIVE_PATH)
 }
 
 /// 将暂存原文件恢复到已核验目标，并同步修复数据库基线。
@@ -533,10 +592,9 @@ fn restore_free_up_staging(
         .ok()
         .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|duration| duration.as_millis() as i64);
-    std::fs::rename(staging_path, target)
+    crate::sync::path_recovery::rename_no_replace(staging_path, target)
         .map_err(|error| AppError::generic(format!("恢复释放空间原文件失败：{error}")))?;
-    clear_free_up_marker(target);
-    conn.execute(
+    let changed = match conn.execute(
         "UPDATE sync_items
          SET status=?1, local_size=?2, local_mtime=?3, error_message=NULL
          WHERE file_id=?4 AND local_path=?5",
@@ -547,8 +605,30 @@ fn restore_free_up_staging(
             file_id,
             relative_path,
         ],
-    )
-    .map_err(|error| AppError::generic(format!("恢复释放空间同步基线失败：{error}")))?;
+    ) {
+        Ok(changed) if changed == 1 => changed,
+        Ok(changed) => {
+            let rollback = crate::sync::path_recovery::rename_no_replace(target, staging_path);
+            return Err(AppError::generic(format!(
+                "恢复释放空间同步基线应更新 1 行，实际 {changed} 行；文件回隔离结果：{}",
+                rollback
+                    .map(|_| "已移回隐藏暂存".to_string())
+                    .unwrap_or_else(|error| error.to_string())
+            )));
+        }
+        Err(error) => {
+            let rollback = crate::sync::path_recovery::rename_no_replace(target, staging_path);
+            return Err(AppError::generic(format!(
+                "恢复释放空间同步基线失败：{error}；文件回隔离结果：{}",
+                rollback
+                    .map(|_| "已移回隐藏暂存".to_string())
+                    .unwrap_or_else(|rollback_error| rollback_error.to_string())
+            )));
+        }
+    };
+    debug_assert_eq!(changed, 1);
+    // DB 已经精确结算后才移除恢复 marker；清理失败时 marker 保留，绝不伪装成无标记成功。
+    clear_free_up_marker(target)?;
     tracing::warn!(path = %target.display(), "检测到中断的释放空间操作，已恢复原文件");
     Ok(())
 }
@@ -569,35 +649,66 @@ fn surface_free_up_recovery(staging_path: &Path) -> AppResult<PathBuf> {
                 )))
             }
         }
-        std::fs::rename(staging_path, &target)
-            .map_err(|error| AppError::generic(format!("显式恢复暂存内容失败：{error}")))?;
-        clear_free_up_marker(&target);
-        let _ = xattr::remove(&target, XATTR_FILE_ID);
-        let _ = xattr::remove(&target, XATTR_STATE);
-        let _ = xattr::remove(&target, XATTR_SIZE);
+        // 在仍是隐藏 staging 时清掉全部同步身份；任一步失败都不把它暴露成普通同步项。
+        for key in [
+            XATTR_STATE,
+            XATTR_SIZE,
+            XATTR_FILE_ID,
+            // 恢复路径 marker 最后移除；前置失败时仍可在下次启动恢复原路径。
+            XATTR_FREE_UP_RELATIVE_PATH,
+        ] {
+            remove_logical_xattr_and_verify(staging_path, key)?;
+        }
+        match crate::sync::path_recovery::rename_no_replace(staging_path, &target) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(AppError::generic(format!("显式恢复暂存内容失败：{error}"))),
+        }
         tracing::warn!(path = %target.display(), "释放空间恢复无法覆盖原路径，已保留为可见副本");
         return Ok(target);
     }
     Err(AppError::generic("无法分配释放空间恢复副本路径"))
 }
 
-// ===== 平台相关实现（xattr + osascript） =====
+// ===== 平台相关实现（xattr + 文件管理器视觉标记） =====
 
 /// 同步读 xattr 值。
-#[cfg(target_os = "macos")]
 fn get_xattr(path: &Path, key: &str) -> std::io::Result<String> {
-    let bytes = xattr::get(path, key)?
+    let bytes = crate::platform::xattr::get(path, key)?
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "xattr not found"))?;
     String::from_utf8(bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
-/// 非 macOS 平台明确返回 xattr 不受支持。
-#[cfg(not(target_os = "macos"))]
-fn get_xattr(_path: &Path, _key: &str) -> std::io::Result<String> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "xattr not available",
-    ))
+/// 把“属性原本不存在”视为幂等成功，其余权限、只读文件系统与 I/O 错误必须传播。
+fn ignore_missing_xattr(result: std::io::Result<()>) -> std::io::Result<()> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        #[cfg(target_os = "linux")]
+        Err(error) if error.raw_os_error() == Some(libc::ENODATA) => Ok(()),
+        // macOS 的 ENOATTR；避免在非 Linux target 引入额外 libc 直接依赖。
+        #[cfg(target_os = "macos")]
+        Err(error) if error.raw_os_error() == Some(93) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+/// 幂等移除一个 PetalLink 逻辑 xattr，并保留真实失败。
+fn remove_logical_xattr_if_present(path: &Path, key: &str) -> AppResult<()> {
+    ignore_missing_xattr(crate::platform::xattr::remove(path, key))
+        .map_err(|error| AppError::generic(format!("清 {key} xattr 失败：{error}")))
+}
+
+/// 严格移除逻辑 xattr，并读回确认平台没有静默保留属性。
+fn remove_logical_xattr_and_verify(path: &Path, key: &str) -> AppResult<()> {
+    remove_logical_xattr_if_present(path, key)?;
+    if crate::platform::xattr::get(path, key)
+        .map_err(|error| AppError::generic(format!("复核 {key} xattr 清理失败：{error}")))?
+        .is_some()
+    {
+        return Err(AppError::generic(format!("{key} xattr 清除后仍然存在")));
+    }
+    Ok(())
 }
 
 /// 异步写 xattr（在 tokio 线程池执行）。
@@ -610,19 +721,9 @@ async fn set_xattr_async(path: String, key: &str, value: &str) -> std::io::Resul
         .map_err(std::io::Error::other)?
 }
 
-/// 在 macOS 上同步写入 UTF-8 xattr 值。
-#[cfg(target_os = "macos")]
+/// 同步写入 UTF-8 xattr 值，由平台层处理原生键命名空间。
 fn set_xattr_sync(path: &str, key: &str, value: &str) -> std::io::Result<()> {
-    xattr::set(Path::new(path), key, value.as_bytes())
-}
-
-/// 非 macOS 平台明确返回 xattr 不受支持。
-#[cfg(not(target_os = "macos"))]
-fn set_xattr_sync(_path: &str, _key: &str, _value: &str) -> std::io::Result<()> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "xattr not available",
-    ))
+    crate::platform::xattr::set(Path::new(path), key, value.as_bytes())
 }
 
 /// Finder 灰标 xattr 键
@@ -749,14 +850,197 @@ fn legacy_placeholder_path(path: &Path) -> PathBuf {
 
 /// 通过 xattr 判断是否为占位符（state=placeholder）。
 pub fn is_placeholder_file(path: &Path) -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        xattr::get(path, XATTR_STATE)
-            .ok()
-            .flatten()
-            .map(|b| String::from_utf8_lossy(&b) == STATE_PLACEHOLDER)
-            .unwrap_or(false)
+    crate::platform::xattr::get(path, XATTR_STATE)
+        .ok()
+        .flatten()
+        .map(|bytes| String::from_utf8_lossy(&bytes) == STATE_PLACEHOLDER)
+        .unwrap_or(false)
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod tests {
+    use super::*;
+
+    /// 创建释放空间恢复测试所需的最小同步基线表。
+    fn free_up_test_database() -> rusqlite::Connection {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE sync_items (
+                    file_id TEXT NOT NULL,
+                    local_path TEXT NOT NULL,
+                    status INTEGER NOT NULL,
+                    local_size INTEGER,
+                    local_mtime INTEGER,
+                    error_message TEXT
+                );",
+            )
+            .unwrap();
+        connection
     }
-    #[cfg(not(target_os = "macos"))]
-    false
+
+    /// 云端目录身份可重复补写，但绝不能覆盖已有的另一 fileId。
+    #[test]
+    fn ensure_folder_identity_is_idempotent_and_never_overwrites() {
+        let temp = tempfile::tempdir().unwrap();
+        let mount = MountManager::new(temp.path());
+
+        let folder = mount
+            .ensure_folder_with_file_id("documents/reports", "folder-id")
+            .unwrap();
+        mount
+            .ensure_folder_with_file_id("documents/reports", "folder-id")
+            .unwrap();
+        assert_eq!(
+            crate::platform::xattr::get(&folder, XATTR_FILE_ID)
+                .unwrap()
+                .as_deref(),
+            Some(b"folder-id".as_slice())
+        );
+
+        let error = mount
+            .ensure_folder_with_file_id("documents/reports", "different-id")
+            .unwrap_err();
+        assert!(error.to_string().contains("不同的云端 fileId"));
+        assert_eq!(
+            crate::platform::xattr::get(&folder, XATTR_FILE_ID)
+                .unwrap()
+                .as_deref(),
+            Some(b"folder-id".as_slice()),
+            "冲突写入不得改变原目录身份"
+        );
+    }
+
+    /// 冲突副本成为普通文件前，状态、大小和稳定 fileId 都必须严格清除。
+    #[tokio::test]
+    async fn clear_placeholder_identity_removes_every_sync_attribute() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("copy.txt");
+        std::fs::write(&path, b"local-copy").unwrap();
+        for (key, value) in [
+            (XATTR_FILE_ID, b"cloud-file-id".as_slice()),
+            (XATTR_STATE, STATE_DOWNLOADED.as_bytes()),
+            (XATTR_SIZE, b"10".as_slice()),
+        ] {
+            crate::platform::xattr::set(&path, key, value).unwrap();
+        }
+
+        MountManager::new(temp.path())
+            .clear_placeholder_xattr(&path)
+            .await
+            .unwrap();
+
+        for key in [XATTR_FILE_ID, XATTR_STATE, XATTR_SIZE] {
+            assert_eq!(crate::platform::xattr::get(&path, key).unwrap(), None);
+        }
+    }
+
+    /// 启动恢复先精确修复 DB，再移除 marker 并发布同步文件。
+    #[test]
+    fn free_up_restore_updates_one_baseline_then_clears_marker() {
+        let temp = tempfile::tempdir().unwrap();
+        let staging = temp.path().join(".hwcloud_freeup-test");
+        let target = temp.path().join("file.txt");
+        std::fs::write(&staging, b"recoverable-content").unwrap();
+        crate::platform::xattr::set(&staging, XATTR_FREE_UP_RELATIVE_PATH, b"file.txt").unwrap();
+        crate::platform::xattr::set(&staging, XATTR_FILE_ID, b"cloud-file-id").unwrap();
+        let connection = free_up_test_database();
+        connection
+            .execute(
+                "INSERT INTO sync_items (
+                    file_id, local_path, status, local_size, local_mtime, error_message
+                 ) VALUES (?1, ?2, ?3, 0, NULL, 'interrupted')",
+                rusqlite::params![
+                    "cloud-file-id",
+                    "file.txt",
+                    crate::data::repository::sync_status::CLOUD_ONLY,
+                ],
+            )
+            .unwrap();
+
+        restore_free_up_staging(&connection, &staging, &target, "cloud-file-id", "file.txt")
+            .unwrap();
+
+        assert!(!staging.exists());
+        assert_eq!(std::fs::read(&target).unwrap(), b"recoverable-content");
+        assert_eq!(
+            crate::platform::xattr::get(&target, XATTR_FREE_UP_RELATIVE_PATH).unwrap(),
+            None
+        );
+        let (status, local_size, error): (i32, i64, Option<String>) = connection
+            .query_row(
+                "SELECT status, local_size, error_message
+                 FROM sync_items WHERE file_id='cloud-file-id'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(status, crate::data::repository::sync_status::SYNCED);
+        assert_eq!(local_size, b"recoverable-content".len() as i64);
+        assert_eq!(error, None);
+    }
+
+    /// DB 未精确匹配时，恢复内容必须回到隐藏 staging，且保留恢复 marker。
+    #[test]
+    fn free_up_restore_rolls_back_when_baseline_is_not_unique() {
+        let temp = tempfile::tempdir().unwrap();
+        let staging = temp.path().join(".hwcloud_freeup-test");
+        let target = temp.path().join("file.txt");
+        std::fs::write(&staging, b"recoverable-content").unwrap();
+        crate::platform::xattr::set(&staging, XATTR_FREE_UP_RELATIVE_PATH, b"file.txt").unwrap();
+        crate::platform::xattr::set(&staging, XATTR_FILE_ID, b"cloud-file-id").unwrap();
+        let connection = free_up_test_database();
+
+        let error =
+            restore_free_up_staging(&connection, &staging, &target, "cloud-file-id", "file.txt")
+                .unwrap_err();
+
+        assert!(error.to_string().contains("实际 0 行"));
+        assert!(staging.exists());
+        assert!(!target.exists());
+        assert_eq!(
+            crate::platform::xattr::get(&staging, XATTR_FREE_UP_RELATIVE_PATH)
+                .unwrap()
+                .as_deref(),
+            Some(b"file.txt".as_slice())
+        );
+    }
+
+    /// 隐藏释放空间暂存只有在全部同步身份清除并读回确认后才可发布为普通副本。
+    #[test]
+    fn surfaced_free_up_recovery_has_no_sync_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let staging = temp.path().join(".hwcloud_freeup-test");
+        std::fs::write(&staging, b"recoverable-content").unwrap();
+        for (key, value) in [
+            (XATTR_FREE_UP_RELATIVE_PATH, b"docs/file.txt".as_slice()),
+            (XATTR_FILE_ID, b"cloud-file-id".as_slice()),
+            (XATTR_STATE, STATE_DOWNLOADED.as_bytes()),
+            (XATTR_SIZE, b"19".as_slice()),
+        ] {
+            crate::platform::xattr::set(&staging, key, value).unwrap();
+        }
+
+        let visible = surface_free_up_recovery(&staging).unwrap();
+
+        assert!(!staging.exists());
+        assert_eq!(std::fs::read(&visible).unwrap(), b"recoverable-content");
+        assert!(!visible
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with(".hwcloud_"));
+        for key in [
+            XATTR_FREE_UP_RELATIVE_PATH,
+            XATTR_FILE_ID,
+            XATTR_STATE,
+            XATTR_SIZE,
+        ] {
+            assert_eq!(
+                crate::platform::xattr::get(&visible, key).unwrap(),
+                None,
+                "{key} 不得泄漏到可见恢复副本"
+            );
+        }
+    }
 }

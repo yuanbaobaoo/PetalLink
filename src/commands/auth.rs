@@ -69,7 +69,11 @@ pub async fn auth_login(app: AppHandle, port: u16) -> AppResult<TokenPair> {
 /// 清空挂载目录配置，避免新账号复用上一账号的同步目录。
 fn reset_account_config() -> AppResult<()> {
     let config = ConfigStore::load()?;
-    if config.mount_dir.is_empty() && !config.mount_configured {
+    if config.mount_dir.is_empty()
+        && !config.mount_configured
+        && !config.virtual_drive_enabled
+        && config.virtual_mount_dir.is_empty()
+    {
         return Ok(()); // 已是初始态，无需重置
     }
     let reset = config.with(
@@ -77,6 +81,8 @@ fn reset_account_config() -> AppResult<()> {
         None,
         Some(String::new()),
         Some(false),
+        Some(false),
+        Some(String::new()),
         None,
         None,
         None,

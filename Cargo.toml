@@ -1,10 +1,10 @@
 [package]
 name = "PetalLink"
 version = "1.1.6"
-description = "PetalLink — 基于 Tauri 的 macOS 华为云盘开源客户端"
+description = "PetalLink — 基于 Tauri 的华为云盘桌面开源客户端"
 authors = ["PetalLink"]
 edition = "2021"
-rust-version = "1.77"
+rust-version = "1.85"
 default-run = "PetalLink"
 
 # 库形态：Tauri 2 推荐 lib + bin 双入口（便于测试与移动端复用）
@@ -25,9 +25,9 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
-tauri-plugin-process = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-updater = "2"
+tauri-plugin-window-state = "2"
 
 # === 序列化 / 配置 ===
 serde = { version = "1", features = ["derive"] }
@@ -53,7 +53,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 
-# === 文件系统监听（macOS 底层 FSEvents） ===
+# === 文件系统监听（macOS FSEvents / Linux inotify） ===
 notify = "7"
 notify-debouncer-full = "0.4"
 
@@ -69,7 +69,7 @@ dotenvy = "0.15"
 # === 系统路径（Application Support 等） ===
 dirs = "5"
 
-# === 文件属性（macOS xattr 占位符标记） ===
+# === 文件属性（macOS / Linux xattr 占位符标记） ===
 xattr = "1"
 
 # === 时间 / 并发工具 ===
@@ -96,6 +96,11 @@ anyhow = "1"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSNotification", "NSString", "NSProcessInfo"] }
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSStatusItem", "NSMenu", "NSWorkspace", "NSWindow", "NSRunningApplication", "NSImage", "NSResponder"] }
+
+# === Linux 原子文件系统操作 / 用户态按需文件系统 ===
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+fuser = { version = "=0.18.0", default-features = false }
 
 [dev-dependencies]
 http = "1"

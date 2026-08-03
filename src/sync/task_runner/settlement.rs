@@ -1,5 +1,7 @@
 //! 提供任务结果结算与失败恢复流程。
 
+use std::path::Path;
+
 use super::contracts::{TaskDisposition, TaskExecutionOutcome};
 use super::persistence::{mark_compatibility_sync_failed, transition_error};
 use super::preflight::PreflightFailure;
@@ -336,6 +338,34 @@ impl TaskRunner {
             let transaction = conn
                 .unchecked_transaction()
                 .map_err(|error| AppError::generic(format!("开始传输结算事务失败：{error}")))?;
+            // 本地/FUSE 改名后的占位 hydration 仍以新路径执行下载，但在云端移动成功前，
+            // fileId 的唯一同步基线必须继续指向旧云端路径，供 detect_renames 规划 MoveInCloud。
+            let existing_download_baseline = if matches!(
+                operation,
+                TransferOperation::Download | TransferOperation::DownloadUpdate
+            ) {
+                repository::find_by_file_id(&transaction, &file_id)?
+            } else {
+                None
+            };
+            let preserve_moved_download_baseline = if let Some(baseline) =
+                existing_download_baseline.filter(|baseline| baseline.local_path != relative_path)
+            {
+                let recorded_destination = crate::core::paths::safe_join_under(
+                    &self.mount_root,
+                    &baseline.local_path,
+                    false,
+                )?;
+                crate::sync::hydration::validate_pending_move_destination(
+                    &self.mount_root,
+                    &file_id,
+                    Path::new(local_path),
+                    &recorded_destination,
+                )?;
+                true
+            } else {
+                false
+            };
             // 服务端缺少更新时间时保留 Update 前基线，避免误判成无版本。
             let preserved_cloud_edited_time =
                 if operation == TransferOperation::Update && cloud_edited_time.is_none() {
@@ -382,36 +412,45 @@ impl TaskRunner {
                     ],
                 )
                 .map_err(|error| AppError::generic(format!("清理待确认同步基线失败：{error}")))?;
-            // 改名或移动后的 Update 只保留当前路径基线。
-            if operation == TransferOperation::Update {
-                transaction
-                    .execute(
-                        "DELETE FROM sync_items WHERE file_id=?1 AND local_path<>?2",
-                        rusqlite::params![file_id, relative_path],
-                    )
-                    .map_err(|error| {
-                        AppError::generic(format!("清理改名/移动旧基线路径失败：{error}"))
-                    })?;
-            }
-            // 最后写入已同步基线，提交后再对外发布状态。
-            repository::upsert(
-                &transaction,
-                &repository::SyncItem {
+            if preserve_moved_download_baseline {
+                tracing::info!(
+                    task_id = running.id,
                     file_id,
-                    local_path: relative_path.to_string(),
-                    parent_folder_id,
-                    name,
-                    is_folder: false,
-                    size,
-                    local_size: Some(local_size),
-                    sha256: None,
-                    local_mtime: Some(local_mtime),
-                    cloud_edited_time: cloud_edited_time.or(preserved_cloud_edited_time),
-                    last_sync_time: Some(finished_at),
-                    status: repository::sync_status::SYNCED,
-                    error_message: None,
-                },
-            )?;
+                    requested_path = relative_path,
+                    "改名占位 hydration 已完成，保留旧云端路径同步基线等待 MoveInCloud"
+                );
+            } else {
+                // 改名或移动后的 Update 只保留当前路径基线。
+                if operation == TransferOperation::Update {
+                    transaction
+                        .execute(
+                            "DELETE FROM sync_items WHERE file_id=?1 AND local_path<>?2",
+                            rusqlite::params![file_id, relative_path],
+                        )
+                        .map_err(|error| {
+                            AppError::generic(format!("清理改名/移动旧基线路径失败：{error}"))
+                        })?;
+                }
+                // 最后写入已同步基线，提交后再对外发布状态。
+                repository::upsert(
+                    &transaction,
+                    &repository::SyncItem {
+                        file_id,
+                        local_path: relative_path.to_string(),
+                        parent_folder_id,
+                        name,
+                        is_folder: false,
+                        size,
+                        local_size: Some(local_size),
+                        sha256: None,
+                        local_mtime: Some(local_mtime),
+                        cloud_edited_time: cloud_edited_time.or(preserved_cloud_edited_time),
+                        last_sync_time: Some(finished_at),
+                        status: repository::sync_status::SYNCED,
+                        error_message: None,
+                    },
+                )?;
+            }
             transaction
                 .commit()
                 .map_err(|error| AppError::generic(format!("提交传输结算事务失败：{error}")))?;

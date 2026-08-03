@@ -8,6 +8,7 @@ use tauri::AppHandle;
 
 use crate::data::repository;
 use crate::error::{AppError, AppResult};
+use crate::sync::hydration::HydrationService;
 use crate::sync::state::FreeUpCheckResult;
 
 use super::{mount, sync_engine, try_sync_engine, DB, FILES_API};
@@ -90,6 +91,42 @@ fn allocate_free_up_staging_path(local_path: &std::path::Path) -> AppResult<std:
     Err(AppError::generic("无法分配释放空间临时路径"))
 }
 
+/// 判断 xattr 删除失败是否只表示该属性原本不存在。
+fn is_missing_xattr_error(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        return true;
+    }
+    #[cfg(target_os = "linux")]
+    if error.raw_os_error() == Some(libc::ENODATA) {
+        return true;
+    }
+    #[cfg(target_os = "macos")]
+    if error.raw_os_error() == Some(93) {
+        return true;
+    }
+    false
+}
+
+/// 严格清理释放空间事务 marker；真实删除错误和读回残留都必须失败。
+fn clear_free_up_marker_strict(path: &std::path::Path) -> AppResult<()> {
+    match crate::platform::xattr::remove(path, crate::mount::manager::XATTR_FREE_UP_RELATIVE_PATH) {
+        Ok(()) => {}
+        Err(error) if is_missing_xattr_error(&error) => {}
+        Err(error) => {
+            return Err(AppError::generic(format!(
+                "清理释放空间恢复标记失败：{error}"
+            )))
+        }
+    }
+    if crate::platform::xattr::get(path, crate::mount::manager::XATTR_FREE_UP_RELATIVE_PATH)
+        .map_err(|error| AppError::generic(format!("复核释放空间恢复标记失败：{error}")))?
+        .is_some()
+    {
+        return Err(AppError::generic("释放空间恢复标记清除后仍存在"));
+    }
+    Ok(())
+}
+
 /// 仅在原路径空缺或仍是本文件占位符时恢复暂存内容。
 async fn restore_staged_free_up(
     local_path: &std::path::Path,
@@ -103,9 +140,9 @@ async fn restore_staged_free_up(
                 staging_path.display()
             )));
         }
-        let state = xattr::get(local_path, crate::mount::manager::XATTR_STATE)
+        let state = crate::platform::xattr::get(local_path, crate::mount::manager::XATTR_STATE)
             .map_err(|error| AppError::generic(format!("读取回滚占位状态失败：{error}")))?;
-        let owner = xattr::get(local_path, crate::mount::manager::XATTR_FILE_ID)
+        let owner = crate::platform::xattr::get(local_path, crate::mount::manager::XATTR_FILE_ID)
             .map_err(|error| AppError::generic(format!("读取回滚占位身份失败：{error}")))?;
         let is_owned_placeholder = state.as_deref()
             == Some(crate::mount::manager::STATE_PLACEHOLDER.as_bytes())
@@ -120,13 +157,17 @@ async fn restore_staged_free_up(
             .await
             .map_err(|error| AppError::generic(format!("移除回滚占位符失败：{error}")))?;
     }
-    tokio::fs::rename(staging_path, local_path)
-        .await
+    crate::sync::path_recovery::rename_no_replace(staging_path, local_path)
         .map_err(|error| AppError::generic(format!("恢复释放空间原文件失败：{error}")))?;
-    let _ = xattr::remove(
-        local_path,
-        crate::mount::manager::XATTR_FREE_UP_RELATIVE_PATH,
-    );
+    if let Err(error) = clear_free_up_marker_strict(local_path) {
+        let rollback = crate::sync::path_recovery::rename_no_replace(local_path, staging_path);
+        return Err(AppError::generic(format!(
+            "{error}；文件回隔离结果：{}",
+            rollback
+                .map(|_| "已移回隐藏暂存".to_string())
+                .unwrap_or_else(|rollback_error| rollback_error.to_string())
+        )));
+    }
     Ok(())
 }
 
@@ -333,7 +374,7 @@ async fn free_up_one(
             });
         let current = repository::find_by_file_id(&conn, &file_id)?;
         if active
-            || current.as_ref().map_or(true, |record| {
+            || current.as_ref().is_none_or(|record| {
                 record.local_path != baseline.local_path
                     || record.status != baseline.status
                     || record.local_mtime != baseline.local_mtime
@@ -352,7 +393,7 @@ async fn free_up_one(
     // 原文件先原子移入 watcher 忽略的同目录 staging；占位或 DB 结算失败时可恢复，
     // 同时正确处理真实的 0 字节文件（delete_local 会有意保留这类文件，不能用于此处）。
     let staging_path = allocate_free_up_staging_path(&lp)?;
-    xattr::set(
+    crate::platform::xattr::set(
         &lp,
         crate::mount::manager::XATTR_FREE_UP_RELATIVE_PATH,
         rel_path.as_bytes(),
@@ -361,9 +402,15 @@ async fn free_up_one(
     std::fs::File::open(&lp)
         .and_then(|file| file.sync_all())
         .map_err(|error| AppError::generic(format!("持久化释放空间恢复标记失败：{error}")))?;
-    tokio::fs::rename(&lp, &staging_path)
-        .await
-        .map_err(|error| AppError::generic(format!("暂存待释放文件失败：{error}")))?;
+    if let Err(error) = crate::sync::path_recovery::rename_no_replace(&lp, &staging_path) {
+        let marker_cleanup = clear_free_up_marker_strict(&lp);
+        return Err(AppError::generic(format!(
+            "暂存待释放文件失败：{error}；恢复标记清理：{}",
+            marker_cleanup
+                .map(|_| "成功".to_string())
+                .unwrap_or_else(|cleanup_error| cleanup_error.to_string())
+        )));
+    }
     if let Err(error) = m.create_placeholder_strict(&rel_path, &file_id, size).await {
         let rollback = restore_staged_free_up(&lp, &staging_path, &file_id).await;
         return Err(AppError::generic(format!(
@@ -533,137 +580,18 @@ pub async fn sync_download_on_demand(
     file_id: String,
     dest_path: String,
 ) -> AppResult<bool> {
-    let engine = sync_engine()?;
-    let _activity = engine.begin_external_activity()?;
-    // 全局索引读取中：禁止按需下载（同 sync_folder_recursive，cloud_tree 构建中）
-    if engine.current_state().is_indexing {
-        let user_message = "正在读取云端文件，请稍后再试";
-        tracing::debug!(user_message, "云端索引构建期间拒绝按需下载");
-        return Err(AppError::generic(user_message));
-    }
     let m = mount()?;
     let frontend_dest = PathBuf::from(&dest_path);
     let frontend_rel = crate::core::paths::relative_path_from_mount(m.mount_dir(), &frontend_dest)?;
-    let record = {
-        let conn = DB.lock();
-        repository::find_by_file_id(&conn, &file_id)?
-    };
-    let dest_rel = match record.as_ref().map(|record| record.local_path.clone()) {
-        Some(rel) => {
-            crate::core::paths::validate_relative_path(&rel, false)?;
-            if rel != frontend_rel {
-                return Err(AppError::config(format!(
-                    "下载路径不一致：file_id={file_id}, rel_path={rel}, dest_path={dest_path}"
-                )));
-            }
-            rel
-        }
-        None => frontend_rel,
-    };
-    let dest = crate::core::paths::safe_join_under(m.mount_dir(), &dest_rel, false)?;
-    let name = dest
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
-    // 云端元数据必须包含真实 editedTime 与 size，以支持变更判断和传输进度。
-    // 云端查询失败时仅允许回退到具备完整版本信息的可信 DB 缓存；缓存也不完整时必须
-    // 传播原始 GET 错误，不能构造 size=0 / editedTime=None 的不可执行任务。
-    let cached_metadata = record
-        .as_ref()
-        .filter(|record| record.size >= 0 && record.cloud_edited_time.is_some());
-    let cloud_file = match FILES_API.get(&file_id).await {
-        Ok(file) => Some(file),
-        Err(error) if cached_metadata.is_some() => {
-            tracing::warn!(
-                file_id,
-                error = %error,
-                "按需下载获取实时元数据失败，使用可信同步基线"
-            );
-            None
-        }
-        Err(error) => return Err(error),
-    };
-    let cloud_edited_time = cloud_file
-        .as_ref()
-        .and_then(|f| f.edited_time.map(|t| t.timestamp_millis()))
-        .or_else(|| cached_metadata.and_then(|record| record.cloud_edited_time))
-        .ok_or_else(|| AppError::generic("按需下载缺少可信云端 editedTime，拒绝创建任务"))?;
-    let cloud_size = cloud_file
-        .as_ref()
-        .map(|file| file.size)
-        .filter(|size| *size >= 0)
-        .or_else(|| cached_metadata.map(|record| record.size))
-        .ok_or_else(|| AppError::generic("按需下载缺少可信云端文件大小，拒绝创建任务"))?;
-    let destination_snapshot = match std::fs::symlink_metadata(&dest) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() || !metadata.is_file() {
-                return Err(AppError::generic("按需下载目标不是安全的普通文件"));
-            }
-            if metadata.len() == 0 && crate::mount::manager::is_placeholder_file(&dest) {
-                None
-            } else {
-                let mtime = metadata
-                    .modified()
-                    .ok()
-                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|duration| duration.as_millis() as i64)
-                    .ok_or_else(|| AppError::generic("无法读取按需下载目标修改时间"))?;
-                Some((mtime, metadata.len() as i64))
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(AppError::generic(format!("读取按需下载目标失败：{error}"))),
-    };
-    let is_update = destination_snapshot.is_some();
-    let operation = if is_update {
-        crate::sync::transfer_state::TransferOperation::DownloadUpdate
-    } else {
-        crate::sync::transfer_state::TransferOperation::Download
-    };
-    let direction = if is_update {
-        repository::transfer_direction::DOWNLOAD_UPDATE
-    } else {
-        repository::transfer_direction::DOWNLOAD
-    };
-    let task = repository::TransferTask {
-        id: 0,
-        direction,
-        file_id: Some(file_id),
-        local_path: Some(dest.to_string_lossy().into_owned()),
-        name,
-        total_size: cloud_size,
-        transferred: 0,
-        state: i32::from(crate::sync::transfer_state::TransferState::Pending),
-        error_message: None,
-        created_at: chrono::Utc::now().timestamp_millis(),
-        finished_at: None,
-        server_id: None,
-        upload_id: None,
-        resume_offset: 0,
-        session_url: None,
-        relative_path: Some(dest_rel),
-        parent_file_id: cloud_file
-            .as_ref()
-            .and_then(|file| file.parent_folder.as_ref())
-            .and_then(|parents| parents.first().cloned())
-            .or_else(|| cached_metadata.and_then(|record| record.parent_folder_id.clone())),
-        operation: Some(i32::from(operation)),
-        source_mtime: destination_snapshot.map(|snapshot| snapshot.0),
-        source_size: destination_snapshot.map(|snapshot| snapshot.1),
-        expected_cloud_edited_time: Some(cloud_edited_time),
-        attempt_count: 0,
-        verify_attempt_count: 0,
-        next_retry_at: None,
-        error_kind: None,
-        remote_result_file_id: None,
-        state_revision: 0,
-    };
-    let result = engine.task_runner()?.enqueue_and_run(task).await?;
-    match result.outcome.disposition {
+    let service = HydrationService::new(sync_engine()?, m, DB.clone(), FILES_API.clone());
+    let result = service.ensure_local(&file_id, &frontend_rel).await?;
+    match result.disposition() {
         crate::sync::task_runner::TaskDisposition::Completed => Ok(true),
         disposition => {
             let user_message = disposition.user_message();
             tracing::info!(
+                task_id = result.task_id(),
+                local_path = %result.local_path().display(),
                 disposition = ?disposition,
                 user_message,
                 "按需下载未立即完成，已保留在传输队列"

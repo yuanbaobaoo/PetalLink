@@ -441,6 +441,13 @@ pub(super) fn verify_created_folder(
             "响应 mimeType 不是 Huawei 文件夹类型",
         ));
     }
+    // 根目录请求使用协议别名 `root`，但 Huawei File 响应中的 parentFolder 返回账号
+    // 实际根目录 ID。该 ID 是服务端分配的 opaque 值，不能与字面量 `root` 比较。
+    // 此处仍要求响应恰有一个非空父目录；非根目录继续精确匹配请求中的稳定 fileId。
+    if expected_parent == "root" {
+        single_parent(file, "createFolder", semantics, auth_already_replayed)?;
+        return Ok(());
+    }
     verify_parent(
         file,
         expected_parent,
@@ -502,4 +509,63 @@ pub(super) fn verify_written_parent(
         RequestSemantics::Write,
         auth_already_replayed,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::verify_created_folder;
+    use crate::drive::models::DriveFile;
+    use crate::error::RequestSemantics;
+
+    fn folder(parent_folder: serde_json::Value) -> DriveFile {
+        DriveFile::from_json(&json!({
+            "id": "folder-id",
+            "fileName": "new-folder",
+            "mimeType": "application/vnd.huawei-apps.folder",
+            "parentFolder": parent_folder,
+        }))
+        .expect("valid folder")
+    }
+
+    #[test]
+    fn root_alias_accepts_unique_opaque_root_parent_id() {
+        let result = verify_created_folder(
+            &folder(json!(["opaque-account-root-id"])),
+            "new-folder",
+            "root",
+            RequestSemantics::Read,
+            false,
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn root_alias_still_rejects_missing_or_ambiguous_parent() {
+        for parent_folder in [json!([]), json!(["root-a", "root-b"])] {
+            let result = verify_created_folder(
+                &folder(parent_folder),
+                "new-folder",
+                "root",
+                RequestSemantics::Read,
+                false,
+            );
+            assert!(result.is_err());
+        }
+    }
+
+    #[test]
+    fn nested_folder_parent_still_requires_exact_file_id() {
+        let result = verify_created_folder(
+            &folder(json!(["other-parent-id"])),
+            "new-folder",
+            "expected-parent-id",
+            RequestSemantics::Read,
+            false,
+        );
+
+        assert!(result.is_err());
+    }
 }
