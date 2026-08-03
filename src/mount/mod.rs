@@ -4,6 +4,8 @@
 
 /// 带元数据缓存的文件哈希计算。
 pub mod file_hasher;
+/// 拖拽导入的递归复制（`.tmp` 原子落盘、拒绝覆盖）。
+pub mod import_copy;
 /// 本地文件系统变更监听与防抖。
 pub mod local_watcher;
 /// 镜像目录、占位符 与 xattr 管理。

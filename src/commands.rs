@@ -34,6 +34,8 @@ pub(crate) mod drive;
 mod folder_sync;
 /// 本地空间释放与按需下载命令。
 mod free_up;
+/// 拖拽导入命令。
+mod import_files;
 /// 平台集成与应用维护命令。
 mod platform;
 /// 同步控制命令。
@@ -48,6 +50,7 @@ pub use config::*;
 pub use drive::*;
 pub use folder_sync::*;
 pub use free_up::*;
+pub use import_files::*;
 pub use platform::*;
 pub use sync_control::*;
 pub use sync_status::*;
@@ -356,7 +359,7 @@ fn ensure_engine_started_owned(app: &AppHandle) -> AppResult<()> {
     // 传输进度实时推送通道：每次传输结算时触发前端刷新
     let (transfer_update_tx, mut transfer_update_rx) = tokio::sync::broadcast::channel::<()>(64);
     executor.set_transfer_update_tx(transfer_update_tx.clone());
-    // 注入 AppHandle：上传失败时直接 emit upload_failed → 前端弹 toast
+    // 注入 AppHandle：上传结算为终态失败时 emit upload_failed → 前端弹 toast
     executor.set_app_handle(app.clone());
     let task_runner = executor.initialize_task_runner()?;
     // 传输进度实时推送监听器

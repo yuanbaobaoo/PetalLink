@@ -111,6 +111,14 @@ impl TaskRunner {
                 })?;
             }
             self.notify_best_effort();
+            // 只有终态失败的上传才通知用户；可恢复结算（远端核验/退避/等待网络）
+            // 由状态机自动收敛，提前通知会把随后的自动恢复误报成“上传失败”。
+            if matches!(
+                operation,
+                TransferOperation::Create | TransferOperation::Update
+            ) {
+                self.notify_upload_failed(running, &user_message);
+            }
         } else {
             self.transition(running.id, running.state_revision, state, patch)?;
         }

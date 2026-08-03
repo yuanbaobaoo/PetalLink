@@ -21,8 +21,8 @@ pub mod drive;
 pub mod error;
 /// Tauri IPC 合同与 TypeScript bindings。
 pub mod ipc;
-/// 本地挂载与文件监听。
-mod mount;
+/// 本地挂载与文件监听（对 crate 外开放以支撑拖拽导入复制的集成测试）。
+pub mod mount;
 /// 桌面平台集成。
 pub mod platform;
 /// 双向同步引擎。

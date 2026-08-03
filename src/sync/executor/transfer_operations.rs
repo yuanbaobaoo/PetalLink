@@ -32,7 +32,6 @@ struct ExecutorTransferOperations {
     upload_api: Arc<UploadApi>,
     mount: Arc<MountManager>,
     stability: Option<Arc<tokio::sync::Mutex<StabilityChecker>>>,
-    app_handle: Option<tauri::AppHandle>,
 }
 
 /// 确认上传源的类型、修改时间与大小仍匹配持久任务。
@@ -285,23 +284,8 @@ impl TransferOperations for ExecutorTransferOperations {
                         .upload(&local_path, parent_id, Some(&on_progress), Some(&on_resume))
                         .await
                 };
-                // 上传失败同时通知 UI，结算仍由调用层统一写入任务状态。
-                let uploaded = match upload_result {
-                    Ok(uploaded) => uploaded,
-                    Err(error) => {
-                        if let Some(app) = &self.app_handle {
-                            let relative_path = task.relative_path.as_deref().unwrap_or(&task.name);
-                            use tauri_specta::Event;
-                            let _ = crate::ipc::UploadFailedEvent {
-                                rel_path: relative_path.to_string(),
-                                name: task.name.clone(),
-                                error: error.to_string(),
-                            }
-                            .emit(app);
-                        }
-                        return Err(TaskExecutionError::App(error));
-                    }
-                };
+                // 失败通知由结算层按终态统一发出，此处只回传错误。
+                let uploaded = upload_result.map_err(TaskExecutionError::App)?;
                 // 服务端只返回 ID 时补取权威元数据；无法确认则进入远端核验态。
                 let (cloud_file, disposition) = if uploaded.edited_time.is_none() {
                     match self.files_api.get(&uploaded.id).await {
@@ -579,7 +563,6 @@ impl SyncExecutor {
             upload_api: self.upload_api.clone(),
             mount: mount.clone(),
             stability: self.stability.clone(),
-            app_handle: self.app_handle.clone(),
         });
         let online_check: OnlineCheck = Arc::new(crate::core::net_guard::is_online);
         let initial_sink: Arc<dyn TaskStateSink> = Arc::new(|| Ok(()));
@@ -591,6 +574,20 @@ impl SyncExecutor {
             initial_sink,
             self.transfer_update_tx.clone(),
         ));
+        // 上传终态失败才通知 UI；可恢复结算（远端核验/退避/等待网络）不打扰用户。
+        if let Some(app) = &self.app_handle {
+            let app = app.clone();
+            runner.set_upload_failed_notifier(Arc::new(move |task, user_message| {
+                use tauri_specta::Event;
+                let relative_path = task.relative_path.as_deref().unwrap_or(&task.name);
+                let _ = crate::ipc::UploadFailedEvent {
+                    rel_path: relative_path.to_string(),
+                    name: task.name.clone(),
+                    error: user_message.to_string(),
+                }
+                .emit(&app);
+            }));
+        }
         self.task_runner = Some(runner.clone());
         Ok(runner)
     }

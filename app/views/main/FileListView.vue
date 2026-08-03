@@ -1,6 +1,8 @@
 <!-- 文件列表，表头可拖拽列宽 + 多选 + 右键菜单 -->
 <script setup lang="ts">
-import { ref, computed, watch, nextTick } from "vue";
+import { ref, computed, watch, nextTick, onMounted, onUnmounted } from "vue";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+import type { UnlistenFn } from "@tauri-apps/api/event";
 import { useFileBrowserStore } from "@/stores/fileBrowser";
 import { useSyncStore } from "@/stores/sync";
 import { commands } from "@/api/generated";
@@ -13,6 +15,7 @@ import {
 import { confirmDialog, showToast } from "@/components/mate";
 import { useAsyncAction } from "@/composables/useAsyncAction";
 import { useFileOperation } from "@/composables/useFileOperation";
+import { runDragImportFromDrop } from "@/composables/useDragUpload";
 import { formatFileSize, formatDateTime } from "@/utils/format";
 import { extractErrorMessage } from "@/utils/error";
 
@@ -141,6 +144,39 @@ const freeUpTotalBytes = computed(() => freeUpPreviewItems.value.reduce((sum, it
 
 // 批量文件同步状态缓存（fileId → "synced" | "placeholder" | "not_synced" | "folder"）
 const fileStatuses = ref<Record<string, string>>({});
+
+// 外部文件拖入列表区域的高亮态
+const dragImportOver = ref(false);
+// 系统文件拖放事件监听句柄（卸载时释放）
+let unlistenDragDrop: UnlistenFn | null = null;
+
+/**
+ * 挂载时监听系统文件拖放：HTML5 拖拽被 Tauri 拦截，必须走 onDragDropEvent 拿本地路径。
+ */
+onMounted(async () => {
+  try {
+    unlistenDragDrop = await getCurrentWebview().onDragDropEvent((event) => {
+      if (event.payload.type === "enter" || event.payload.type === "over") {
+        dragImportOver.value = true;
+      } else if (event.payload.type === "drop") {
+        dragImportOver.value = false;
+        void runDragImportFromDrop(event.payload.paths);
+      } else {
+        // leave：拖出窗口或取消，统一收起高亮。
+        dragImportOver.value = false;
+      }
+    });
+  } catch {
+    // 拖放监听不可用时静默降级，不影响列表其余功能。
+  }
+});
+
+/**
+ * 卸载时释放拖放监听，避免组件销毁后回调悬挂。
+ */
+onUnmounted(() => {
+  unlistenDragDrop?.();
+});
 
 /**
  * 监听排序文件变化，自动加载缩略图和批量同步状态
@@ -780,6 +816,13 @@ function handleSort(field: "name" | "size" | "modifiedTime"): void {
     <!-- 加载态 -->
     <div v-if="browser.loading" class="file-loading"><MateCircularProgress :size="24" /></div>
 
+    <!-- 拖拽导入高亮遮罩（pointer-events 关闭，不拦截拖放事件） -->
+    <div v-if="dragImportOver" class="drop-overlay">
+      <div class="drop-overlay__badge"><MateIcon name="upload" :size="28" /></div>
+      <div class="drop-overlay__title">松开以上传到当前文件夹</div>
+      <div class="drop-overlay__desc">文件将复制到同步目录，并自动上传到云端</div>
+    </div>
+
     <template v-if="files.length > 0">
       <div class="file-header">
         <div class="file-header__checkbox">
@@ -995,6 +1038,21 @@ function handleSort(field: "name" | "size" | "modifiedTime"): void {
 
 /* 加载 / 空态 */
 .file-loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(255, 255, 255, 0.6); }
+
+/* 拖拽导入高亮遮罩 */
+.drop-overlay {
+  position: absolute; inset: 0; z-index: 40;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: var(--space-sm); border-radius: var(--radius-lg);
+  background: var(--brand-50); box-shadow: inset 0 0 0 2px var(--brand-200);
+  pointer-events: none;
+}
+.drop-overlay__badge {
+  width: 56px; height: 56px; display: flex; align-items: center; justify-content: center;
+  border-radius: 50%; background: var(--grad-brand-soft); color: var(--brand-500);
+}
+.drop-overlay__title { font-size: 15px; font-weight: var(--fw-semibold); color: var(--text-primary); }
+.drop-overlay__desc { font-size: var(--font-body-sm); color: var(--text-secondary); }
 
 /* 底部 */
 .file-footer {

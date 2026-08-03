@@ -3,8 +3,8 @@
  */
 import { commands } from "./generated";
 export { DELETE_TRACE_ERROR_PREFIX } from "./generated";
-export type { DriveFile, FileCategory, FileListResult } from "./generated";
-import type { DriveFile } from "./generated";
+export type { DriveFile, FileCategory, FileListResult, ImportFilesResult } from "./generated";
+import type { DriveFile, ImportFilesResult } from "./generated";
 
 /**
  * 是否文件夹（大小写不敏感，兼容后端返回 "Folder" / "folder"）
@@ -80,4 +80,18 @@ export async function getThumbnail(fileId: string): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+/**
+ * 拖拽导入外部文件/目录到同步文件夹（复制进挂载目录后由后端自动上传）
+ *
+ * @param sourcePaths - 拖入的本地绝对路径数组
+ * @param targetRelPath - 目标文件夹相对挂载根路径，根目录传空串
+ */
+export async function importLocalFiles(
+  sourcePaths: string[],
+  targetRelPath: string,
+): Promise<ImportFilesResult> {
+  // 部分失败由后端汇总在 result.failures，不在此处抛出。
+  return await commands.driveImportFiles(sourcePaths, targetRelPath);
 }

@@ -14,6 +14,11 @@ use crate::sync::transfer_state::{TransferErrorKind, TransferState};
 pub type OnlineCheck = Arc<dyn Fn() -> bool + Send + Sync>;
 /// 返回当前 epoch 毫秒的可共享时钟。
 pub type NowMs = Arc<dyn Fn() -> i64 + Send + Sync>;
+/// 上传任务结算为终态失败时的用户通知回调（任务快照 + 用户可读文案）。
+///
+/// 只有永久 Failed 才触发；VerifyingRemote/退避/等待网络等可恢复结算不触发，
+/// 避免状态机随后的自动恢复被误报成“上传失败”。
+pub type UploadFailedNotifier = Arc<dyn Fn(&TransferTask, &str) + Send + Sync>;
 
 /// 为传输任务提供引擎关闭与路径冲突准入门。
 pub trait TaskActivityGate: Send + Sync {

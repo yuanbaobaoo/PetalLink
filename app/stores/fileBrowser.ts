@@ -32,6 +32,10 @@ export const useFileBrowserStore = defineStore("fileBrowser", () => {
 
   // 当前文件夹位置
   const current = computed(() => pathStack.value[pathStack.value.length - 1]);
+  // 当前文件夹相对挂载根路径（跳过根节点按名称拼接，根目录为空串）
+  const currentRelPath = computed(() =>
+    pathStack.value.slice(1).map((location) => location.name).join("/"),
+  );
 
   /**
    * 加载当前目录内容
@@ -98,6 +102,7 @@ export const useFileBrowserStore = defineStore("fileBrowser", () => {
     loading,
     errorMessage,
     current,
+    currentRelPath,
     loadRoot,
     loadCurrent,
     enterFolder,

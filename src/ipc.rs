@@ -145,6 +145,7 @@ pub fn builder() -> Builder<Wry> {
             commands::drive_get_about,
             commands::drive_download_file,
             commands::drive_upload_file,
+            commands::drive_import_files,
             commands::sync_manual_refresh,
             commands::sync_check_safe_free_up,
             commands::sync_check_file_local_status,

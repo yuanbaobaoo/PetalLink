@@ -30,7 +30,7 @@ pub use contracts::{
     BackendPreflightFailure, EnqueuedTaskOutcome, NowMs, OnlineCheck, RecoveredCloudFile,
     RemoteVerification, StartupRecoverySummary, TaskActivityGate, TaskDisposition,
     TaskExecutionError, TaskExecutionOutcome, TaskRecoverySummary, TaskStateSink,
-    TransferOperations,
+    TransferOperations, UploadFailedNotifier,
 };
 pub use progress::TaskProgressReporter;
 
@@ -46,6 +46,8 @@ pub struct TaskRunner {
     // 权威状态与兼容通知发布通道。
     state_sink: Arc<RwLock<Arc<dyn TaskStateSink>>>,
     transfer_update_tx: Option<tokio::sync::broadcast::Sender<()>>,
+    // 上传终态失败的用户通知（构造后注入，未注入时不通知）。
+    upload_failed_notifier: Arc<RwLock<Option<UploadFailedNotifier>>>,
     // 任务生命周期准入门。
     activity_gate: Arc<RwLock<Option<Arc<dyn TaskActivityGate>>>>,
 }
@@ -91,6 +93,7 @@ impl TaskRunner {
             now_ms,
             state_sink: Arc::new(RwLock::new(state_sink)),
             transfer_update_tx,
+            upload_failed_notifier: Arc::new(RwLock::new(None)),
             activity_gate: Arc::new(RwLock::new(None)),
         }
     }

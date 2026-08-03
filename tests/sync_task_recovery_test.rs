@@ -7,10 +7,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use petal_link_lib::drive::models::DriveFile;
-use petal_link_lib::error::{AppError, AppResult};
+use petal_link_lib::error::{AppError, AppResult, DriveTransportKind};
 use petal_link_lib::sync::task_runner::{
-    RemoteVerification, TaskActivityGate, TaskExecutionError, TaskExecutionOutcome,
-    TaskProgressReporter, TaskRunner, TransferOperations, TransferTask,
+    RemoteVerification, TaskActivityGate, TaskDisposition, TaskExecutionError,
+    TaskExecutionOutcome, TaskProgressReporter, TaskRunner, TransferOperations, TransferTask,
 };
 use petal_link_lib::sync::transfer_state::{TransferErrorKind, TransferOperation, TransferState};
 use rusqlite::{params, Connection};
@@ -594,4 +594,161 @@ async fn later_activity_failure_preserves_completed_recovery_summary() {
         .unwrap();
     assert_eq!(first_state, i32::from(TransferState::Completed));
     assert_eq!(second_state, i32::from(TransferState::VerifyingRemote));
+}
+
+/// 创建等待执行的 Create 上传任务。
+fn pending_create_task(local_path: &Path) -> TransferTask {
+    let metadata = std::fs::metadata(local_path).unwrap();
+    let source_mtime = metadata
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    TransferTask {
+        id: 0,
+        direction: UPLOAD_DIRECTION,
+        file_id: None,
+        local_path: Some(local_path.to_str().unwrap().to_string()),
+        name: FILE_NAME.to_string(),
+        total_size: FILE_CONTENT.len() as i64,
+        transferred: 0,
+        state: i32::from(TransferState::Pending),
+        error_message: None,
+        created_at: 1,
+        finished_at: None,
+        server_id: None,
+        upload_id: None,
+        resume_offset: 0,
+        session_url: None,
+        relative_path: Some(RELATIVE_PATH.to_string()),
+        parent_file_id: Some("contracts-folder-id".to_string()),
+        operation: Some(i32::from(TransferOperation::Create)),
+        source_mtime: Some(source_mtime),
+        source_size: Some(FILE_CONTENT.len() as i64),
+        expected_cloud_edited_time: None,
+        attempt_count: 0,
+        verify_attempt_count: 0,
+        next_retry_at: None,
+        error_kind: None,
+        remote_result_file_id: None,
+        state_revision: 0,
+    }
+}
+
+/// 执行时始终返回固定错误的操作集，用于失败结算测试。
+struct FailingOperations {
+    error: AppError,
+}
+
+#[async_trait]
+impl TransferOperations for FailingOperations {
+    /// 模拟执行期失败，错误按任务结算层分类决定去向。
+    async fn execute(
+        &self,
+        _task: &TransferTask,
+        _progress: &TaskProgressReporter,
+    ) -> Result<TaskExecutionOutcome, TaskExecutionError> {
+        Err(TaskExecutionError::App(self.error.clone()))
+    }
+}
+
+/// 终态失败的上传任务必须触发一次用户通知，且持久状态为 Failed。
+#[tokio::test]
+async fn permanent_upload_failure_notifies_user_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mount_root, local_path) = create_local_source(&temp);
+    let database = open_database(&temp.path().join("state.db"));
+    let task_id = insert_task(&database.lock(), &pending_create_task(&local_path));
+    // Generic 错误分类为永久失败，结算状态为 Failed。
+    let operations = Arc::new(FailingOperations {
+        error: AppError::generic("源文件校验永久失败"),
+    });
+    let runner = TaskRunner::new_with_clock(
+        database.clone(),
+        mount_root,
+        operations,
+        Arc::new(|| true),
+        Arc::new(|| Ok(())),
+        None,
+        Arc::new(|| NOW_MS),
+    );
+    let notifications: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorded = notifications.clone();
+    runner.set_upload_failed_notifier(Arc::new(move |task, user_message| {
+        recorded
+            .lock()
+            .push((task.name.clone(), user_message.to_string()));
+    }));
+
+    // 终态失败以 Err 返回调用方。
+    let result = runner.run(task_id).await;
+
+    assert!(result.is_err());
+    let recorded = notifications.lock();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0].0, FILE_NAME);
+    assert!(recorded[0].1.contains("源文件校验永久失败"));
+    drop(recorded);
+    let persisted: i32 = database
+        .lock()
+        .query_row(
+            "SELECT state FROM transfer_queue WHERE id=?1",
+            [task_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(persisted, i32::from(TransferState::Failed));
+}
+
+/// 响应丢失的不确定写入必须结算为 VerifyingRemote 静默等待核验，不得触发失败通知。
+#[tokio::test]
+async fn ambiguous_upload_error_settles_without_failure_notification() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mount_root, local_path) = create_local_source(&temp);
+    let database = open_database(&temp.path().join("state.db"));
+    let task_id = insert_task(&database.lock(), &pending_create_task(&local_path));
+    // Decode + 写请求可能已到达服务端 → RemoteAmbiguous → VerifyingRemote。
+    let operations = Arc::new(FailingOperations {
+        error: AppError::drive_transport_with_submission(
+            DriveTransportKind::Decode,
+            true,
+            false,
+            None,
+        ),
+    });
+    let runner = TaskRunner::new_with_clock(
+        database.clone(),
+        mount_root,
+        operations,
+        Arc::new(|| true),
+        Arc::new(|| Ok(())),
+        None,
+        Arc::new(|| NOW_MS),
+    );
+    let notifications: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorded = notifications.clone();
+    runner.set_upload_failed_notifier(Arc::new(move |task, user_message| {
+        recorded
+            .lock()
+            .push((task.name.clone(), user_message.to_string()));
+    }));
+
+    let outcome = runner.run(task_id).await.unwrap();
+
+    assert_eq!(outcome.disposition, TaskDisposition::VerifyingRemote);
+    assert!(notifications.lock().is_empty());
+    let persisted: (i32, Option<i32>) = database
+        .lock()
+        .query_row(
+            "SELECT state, error_kind FROM transfer_queue WHERE id=?1",
+            [task_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(persisted.0, i32::from(TransferState::VerifyingRemote));
+    assert_eq!(
+        persisted.1,
+        Some(i32::from(TransferErrorKind::RemoteAmbiguous))
+    );
 }

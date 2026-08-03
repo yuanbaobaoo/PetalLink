@@ -14,15 +14,17 @@ use std::collections::HashSet;
 use regex::Regex;
 
 /// 预编译并统一执行内部规则与用户 skipPatterns。
+///
+/// 对 crate 外开放是为了 `tests/` 集成测试能以真实匹配器驱动拖拽导入复制的公开合同。
 #[derive(Clone, Debug, Default)]
-pub(crate) struct SkipMatcher {
+pub struct SkipMatcher {
     exact_patterns: HashSet<String>,
     wildcard_patterns: Vec<Regex>,
 }
 
 impl SkipMatcher {
     /// 将配置规则编译为可跨扫描、watcher 与规划阶段复用的匹配器。
-    pub(crate) fn new(skip_patterns: &[String]) -> Self {
+    pub fn new(skip_patterns: &[String]) -> Self {
         let mut matcher = Self::default();
         for pattern in skip_patterns {
             if pattern.contains('*') || pattern.contains('?') {
@@ -41,7 +43,7 @@ impl SkipMatcher {
     }
 
     /// 判断单个文件名是否命中内部规则或用户配置。
-    pub(crate) fn should_skip(&self, name: &str) -> bool {
+    pub fn should_skip(&self, name: &str) -> bool {
         // 内部缓存、旧占位符和下载临时文件不受用户配置影响。
         if name.starts_with(crate::constants::INTERNAL_FILE_PREFIX)
             || name.ends_with(".hwcloud_placeholder")

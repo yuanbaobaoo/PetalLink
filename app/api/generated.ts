@@ -43,6 +43,10 @@ export const commands = {
 	driveDownloadFile: (fileId: string, destPath: string) => __TAURI_INVOKE<null>("drive_download_file", { fileId, destPath }),
 	// 上传挂载目录中的本地文件。
 	driveUploadFile: (localPath: string, parentId: string | null) => __TAURI_INVOKE<DriveFile>("drive_upload_file", { localPath, parentId }),
+	// 拖拽导入外部文件/目录到指定同步文件夹（相对挂载根路径，根目录为空串）。
+	// 逐源独立复制，任一源失败不阻塞其余源；全部复制完后后台触发一次全量同步周期，
+	// command 不等待上传完成即返回，传输进度经传输队列实时可见。
+	driveImportFiles: (sourcePaths: string[], targetRelPath: string) => __TAURI_INVOKE<ImportFilesResult>("drive_import_files", { sourcePaths, targetRelPath }),
 	// 触发云端树全量刷新与同步周期。
 	syncManualRefresh: () => __TAURI_INVOKE<null>("sync_manual_refresh"),
 	// 检查文件是否可安全释放本地空间。
@@ -296,6 +300,24 @@ export type FreeableItem = {
 	name: string,
 	// 本地已下载字节数
 	size: number,
+};
+
+// 拖拽导入的单个失败项。
+export type ImportFailure = {
+	// 导入源的原始路径。
+	source: string,
+	// 用户可读的中文失败原因。
+	reason: string,
+};
+
+// 拖拽导入结果汇总。
+export type ImportFilesResult = {
+	// 成功复制的文件数（目录按其中文件逐个计）。
+	imported: number,
+	// 命中跳过规则或为符号链接而被跳过的条目数。
+	skipped: number,
+	// 失败的导入源及原因（含同名冲突拒绝覆盖）。
+	failures: ImportFailure[],
 };
 
 // `AppError` 暴露给前端的稳定扁平结构。

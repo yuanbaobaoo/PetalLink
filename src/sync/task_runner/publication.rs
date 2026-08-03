@@ -5,13 +5,25 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 use super::contracts::TaskStateSink;
-use super::TaskRunner;
+use super::{TaskRunner, TransferTask};
 use crate::error::AppResult;
 
 impl TaskRunner {
     /// 替换任务状态发布接收器。
     pub fn set_state_sink(&self, state_sink: Arc<dyn TaskStateSink>) {
         *self.state_sink.write() = state_sink;
+    }
+
+    /// 注入上传终态失败的用户通知回调。
+    pub fn set_upload_failed_notifier(&self, notifier: super::contracts::UploadFailedNotifier) {
+        *self.upload_failed_notifier.write() = Some(notifier);
+    }
+
+    /// 上传任务结算为终态失败时通知用户；未注入回调时静默跳过。
+    pub(super) fn notify_upload_failed(&self, task: &TransferTask, user_message: &str) {
+        if let Some(notifier) = self.upload_failed_notifier.read().as_ref() {
+            notifier(task, user_message);
+        }
     }
 
     /// 发布任务状态并返回发布错误。
