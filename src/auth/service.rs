@@ -380,17 +380,9 @@ pub fn build_authorize_url(
     format!("{}?{query}&scope={scope_encoded}", constants::AUTHORIZE_URL)
 }
 
-/// 打开系统浏览器（macOS 用 `open` 命令）。
+/// 使用桌面环境的默认浏览器打开授权 URL。
 fn open_browser(url: &str) -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open").arg(url).spawn().is_ok()
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = url;
-        false
-    }
+    crate::platform::opener::open(url).is_ok()
 }
 
 /// 包装全局加密 token 存储为 Arc<dyn TokenStore>。

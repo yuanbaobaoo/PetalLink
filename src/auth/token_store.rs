@@ -1,13 +1,13 @@
-//! Token 存储 —— 机器码绑定的加密二进制文件。
+//! Token 存储 —— 桌面平台机器标识绑定的加密二进制文件。
 //!
 //! 设计取舍（方案 C）：
 //! - 放弃 macOS Keychain（签名变化/dev↔release 切换会导致 token 不可靠恢复，触发误判未登录）。
 //! - 改为：`<Application Support>/token.bin`，自定义二进制格式，ChaCha20-Poly1305 AEAD 加密。
-//! - 加密密钥由本机 **IOPlatformUUID**（via `ioreg`）经 SHA-256 派生 → 绑定本机硬件。
+//! - macOS 使用 IOPlatformUUID，Linux 使用 `/etc/machine-id`，经 SHA-256 派生后绑定本机。
 //! - 安全边界：
 //!   - ✅ 防跨机器复制：token.bin 拷到别的机器 → UUID 不同 → AEAD 解密失败 → 视为未登录。
 //!   - ✅ 防篡改：AEAD 自带 Poly1305 完整性校验，改一个 bit 都解密失败。
-//!   - ⚠️ 不防本机攻击：本机任何进程可读同样的 UUID（IOPlatformUUID 非秘密）。
+//!   - ⚠️ 不防本机攻击：本机进程可读取相同机器标识，机器标识不是秘密。
 //!   - 文件权限 0600（仅 owner 读写）。
 //! - 失败行为：UUID 取不到/文件不存在/损坏/跨机器/重装系统（UUID 变）→ load 返回 Ok(None)（未登录）。
 //! - token 绝不日志输出。
@@ -15,6 +15,7 @@
 use std::fs;
 use std::io::{Cursor, Read};
 use std::path::PathBuf;
+#[cfg(target_os = "macos")]
 use std::process::Command;
 
 use chacha20poly1305::{
@@ -121,7 +122,8 @@ fn file_path() -> AppResult<PathBuf> {
 
 /// 取本机 IOPlatformUUID（via ioreg，无需 root，无需 IOKit 依赖）。
 /// 失败返回 Err（极少见：严格沙盒环境；本应用非沙盒）。
-fn machine_uuid() -> AppResult<String> {
+#[cfg(target_os = "macos")]
+fn machine_identifier() -> AppResult<String> {
     let output = Command::new("ioreg")
         .args(["-d2", "-c", "IOPlatformExpertDevice"])
         .output()
@@ -145,11 +147,59 @@ fn machine_uuid() -> AppResult<String> {
     Ok(uuid)
 }
 
-/// 密钥派生：SHA-256(machine_uuid) → 32 字节。
-/// UUID 本身高熵，无需慢哈希；不加 salt（salt 会随文件走，失去绑机器意义）。
-fn derive_key(uuid: &str) -> [u8; 32] {
+/// 读取 Linux machine-id，并加入应用与平台域分隔后用于密钥派生。
+#[cfg(target_os = "linux")]
+fn machine_identifier() -> AppResult<String> {
+    const MACHINE_ID_PATHS: &[&str] = &["/etc/machine-id", "/var/lib/dbus/machine-id"];
+    let mut errors = Vec::new();
+    for path in MACHINE_ID_PATHS {
+        match fs::read_to_string(path) {
+            Ok(raw) => match normalize_linux_machine_id(&raw) {
+                Ok(machine_id) => return Ok(machine_id),
+                Err(error) => errors.push(format!("{path}: {error}")),
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => errors.push(format!("{path}: {error}")),
+        }
+    }
+    let detail = if errors.is_empty() {
+        "machine-id 文件不存在".to_string()
+    } else {
+        errors.join("；")
+    };
+    Err(AppError::generic(format!(
+        "无法读取有效 Linux machine-id：{detail}"
+    )))
+}
+
+/// 校验标准 128-bit machine-id，并做应用级域分隔避免跨应用复用派生值。
+#[cfg(target_os = "linux")]
+fn normalize_linux_machine_id(raw: &str) -> AppResult<String> {
+    let machine_id = raw.trim();
+    let valid = machine_id.len() == 32
+        && machine_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && machine_id.bytes().any(|byte| byte != b'0');
+    if !valid {
+        return Err(AppError::generic("machine-id 格式无效"));
+    }
+    Ok(format!(
+        "{}:linux:{}",
+        crate::constants::BUNDLE_IDENTIFIER,
+        machine_id.to_ascii_lowercase()
+    ))
+}
+
+/// 尚未适配机器标识的平台拒绝持久化 token。
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn machine_identifier() -> AppResult<String> {
+    Err(AppError::generic("当前平台暂不支持机器标识绑定"))
+}
+
+/// 密钥派生：SHA-256(machine_identifier) → 32 字节。
+/// 机器标识已稳定且具有足够熵，无需慢哈希；随机 salt 随文件复制会削弱绑机器语义。
+fn derive_key(identifier: &str) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    hasher.update(uuid.as_bytes());
+    hasher.update(identifier.as_bytes());
     let result = hasher.finalize();
     let mut key = [0u8; 32];
     key.copy_from_slice(&result);
@@ -161,8 +211,8 @@ fn derive_key(uuid: &str) -> [u8; 32] {
 /// 加密 token：序列化明文 → 随机 nonce → ChaCha20-Poly1305 加密 → 拼装文件格式。
 fn encrypt_token(token: &TokenPair) -> AppResult<Vec<u8>> {
     // 密钥派生（UUID 取不到则无法加密）
-    let uuid = machine_uuid()?;
-    let key = derive_key(&uuid);
+    let identifier = machine_identifier()?;
+    let key = derive_key(&identifier);
     let cipher = ChaCha20Poly1305::new(&key.into());
 
     // 随机 nonce（每次保存重新生成，AEAD 安全性靠 nonce 不重用）
@@ -216,8 +266,8 @@ fn decrypt_token(raw: &[u8]) -> AppResult<TokenPair> {
         .map_err(|e| AppError::generic(format!("读取密文失败：{e}")))?;
 
     // 派生本机密钥并解密（UUID 变化/跨机器 → AEAD 失败）
-    let uuid = machine_uuid()?;
-    let key = derive_key(&uuid);
+    let identifier = machine_identifier()?;
+    let key = derive_key(&identifier);
     let cipher = ChaCha20Poly1305::new(&key.into());
     let nonce = nonce_bytes.into();
     let plaintext = cipher
@@ -336,4 +386,31 @@ static GLOBAL_STORE: once_cell::sync::Lazy<EncryptedFileStore> =
 /// 获取全局 token 存储实例。
 pub fn global_store() -> &'static EncryptedFileStore {
     &GLOBAL_STORE
+}
+
+#[cfg(all(test, target_os = "linux"))]
+/// Linux machine-id 校验与域分隔合同测试。
+mod linux_tests {
+    use super::normalize_linux_machine_id;
+
+    /// 合法 machine-id 应统一为小写并包含应用级域分隔。
+    #[test]
+    fn valid_machine_id_is_normalized() {
+        let value = normalize_linux_machine_id("0123456789ABCDEF0123456789ABCDEF\n").unwrap();
+        assert_eq!(
+            value,
+            format!(
+                "{}:linux:0123456789abcdef0123456789abcdef",
+                crate::constants::BUNDLE_IDENTIFIER
+            )
+        );
+    }
+
+    /// 空值、全零值和非十六进制值不能作为加密绑定标识。
+    #[test]
+    fn invalid_machine_ids_are_rejected() {
+        assert!(normalize_linux_machine_id("").is_err());
+        assert!(normalize_linux_machine_id("00000000000000000000000000000000").is_err());
+        assert!(normalize_linux_machine_id("not-a-valid-machine-id").is_err());
+    }
 }
