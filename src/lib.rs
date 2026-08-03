@@ -249,6 +249,7 @@ pub fn run() {
                 platform::activation::set_accessory();
             }
         }
+        #[cfg(target_os = "macos")]
         tauri::RunEvent::Reopen { .. } => {
             // macOS：关窗/Cmd+Q 被拦截后进程仍在后台（accessory 无 Dock 图标）。
             // 此时用户再次点击应用图标，系统不会新建进程，只发 Reopen 事件

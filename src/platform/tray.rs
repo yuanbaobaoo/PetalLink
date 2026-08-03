@@ -45,13 +45,28 @@ const MENUBAR_ICON_PNG: &[u8] = include_bytes!("../../assets/menubar-icon.png");
 /// 创建系统托盘图标 + 菜单（对齐 Flutter buildStatusMenu）。
 pub fn setup(app: &AppHandle) {
     // 构建菜单（对齐 AppDelegate.buildStatusMenu，内含动态「正在传输」段）
-    let menu = build_menu(app).expect("创建托盘菜单失败");
+    let menu = match build_menu(app) {
+        Ok(menu) => menu,
+        Err(error) => {
+            crate::platform::activation::set_tray_icon_visible(false);
+            tracing::error!(%error, "创建托盘菜单失败，应用将以无托盘模式运行");
+            return;
+        }
+    };
 
     // 加载 menubar 图标（PNG，对齐 Flutter MenubarIcon）
-    let icon = Image::from_bytes(MENUBAR_ICON_PNG).unwrap_or_else(|_| {
-        tracing::warn!("menubar PNG 加载失败，回退到应用图标");
-        app.default_window_icon().cloned().unwrap()
-    });
+    let icon = match Image::from_bytes(MENUBAR_ICON_PNG) {
+        Ok(icon) => icon,
+        Err(error) => {
+            tracing::warn!(%error, "menubar PNG 加载失败，回退到应用图标");
+            let Some(icon) = app.default_window_icon().cloned() else {
+                crate::platform::activation::set_tray_icon_visible(false);
+                tracing::error!("应用默认图标也不可用，将以无托盘模式运行");
+                return;
+            };
+            icon
+        }
+    };
 
     match TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon)
@@ -69,8 +84,10 @@ pub fn setup(app: &AppHandle) {
         .build(app)
     {
         Ok(_) => tracing::info!("系统托盘图标+菜单已创建"),
-        // build 失败此前被静默吞掉，菜单栏图标消失时无任何线索
-        Err(e) => tracing::error!(error = %e, "系统托盘图标创建失败"),
+        Err(e) => {
+            crate::platform::activation::set_tray_icon_visible(false);
+            tracing::error!(error = %e, "系统托盘图标创建失败，关窗将直接退出");
+        }
     }
 }
 
@@ -83,7 +100,7 @@ fn build_menu(app: &AppHandle<Wry>) -> tauri::Result<Menu<Wry>> {
     let version_item = MenuItem::with_id(
         app,
         "version",
-        "PetalLink - 华为云盘 Mac 客户端开源版",
+        "PetalLink - 华为云盘桌面客户端开源版",
         false,
         None::<&str>,
     )?;
@@ -327,16 +344,20 @@ pub fn update_tooltip(app: &AppHandle, tooltip: &str) {
 /// 托盘隐藏后后台保活失去退出入口，activation 层的 Cmd+Q/Dock 退出拦截
 /// 会据此放行真退出（见 `activation::is_tray_icon_visible`）。
 pub fn set_tray_visible(app: &AppHandle, visible: bool) {
-    crate::platform::activation::set_tray_icon_visible(visible);
     match app.tray_by_id(TRAY_ID) {
         Some(tray) => {
             if let Err(e) = tray.set_visible(visible) {
+                crate::platform::activation::set_tray_icon_visible(false);
                 tracing::error!(error = %e, visible, "切换托盘图标可见性失败");
             } else {
+                crate::platform::activation::set_tray_icon_visible(visible);
                 tracing::info!(visible, "托盘图标可见性已切换");
             }
         }
-        None => tracing::warn!("托盘图标不存在，跳过可见性切换"),
+        None => {
+            crate::platform::activation::set_tray_icon_visible(false);
+            tracing::warn!("托盘图标不存在，关窗将直接退出");
+        }
     }
 }
 
@@ -354,8 +375,7 @@ fn show_main_window(app: &AppHandle) {
 
 /// 标记真实退出并终止应用。
 fn quit_app(app: &AppHandle) {
-    tracing::info!("菜单栏「退出 PetalLink」— 真退出");
-    #[cfg(target_os = "macos")]
+    tracing::info!("托盘「退出 PetalLink」— 真退出");
     crate::platform::activation::mark_real_quit();
     app.exit(0);
 }
