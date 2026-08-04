@@ -57,6 +57,8 @@ const { loading: bulkDownloadLoading, run: runBulkDownload } = useAsyncAction();
 const { loading: bulkFreeUpLoading, run: runBulkFreeUp } = useAsyncAction();
 // 右键「同步」非 MateButton，仅用 run 做防重复（不绑 loading 显示）
 const { run: runSyncItem } = useAsyncAction();
+// 打开本地项目的互斥操作，避免重复双击同时下载或拉起多个默认应用实例
+const { run: runOpenItem } = useAsyncAction();
 
 // 文件操作统一封装：守卫 + 错误归一 + 统一通知
 const fileOp = useFileOperation({
@@ -374,16 +376,75 @@ function fileTileClass(f: DriveFile): string {
 }
 
 /**
- * 双击文件行：文件夹→打开目录，文件→触发同步下载
+ * 双击文件行：文件夹→进入云端目录，文件→确保下载后用系统默认应用打开
  *
  * @param f - 文件对象
  */
-function handleDoubleClick(f: DriveFile): void {
+async function handleDoubleClick(f: DriveFile): Promise<void> {
   if (driveApi.isFolder(f)) {
-    browser.enterFolder(f);
+    await browser.enterFolder(f);
   } else {
-    handleSyncFile(f);
+    await handleOpenLocalItem(f);
   }
+}
+
+/**
+ * 用系统默认应用打开本地项目。
+ *
+ * Linux 按需云盘直接把可见路径交给系统默认应用，由 FUSE 在应用首次 read 时透明下载。
+ * 传统镜像模式下，普通文件仍先读取实时本地状态：已同步时立即打开，仅云端或占位状态
+ * 则等待下载完成后再打开。文件夹不触发递归同步。
+ *
+ * @param f - 文件或文件夹对象
+ */
+async function handleOpenLocalItem(f: DriveFile): Promise<void> {
+  await runOpenItem(async () => {
+    closeMenu();
+    if (!sync.mountConfigured) {
+      showToast("请先在设置中配置同步目录", { variant: "warning" });
+      return;
+    }
+    // 后端只接收挂载根内的相对路径，并负责最终路径安全校验。
+    const relPath = relPathOf(f);
+    try {
+      if (!sync.usesVirtualDrive && !driveApi.isFolder(f)) {
+        // 不依赖可能过期的列表缓存；打开前重新读取磁盘上的真实状态。
+        const status = await commands.syncCheckFileLocalStatus(f.id);
+        if (status !== "synced") {
+          // 文件尚未落地时先完成下载；失败则不得继续打开空占位文件。
+          const downloaded = await handleSyncFile(f, false);
+          if (!downloaded) return;
+        }
+      }
+      await commands.openLocalItem(relPath);
+    } catch (e) {
+      if (sync.usesVirtualDrive) await sync.refreshVirtualDriveStatus();
+      showToast("打开失败：" + extractErrorMessage(e), { variant: "error" });
+    }
+  });
+}
+
+/**
+ * 在系统文件管理器中打开文件所在目录。
+ *
+ * 此操作不下载文件；仅云端文件也可以直接查看其已经建立的本地镜像目录。
+ *
+ * @param f - 目标文件
+ */
+async function handleRevealLocalItem(f: DriveFile): Promise<void> {
+  await runOpenItem(async () => {
+    closeMenu();
+    if (!sync.mountConfigured) {
+      showToast("请先在设置中配置同步目录", { variant: "warning" });
+      return;
+    }
+    try {
+      await commands.revealLocalItem(relPathOf(f));
+    } catch (e) {
+      if (sync.usesVirtualDrive) await sync.refreshVirtualDriveStatus();
+      showToast("打开所在文件夹失败：" + extractErrorMessage(e), { variant: "error" });
+    }
+  });
 }
 
 /**
@@ -408,7 +469,7 @@ async function handleSyncItem(f: DriveFile): Promise<void> {
 /**
  * 递归同步文件夹子树（在 runSyncItem 内调用，不再自裹防重复）。
  *
- * 后台异步执行：后端立即返回，不阻塞 UI。进度实时出现在传输队列（菜单栏图标 + 传输弹窗），
+ * 后台异步执行：后端立即返回，不阻塞 UI。进度实时出现在传输队列（托盘图标 + 传输弹窗），
  * 用户可继续操作其他功能。完成无需 toast（传输队列本身显示完成态 + 后端会广播目录刷新）。
  *
  * @param f - 文件对象
@@ -429,20 +490,24 @@ async function doSyncFolder(f: DriveFile): Promise<void> {
  * 同步单个文件：下载到本地镜像目录
  *
  * @param f - 文件对象
+ * @param notifySuccess - 下载成功后是否显示“已同步”提示；下载后立即打开时无需重复提示
+ * @returns 是否成功完成下载
  */
-async function handleSyncFile(f: DriveFile): Promise<void> {
-  if (driveApi.isFolder(f)) return;
-  if (!fileOp.guard({ requireMount: true })) return;
+async function handleSyncFile(f: DriveFile, notifySuccess = true): Promise<boolean> {
+  if (driveApi.isFolder(f)) return false;
+  if (!fileOp.guard({ requireMount: true })) return false;
   // 文件在挂载目录中的安全目标路径。
   const dest = `${mountDir.value}/${relPathOf(f)}`;
   downloading.value = { open: true, name: f.name };
   try {
     await commands.syncDownloadOnDemand(f.id, dest);
-    showToast(`已同步「${f.name}」`);
+    if (notifySuccess) showToast(`已同步「${f.name}」`);
     // 下载完成后磁盘 xattr 已变（state=downloaded），重新拉批量状态刷新图标（云端→已同步）
-    refreshBatchStatus();
+    void refreshBatchStatus();
+    return true;
   } catch (e) {
     showToast("同步失败：" + extractErrorMessage(e), { variant: "error" });
+    return false;
   } finally {
     downloading.value.open = false;
   }
@@ -875,7 +940,7 @@ function handleSort(field: "name" | "size" | "modifiedTime"): void {
             <MateIcon :name="syncStatusIcon(f)" :size="16" :class="syncStatusClass(f)" />
           </div>
           <div class="file-col file-col--actions">
-            <MateButton variant="icon" icon="list" tooltip="操作" @click="handleShowActionMenu($event, f)" />
+            <MateButton variant="icon" icon="list" tooltip="操作" @click.stop="handleShowActionMenu($event, f)" />
           </div>
         </div>
       </div>
@@ -888,6 +953,12 @@ function handleSort(field: "name" | "size" | "modifiedTime"): void {
     <Teleport to="body">
       <div v-if="contextMenu.show" class="ctx-capture" @click="closeMenu" @contextmenu.prevent="closeMenu" />
       <div v-if="contextMenu.show && contextMenu.file" ref="ctxMenuEl" class="ctx-menu menu-fade-in" :style="{ '--menu-x': contextMenu.x + 'px', '--menu-y': contextMenu.y + 'px' }">
+        <button v-if="sync.mountConfigured" class="ctx-item" @click="handleOpenLocalItem(contextMenu.file!)">
+          <MateIcon :name="driveApi.isFolder(contextMenu.file!) ? 'folder-open' : 'file'" :size="16" />
+          {{ driveApi.isFolder(contextMenu.file!) ? "在系统文件管理器中打开" : "打开" }}
+        </button>
+        <button v-if="sync.mountConfigured && !driveApi.isFolder(contextMenu.file!)" class="ctx-item" @click="handleRevealLocalItem(contextMenu.file!)"><MateIcon name="folder-open" :size="16" /> 打开所在文件夹</button>
+        <div v-if="sync.mountConfigured" class="ctx-sep" />
         <button v-if="sync.mountConfigured" class="ctx-item" :disabled="sync.isIndexing" @click="handleSyncItem(contextMenu.file!)"><MateIcon name="sync" :size="16" /> 执行双端对齐</button>
         <div v-if="sync.mountConfigured" class="ctx-sep" />
         <button v-if="contextMenu.canFreeUp" class="ctx-item" @click="handleFreeUpSpace(contextMenu.file!)"><MateIcon name="cloud" :size="16" /> 释放空间</button>

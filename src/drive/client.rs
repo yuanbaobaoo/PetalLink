@@ -383,6 +383,15 @@ pub fn response_decode_error(
     cause: &str,
 ) -> AppError {
     let diagnostic = format!("解析{ctx}响应失败：{cause}");
+    // 用户可见错误保持稳定且不回显响应体；把无凭据的解析上下文写入本地日志，
+    // 否则所有 schema/身份校验失败都会坍缩成无法定位的“云端响应异常”。
+    tracing::warn!(
+        context = ctx,
+        ?semantics,
+        auth_already_replayed,
+        cause,
+        "Drive API 响应解码或协议校验失败"
+    );
     AppError::drive_transport(
         DriveTransportKind::Decode,
         semantics,

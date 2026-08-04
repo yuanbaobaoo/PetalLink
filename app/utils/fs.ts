@@ -43,3 +43,12 @@ export async function isEmptyDir(dir: string): Promise<boolean> {
   });
   return visible.length === 0;
 }
+
+/**
+ * 判断目录是否完全为空。
+ *
+ * FUSE 挂载点不能包含隐藏文件等任何条目，因此其约束比传统同步目录更严格。
+ */
+export async function isCompletelyEmptyDir(dir: string): Promise<boolean> {
+  return (await readDir(dir)).length === 0;
+}

@@ -27,12 +27,69 @@ const FILE_NAME: &str = "verified.docx";
 const FILE_CONTENT: &[u8] = b"data";
 /// 上传方向的持久化协议值。
 const UPLOAD_DIRECTION: i32 = 0;
+/// 首次下载方向的持久化协议值。
+const DOWNLOAD_DIRECTION: i32 = 1;
+/// 本地改名前的云端对齐路径。
+const OLD_RELATIVE_PATH: &str = "contracts/original.docx";
+/// 本地改名后的 hydration 目标路径。
+const MOVED_RELATIVE_PATH: &str = "contracts/moved.docx";
+/// 测试占位与下载身份使用的逻辑 xattr。
+const XATTR_FILE_ID: &str = "com.hwcloud.fileId";
+const XATTR_STATE: &str = "com.hwcloud.state";
+const STATE_PLACEHOLDER: &[u8] = b"placeholder";
+const STATE_DOWNLOADED: &[u8] = b"downloaded";
 
 /// 返回固定远端确认结果并记录核验次数。
 struct CommittedOperations {
     cloud_file: DriveFile,
     verification_calls: Arc<AtomicUsize>,
     active_activities: Arc<AtomicUsize>,
+}
+
+/// 模拟恢复下载已写入内容与状态；可选择模拟 fileId xattr 补写失败。
+struct RecoveredDownloadOperations {
+    write_file_id: bool,
+}
+
+/// 模拟远端已返回结果，但本地 fileId xattr 尚未可靠落盘。
+struct DeferredUploadIdentityOperations {
+    execute_calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl TransferOperations for RecoveredDownloadOperations {
+    async fn execute(
+        &self,
+        task: &TransferTask,
+        _progress: &TaskProgressReporter,
+    ) -> Result<TaskExecutionOutcome, TaskExecutionError> {
+        let local_path = Path::new(task.local_path.as_deref().expect("下载任务缺少绝对路径"));
+        std::fs::write(local_path, FILE_CONTENT).map_err(AppError::from)?;
+        petal_link_lib::platform::xattr::set(local_path, XATTR_STATE, STATE_DOWNLOADED)
+            .map_err(AppError::from)?;
+        if self.write_file_id {
+            petal_link_lib::platform::xattr::set(local_path, XATTR_FILE_ID, FILE_ID.as_bytes())
+                .map_err(AppError::from)?;
+        } else {
+            let _ = petal_link_lib::platform::xattr::remove(local_path, XATTR_FILE_ID);
+        }
+        Ok(TaskExecutionOutcome::default())
+    }
+}
+
+#[async_trait]
+impl TransferOperations for DeferredUploadIdentityOperations {
+    async fn execute(
+        &self,
+        _task: &TransferTask,
+        _progress: &TaskProgressReporter,
+    ) -> Result<TaskExecutionOutcome, TaskExecutionError> {
+        self.execute_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(TaskExecutionOutcome {
+            cloud_file: Some(committed_cloud_file()),
+            disposition: TaskDisposition::VerifyingRemote,
+        })
+    }
 }
 
 #[async_trait]
@@ -251,6 +308,92 @@ fn insert_task(connection: &Connection, task: &TransferTask) -> i64 {
     connection.last_insert_rowid()
 }
 
+/// 插入一条云端对齐同步基线。
+fn insert_sync_baseline(connection: &Connection, relative_path: &str) {
+    connection
+        .execute(
+            "INSERT INTO sync_items (
+                file_id, local_path, parent_folder_id, name, is_folder, size, local_size,
+                sha256, local_mtime, cloud_edited_time, last_sync_time, status, error_message
+             ) VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, NULL, ?7, ?8, ?9, 0, NULL)",
+            params![
+                FILE_ID,
+                relative_path,
+                "contracts-folder-id",
+                "original.docx",
+                FILE_CONTENT.len() as i64,
+                FILE_CONTENT.len() as i64,
+                1_000_i64,
+                2_000_i64,
+                3_000_i64,
+            ],
+        )
+        .unwrap();
+}
+
+/// 创建一次进程中断的占位下载任务。
+fn running_moved_download_task(local_path: &Path) -> TransferTask {
+    TransferTask {
+        id: 0,
+        direction: DOWNLOAD_DIRECTION,
+        file_id: Some(FILE_ID.to_string()),
+        local_path: Some(local_path.to_str().unwrap().to_string()),
+        name: "moved.docx".to_string(),
+        total_size: FILE_CONTENT.len() as i64,
+        transferred: 0,
+        state: i32::from(TransferState::Running),
+        error_message: None,
+        created_at: 1,
+        finished_at: None,
+        server_id: None,
+        upload_id: None,
+        resume_offset: 0,
+        session_url: None,
+        relative_path: Some(MOVED_RELATIVE_PATH.to_string()),
+        parent_file_id: Some("contracts-folder-id".to_string()),
+        operation: Some(i32::from(TransferOperation::Download)),
+        source_mtime: None,
+        source_size: None,
+        expected_cloud_edited_time: Some(2_000),
+        attempt_count: 0,
+        verify_attempt_count: 0,
+        next_retry_at: None,
+        error_kind: None,
+        remote_result_file_id: None,
+        state_revision: 0,
+    }
+}
+
+/// 创建改名后的占位目标，并按需保留其稳定 fileId。
+fn create_moved_placeholder(mount_root: &Path, with_file_id: bool) -> std::path::PathBuf {
+    let local_path = mount_root.join(MOVED_RELATIVE_PATH);
+    std::fs::create_dir_all(local_path.parent().unwrap()).unwrap();
+    std::fs::write(&local_path, b"").unwrap();
+    petal_link_lib::platform::xattr::set(&local_path, XATTR_STATE, STATE_PLACEHOLDER).unwrap();
+    if with_file_id {
+        petal_link_lib::platform::xattr::set(&local_path, XATTR_FILE_ID, FILE_ID.as_bytes())
+            .unwrap();
+    }
+    local_path
+}
+
+/// 构造下载恢复 runner。
+fn recovered_download_runner(
+    database: Arc<Mutex<Connection>>,
+    mount_root: std::path::PathBuf,
+    write_file_id: bool,
+) -> TaskRunner {
+    TaskRunner::new_with_clock(
+        database,
+        mount_root,
+        Arc::new(RecoveredDownloadOperations { write_file_id }),
+        Arc::new(|| true),
+        Arc::new(|| Ok(())),
+        None,
+        Arc::new(|| NOW_MS),
+    )
+}
+
 /// 构造核验后可安全结算的完整远端元数据。
 fn committed_cloud_file() -> DriveFile {
     DriveFile {
@@ -270,6 +413,247 @@ fn create_local_source(temp: &tempfile::TempDir) -> (std::path::PathBuf, std::pa
     std::fs::create_dir_all(local_path.parent().unwrap()).unwrap();
     std::fs::write(&local_path, FILE_CONTENT).unwrap();
     (mount_root, local_path)
+}
+
+/// fileId xattr 补写未完成时必须保存远端 ID 并阻止同一上传被再次执行。
+#[tokio::test]
+async fn deferred_upload_identity_enters_verifying_and_deduplicates_reenqueue() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mount_root, local_path) = create_local_source(&temp);
+    let database = open_database(&temp.path().join("state.db"));
+    let mut pending = verifying_task(&local_path, NOW_MS);
+    pending.state = i32::from(TransferState::Pending);
+    pending.error_message = None;
+    pending.error_kind = None;
+    pending.next_retry_at = None;
+    pending.remote_result_file_id = None;
+    pending.attempt_count = 0;
+    let execute_calls = Arc::new(AtomicUsize::new(0));
+    let runner = TaskRunner::new_with_clock(
+        database.clone(),
+        mount_root,
+        Arc::new(DeferredUploadIdentityOperations {
+            execute_calls: execute_calls.clone(),
+        }),
+        Arc::new(|| true),
+        Arc::new(|| Ok(())),
+        None,
+        Arc::new(|| NOW_MS),
+    );
+
+    let first = runner.enqueue_and_run(pending.clone()).await.unwrap();
+    assert_eq!(first.outcome.disposition, TaskDisposition::VerifyingRemote);
+    assert_eq!(execute_calls.load(Ordering::SeqCst), 1);
+    let persisted: (i32, Option<String>, Option<i64>) = {
+        let connection = database.lock();
+        connection
+            .query_row(
+                "SELECT state, remote_result_file_id, next_retry_at
+                 FROM transfer_queue WHERE id=?1",
+                [first.task_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap()
+    };
+    assert_eq!(persisted.0, i32::from(TransferState::VerifyingRemote));
+    assert_eq!(persisted.1.as_deref(), Some(FILE_ID));
+    assert_eq!(persisted.2, Some(NOW_MS + 3_000));
+
+    let second = runner.enqueue_and_run(pending).await.unwrap();
+    assert_eq!(second.task_id, first.task_id);
+    assert_eq!(second.outcome.disposition, TaskDisposition::VerifyingRemote);
+    assert_eq!(
+        execute_calls.load(Ordering::SeqCst),
+        1,
+        "远端已有结果的上传不得重复执行"
+    );
+}
+
+/// 启动恢复下载也必须完成目标 hydration，但保留旧云端路径基线等待 MoveInCloud。
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn recovered_moved_download_completes_without_rekeying_cloud_baseline() {
+    let temp = tempfile::tempdir().unwrap();
+    let mount_root = temp.path().join("mount");
+    let moved_path = create_moved_placeholder(&mount_root, true);
+    let old_path = mount_root.join(OLD_RELATIVE_PATH);
+    std::fs::write(&old_path, b"replacement").unwrap();
+    petal_link_lib::platform::xattr::set(&old_path, XATTR_FILE_ID, b"replacement-file").unwrap();
+    let database = open_database(&temp.path().join("state.db"));
+    insert_sync_baseline(&database.lock(), OLD_RELATIVE_PATH);
+    let task_id = insert_task(&database.lock(), &running_moved_download_task(&moved_path));
+    let runner = recovered_download_runner(database.clone(), mount_root, true);
+
+    let summary = runner.recover_startup().await.unwrap();
+
+    assert_eq!(summary.completed, 1);
+    assert_eq!(summary.failed, 0);
+    assert_eq!(std::fs::read(&moved_path).unwrap(), FILE_CONTENT);
+    assert_eq!(
+        petal_link_lib::platform::xattr::get(&moved_path, XATTR_STATE).unwrap(),
+        Some(STATE_DOWNLOADED.to_vec())
+    );
+    assert_eq!(
+        petal_link_lib::platform::xattr::get(&moved_path, XATTR_FILE_ID).unwrap(),
+        Some(FILE_ID.as_bytes().to_vec())
+    );
+    let connection = database.lock();
+    let task: (i32, i64, Option<String>) = connection
+        .query_row(
+            "SELECT state, transferred, remote_result_file_id
+             FROM transfer_queue WHERE id=?1",
+            [task_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(task.0, i32::from(TransferState::Completed));
+    assert_eq!(task.1, FILE_CONTENT.len() as i64);
+    assert_eq!(task.2.as_deref(), Some(FILE_ID));
+    let baselines = connection
+        .prepare(
+            "SELECT local_path, name, local_size, local_mtime, cloud_edited_time, last_sync_time
+             FROM sync_items WHERE file_id=?1 ORDER BY local_path",
+        )
+        .unwrap()
+        .query_map([FILE_ID], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<i64>>(5)?,
+            ))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(
+        baselines,
+        vec![(
+            OLD_RELATIVE_PATH.to_string(),
+            "original.docx".to_string(),
+            Some(FILE_CONTENT.len() as i64),
+            Some(1_000),
+            Some(2_000),
+            Some(3_000),
+        )]
+    );
+}
+
+/// 旧路径重新出现同一 fileId 时是复制歧义，下载产物不得生成第二条同步基线。
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn recovered_moved_download_refuses_ambiguous_copy_settlement() {
+    let temp = tempfile::tempdir().unwrap();
+    let mount_root = temp.path().join("mount");
+    let moved_path = create_moved_placeholder(&mount_root, true);
+    let old_path = mount_root.join(OLD_RELATIVE_PATH);
+    std::fs::write(&old_path, b"original").unwrap();
+    petal_link_lib::platform::xattr::set(&old_path, XATTR_FILE_ID, FILE_ID.as_bytes()).unwrap();
+    let database = open_database(&temp.path().join("state.db"));
+    insert_sync_baseline(&database.lock(), OLD_RELATIVE_PATH);
+    let task_id = insert_task(&database.lock(), &running_moved_download_task(&moved_path));
+    let runner = recovered_download_runner(database.clone(), mount_root, true);
+
+    let summary = runner.recover_startup().await.unwrap();
+
+    assert_eq!(summary.completed, 0);
+    assert_eq!(summary.failed, 1);
+    let connection = database.lock();
+    let state: i32 = connection
+        .query_row(
+            "SELECT state FROM transfer_queue WHERE id=?1",
+            [task_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(state, i32::from(TransferState::RestartRequired));
+    let paths = connection
+        .prepare("SELECT local_path FROM sync_items WHERE file_id=?1 ORDER BY local_path")
+        .unwrap()
+        .query_map([FILE_ID], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(paths, vec![OLD_RELATIVE_PATH.to_string()]);
+}
+
+/// 下载后缺少稳定目标身份时不能仅凭路径不同跳过常规基线结算。
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn recovered_download_without_move_identity_does_not_add_new_baseline() {
+    let temp = tempfile::tempdir().unwrap();
+    let mount_root = temp.path().join("mount");
+    let moved_path = create_moved_placeholder(&mount_root, false);
+    let database = open_database(&temp.path().join("state.db"));
+    insert_sync_baseline(&database.lock(), OLD_RELATIVE_PATH);
+    let task_id = insert_task(&database.lock(), &running_moved_download_task(&moved_path));
+    let runner = recovered_download_runner(database.clone(), mount_root, false);
+
+    let summary = runner.recover_startup().await.unwrap();
+
+    assert_eq!(summary.completed, 0);
+    assert_eq!(summary.failed, 1);
+    let connection = database.lock();
+    let state: i32 = connection
+        .query_row(
+            "SELECT state FROM transfer_queue WHERE id=?1",
+            [task_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(state, i32::from(TransferState::RestartRequired));
+    let paths = connection
+        .prepare("SELECT local_path FROM sync_items WHERE file_id=?1 ORDER BY local_path")
+        .unwrap()
+        .query_map([FILE_ID], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(paths, vec![OLD_RELATIVE_PATH.to_string()]);
+}
+
+/// 已损坏的重复 fileId 基线必须阻止结算，不能再扩展为第三条路径。
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn recovered_download_does_not_expand_duplicate_file_id_baselines() {
+    let temp = tempfile::tempdir().unwrap();
+    let mount_root = temp.path().join("mount");
+    let moved_path = create_moved_placeholder(&mount_root, true);
+    let database = open_database(&temp.path().join("state.db"));
+    insert_sync_baseline(&database.lock(), OLD_RELATIVE_PATH);
+    insert_sync_baseline(&database.lock(), "contracts/duplicate.docx");
+    let task_id = insert_task(&database.lock(), &running_moved_download_task(&moved_path));
+    let runner = recovered_download_runner(database.clone(), mount_root, true);
+
+    let summary = runner.recover_startup().await.unwrap();
+
+    assert_eq!(summary.completed, 0);
+    assert_eq!(summary.failed, 1);
+    let connection = database.lock();
+    let state: i32 = connection
+        .query_row(
+            "SELECT state FROM transfer_queue WHERE id=?1",
+            [task_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(state, i32::from(TransferState::RestartRequired));
+    let paths = connection
+        .prepare("SELECT local_path FROM sync_items WHERE file_id=?1 ORDER BY local_path")
+        .unwrap()
+        .query_map([FILE_ID], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(
+        paths,
+        vec![
+            "contracts/duplicate.docx".to_string(),
+            OLD_RELATIVE_PATH.to_string(),
+        ]
+    );
 }
 
 /// 尚未到达 next_retry_at 时不得占用路径许可或发起远端核验。

@@ -27,6 +27,9 @@ pub mod mount;
 pub mod platform;
 /// 双向同步引擎。
 pub mod sync;
+/// Linux 按需云盘的 FUSE 用户态文件系统。
+#[cfg(target_os = "linux")]
+pub mod virtual_fs;
 
 /// 日志初始化：三路输出（默认 INFO，对齐 dart `initLogger`）。
 /// - stdout fmt（控制台，debug 带颜色）
@@ -92,6 +95,17 @@ pub fn load_env() {
     }
 }
 
+/// 仅记住用户主动调整的窗口大小与最大化状态。
+///
+/// 不持久化可见性、全屏、装饰或位置：
+/// - 可见性由手动启动、`--hidden` 与托盘逻辑统一控制；
+/// - Wayland 不允许客户端可靠决定窗口位置，跨显示器恢复位置也容易落到屏幕外。
+fn remembered_window_state_flags() -> tauri_plugin_window_state::StateFlags {
+    use tauri_plugin_window_state::StateFlags;
+
+    StateFlags::SIZE | StateFlags::MAXIMIZED
+}
+
 /// 装配 Tauri 插件、命令与生命周期钩子，并启动桌面应用事件循环。
 pub fn run() {
     init_logger();
@@ -107,11 +121,11 @@ pub fn run() {
 
     let app = tauri::Builder::default()
         // 单实例守护：第二个进程启动时直接退出（已运行实例聚焦到前台）。
-        // 防止双进程各自创建 FSEvents watcher 监听同一挂载目录 → 互相触发 sync cycle
+        // 防止双进程各自监听同一挂载目录 → 互相触发 sync cycle
         // → 基于 stale cloud_tree 误判「本地新建」疯狂上传。必须最先注册。
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             // 第二实例尝试启动。
-            // 若新实例带 --hidden（LaunchAgent 重复触发），不显示窗口；
+            // 若新实例带 --hidden（登录启动项重复触发），不显示窗口；
             // 否则是用户手动打开 → 聚焦已运行实例的主窗口。
             // 关键：若 app 此前因关窗拦截进入 accessory 模式，必须切回 regular 才能响应用户输入，
             // 否则窗口虽 show 但所有按钮点不动（accessory app 不接收鼠标事件）。
@@ -127,14 +141,20 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
-        .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(remembered_window_state_flags())
+                .build(),
+        )
         .invoke_handler(ipc_builder.invoke_handler())
-        // 关窗拦截：关闭按钮/Cmd+W → 隐藏到后台 accessory（不退出），仅 tray 退出放行
+        // 托盘可用时关窗仅隐藏到后台；托盘不可用时放行关闭，避免无入口后台进程。
         .on_window_event(|window, event| {
             match event {
                 tauri::WindowEvent::CloseRequested { api, .. } => {
-                    if !platform::activation::should_real_quit() {
+                    if !platform::activation::should_real_quit()
+                        && platform::activation::is_tray_icon_visible()
+                    {
                         api.prevent_close();
                         let _ = window.hide();
                         #[cfg(target_os = "macos")]
@@ -155,8 +175,10 @@ pub fn run() {
             ipc_builder.mount_events(app);
             // 最早阶段：根据 --hidden 参数设置 activationPolicy
             platform::activation::init_activation_policy();
-            // ★ 必须最早安装：拦截 Dock/Cmd+Q 退出，防止 macOS 直接杀进程
+            // ★ macOS 必须最早安装：拦截 Dock/Cmd+Q 退出，防止直接杀进程
             platform::activation::install_terminate_interceptor();
+            // Linux SIGTERM/SIGINT 默认会绕过 Tauri RunEvent；转成正常退出以先卸载 FUSE。
+            platform::shutdown::install_signal_handler(app.handle().clone());
             // ★ 检测上次崩溃标记（panic hook 写入），记录到日志后清理
             if let Ok(support) = crate::core::config_store::support_dir() {
                 let marker = support.join("last_crash.marker");
@@ -173,14 +195,14 @@ pub fn run() {
             // 创建系统托盘
             platform::tray::setup(app.handle());
 
-            // ★ 启动期清理：若 LaunchAgent 已启用，移除 Login Items 中的重复项。
+            // ★ macOS 启动期清理：若 LaunchAgent 已启用，移除 Login Items 中的重复项。
             //   避免「LaunchAgent 带 --hidden」+「Login Items 不带 --hidden」双重启动，
             //   Login Items 触发 single-instance 回调顶出窗口。
             if platform::launch_at_login::is_enabled() {
                 platform::launch_at_login::remove_from_login_items();
             }
 
-            // 手动启动 → 显示主窗口并聚焦；开机自启（--hidden）→ 窗口保持隐藏（visible:false 默认），仅菜单栏图标后台运行
+            // 手动启动 → 显示主窗口并聚焦；登录启动（--hidden）→ 仅保留托盘图标后台运行。
             if platform::activation::is_launched_manually() {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.show();
@@ -188,7 +210,7 @@ pub fn run() {
                     tracing::info!("手动启动：显示主窗口");
                 }
             } else {
-                tracing::info!("--hidden 模式：主窗口保持隐藏，仅保留菜单栏图标");
+                tracing::info!("--hidden 模式：主窗口保持隐藏，仅保留托盘图标");
             }
 
             // 加载配置（仅一次，token 检测 + 引擎初始化共用）
@@ -218,13 +240,15 @@ pub fn run() {
                 if m.ensure_mount_dir().is_ok() {
                     commands::set_mount_manager(m);
                     tracing::info!("MountManager 已初始化");
-                    if let Err(e) = commands::ensure_engine_started(app.handle()) {
-                        tracing::error!(error = %e, "SyncEngine 初始化失败");
+                    if let Err(error) = commands::ensure_engine_started(app.handle()) {
+                        // 能力探测等安装前检查失败时清除已注入但不可用的 MountManager。
+                        commands::drop_runtime();
+                        tracing::error!(%error, "SyncEngine 初始化失败");
                     }
                 }
             }
 
-            // 应用托盘图标可见性（配置关闭则隐藏菜单栏图标，并同步退出拦截标志）
+            // 应用托盘图标可见性，并同步退出拦截标志。
             platform::tray::set_tray_visible(app.handle(), config.show_tray_icon);
 
             tracing::info!("PetalLink 初始化完成");
@@ -233,7 +257,7 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("运行 PetalLink 时出错");
 
-    // Cmd+Q/Dock Quit → 隐藏到后台；tray 退出(code=Some)放行；关机/真退出 flush
+    // 托盘可用时退出请求隐藏到后台；托盘退出/重启/关机等真实退出执行 flush。
     app.run(|handle, event| match event {
         tauri::RunEvent::ExitRequested { api, code, .. } => {
             // 托盘隐藏时后台保活无退出入口，不再拦截，直接真退出
@@ -249,6 +273,7 @@ pub fn run() {
                 platform::activation::set_accessory();
             }
         }
+        #[cfg(target_os = "macos")]
         tauri::RunEvent::Reopen { .. } => {
             // macOS：关窗/Cmd+Q 被拦截后进程仍在后台（accessory 无 Dock 图标）。
             // 此时用户再次点击应用图标，系统不会新建进程，只发 Reopen 事件
@@ -269,4 +294,24 @@ pub fn run() {
         }
         _ => {}
     });
+}
+
+#[cfg(test)]
+mod window_state_tests {
+    use super::remembered_window_state_flags;
+    use tauri_plugin_window_state::StateFlags;
+
+    #[test]
+    fn remembers_only_size_and_maximized_state() {
+        let flags = remembered_window_state_flags();
+
+        assert!(flags.contains(StateFlags::SIZE));
+        assert!(flags.contains(StateFlags::MAXIMIZED));
+        assert!(!flags.intersects(
+            StateFlags::POSITION
+                | StateFlags::VISIBLE
+                | StateFlags::DECORATIONS
+                | StateFlags::FULLSCREEN
+        ));
+    }
 }

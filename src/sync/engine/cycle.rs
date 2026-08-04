@@ -8,12 +8,12 @@ use std::time::Instant;
 
 use crate::data::repository;
 use crate::error::{AppError, AppResult};
-use crate::sync::planner::SyncSnapshot;
+use crate::sync::planner::{DbSnapshotEntry, SyncSnapshot};
 use crate::sync::state::{
-    SyncAction, SyncActionType, SYNC_PHASE_EXECUTING_ACTIONS, SYNC_PHASE_MATERIALIZING_LOCAL,
-    SYNC_PHASE_PLANNING_STARTUP, SYNC_PHASE_PLANNING_SYNC, SYNC_PHASE_SYNCING_AUTO_INCREMENTAL,
-    SYNC_PHASE_SYNCING_LOCAL, SYNC_PHASE_SYNCING_MANUAL, SYNC_PHASE_SYNCING_RETRY,
-    SYNC_PHASE_SYNCING_STARTUP,
+    ActionResult, SyncAction, SyncActionType, SYNC_PHASE_EXECUTING_ACTIONS,
+    SYNC_PHASE_MATERIALIZING_LOCAL, SYNC_PHASE_PLANNING_STARTUP, SYNC_PHASE_PLANNING_SYNC,
+    SYNC_PHASE_SYNCING_AUTO_INCREMENTAL, SYNC_PHASE_SYNCING_LOCAL, SYNC_PHASE_SYNCING_MANUAL,
+    SYNC_PHASE_SYNCING_RETRY, SYNC_PHASE_SYNCING_STARTUP,
 };
 use crate::sync::transfer_state::TransferState;
 
@@ -510,6 +510,21 @@ impl SyncEngine {
         }
     }
 
+    /// 尝试为一批结构动作取得共享子树租约。
+    ///
+    /// 租约必须从 backing 副作用开始一直活到 checkpoint、DB 与内存缓存全部结算，
+    /// 否则 FUSE 可能在“文件已创建、基线尚未提交”的窗口抢先 rename/unlink。
+    fn begin_settlement_activities(
+        &self,
+        paths: &[String],
+    ) -> AppResult<Vec<super::ActivityGuard>> {
+        let mut activities = Vec::with_capacity(paths.len());
+        for path in paths {
+            activities.push(self.begin_path_activity(path)?);
+        }
+        Ok(activities)
+    }
+
     /// 在可信快照和活动门保护下完成规划、执行与结算。
     async fn run_sync_cycle_inner(
         &self,
@@ -658,9 +673,30 @@ impl SyncEngine {
             "sync cycle: 开始执行动作"
         );
 
+        let settlement_paths = structural_settlement_paths(&actions, &snapshot.db)?;
         drop(planning_activity);
         self.ensure_cycle_active()?;
-        let results = if let Some(ref exec) = self.executor {
+        let settlement_activities = match self.begin_settlement_activities(&settlement_paths) {
+            Ok(activities) => Some(activities),
+            Err(error) => {
+                // 唯一正常竞争方是正在写入/改名的 FUSE exclusive lease。该 lease
+                // 释放时会请求本地重扫；本批不做任何副作用，并以 deferred 收敛状态。
+                self.ensure_cycle_active()?;
+                tracing::info!(%error, paths = ?settlement_paths, "用户正在修改结构动作路径，本批延后");
+                None
+            }
+        };
+        let results = if settlement_activities.is_none() {
+            actions
+                .iter()
+                .map(|_| ActionResult {
+                    success: false,
+                    error_message: Some("用户正在修改目标路径，等待文件关闭后重试".into()),
+                    deferred: true,
+                    cloud_file: None,
+                })
+                .collect()
+        } else if let Some(ref exec) = self.executor {
             self.execute_actions_ordered(exec, &mut actions).await?
         } else {
             Vec::new()
@@ -689,6 +725,8 @@ impl SyncEngine {
 
         // 结算数据库并发布云树与路径索引。
         self.apply_results(&actions, &results)?;
+        // 路径状态至此已经同时提交到持久层与进程内索引，可以让 FUSE 写操作继续。
+        drop(settlement_activities);
         if actions.iter().zip(results.iter()).any(|(action, result)| {
             result.success && action.action_type == crate::sync::state::SyncActionType::MoveInCloud
         }) {
@@ -854,5 +892,143 @@ mod phase_tests {
             cloud_file: None,
             reason: None,
         }
+    }
+}
+
+/// 返回结构动作从执行到结算必须保护的最小祖先路径集合。
+///
+/// MoveInCloud 同时保护新路径和 DB 中唯一的旧身份路径；重复/缺失 fileId 基线时
+/// fail closed，禁止先改远端再发现无法可靠结算。
+fn structural_settlement_paths(
+    actions: &[SyncAction],
+    db: &std::collections::HashMap<String, DbSnapshotEntry>,
+) -> AppResult<Vec<String>> {
+    let mut paths = std::collections::BTreeSet::new();
+    for action in actions {
+        if matches!(
+            action.action_type,
+            SyncActionType::Upload | SyncActionType::Download
+        ) {
+            continue;
+        }
+        if let Some(path) = action.relative_path.as_ref() {
+            paths.insert(path.clone());
+        }
+        if action.action_type == SyncActionType::MoveInCloud {
+            let file_id = action
+                .file_id
+                .as_deref()
+                .filter(|file_id| !file_id.is_empty())
+                .ok_or_else(|| AppError::generic("云端移动缺少稳定 fileId，拒绝执行"))?;
+            let old_paths = db
+                .iter()
+                .filter(|(_, record)| record.file_id == file_id)
+                .map(|(path, _)| path)
+                .collect::<Vec<_>>();
+            if old_paths.len() != 1 {
+                return Err(AppError::generic(format!(
+                    "云端移动缺少唯一旧路径基线（fileId={file_id}，matches={}）",
+                    old_paths.len()
+                )));
+            }
+            paths.insert(old_paths[0].clone());
+        }
+    }
+
+    let mut roots = Vec::<String>::new();
+    for path in paths {
+        if roots
+            .iter()
+            .any(|ancestor| path_is_same_or_descendant(&path, ancestor))
+        {
+            continue;
+        }
+        roots.push(path);
+    }
+    Ok(roots)
+}
+
+fn path_is_same_or_descendant(path: &str, ancestor: &str) -> bool {
+    path == ancestor
+        || path
+            .strip_prefix(ancestor)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+#[cfg(test)]
+mod settlement_activity_tests {
+    use super::*;
+
+    fn action(
+        action_type: SyncActionType,
+        relative_path: &str,
+        file_id: Option<&str>,
+    ) -> SyncAction {
+        SyncAction {
+            action_type,
+            relative_path: Some(relative_path.to_string()),
+            file_id: file_id.map(str::to_string),
+            parent_file_id: None,
+            local_path: None,
+            cloud_file: None,
+            reason: None,
+        }
+    }
+
+    fn db_entry(file_id: &str, is_folder: bool) -> DbSnapshotEntry {
+        DbSnapshotEntry {
+            file_id: file_id.to_string(),
+            local_mtime: None,
+            local_size: None,
+            cloud_edited_time: None,
+            status: 0,
+            is_folder,
+        }
+    }
+
+    #[test]
+    fn settlement_paths_cover_move_source_destination_and_compress_descendants() {
+        let actions = vec![
+            action(
+                SyncActionType::MoveInCloud,
+                "archive/new-folder",
+                Some("folder-id"),
+            ),
+            action(
+                SyncActionType::CreatePlaceholder,
+                "archive/new-folder/remote.txt",
+                Some("child-id"),
+            ),
+            action(SyncActionType::CreateFolder, "independent", None),
+            action(SyncActionType::Download, "unlocked-download.txt", None),
+        ];
+        let db = std::collections::HashMap::from([(
+            "projects/old-folder".to_string(),
+            db_entry("folder-id", true),
+        )]);
+
+        assert_eq!(
+            structural_settlement_paths(&actions, &db).unwrap(),
+            vec![
+                "archive/new-folder".to_string(),
+                "independent".to_string(),
+                "projects/old-folder".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn settlement_paths_reject_ambiguous_move_identity() {
+        let actions = vec![action(
+            SyncActionType::MoveInCloud,
+            "archive/report.txt",
+            Some("same-id"),
+        )];
+        let db = std::collections::HashMap::from([
+            ("one/report.txt".to_string(), db_entry("same-id", false)),
+            ("two/report.txt".to_string(), db_entry("same-id", false)),
+        ]);
+
+        assert!(structural_settlement_paths(&actions, &db).is_err());
     }
 }

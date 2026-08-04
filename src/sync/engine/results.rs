@@ -204,20 +204,43 @@ impl SyncEngine {
             // 结构性移动必须保留最后实际同步的内容版本，不能把移动前后的编辑误认为已同步；
             // 紧随的下一轮周期负责上传内容差异。
             let move_baseline = if action.action_type == SyncActionType::MoveInCloud {
-                Some(
-                    move_baselines
-                        .iter()
-                        .find(|item| item.file_id == file_id && item.local_path != rel.as_str())
-                        .or_else(|| move_baselines.iter().find(|item| item.file_id == file_id))
-                        .ok_or_else(|| {
-                            AppError::generic(format!(
-                                "云端移动已确认但缺少原内容基线（fileId={file_id}）"
-                            ))
-                        })?,
-                )
+                let matches = move_baselines
+                    .iter()
+                    .filter(|item| item.file_id == file_id)
+                    .collect::<Vec<_>>();
+                if matches.len() != 1 {
+                    return Err(AppError::generic(format!(
+                        "云端移动已确认但缺少唯一原内容基线（fileId={file_id}）"
+                    )));
+                }
+                Some(matches[0])
             } else {
                 None
             };
+
+            // 目录根移动会改变全部后代的相对路径。必须在当前结算事务内一次性重键整棵
+            // sync_items 子树；仅根节点采用 Files:update 返回的结构元数据，后代内容基线
+            // 完整保留，等下一轮按各自版本继续对账。
+            if let Some(move_root) = move_baseline.filter(|baseline| baseline.is_folder) {
+                let cloud_root = cloud_file.ok_or_else(|| {
+                    AppError::generic(format!(
+                        "云端目录移动已确认但缺少权威根元数据（fileId={file_id}）"
+                    ))
+                })?;
+                if cloud_root.id != file_id || !cloud_root.is_folder() {
+                    return Err(AppError::generic(format!(
+                        "云端目录移动返回的类型或稳定 fileId 不一致（fileId={file_id}）"
+                    )));
+                }
+                crate::sync::path_recovery::rekey_sync_items_subtree_in_transaction(
+                    &transaction,
+                    &move_baselines,
+                    &move_root.local_path,
+                    rel,
+                    cloud_root,
+                )?;
+                continue;
+            }
 
             // 读取本地真实 mtime/size（对齐 dart _updateDbFromResults 从本地文件 stat）。
             // 写死 None 会导致 is_local_changed 恒 true（db.local_mtime.is_none()），每轮重传。
@@ -416,6 +439,22 @@ impl SyncEngine {
                 }
                 if result.success {
                     if let Some(file) = result.cloud_file.as_ref().or(action.cloud_file.as_ref()) {
+                        if action.action_type == SyncActionType::MoveInCloud && file.is_folder() {
+                            let existing_path = cloud
+                                .iter()
+                                .find(|(_, existing)| existing.id == file.id)
+                                .map(|(path, _)| path.clone());
+                            if let Some(existing_path) = existing_path {
+                                if existing_path != *relative_path {
+                                    crate::sync::cloud_tree::rekey_folder_subtree(
+                                        &mut cloud,
+                                        &mut path_to_id,
+                                        &existing_path,
+                                        relative_path,
+                                    )?;
+                                }
+                            }
+                        }
                         let stale_paths: Vec<String> = cloud
                             .iter()
                             .filter(|(path, existing)| {

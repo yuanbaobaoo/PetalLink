@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use parking_lot::{Mutex, RwLock};
+use tokio::sync::Semaphore;
 
 /// 判定任务准入、去重与路径屏障。
 mod admission;
@@ -48,6 +49,8 @@ pub struct TaskRunner {
     transfer_update_tx: Option<tokio::sync::broadcast::Sender<()>>,
     // 上传终态失败的用户通知（构造后注入，未注入时不通知）。
     upload_failed_notifier: Arc<RwLock<Option<UploadFailedNotifier>>>,
+    // 所有传输入口共享的执行槽；既约束 planner，也约束 FUSE hydration/手动重试。
+    execution_slots: Arc<RwLock<Arc<Semaphore>>>,
     // 任务生命周期准入门。
     activity_gate: Arc<RwLock<Option<Arc<dyn TaskActivityGate>>>>,
 }
@@ -94,7 +97,21 @@ impl TaskRunner {
             state_sink: Arc::new(RwLock::new(state_sink)),
             transfer_update_tx,
             upload_failed_notifier: Arc::new(RwLock::new(None)),
+            // 测试/独立构造保持宽松默认；生产由 SyncExecutor 在发布 runner 前覆盖。
+            execution_slots: Arc::new(RwLock::new(Arc::new(Semaphore::new(64)))),
             activity_gate: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// 设置该 TaskRunner 的进程内共享传输并发上限。
+    ///
+    /// 必须在 runner 被发布给 SyncEngine/HydrationService 前调用。
+    pub fn set_execution_limit(&self, concurrency: usize) {
+        *self.execution_slots.write() = Arc::new(Semaphore::new(concurrency.max(1)));
+    }
+
+    /// 获取当前共享传输槽，供执行主链在跨 `await` 生命周期内持有许可。
+    pub(super) fn execution_slots(&self) -> Arc<Semaphore> {
+        self.execution_slots.read().clone()
     }
 }

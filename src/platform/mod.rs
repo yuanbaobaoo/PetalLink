@@ -1,4 +1,4 @@
-//! macOS 原生集成 —— 系统托盘 / 激活策略 / 开机自启 / 系统关机。
+//! 桌面平台集成 —— 系统托盘 / 激活策略 / 开机自启 / 扩展属性 / 系统关机。
 //!
 //! 对齐 `legacy/macos/Runner/AppDelegate.swift` 的双层架构。
 //!
@@ -13,7 +13,11 @@
 pub mod activation;
 /// macOS 登录项注册。
 pub mod launch_at_login;
+/// 使用系统默认应用打开 URL 或本地路径。
+pub mod opener;
 /// 真实退出时的同步收束。
 pub mod shutdown;
 /// 系统托盘菜单与状态刷新。
 pub mod tray;
+/// 跨平台扩展属性键映射与读写。
+pub mod xattr;

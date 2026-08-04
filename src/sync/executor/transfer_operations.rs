@@ -106,19 +106,24 @@ impl ExecutorTransferOperations {
         Ok(true)
     }
 
-    /// 将已确认的上传结果收敛为提交状态并尽力回写 fileId。
+    /// 将已确认的上传结果收敛为提交状态；fileId 必须可靠回写后才允许结算。
     async fn committed_upload(
         &self,
         task: &TransferTask,
         file: DriveFile,
     ) -> AppResult<RemoteVerification> {
-        if let Err(error) = self.set_upload_file_id_if_current(task, &file.id).await {
-            tracing::warn!(
-                task_id = task.id,
-                remote_id = %file.id,
-                %error,
-                "远端上传已确认，fileId xattr 补写失败但不阻塞基线结算"
-            );
+        match self.set_upload_file_id_if_current(task, &file.id).await {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(AppError::generic(
+                    "远端上传已确认，但本地源在身份落盘前发生变化；保留核验态，禁止重复上传",
+                ));
+            }
+            Err(error) => {
+                return Err(AppError::generic(format!(
+                    "远端上传已确认，但 fileId xattr 尚未可靠落盘：{error}"
+                )));
+            }
         }
         Ok(RemoteVerification::Committed(file))
     }
@@ -287,7 +292,7 @@ impl TransferOperations for ExecutorTransferOperations {
                 // 失败通知由结算层按终态统一发出，此处只回传错误。
                 let uploaded = upload_result.map_err(TaskExecutionError::App)?;
                 // 服务端只返回 ID 时补取权威元数据；无法确认则进入远端核验态。
-                let (cloud_file, disposition) = if uploaded.edited_time.is_none() {
+                let (cloud_file, mut disposition) = if uploaded.edited_time.is_none() {
                     match self.files_api.get(&uploaded.id).await {
                         Ok(full) if full.id == uploaded.id && full.edited_time.is_some() => {
                             (full, TaskDisposition::Completed)
@@ -310,13 +315,22 @@ impl TransferOperations for ExecutorTransferOperations {
                         .set_upload_file_id_if_current(task, &cloud_file.id)
                         .await
                     {
-                        Ok(_) => {}
+                        Ok(true) => {}
+                        Ok(false) => {
+                            disposition = TaskDisposition::VerifyingRemote;
+                            tracing::warn!(
+                                task_id = task.id,
+                                remote_id = %cloud_file.id,
+                                "上传已提交，但本地源在身份落盘前发生变化；转入核验态，禁止重复上传"
+                            );
+                        }
                         Err(error) => {
+                            disposition = TaskDisposition::VerifyingRemote;
                             tracing::warn!(
                                 task_id = task.id,
                                 remote_id = %cloud_file.id,
                                 %error,
-                                "上传已提交但 fileId xattr 写入失败；继续按已上传源快照结算"
+                                "上传已提交但 fileId xattr 写入失败；转入核验态等待仅重试身份落盘"
                             );
                         }
                     }
@@ -367,7 +381,8 @@ impl TransferOperations for ExecutorTransferOperations {
                     placeholder_file_id: (operation == TransferOperation::Download)
                         .then(|| file_id.to_string()),
                 };
-                // 下载成功后再写 xattr；失败时保留原目标或恢复产物。
+                // 下载成功后再写 xattr；fileId 是后续 rename/hydration 判断同一云文件的
+                // 必要身份，必须先于 downloaded 状态落盘，且任一步失败都不能假装任务成功。
                 self.download_api
                     .download_with_expectation(
                         file_id,
@@ -376,8 +391,8 @@ impl TransferOperations for ExecutorTransferOperations {
                         Some(&on_progress),
                     )
                     .await?;
-                let _ = self.mount.mark_downloaded(&local_path).await;
-                let _ = self.mount.set_file_id_xattr(&local_path, file_id).await;
+                self.mount.set_file_id_xattr(&local_path, file_id).await?;
+                self.mount.mark_downloaded(&local_path).await?;
                 Ok(TaskExecutionOutcome::default())
             }
             _ => Err(TaskExecutionError::App(AppError::generic(
@@ -446,7 +461,7 @@ impl TransferOperations for ExecutorTransferOperations {
                     .list_all(task.parent_file_id.as_deref())
                     .await?
                 {
-                    let parent_matches = task.parent_file_id.as_deref().map_or(true, |parent| {
+                    let parent_matches = task.parent_file_id.as_deref().is_none_or(|parent| {
                         file.parent_folder
                             .as_deref()
                             .is_some_and(|parents| parents.len() == 1 && parents[0] == parent)
@@ -574,6 +589,7 @@ impl SyncExecutor {
             initial_sink,
             self.transfer_update_tx.clone(),
         ));
+        runner.set_execution_limit(self.concurrency as usize);
         // 上传终态失败才通知 UI；可恢复结算（远端核验/退避/等待网络）不打扰用户。
         if let Some(app) = &self.app_handle {
             let app = app.clone();

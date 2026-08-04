@@ -113,6 +113,89 @@ impl CloudTreeCache {
     }
 }
 
+/// 在云端树与路径索引中一次性重键目录根及全部后代。
+///
+/// Files:update 只返回被移动的目录根，但目录的相对路径变化会影响整棵子树。调用方必须
+/// 在持久化 checkpoint 前使用本函数更新所有后代，避免生成“新根 + 旧后代”的撕裂缓存。
+pub(crate) fn rekey_folder_subtree(
+    tree: &mut HashMap<String, DriveFile>,
+    path_to_id: &mut HashMap<String, String>,
+    old_root: &str,
+    new_root: &str,
+) -> AppResult<usize> {
+    crate::core::paths::validate_relative_path(old_root, false)?;
+    crate::core::paths::validate_relative_path(new_root, false)?;
+    if old_root == new_root {
+        return Ok(0);
+    }
+    if new_root
+        .strip_prefix(old_root)
+        .is_some_and(|suffix| suffix.starts_with('/'))
+    {
+        return Err(AppError::generic(format!(
+            "拒绝把云端目录移动到自身子树：{old_root} -> {new_root}"
+        )));
+    }
+    let root = tree
+        .get(old_root)
+        .ok_or_else(|| AppError::generic(format!("云端缓存缺少待移动目录根：{old_root}")))?;
+    if !root.is_folder() {
+        return Err(AppError::generic(format!(
+            "云端缓存待重键根不是目录：{old_root}"
+        )));
+    }
+
+    let old_prefix = format!("{old_root}/");
+    let moved_paths = tree
+        .keys()
+        .filter(|path| path.as_str() == old_root || path.starts_with(&old_prefix))
+        .cloned()
+        .collect::<Vec<_>>();
+    let moved_set = moved_paths
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let targets = moved_paths
+        .iter()
+        .map(|old_path| {
+            let suffix = old_path.strip_prefix(old_root).unwrap_or_default();
+            (old_path.clone(), format!("{new_root}{suffix}"))
+        })
+        .collect::<Vec<_>>();
+    for (old_path, target) in &targets {
+        let file = tree
+            .get(old_path)
+            .ok_or_else(|| AppError::generic(format!("云端缓存路径在重键前消失：{old_path}")))?;
+        if path_to_id.get(old_path) != Some(&file.id) {
+            return Err(AppError::generic(format!(
+                "云端缓存路径索引不一致，拒绝目录重键：{old_path}"
+            )));
+        }
+        if tree.contains_key(target) && !moved_set.contains(target.as_str()) {
+            return Err(AppError::generic(format!(
+                "云端目录移动目标路径已存在，拒绝覆盖：{target}"
+            )));
+        }
+    }
+
+    let mut moved = Vec::with_capacity(targets.len());
+    for (old_path, new_path) in targets {
+        let file = tree
+            .remove(&old_path)
+            .ok_or_else(|| AppError::generic(format!("云端缓存移动时路径消失：{old_path}")))?;
+        let file_id = path_to_id
+            .remove(&old_path)
+            .ok_or_else(|| AppError::generic(format!("云端路径索引移动时路径消失：{old_path}")))?;
+        moved.push((new_path, file_id, file));
+    }
+    let moved_count = moved.len();
+    for (new_path, file_id, file) in moved {
+        path_to_id.insert(new_path.clone(), file_id);
+        tree.insert(new_path, file);
+    }
+    Ok(moved_count)
+}
+
 /// 构建云端文件树（BFS）。
 /// 返回 (tree: rel_path→DriveFile, path_to_id: rel_path→file_id, root_folder_id)。
 pub async fn refresh_cloud_tree(
@@ -430,5 +513,86 @@ impl Default for DriveFile {
             content_hash: None,
             thumbnail_link: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod subtree_tests {
+    use super::*;
+    use crate::drive::models::FileCategory;
+
+    fn folder(id: &str, name: &str, parent: &str) -> DriveFile {
+        DriveFile {
+            id: id.into(),
+            name: name.into(),
+            category: FileCategory::Folder,
+            parent_folder: Some(vec![parent.into()]),
+            ..Default::default()
+        }
+    }
+
+    /// 目录根恢复结果必须把 checkpoint 中全部后代一起迁移，且不改后代元数据。
+    #[test]
+    fn rekey_folder_subtree_moves_all_descendants_in_cache() {
+        let child_edited = chrono::DateTime::from_timestamp_millis(8_765);
+        let child = DriveFile {
+            id: "child-file".into(),
+            name: "note.txt".into(),
+            size: 41,
+            parent_folder: Some(vec!["nested-folder".into()]),
+            edited_time: child_edited,
+            ..Default::default()
+        };
+        let mut tree: HashMap<String, DriveFile> = HashMap::from([
+            (
+                "projects/old".into(),
+                folder("root-folder", "old", "projects-folder"),
+            ),
+            (
+                "projects/old/nested".into(),
+                folder("nested-folder", "nested", "root-folder"),
+            ),
+            ("projects/old/nested/note.txt".into(), child.clone()),
+            (
+                "unrelated".into(),
+                folder("unrelated-folder", "unrelated", "root"),
+            ),
+        ]);
+        let mut path_to_id = tree
+            .iter()
+            .map(|(path, file)| (path.clone(), file.id.clone()))
+            .collect::<HashMap<_, _>>();
+        path_to_id.insert(String::new(), "root".into());
+
+        let moved = rekey_folder_subtree(&mut tree, &mut path_to_id, "projects/old", "archive/new")
+            .unwrap();
+
+        assert_eq!(moved, 3);
+        assert!(!tree.contains_key("projects/old"));
+        assert!(!tree.contains_key("projects/old/nested"));
+        assert!(!tree.contains_key("projects/old/nested/note.txt"));
+        assert_eq!(
+            tree.get("archive/new").map(|file| file.id.as_str()),
+            Some("root-folder")
+        );
+        assert_eq!(
+            tree.get("archive/new/nested").map(|file| file.id.as_str()),
+            Some("nested-folder")
+        );
+        let moved_child = tree.get("archive/new/nested/note.txt").unwrap();
+        assert_eq!(moved_child.id, child.id);
+        assert_eq!(moved_child.size, child.size);
+        assert_eq!(moved_child.edited_time, child.edited_time);
+        assert_eq!(
+            path_to_id
+                .get("archive/new/nested/note.txt")
+                .map(String::as_str),
+            Some("child-file")
+        );
+        assert_eq!(path_to_id.get("").map(String::as_str), Some("root"));
+        assert_eq!(
+            tree.get("unrelated").map(|file| file.id.as_str()),
+            Some("unrelated-folder")
+        );
     }
 }

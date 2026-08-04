@@ -1,12 +1,15 @@
 //! 远端路径恢复与持久传输状态协作的集成测试。
 
-#![cfg(target_os = "macos")]
+#![cfg(any(target_os = "linux", target_os = "macos"))]
 
 use std::collections::HashMap;
 
 use petal_link_lib::drive::models::DriveFile;
 use petal_link_lib::error::AppResult;
-use petal_link_lib::sync::path_recovery::recover_verified_remote_path_changes;
+use petal_link_lib::sync::conflict::dedupe_copy_path;
+use petal_link_lib::sync::path_recovery::{
+    recover_verified_remote_path_changes, rename_no_replace,
+};
 use petal_link_lib::sync::transfer_state::{TransferOperation, TransferState};
 use rusqlite::{params, Connection};
 
@@ -18,6 +21,57 @@ const OLD_PATH: &str = "contracts/old.docx";
 const NEW_PATH: &str = "contracts/new.docx";
 /// 本地持久化远端身份使用的扩展属性。
 const XATTR_FILE_ID: &str = "com.hwcloud.fileId";
+
+/// 原子不覆盖重命名在目标缺失时应完整移动源内容。
+#[test]
+fn rename_no_replace_moves_source_when_target_is_absent() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source.txt");
+    let target = temp.path().join("target.txt");
+    std::fs::write(&source, b"source-data").unwrap();
+
+    rename_no_replace(&source, &target).unwrap();
+
+    assert!(!source.exists());
+    assert_eq!(std::fs::read(&target).unwrap(), b"source-data");
+}
+
+/// 目标突变时必须拒绝覆盖，并同时保留源与目标的原始内容。
+#[test]
+fn rename_no_replace_preserves_both_files_on_conflict() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source.txt");
+    let target = temp.path().join("target.txt");
+    std::fs::write(&source, b"source-data").unwrap();
+    std::fs::write(&target, b"target-data").unwrap();
+
+    assert!(rename_no_replace(&source, &target).is_err());
+
+    assert_eq!(std::fs::read(&source).unwrap(), b"source-data");
+    assert_eq!(std::fs::read(&target).unwrap(), b"target-data");
+}
+
+/// 副本候选在存在性检查后被抢占时，应保留抢占内容并改用下一个去重名称。
+#[test]
+fn conflict_copy_collision_retries_without_overwrite() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("report.txt");
+    std::fs::write(&source, b"local-version").unwrap();
+    let stamp = chrono::DateTime::from_timestamp_millis(1_700_000_000_000).unwrap();
+
+    let raced_target = dedupe_copy_path(&source, "本地副本", &stamp);
+    std::fs::write(&raced_target, b"racing-writer").unwrap();
+    let collision = rename_no_replace(&source, &raced_target).unwrap_err();
+    assert_eq!(collision.kind(), std::io::ErrorKind::AlreadyExists);
+
+    let retry_target = dedupe_copy_path(&source, "本地副本", &stamp);
+    assert_ne!(retry_target, raced_target);
+    rename_no_replace(&source, &retry_target).unwrap();
+
+    assert!(!source.exists());
+    assert_eq!(std::fs::read(&raced_target).unwrap(), b"racing-writer");
+    assert_eq!(std::fs::read(&retry_target).unwrap(), b"local-version");
+}
 
 /// 创建路径恢复所需的最小数据库结构。
 fn open_database(path: &std::path::Path) -> Connection {
@@ -179,7 +233,7 @@ fn restart_required_does_not_permanently_block_path_recovery() -> AppResult<()> 
     let target = temp.path().join(NEW_PATH);
     std::fs::create_dir_all(target.parent().unwrap())?;
     std::fs::write(&target, b"data")?;
-    xattr::set(&target, XATTR_FILE_ID, FILE_ID.as_bytes())?;
+    petal_link_lib::platform::xattr::set(&target, XATTR_FILE_ID, FILE_ID.as_bytes())?;
 
     let summary = recover_verified_remote_path_changes(
         temp.path(),
@@ -269,7 +323,7 @@ fn path_conflict_does_not_block_independent_recovery() -> Result<(), Box<dyn std
     let second_target = temp.path().join(second_new_path);
     std::fs::create_dir_all(second_target.parent().unwrap())?;
     std::fs::write(&second_target, b"data")?;
-    xattr::set(&second_target, XATTR_FILE_ID, second_file_id.as_bytes())?;
+    petal_link_lib::platform::xattr::set(&second_target, XATTR_FILE_ID, second_file_id.as_bytes())?;
 
     let mut cloud_tree = renamed_cloud_tree();
     cloud_tree.insert(

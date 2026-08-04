@@ -35,6 +35,9 @@ const READONLY_PROCESSES: &[&str] = &[
     "bird",
     "CoreServicesUIAgent",
 ];
+/// Linux 不预设跨桌面环境的只读进程白名单，优先保守延迟上传。
+#[cfg(target_os = "linux")]
+const READONLY_PROCESSES: &[&str] = &[];
 
 /// 稳定性检查结果
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,7 +149,7 @@ fn file_size(path: &Path) -> Option<u64> {
 
 /// lsof 检查：是否有进程以写模式打开文件。
 /// 对齐 dart `_isFileBusy`（双重检查 + 白名单在 check 方法中处理）。
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn is_file_busy(path: &Path) -> bool {
     use tokio::process::Command;
     let path_str = path.to_string_lossy().to_string();
@@ -177,8 +180,8 @@ async fn is_file_busy(path: &Path) -> bool {
     !commands.is_empty()
 }
 
-#[cfg(not(target_os = "macos"))]
-/// 非 macOS 平台不执行 `lsof` 占用检测。
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+/// 尚未适配的平台不执行 `lsof` 占用检测。
 async fn is_file_busy(_path: &Path) -> bool {
     false
 }

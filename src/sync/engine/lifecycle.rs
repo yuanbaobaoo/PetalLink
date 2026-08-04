@@ -130,6 +130,12 @@ impl SyncEngine {
         self.activity.begin(None)
     }
 
+    /// 校验路径后登记可与其他只读任务并行的共享子树活动。
+    pub(crate) fn begin_path_activity(&self, relative_path: &str) -> AppResult<ActivityGuard> {
+        crate::core::paths::validate_relative_path(relative_path, false)?;
+        self.activity.begin(Some(relative_path))
+    }
+
     /// 校验路径后尝试获取排他子树活动租约。
     pub(crate) fn begin_exclusive_path_activity(
         &self,
@@ -137,6 +143,18 @@ impl SyncEngine {
     ) -> AppResult<ActivityGuard> {
         crate::core::paths::validate_relative_path(relative_path, false)?;
         self.activity.begin_exclusive(relative_path)
+    }
+
+    /// 当前引擎是否已经关闭新活动准入。
+    pub(crate) fn is_shutting_down(&self) -> bool {
+        *self.shutdown.lock()
+    }
+
+    /// 把 FUSE 已提交的本地修改立即并入现有 watcher 重扫通道。
+    pub(crate) fn notify_virtual_drive_change(self: &Arc<Self>) {
+        if !self.is_shutting_down() {
+            self.request_cycle_background("local-watcher");
+        }
     }
 
     /// 返回已绑定的持久传输调度器。
@@ -181,11 +199,11 @@ impl SyncEngine {
         }
     }
 
-    /// 停止引擎：停 watcher（释放 FSEvents）+ 置 shutdown 标志（detached watcher 任务退出）。
+    /// 停止引擎：停 watcher（释放平台事件流）+ 置 shutdown 标志。
     ///
     /// 必须在引擎被替换（换目录/换账号）或退出前调用。之前只 `drop_runtime()` 清全局指针，
     /// 但 detached watcher 任务持有 `Arc<SyncEngine>` 克隆，引擎永不被 drop → 旧 watcher
-    /// 持续监听 FSEvents，向旧（cloud_tree 已过时的）引擎触发 sync cycle → 误判「本地新建」
+    /// 持续监听文件事件，向旧（cloud_tree 已过时的）引擎触发 sync cycle → 误判「本地新建」
     /// 疯狂上传。本方法确保旧 watcher 真正停止。
     pub async fn shutdown(&self) {
         let watcher = self.watcher.lock().take();
@@ -223,10 +241,10 @@ impl SyncEngine {
         }
         let _ = self.shutdown_tx.send(true);
         self.backoff_changed.notify_waiters();
-        // 取出并释放 watcher，同步关闭底层 FSEvents stream。
+        // 取出并释放 watcher，同步关闭平台底层事件流。
         let taken = self.watcher.lock().take();
         drop(taken);
-        tracing::info!("SyncEngine shutdown_sync（shutdown 标志置位、FSEvents 释放）");
+        tracing::info!("SyncEngine shutdown_sync（shutdown 标志置位、文件 watcher 释放）");
     }
 
     /// 先订阅网络转换，再完成启动收敛并装配运行期监听任务。

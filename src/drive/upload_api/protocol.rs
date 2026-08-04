@@ -71,7 +71,7 @@ pub(super) fn complete_upload_file(
     let file = DriveFile::from_json(body)?;
     let size_matches = file.size >= 0 && file.size as u64 == expected_size;
     let name_matches = !file.name.trim().is_empty()
-        && expected_name.map_or(true, |expected| file.name.as_str() == expected);
+        && expected_name.is_none_or(|expected| file.name.as_str() == expected);
     (!file.id.trim().is_empty() && size_matches && name_matches).then_some(file)
 }
 
