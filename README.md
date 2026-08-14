@@ -1,3 +1,5 @@
+
+
 <p align="center"><img alt="PetalLink" src="assets/logo.png" width="80"></p>
 
 # PetalLink
@@ -79,6 +81,7 @@
 - macOS 12 Monterey 及以上
 - [Rust](https://rustup.rs/) 1.77+
 - [Node.js](https://nodejs.org/) 20+（推荐 24+）
+- [cargo-tauri](https://github.com/tauri-apps/tauri/blob/dev/crates/tauri-cli/README.md)（`cargo install cargo-tauri`）
 - Xcode Command Line Tools（`xcode-select --install`）
 
 ---
