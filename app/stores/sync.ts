@@ -7,12 +7,15 @@ import { commands } from "@/api/generated";
 import * as syncApi from "@/api/sync";
 import type { FailedItem } from "@/api/sync";
 import * as configApi from "@/api/config";
+import { isLinuxPlatform } from "@/utils/platform";
 
 // 重新导出 FailedItem，保持既有导入路径（`from "@/stores/sync"`）可用
 export type { FailedItem };
 
 // 全局同步 Store。
 export const useSyncStore = defineStore("sync", () => {
+  // Linux 发行版只有 FUSE 云盘模式；其他平台保留传统同步目录。
+  const isLinux = isLinuxPlatform();
   // 全局同步状态
   const revision = ref(0);
   // 本轮总任务数。
@@ -55,6 +58,29 @@ export const useSyncStore = defineStore("sync", () => {
   const mountConfigured = ref(false);
   // 同步目录路径
   const mountDir = ref("");
+  // Linux FUSE 云盘是否启用；Linux 配置页不再提供关闭入口。
+  const virtualDriveEnabled = ref(false);
+  // Linux FUSE 用户可见挂载目录。
+  const virtualMountDir = ref("");
+  // FUSE 当前是否真实挂载；不能用配置开关代替。
+  const virtualDriveMounted = ref(false);
+  // 当前真实挂载目录（成功挂载后由后端返回）。
+  const mountedVirtualDir = ref("");
+  // 最近一次 FUSE 挂载失败原因。
+  const virtualDriveError = ref<string | null>(null);
+  // Linux 的产品模式固定为 FUSE；状态查询失败或返回 disabled 也不能退回传统同步。
+  const usesVirtualDrive = computed(() => isLinux || virtualDriveEnabled.value);
+  // 用户应在文件管理器中访问的目录。Linux 永不回退暴露 hidden backing：
+  // FUSE 未真实挂载时返回空字符串，让所有“打开云盘”入口保持禁用。
+  const userVisibleRoot = computed(() => {
+    if (isLinux) {
+      return virtualDriveMounted.value ? mountedVirtualDir.value : "";
+    }
+    if (virtualDriveEnabled.value) {
+      return virtualDriveMounted.value ? mountedVirtualDir.value : "";
+    }
+    return mountDir.value;
+  });
   // 同步阶段
   const setupPhase = ref<"loading" | "needsSetup" | "needsFirstSync" | "active">("loading");
 
@@ -118,12 +144,53 @@ export const useSyncStore = defineStore("sync", () => {
   /**
    * 在配置提交成功后立即应用挂载事实，避免瞬时配置重读失败回退为未配置。
    *
-   * @param path - 已持久化的同步目录
+   * Linux 的用户选择是 FUSE 可见目录，不能覆盖后端管理的 backing 目录。
+   *
+   * @param path - 已持久化的用户可见目录
    */
   function applyMountConfiguration(path: string): void {
     mountConfigured.value = true;
-    mountDir.value = path;
+    if (isLinux) {
+      virtualDriveEnabled.value = true;
+      virtualMountDir.value = path;
+    } else {
+      mountDir.value = path;
+    }
     setupPhase.value = "active";
+  }
+
+  /**
+   * 应用后端报告的真实 FUSE 挂载状态。
+   */
+  function applyVirtualDriveStatus(value: unknown): boolean {
+    if (!value || typeof value !== "object") return false;
+    const status = value as Record<string, unknown>;
+    if (
+      typeof status.enabled !== "boolean"
+      || typeof status.mounted !== "boolean"
+      || !(status.mount_dir === null || typeof status.mount_dir === "string")
+      || !(status.error === null || typeof status.error === "string")
+    ) {
+      return false;
+    }
+    virtualDriveEnabled.value = status.enabled;
+    virtualDriveMounted.value = status.mounted;
+    mountedVirtualDir.value = status.mounted && typeof status.mount_dir === "string"
+      ? status.mount_dir
+      : "";
+    virtualDriveError.value = typeof status.error === "string" ? status.error : null;
+    return true;
+  }
+
+  /**
+   * 主动刷新真实挂载状态，用于覆盖前端初始化早于异步 FUSE 启动的窗口。
+   */
+  async function refreshVirtualDriveStatus(): Promise<void> {
+    try {
+      applyVirtualDriveStatus(await commands.virtualDriveStatus());
+    } catch {
+      // 后端尚未启动或旧版本无此命令时保留当前状态，等待状态事件。
+    }
   }
 
   /**
@@ -134,9 +201,17 @@ export const useSyncStore = defineStore("sync", () => {
     try {
       // 配置决定同步视图能否进入 active 阶段。
       const config = await configApi.loadConfig();
-      mountConfigured.value = config.mount_configured;
+      const visibleDirectoryConfigured = !isLinux
+        || Boolean((config.virtual_mount_dir ?? "").trim());
+      mountConfigured.value = config.mount_configured && visibleDirectoryConfigured;
       mountDir.value = config.mount_dir;
-      if (!config.mount_configured) {
+      virtualDriveEnabled.value = isLinux || (config.virtual_drive_enabled ?? false);
+      virtualMountDir.value = config.virtual_mount_dir ?? "";
+      virtualDriveMounted.value = false;
+      mountedVirtualDir.value = "";
+      virtualDriveError.value = null;
+      await refreshVirtualDriveStatus();
+      if (!mountConfigured.value) {
         setupPhase.value = "needsSetup";
       } else {
         setupPhase.value = "active";
@@ -184,8 +259,13 @@ export const useSyncStore = defineStore("sync", () => {
     failed, transferFailed, failedItems, conflict, editing,
     isRunning, isIndexing, indexingScannedFolders, indexingDiscoveredItems,
     syncPhase, lastSyncTime, contentChanged,
-    mountConfigured, setupPhase, mountDir, progress, hasActiveTransfer,
-    init, applyState, applyMountConfiguration, triggerManualRefresh, retryFailed,
+    mountConfigured, setupPhase, mountDir,
+    virtualDriveEnabled, virtualMountDir, virtualDriveMounted,
+    mountedVirtualDir, virtualDriveError, usesVirtualDrive, userVisibleRoot,
+    progress, hasActiveTransfer,
+    init, applyState, applyMountConfiguration,
+    applyVirtualDriveStatus, refreshVirtualDriveStatus,
+    triggerManualRefresh, retryFailed,
     sidebarRefresh,
   };
 });

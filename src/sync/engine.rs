@@ -140,7 +140,7 @@ pub struct SyncEngine {
     /// 云端定时刷新间隔（秒）。0 = 关闭。到期后全量 BFS 重拉云端树，使云端变更自动同步到本地。
     poll_interval_secs: u32,
     state_tx: broadcast::Sender<SyncGlobalState>,
-    /// 本地监听器句柄（保活，防止 FSEvents 提前释放）
+    /// 本地监听器句柄（保活，防止平台 watcher 提前释放）
     watcher: Mutex<Option<Arc<LocalWatcher>>>,
     /// 是否已 shutdown。detached watcher 任务每次 cycle 前检查此标志，
     /// 置位后退出循环，防止引擎被替换后旧 watcher 仍触发 sync cycle（误判上传）。

@@ -10,15 +10,23 @@ import type { AppConfig } from "@/api/config";
 import * as authApi from "@/api/auth";
 import LogViewerPage from "@/views/settings/LogViewerPage.vue";
 import { useAuthStore } from "@/stores/auth";
+import { useSyncStore } from "@/stores/sync";
+import { useFileBrowserStore } from "@/stores/fileBrowser";
 import { useUpdaterStore } from "@/stores/updater";
 import { useTransferStore } from "@/stores/transfer";
 import { useAsyncAction } from "@/composables/useAsyncAction";
 import { selectAndConfigureSyncDirectory } from "@/composables/useSyncDirectorySetup";
+import { open } from "@tauri-apps/plugin-dialog";
 import { formatFileSize } from "@/utils/format";
+import { isCompletelyEmptyDir } from "@/utils/fs";
+import { isLinuxPlatform } from "@/utils/platform";
 import { extractErrorMessage } from "@/utils/error";
 
 // 当前认证状态。
 const auth = useAuthStore();
+// 目录配置保存后用于立即提交状态并刷新文件列表。
+const sync = useSyncStore();
+const browser = useFileBrowserStore();
 // 应用更新状态。
 const updater = useUpdaterStore();
 // 传输队列状态（用于传输中禁用清空缓存/退出登录）。
@@ -27,13 +35,15 @@ const transfer = useTransferStore();
 type TabKey = "syncDir" | "transfer" | "advanced" | "account" | "logs" | "about";
 // 当前激活的 Tab
 const activeTab = ref<TabKey>("syncDir");
+// 平台决定目录设置的含义；Linux 只让用户选择 FUSE 可见目录。
+const isLinux = isLinuxPlatform();
 
 // 左侧导航分组（通用 / 其他）
 const tabGroups: { group: string; items: { key: TabKey; icon: string; label: string }[] }[] = [
   {
     group: "通用",
     items: [
-      { key: "syncDir", icon: "folder", label: "同步目录" },
+      { key: "syncDir", icon: "folder", label: isLinux ? "云盘目录" : "同步目录" },
       { key: "transfer", icon: "transfer", label: "传输设置" },
       { key: "advanced", icon: "settings", label: "高级设置" },
     ],
@@ -62,6 +72,10 @@ const mountDir = ref("");
 const mountConfigured = ref(false);
 // 最近一次成功加载或保存的完整配置，用于保留未展示字段。
 const loadedConfig = ref<AppConfig | null>(null);
+// Linux FUSE 云盘状态；Linux 不提供传统同步模式入口。
+const virtualDriveEnabled = ref(false);
+// 用户在文件管理器中看到的云盘挂载目录。
+const virtualMountDir = ref("");
 // OAuth 设置
 const oauthPort = ref(9999);
 // 开机自启
@@ -96,9 +110,25 @@ const userInitial = computed(() => authApi.initial(userInfo.value) ?? "华");
 const about = ref<DriveAbout | null>(null);
 // 应用版本号
 const appVersion = ref("");
+// 当前正在交给系统浏览器打开的项目主页；非空时阻止重复点击。
+const openingExternalUrl = ref("");
+// 关于页只展示项目固定主页；后端仍会校验协议与主机后再交给系统浏览器。
+const projectLinks = {
+  GitHub: "https://github.com/yuanbaobaoo/PetalLink",
+  GitCode: "https://gitcode.com/yuanbaobaoo/PetalLink",
+} as const;
 
 // 配置类页签才展示保存底栏。
 const showFooter = computed(() => ["syncDir", "transfer", "advanced"].includes(activeTab.value));
+// Linux 云盘目录的即时提示；路径、权限与挂载能力仍以后端校验为准。
+const virtualDirectoryError = computed<string | null>(() => {
+  // 尚未开始目录配置时仍允许先保存传输/高级设置；用户一旦选择目录再要求完整。
+  if (!isLinux || !mountConfigured.value) return null;
+  if (!virtualMountDir.value.trim()) {
+    return "请选择一个完全空的目录作为云盘目录";
+  }
+  return null;
+});
 
 // 设置页导航事件。
 const emit = defineEmits<{ (e: "back"): void; (e: "open-logs"): void }>();
@@ -116,7 +146,10 @@ onMounted(async () => {
     debounceSec.value = config.debounce_sec;
     skipPatterns.value = config.skip_patterns.join(", ");
     mountDir.value = config.mount_dir;
-    mountConfigured.value = config.mount_configured;
+    virtualMountDir.value = config.virtual_mount_dir ?? "";
+    mountConfigured.value = config.mount_configured
+      && (!isLinux || Boolean(virtualMountDir.value.trim()));
+    virtualDriveEnabled.value = isLinux || (config.virtual_drive_enabled ?? false);
     oauthPort.value = config.oauth_callback_port;
     pollIntervalSec.value = config.poll_interval_sec;
   } catch {}
@@ -146,6 +179,8 @@ function buildFormConfig(): AppConfig {
     oauth_callback_port: oauthPort.value,
     mount_dir: mountDir.value,
     mount_configured: mountConfigured.value,
+    virtual_drive_enabled: isLinux ? true : virtualDriveEnabled.value,
+    virtual_mount_dir: virtualMountDir.value,
     concurrency: concurrency.value,
     poll_interval_sec: pollIntervalSec.value,
     debounce_sec: debounceSec.value,
@@ -164,6 +199,8 @@ function buildFormConfig(): AppConfig {
     oauth_callback_port: oauthPort.value,
     mount_dir: mountDir.value,
     mount_configured: mountConfigured.value,
+    virtual_drive_enabled: isLinux ? true : virtualDriveEnabled.value,
+    virtual_mount_dir: virtualMountDir.value,
     concurrency: concurrency.value,
     poll_interval_sec: pollIntervalSec.value,
     debounce_sec: debounceSec.value,
@@ -177,6 +214,11 @@ function buildFormConfig(): AppConfig {
  */
 async function handleSave(): Promise<void> {
   if (saving.value) return; // 防重复点击
+  if (virtualDirectoryError.value) {
+    errorMessage.value = virtualDirectoryError.value;
+    showToast(virtualDirectoryError.value, { variant: "warning" });
+    return;
+  }
   saving.value = true; errorMessage.value = null;
   try {
     // 所有配置一次提交，避免局部成功导致界面与磁盘不一致。
@@ -201,7 +243,10 @@ async function handleReset(): Promise<void> {
     debounceSec.value = config.debounce_sec;
     skipPatterns.value = config.skip_patterns.join(", ");
     mountDir.value = config.mount_dir;
-    mountConfigured.value = config.mount_configured;
+    virtualMountDir.value = config.virtual_mount_dir ?? "";
+    mountConfigured.value = config.mount_configured
+      && (!isLinux || Boolean(virtualMountDir.value.trim()));
+    virtualDriveEnabled.value = isLinux || (config.virtual_drive_enabled ?? false);
     oauthPort.value = config.oauth_callback_port;
     pollIntervalSec.value = config.poll_interval_sec;
     saved.value = true;
@@ -248,7 +293,7 @@ async function handleClearCache(): Promise<void> {
     // 高风险操作必须由用户显式确认。
     const ok = await confirmDialog({
       title: "清空缓存并重启", titleIcon: "alert", danger: true, confirmText: "确认清空",
-      content: "此操作将清除：\n• 登录状态（需重新登录）\n• 同步数据库（本地镜像与传输队列）\n• 缓存文件（同步状态快照 + 云端树缓存，工作目录）\n• 配置文件（端口、并发、过滤等设置）\n\n云盘文件不会被删除。",
+      content: "此操作将清除：\n• 登录状态（需重新登录）\n• 同步数据库与传输队列\n• 应用管理的本地文件缓存（尚未上传的本地更改也会丢失）\n• 同步快照、云端树缓存和配置文件\n\n已经上传到云盘的文件不会被删除。",
     });
     if (!ok) return;
     // 后端 app_clear_cache 会停引擎+删 config+relaunch（进程将替换），先提示再调，不依赖返回
@@ -293,28 +338,88 @@ async function handleCheckUpdate(): Promise<void> {
 }
 
 /**
- * 通过统一入口选择目录并提交当前完整设置表单。
+ * 使用系统默认浏览器打开项目主页。
+ */
+async function handleOpenExternalLink(
+  label: keyof typeof projectLinks,
+  url: (typeof projectLinks)[keyof typeof projectLinks],
+): Promise<void> {
+  if (openingExternalUrl.value) return;
+  openingExternalUrl.value = url;
+  try {
+    await commands.openExternalUrl(url);
+  } catch (error) {
+    showToast(`打开 ${label} 失败：${extractErrorMessage(error)}`, { variant: "error" });
+  } finally {
+    openingExternalUrl.value = "";
+  }
+}
+
+/**
+ * 选择目录并提交当前完整设置表单。
+ *
+ * 非 Linux 使用 1.1.4 的统一传统目录流程；Linux 单独校验完全空的 FUSE
+ * 挂载点，并只更新用户可见目录，保留后端管理的 backing。
  */
 async function handleSelectDir(): Promise<void> {
   await runSelectDir(async () => {
     try {
       // 当前表单配置必须与新目录在同一事务中提交，避免未保存编辑丢失。
       const config = buildFormConfig();
-      // 统一目录配置结果。
-      const result = await selectAndConfigureSyncDirectory(config);
-      if (!result) return;
-      mountDir.value = result.path;
-      mountConfigured.value = true;
-      loadedConfig.value = {
-        ...config,
-        mount_dir: result.path,
-        mount_configured: true,
-        skip_patterns: [...config.skip_patterns],
-      };
+
+      if (!isLinux) {
+        // 统一目录配置结果。
+        const result = await selectAndConfigureSyncDirectory(config);
+        if (!result) return;
+        mountDir.value = result.path;
+        mountConfigured.value = true;
+        loadedConfig.value = {
+          ...config,
+          mount_dir: result.path,
+          mount_configured: true,
+          skip_patterns: [...config.skip_patterns],
+        };
+      } else {
+        const selected = await open({
+          directory: true,
+          multiple: false,
+          title: "选择云盘目录",
+        });
+        if (!selected || typeof selected !== "string") return;
+
+        let isEmpty = false;
+        try {
+          isEmpty = await isCompletelyEmptyDir(selected);
+        } catch {
+          // 无法读取目录时按非空处理，避免挂载覆盖未知内容。
+        }
+        if (!isEmpty) {
+          showToast("云盘目录必须完全为空（包括隐藏文件）", { variant: "warning" });
+          return;
+        }
+
+        const nextConfig = configApi.withSelectedDriveDirectory(config, selected, true);
+        await commands.configSave(nextConfig);
+        sync.applyMountConfiguration(selected);
+        virtualMountDir.value = selected;
+        virtualDriveEnabled.value = true;
+        mountConfigured.value = true;
+        loadedConfig.value = {
+          ...nextConfig,
+          skip_patterns: [...nextConfig.skip_patterns],
+        };
+        await sync.init();
+        await browser.loadRoot();
+      }
+
+      errorMessage.value = null;
       saved.value = true;
       showToast("配置已保存");
     } catch (e) {
-      showToast("配置同步目录失败：" + extractErrorMessage(e), { variant: "error" });
+      showToast(
+        `${isLinux ? "配置云盘目录" : "配置同步目录"}失败：${extractErrorMessage(e)}`,
+        { variant: "error" },
+      );
     }
   });
 }
@@ -350,20 +455,49 @@ function fmtSize(bytes: number): string {
       <div class="settings-main">
         <!-- 同步目录 -->
         <section v-if="activeTab === 'syncDir'" class="settings-section">
-          <MateSectionHeader icon="folder" text="同步目录" />
+          <MateSectionHeader icon="folder" :text="isLinux ? '云盘目录' : '同步目录'" />
           <div v-if="!mountConfigured" class="card">
             <div class="card__badge"><MateIcon name="folder-open" :size="32" /></div>
-            <div class="card-title">尚未配置同步目录</div>
-            <div class="card-desc">选择一个本地空目录作为云盘镜像，文件将自动双向同步。</div>
-            <MateButton variant="primary" icon="folder-open" :loading="selectDirLoading" :disabled="selectDirLoading" @click="handleSelectDir">选择目录</MateButton>
+            <div class="card-title">{{ isLinux ? "尚未配置云盘目录" : "尚未配置本地数据目录" }}</div>
+            <div class="card-desc">
+              {{ isLinux
+                ? "选择一个完全空的目录，之后可像普通文件夹一样使用华为云盘。"
+                : "选择一个本地空目录保存同步数据与已下载的文件。" }}
+            </div>
+            <MateButton variant="primary" icon="folder-open" :loading="selectDirLoading" :disabled="selectDirLoading" @click="handleSelectDir">
+              {{ isLinux ? "选择云盘目录" : "选择本地数据目录" }}
+            </MateButton>
           </div>
           <div v-else class="card">
             <MateIcon name="check" :size="20" class="card-icon card-icon--success" />
-            <div class="card-title">当前同步目录</div>
-            <code class="card-path">{{ mountDir }}</code>
+            <div class="card-title">{{ isLinux ? "云盘目录" : "本地缓存 / 同步数据目录" }}</div>
+            <div class="card-desc">
+              {{ isLinux
+                ? "可在文件管理器中像普通文件夹一样使用；未下载的文件会在首次打开时自动获取。"
+                : "传统同步模式下，这也是日常打开的本地云盘镜像。" }}
+            </div>
+            <code class="card-path">{{ isLinux ? virtualMountDir : mountDir }}</code>
             <MateButton variant="text" icon="folder-open" :loading="selectDirLoading" :disabled="selectDirLoading" @click="handleSelectDir">更换目录</MateButton>
           </div>
-          <MateInfoBanner variant="info" class="info-banner">更换同步目录将清除所有本地缓存与登录状态并重启，云盘文件不受影响。</MateInfoBanner>
+          <MateInfoBanner variant="info" class="info-banner">
+            {{ isLinux
+              ? "更换云盘目录后应用会重新挂载；账号、本地缓存与云盘文件不受影响。"
+              : "更换同步目录将清除所有本地缓存与登录状态并重启，云盘文件不受影响。" }}
+          </MateInfoBanner>
+          <MateInfoBanner
+            v-if="isLinux && virtualDirectoryError"
+            variant="warning"
+            class="info-banner"
+          >
+            {{ virtualDirectoryError }}
+          </MateInfoBanner>
+          <MateInfoBanner
+            v-else-if="isLinux"
+            variant="info"
+            class="info-banner"
+          >
+            保存后应用将重新加载云盘。目录权限与系统支持情况会自动检查。
+          </MateInfoBanner>
         </section>
 
         <!-- 传输设置 -->
@@ -411,14 +545,14 @@ function fmtSize(bytes: number): string {
             <div class="setting-row">
               <div class="setting-row__text">
                 <div class="setting-label">开机自启动</div>
-                <div class="setting-desc">开机登录后自动在后台启动（仅菜单栏图标，不显示主窗口）。关闭后需手动打开 App。</div>
+                <div class="setting-desc">登录桌面后自动在后台启动（仅托盘图标，不显示主窗口）。关闭后需手动打开 App。</div>
               </div>
               <div class="setting-control"><MateSwitch :model-value="autoLaunch" @update:model-value="onToggleAutoLaunch" /></div>
             </div>
             <div class="setting-row">
               <div class="setting-row__text">
                 <div class="setting-label">显示托盘图标</div>
-                <div class="setting-desc">在菜单栏显示 PetalLink 图标（后台同步入口）。关闭后 App 仍在后台运行，此时可通过 Cmd+Q 完全退出。</div>
+                <div class="setting-desc">显示 PetalLink 托盘图标（后台同步入口）。关闭后，关闭主窗口即会完全退出。</div>
               </div>
               <div class="setting-control"><MateSwitch :model-value="showTrayIcon" @update:model-value="onToggleTrayIcon" /></div>
             </div>
@@ -467,7 +601,7 @@ function fmtSize(bytes: number): string {
             <div class="setting-row">
               <div class="setting-row__text">
                 <div class="setting-label">退出登录</div>
-                <div class="setting-desc">清除本地 token 并返回登录页。后台进程仍会继续，可从菜单栏彻底退出。</div>
+                <div class="setting-desc">清除本地 token 并返回登录页。后台进程仍会继续，可从托盘菜单彻底退出。</div>
               </div>
               <div class="setting-control"><MateButton variant="primary" icon="x" danger :loading="logoutLoading" :disabled="logoutLoading || transferBusy" :tooltip="transferBusy ? TRANSFER_BUSY_TIP : ''" @click="handleLogout">退出登录</MateButton></div>
             </div>
@@ -485,6 +619,7 @@ function fmtSize(bytes: number): string {
             <div class="about-version-row">
               <span class="about-version">版本 {{ appVersion || "..." }}</span>
               <MateButton
+                v-if="updater.updateSupported !== false"
                 variant="text"
                 icon="refresh"
                 :loading="updater.isChecking"
@@ -493,6 +628,7 @@ function fmtSize(bytes: number): string {
               >
                 {{ updater.isChecking ? '检查中…' : '检查更新' }}
               </MateButton>
+              <span v-else class="about-update-hint">当前版本暂不支持自动更新</span>
               <span v-if="updater.phase === 'upToDate'" class="about-update-hint">已是最新版本</span>
               <span v-else-if="updater.phase === 'error'" class="about-update-hint about-update-hint--error">检查失败</span>
               <span v-else-if="updater.phase === 'available'" class="chip chip--brand">
@@ -519,14 +655,26 @@ function fmtSize(bytes: number): string {
               </div>
             </div>
             <div class="about-links">
-              <a href="https://github.com/yuanbaobaoo/PetalLink" target="_blank" class="about-link" rel="noopener noreferrer">
+              <button
+                type="button"
+                class="about-link"
+                :disabled="Boolean(openingExternalUrl)"
+                :aria-busy="openingExternalUrl === projectLinks.GitHub"
+                @click="handleOpenExternalLink('GitHub', projectLinks.GitHub)"
+              >
                 <MateIcon name="github" :size="16" />
                 GitHub
-              </a>
-              <a href="https://gitcode.com/yuanbaobaoo/PetalLink" target="_blank" class="about-link" rel="noopener noreferrer">
+              </button>
+              <button
+                type="button"
+                class="about-link"
+                :disabled="Boolean(openingExternalUrl)"
+                :aria-busy="openingExternalUrl === projectLinks.GitCode"
+                @click="handleOpenExternalLink('GitCode', projectLinks.GitCode)"
+              >
                 <MateIcon name="gitcode" :size="16" />
                 GitCode
-              </a>
+              </button>
             </div>
           </div>
         </section>
@@ -632,8 +780,14 @@ function fmtSize(bytes: number): string {
 .about-update-progress__bar { height: 4px; background-color: var(--bg-fill); border-radius: var(--radius-full); overflow: hidden; }
 .about-update-progress__fill { height: 100%; background: var(--grad-brand); border-radius: var(--radius-full); transition: width 0.3s ease; }
 .about-links { display: flex; gap: var(--space-lg); margin-top: var(--space-md); }
-.about-link { display: inline-flex; align-items: center; gap: var(--space-xs); font-size: var(--font-body-sm); color: var(--brand-500); text-decoration: none; transition: color 0.15s; }
-.about-link:hover { color: var(--brand-400); text-decoration: underline; }
+.about-link {
+  display: inline-flex; align-items: center; gap: var(--space-xs);
+  padding: 0; border: 0; background: transparent; cursor: pointer;
+  font: inherit; font-size: var(--font-body-sm); color: var(--brand-500);
+  text-decoration: none; transition: color 0.15s;
+}
+.about-link:hover:not(:disabled) { color: var(--brand-400); text-decoration: underline; }
+.about-link:disabled { opacity: 0.55; cursor: wait; }
 
 /* chip（关于页新版本提示 / 底栏已保存） */
 .chip {

@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "PetalLink 默认权限：前端访问后端命令、目录选择/保存、同步目录空检查、进程重启、更新检查。",
+  "description": "PetalLink 默认权限：前端访问后端命令、目录选择/保存、同步目录空检查与更新检查。",
   "windows": ["main"],
   "permissions": [
     "core:default",
@@ -18,7 +18,6 @@
     "dialog:allow-open",
     "dialog:allow-save",
     "fs:allow-read-dir",
-    "process:allow-restart",
     "updater:default",
     "updater:allow-check",
     "updater:allow-download-and-install"

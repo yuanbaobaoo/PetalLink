@@ -458,11 +458,12 @@ async fn persist_remote_path_change_identity(
             if !metadata.file_type().is_symlink()
                 && (metadata.file_type().is_file() || metadata.file_type().is_dir()) =>
         {
-            let existing_id = xattr::get(&local_path, crate::mount::manager::XATTR_FILE_ID)
-                .map_err(|error| AppError::generic(format!("读取路径变更源身份失败：{error}")))?
-                .map(String::from_utf8)
-                .transpose()
-                .map_err(|_| AppError::generic("路径变更源 fileId 标记损坏，拒绝修改远端"))?;
+            let existing_id =
+                crate::platform::xattr::get(&local_path, crate::mount::manager::XATTR_FILE_ID)
+                    .map_err(|error| AppError::generic(format!("读取路径变更源身份失败：{error}")))?
+                    .map(String::from_utf8)
+                    .transpose()
+                    .map_err(|_| AppError::generic("路径变更源 fileId 标记损坏，拒绝修改远端"))?;
             if existing_id.as_deref().is_some_and(|id| id != file_id) {
                 return Err(AppError::generic(
                     "路径变更源属于另一云端文件，拒绝修改远端",

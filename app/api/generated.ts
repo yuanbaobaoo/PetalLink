@@ -103,14 +103,35 @@ export const commands = {
 	transferClearFinished: () => __TAURI_INVOKE<null>("transfer_clear_finished"),
 	// 重试传输任务。
 	transferRetry: (taskId: number) => __TAURI_INVOKE<null>("transfer_retry", { taskId }),
-	// 在 Finder 中打开路径。
-	openInFinder: (path: string) => __TAURI_INVOKE<boolean>("open_in_finder", { path }),
+	// 在系统文件管理器中打开路径。
+	openInFinder: () => __TAURI_INVOKE<boolean>("open_in_finder"),
+	// 使用系统默认应用打开同步目录内的本地文件或目录。
+	openLocalItem: (relPath: string) => __TAURI_INVOKE<boolean>("open_local_item", { relPath }),
+	// 在系统文件管理器中显示同步目录内的本地文件或目录。
+	// 此操作允许显示占位文件，但不会把占位文件作为内容交给默认应用。
+	revealLocalItem: (relPath: string) => __TAURI_INVOKE<boolean>("reveal_local_item", { relPath }),
+	// 使用系统默认浏览器打开合法的 HTTP/HTTPS 外部链接。
+	openExternalUrl: (url: string) => __TAURI_INVOKE<boolean>("open_external_url", { url }),
+	// 查询 Linux 按需云盘当前是否真实挂载。
+	// 前端不能只看配置开关：引擎启动和首次索引是异步的，FUSE 也可能因系统能力问题
+	// 挂载失败；此命令让“打开云盘”入口只在真正可用时出现。
+	virtualDriveStatus: () => __TAURI_INVOKE<VirtualDriveStatus>("virtual_drive_status"),
 	// 检查开机自启。
 	launchAtLoginIsEnabled: () => __TAURI_INVOKE<boolean>("launch_at_login_is_enabled"),
 	// 设置开机自启。
 	launchAtLoginSetEnabled: (enabled: boolean) => __TAURI_INVOKE<boolean>("launch_at_login_set_enabled", { enabled }),
 	// 查询托盘图标当前实际可见性（运行时真实状态，而非配置文件里的目标值）。
 	trayIsVisible: () => __TAURI_INVOKE<boolean>("tray_is_visible"),
+	// 当前发行渠道是否提供可验证的自动更新产物。
+	// macOS 沿用已有的签名更新渠道。Linux 必须同时满足：
+	// - 构建时显式设置 `PETALLINK_UPDATE_CHANNEL=appimage`；
+	// - 当前确实由 AppImage runtime 启动；
+	// - AppImage 所在目录允许当前用户原子替换该文件。
+	// 因此 AUR/系统包和普通源码构建即使人为设置 `APPIMAGE` 也不会误走应用内更新，
+	// 放在只读目录中的 AppImage 则交由用户或包管理器更新。
+	updaterIsSupported: () => __TAURI_INVOKE<boolean>("updater_is_supported"),
+	// 收束同步运行时并以前台模式重启应用。
+	appRelaunch: () => __TAURI_INVOKE<null>("app_relaunch"),
 	// 清空应用缓存。
 	appClearCache: () => __TAURI_INVOKE<null>("app_clear_cache"),
 	// 读取最近日志。
@@ -131,6 +152,7 @@ export const events = {
 	syncState: makeEvent<SyncStateEvent_Deserialize>("sync_state"),
 	transferUpdate: makeEvent<TransferUpdateEvent>("transfer_update"),
 	uploadFailed: makeEvent<UploadFailedEvent>("upload_failed"),
+	virtualDriveStatus: makeEvent<VirtualDriveStatusEvent>("virtual_drive_status"),
 };
 
 // 常量
@@ -154,11 +176,18 @@ export type AppConfig = {
 	oauth_redirect_uri?: string,
 	// OAuth 回调端口
 	oauth_callback_port?: number,
-	// 本地挂载目录（可能含 ~ 前缀）
+	// 同步引擎使用的本地物理目录（可能含 ~ 前缀）。
+	// Linux 上这是应用管理的隐藏 backing，不是用户选择或日常打开的目录；
+	// 用户选择的唯一目录保存在 [`Self::virtual_mount_dir`]。
 	mount_dir?: string,
 	// 用户是否已显式配置过挂载目录（首次同步引导用，F-MOUNT-13）。
 	// 区分"默认值"与"用户已确认"，避免未选目录就自动同步覆盖本地已有内容。
 	mount_configured?: boolean,
+	// 是否启用 Linux FUSE 按需云盘。
+	// Linux 已配置目录时该值必须为 true；false 只用于“尚未配置”的初始态。
+	virtual_drive_enabled?: boolean,
+	// 用户可见的 FUSE 挂载目录；`mount_dir` 仍作为物理 backing 目录。
+	virtual_mount_dir?: string,
 	// 并发传输数，范围 1-20（Q1 决策：默认 6）
 	concurrency?: number,
 	// 云端定时刷新间隔（秒）。0 = 关闭自动刷新；开启时最小 60 秒。默认 900（15 分钟）。
@@ -172,8 +201,8 @@ export type AppConfig = {
 	sort_field?: SortField,
 	// 排序方向
 	sort_order?: SortOrder,
-	// 是否显示托盘（菜单栏）图标。默认显示。
-	// 关闭后后台同步无托盘入口，此时 Cmd+Q/Dock 退出直接真退出。
+	// 是否显示系统托盘图标。默认显示。
+	// 关闭后后台同步无托盘入口，此时关闭主窗口或退出应用会直接真退出。
 	show_tray_icon?: boolean,
 };
 
@@ -589,6 +618,21 @@ export type UserInfo = {
 	// displayName 是否为匿名账号（displayNameFlag=1）
 	is_anonymized?: boolean,
 };
+
+// Linux 按需云盘的真实运行状态，而不是仅反映配置开关。
+export type VirtualDriveStatus = {
+	// 配置中是否启用了按需云盘。
+	enabled: boolean,
+	// FUSE 会话是否已经成功挂载。
+	mounted: boolean,
+	// 当前真实挂载目录；尚未挂载时为空。
+	mount_dir: string | null,
+	// 最近一次挂载失败原因。
+	error: string | null,
+};
+
+// 按需云盘挂载成功或失败后推送真实状态。
+export type VirtualDriveStatusEvent = VirtualDriveStatus;
 
 // Tauri Specta 事件运行时
 type EventEmit<T> = [T] extends [null] ? () => Promise<void> : (payload: T) => Promise<void>;

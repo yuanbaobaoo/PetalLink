@@ -7,11 +7,150 @@ use futures_util::{stream, FutureExt, StreamExt};
 use tokio::sync::Semaphore;
 
 use crate::data::repository::{self, sync_status, SyncItem};
-use crate::drive::download_api::DownloadExpectation;
+use crate::drive::download_api::{DownloadExpectation, LocalDestinationSnapshot};
 use crate::error::{AppError, AppResult};
 use crate::sync::state::{ActionResult, SyncAction, SyncActionType};
 
 use super::SyncExecutor;
+
+/// 读取冲突源文件的严格本地快照；符号链接和不可复核时间戳均拒绝处理。
+fn inspect_conflict_source(
+    path: &std::path::Path,
+) -> AppResult<(chrono::DateTime<chrono::Utc>, LocalDestinationSnapshot)> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| AppError::generic(format!("读取冲突源文件失败：{error}")))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(AppError::generic("冲突源路径不是安全的普通文件"));
+    }
+    let mtime_ms = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+        .ok_or_else(|| AppError::generic("无法读取冲突源文件修改时间"))?;
+    let local_mtime = chrono::DateTime::from_timestamp_millis(mtime_ms)
+        .ok_or_else(|| AppError::generic("冲突源文件修改时间超出支持范围"))?;
+    Ok((
+        local_mtime,
+        LocalDestinationSnapshot {
+            mtime_ms,
+            size: metadata.len(),
+        },
+    ))
+}
+
+/// 确认普通文件仍与先前快照一致。
+fn verify_conflict_source_snapshot(
+    path: &std::path::Path,
+    expected: &LocalDestinationSnapshot,
+) -> AppResult<()> {
+    let (_, actual) = inspect_conflict_source(path)?;
+    if &actual != expected {
+        return Err(AppError::generic("生成副本期间本地源文件已变化"));
+    }
+    Ok(())
+}
+
+/// 以 create-new 方式把源文件复制到隐藏 staging，并同步落盘、复核源快照。
+async fn copy_to_hidden_conflict_staging(
+    source: &std::path::Path,
+    staging: &std::path::Path,
+    expected: &LocalDestinationSnapshot,
+) -> AppResult<()> {
+    let source = source.to_path_buf();
+    let staging = staging.to_path_buf();
+    let expected = expected.clone();
+    tokio::task::spawn_blocking(move || {
+        let result = (|| -> AppResult<()> {
+            let mut source_options = std::fs::OpenOptions::new();
+            source_options.read(true);
+            #[cfg(target_os = "linux")]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                source_options.custom_flags(libc::O_NOFOLLOW);
+            }
+            #[cfg(target_os = "macos")]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                // Darwin fcntl.h: O_NOFOLLOW，避免为 macOS target 引入 Linux-only libc 依赖。
+                const DARWIN_O_NOFOLLOW: i32 = 0x0000_0100;
+                source_options.custom_flags(DARWIN_O_NOFOLLOW);
+            }
+            let mut source_file = source_options
+                .open(&source)
+                .map_err(|error| AppError::generic(format!("打开冲突源文件失败：{error}")))?;
+            let source_metadata = source_file
+                .metadata()
+                .map_err(|error| AppError::generic(format!("读取冲突源句柄失败：{error}")))?;
+            if !source_metadata.is_file() {
+                return Err(AppError::generic("冲突源句柄不是普通文件"));
+            }
+            let source_mtime_ms = source_metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .and_then(|duration| i64::try_from(duration.as_millis()).ok());
+            if source_metadata.len() != expected.size || source_mtime_ms != Some(expected.mtime_ms)
+            {
+                return Err(AppError::generic("复制前冲突源文件已变化"));
+            }
+
+            let mut target_file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&staging)
+                .map_err(|error| AppError::generic(format!("创建冲突隐藏暂存失败：{error}")))?;
+            target_file
+                .set_permissions(source_metadata.permissions())
+                .map_err(|error| AppError::generic(format!("复制冲突文件权限失败：{error}")))?;
+            let copied = std::io::copy(&mut source_file, &mut target_file)
+                .map_err(|error| AppError::generic(format!("复制冲突文件失败：{error}")))?;
+            if copied != expected.size {
+                return Err(AppError::generic(format!(
+                    "冲突副本长度不一致：期望 {}，实际 {copied}",
+                    expected.size
+                )));
+            }
+            target_file
+                .sync_all()
+                .map_err(|error| AppError::generic(format!("同步冲突隐藏暂存失败：{error}")))?;
+
+            let after = source_file
+                .metadata()
+                .map_err(|error| AppError::generic(format!("复核冲突源句柄失败：{error}")))?;
+            let after_mtime_ms = after
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .and_then(|duration| i64::try_from(duration.as_millis()).ok());
+            if after.len() != expected.size || after_mtime_ms != Some(expected.mtime_ms) {
+                return Err(AppError::generic("复制期间冲突源文件已变化"));
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&staging);
+        }
+        result
+    })
+    .await
+    .map_err(|error| AppError::generic(format!("冲突副本线程异常：{error}")))?
+}
+
+/// 本地优先覆盖失败时移除已发布的冗余云端旧版，避免每轮重试累积副本。
+async fn remove_redundant_conflict_copy(copy_path: &std::path::Path) -> AppResult<()> {
+    match tokio::fs::remove_file(copy_path).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(AppError::generic(format!(
+                "清理冗余云端冲突副本失败：{error}"
+            )))
+        }
+    }
+    crate::drive::download_api::discard_resume_artifacts(copy_path);
+    Ok(())
+}
 
 impl SyncExecutor {
     /// 并发执行全部动作。
@@ -96,6 +235,64 @@ impl SyncExecutor {
             .as_ref()
             .map(|gate| gate.begin(relative_path))
             .transpose()
+    }
+
+    /// 为冲突副本登记路径活动，防止 FUSE 在副本落位期间并发写入。
+    fn begin_copy_activity(&self, copy_path: &std::path::Path) -> AppResult<Option<Box<dyn Send>>> {
+        let mount = self
+            .mount
+            .as_ref()
+            .ok_or_else(|| AppError::generic("mount manager 未初始化，无法保护冲突副本路径"))?;
+        let relative = crate::core::paths::relative_path_from_mount(mount.mount_dir(), copy_path)?;
+        self.begin_action_activity(Some(&relative))
+    }
+
+    /// 使用 no-replace 原子重命名分配冲突副本；EEXIST 时重新选名，绝不覆盖竞态目标。
+    fn rename_to_unique_copy(
+        &self,
+        source: &std::path::Path,
+        local_path: &std::path::Path,
+        side_label: &str,
+        stamp: &chrono::DateTime<chrono::Utc>,
+    ) -> AppResult<(PathBuf, Option<Box<dyn Send>>)> {
+        for _ in 0..32 {
+            let candidate = crate::sync::conflict::dedupe_copy_path(local_path, side_label, stamp);
+            let activity = self.begin_copy_activity(&candidate)?;
+            match crate::sync::path_recovery::rename_no_replace(source, &candidate) {
+                Ok(()) => return Ok((candidate, activity)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    drop(activity);
+                }
+                Err(error) => {
+                    return Err(AppError::generic(format!("原子创建冲突副本失败：{error}")))
+                }
+            }
+        }
+        Err(AppError::generic("冲突副本路径持续被占用，请稍后重试"))
+    }
+
+    /// 在原文件同目录分配 watcher/FUSE 都会忽略的冲突下载暂存路径。
+    fn allocate_conflict_staging(local_path: &std::path::Path) -> AppResult<PathBuf> {
+        let parent = local_path
+            .parent()
+            .ok_or_else(|| AppError::generic("冲突文件缺少父目录"))?;
+        for _ in 0..32 {
+            let candidate = parent.join(format!(
+                ".hwcloud_conflict-{}-{:016x}",
+                std::process::id(),
+                rand::random::<u64>()
+            ));
+            match std::fs::symlink_metadata(&candidate) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(candidate),
+                Ok(_) => continue,
+                Err(error) => {
+                    return Err(AppError::generic(format!(
+                        "检查冲突下载暂存路径失败：{error}"
+                    )))
+                }
+            }
+        }
+        Err(AppError::generic("无法分配冲突下载暂存路径"))
     }
 
     /// 将引擎关闭拒绝转为不记录同步失败的延迟结果。
@@ -266,9 +463,16 @@ impl SyncExecutor {
         // 本地新文件夹（无云端文件）→ 调 createFolder API
         let result = if let Some(cloud_file) = &action.cloud_file {
             // 云端已有文件夹 → 本地 ensure
-            let _cloud = cloud_file;
+            if !cloud_file.is_folder() {
+                return ActionResult {
+                    success: false,
+                    error_message: Some("创建本地目录动作携带的云端资源不是文件夹".into()),
+                    deferred: false,
+                    cloud_file: None,
+                };
+            }
             if let Some(m) = &self.mount {
-                match m.ensure_folder(rel) {
+                match m.ensure_folder_with_file_id(rel, &cloud_file.id) {
                     Ok(_) => ActionResult {
                         success: true,
                         error_message: None,
@@ -304,12 +508,34 @@ impl SyncExecutor {
                 .create_folder(name, action.parent_file_id.as_deref())
                 .await
             {
-                Ok(f) => ActionResult {
-                    success: true,
-                    error_message: None,
-                    deferred: false,
-                    cloud_file: Some(f),
-                },
+                Ok(f) => {
+                    // 远端身份确认后立即回填本地目录 xattr。若本地已被另一身份占用，
+                    // 远端结果由下轮查重收敛，但本轮不得写入错误基线。
+                    if let Some(mount) = &self.mount {
+                        if let Err(error) = mount.ensure_folder_with_file_id(rel, &f.id) {
+                            ActionResult {
+                                success: false,
+                                error_message: Some(error.to_string()),
+                                deferred: true,
+                                cloud_file: Some(f),
+                            }
+                        } else {
+                            ActionResult {
+                                success: true,
+                                error_message: None,
+                                deferred: false,
+                                cloud_file: Some(f),
+                            }
+                        }
+                    } else {
+                        ActionResult {
+                            success: true,
+                            error_message: None,
+                            deferred: false,
+                            cloud_file: Some(f),
+                        }
+                    }
+                }
                 Err(e) => ActionResult {
                     success: false,
                     error_message: Some(e.to_string()),
@@ -352,13 +578,26 @@ impl SyncExecutor {
         let Some(local_path) = action.local_path.as_deref().map(PathBuf::from) else {
             return deferred("云端路径变更缺少本地路径，等待重新规划".to_string());
         };
+        let Some(planned_cloud_file) = action.cloud_file.as_ref() else {
+            return deferred("云端路径变更缺少规划时的稳定身份与类型，等待重新规划".to_string());
+        };
+        if planned_cloud_file.id != file_id {
+            return deferred("云端路径变更的规划身份与 fileId 不一致，等待重新规划".to_string());
+        }
 
         // 写入前确认目标仍携带同一远端身份；本地再次移动时等待重新规划。
-        let local_identity = std::fs::metadata(&local_path)
+        let local_identity = std::fs::symlink_metadata(&local_path)
             .ok()
-            .filter(|metadata| metadata.is_file())
+            .filter(|metadata| {
+                !metadata.file_type().is_symlink()
+                    && if planned_cloud_file.is_folder() {
+                        metadata.is_dir()
+                    } else {
+                        metadata.is_file()
+                    }
+            })
             .and_then(|_| {
-                xattr::get(&local_path, crate::mount::manager::XATTR_FILE_ID)
+                crate::platform::xattr::get(&local_path, crate::mount::manager::XATTR_FILE_ID)
                     .ok()
                     .flatten()
             })
@@ -397,15 +636,24 @@ impl SyncExecutor {
             .update(file_id, Some(target_name), Some(target_parent), None)
             .await
         {
-            Ok(file) => ActionResult {
-                success: true,
-                error_message: None,
-                deferred: false,
-                cloud_file: Some(file),
-            },
+            Ok(file)
+                if file.id == file_id
+                    && file.is_folder() == planned_cloud_file.is_folder() =>
+            {
+                ActionResult {
+                    success: true,
+                    error_message: None,
+                    deferred: false,
+                    cloud_file: Some(file),
+                }
+            }
+            Ok(_) => deferred(
+                "云端路径变更响应的稳定身份或文件类型不一致，等待重新核验".to_string(),
+            ),
             Err(error) => match self.files_api.get(file_id).await {
                 Ok(file)
                     if file.id.as_str() == file_id
+                        && file.is_folder() == planned_cloud_file.is_folder()
                         && file.name.as_str() == target_name
                         && file.parent_folder.as_deref().is_some_and(|parents| {
                             parents.len() == 1 && parents[0].as_str() == target_parent
@@ -520,20 +768,21 @@ impl SyncExecutor {
             }
         };
 
-        // 获取本地 mtime
-        let local_mtime = tokio::fs::metadata(&local_path)
-            .await
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| {
-                chrono::DateTime::from_timestamp(d.as_secs() as i64, d.subsec_nanos())
-                    .unwrap_or(chrono::Utc::now())
-            })
-            .unwrap_or(chrono::Utc::now());
+        // 冲突副本和下载替换都绑定同一份严格源快照，禁止用“当前时间”掩盖 stat 失败。
+        let (local_mtime, local_snapshot) = match inspect_conflict_source(&local_path) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                return ActionResult {
+                    success: false,
+                    error_message: Some(error.to_string()),
+                    deferred: false,
+                    cloud_file: None,
+                }
+            }
+        };
 
         // 解析冲突
-        let resolution = if let Some(conflict) = &self.conflict {
+        let mut resolution = if let Some(conflict) = &self.conflict {
             if let Ok(mut resolver) = conflict.lock() {
                 resolver.resolve(&local_path, cloud_file, &local_mtime)
             } else {
@@ -558,112 +807,319 @@ impl SyncExecutor {
         // 本地胜出时先把云端副本下载到冲突副本路径，再用本地内容覆盖云端。
         let result = match resolution.winner {
             crate::sync::conflict::ConflictSide::Cloud => {
-                // 云端获胜：移动本地 → copyPath，下载云端 → localPath
-                // 改名失败绝不能继续下载——否则本地修改被覆盖且无副本，数据丢失。
-                // 返回失败保住本地原文件，下轮重试。
-                if let Err(e) = tokio::fs::rename(&local_path, &resolution.copy_path).await {
-                    ActionResult {
+                // 云端获胜：主文件保持原位，先复制到隐藏 staging 并清空身份，随后才原子
+                // 发布普通副本。任何崩溃点都不会让可见副本携带原 fileId。
+                match Self::allocate_conflict_staging(&local_path) {
+                    Err(error) => ActionResult {
                         success: false,
-                        error_message: Some(format!("冲突备份改名失败，跳过下载以保本地修改：{e}")),
+                        error_message: Some(format!("分配本地冲突副本暂存路径失败：{error}")),
                         deferred: false,
                         cloud_file: None,
-                    }
-                } else {
-                    let expectation = DownloadExpectation {
-                        edited_time_ms: cloud_file.edited_time.map(|time| time.timestamp_millis()),
-                        size: u64::try_from(cloud_file.size).ok(),
-                        content_hash: cloud_file.content_hash.clone(),
-                        destination_snapshot: None,
-                        placeholder_file_id: Some(cloud_file.id.clone()),
-                    };
-                    match self
-                        .download_api
-                        .download_with_expectation(
-                            &cloud_file.id,
+                    },
+                    Ok(staging_path) => {
+                        if let Err(error) = copy_to_hidden_conflict_staging(
                             &local_path,
-                            Some(&expectation),
-                            None,
+                            &staging_path,
+                            &local_snapshot,
                         )
                         .await
-                    {
-                        Ok(()) => {
-                            if let Some(m) = &self.mount {
-                                let _ = m.mark_downloaded(&local_path).await;
-                            }
-                            if let Some(m) = &self.mount {
-                                let _ = m.clear_placeholder_xattr(&resolution.copy_path).await;
-                            }
-                            ActionResult {
-                                success: true,
-                                error_message: None,
-                                deferred: false,
-                                cloud_file: None,
-                            }
-                        }
-                        Err(e) => {
-                            let _ = tokio::fs::rename(&resolution.copy_path, &local_path).await;
+                        {
                             ActionResult {
                                 success: false,
-                                error_message: Some(e.to_string()),
+                                error_message: Some(format!(
+                                    "创建隐藏本地冲突副本失败，主文件保持不变：{error}"
+                                )),
                                 deferred: false,
                                 cloud_file: None,
+                            }
+                        } else {
+                            let identity_cleanup = match &self.mount {
+                                Some(mount) => mount.clear_placeholder_xattr(&staging_path).await,
+                                None => Err(AppError::generic(
+                                    "冲突副本已暂存，但 mount manager 未初始化",
+                                )),
+                            };
+                            if let Err(error) = identity_cleanup {
+                                let cleanup = remove_redundant_conflict_copy(&staging_path).await;
+                                ActionResult {
+                                    success: false,
+                                    error_message: Some(match cleanup {
+                                        Ok(()) => format!(
+                                            "隐藏冲突副本身份清理失败，主文件保持不变：{error}"
+                                        ),
+                                        Err(cleanup_error) => format!(
+                                            "隐藏冲突副本身份清理失败，主文件保持不变：{error}；{cleanup_error}"
+                                        ),
+                                    }),
+                                    deferred: false,
+                                    cloud_file: None,
+                                }
+                            } else {
+                                match self.rename_to_unique_copy(
+                                    &staging_path,
+                                    &local_path,
+                                    "本地副本",
+                                    &local_mtime,
+                                ) {
+                                    Err(error) => {
+                                        let cleanup =
+                                            remove_redundant_conflict_copy(&staging_path).await;
+                                        ActionResult {
+                                            success: false,
+                                            error_message: Some(match cleanup {
+                                                Ok(()) => format!(
+                                                    "发布本地冲突副本失败，主文件保持不变：{error}"
+                                                ),
+                                                Err(cleanup_error) => format!(
+                                                    "发布本地冲突副本失败，主文件保持不变：{error}；{cleanup_error}"
+                                                ),
+                                            }),
+                                            deferred: false,
+                                            cloud_file: None,
+                                        }
+                                    }
+                                    Ok((copy_path, copy_activity)) => {
+                                        resolution.copy_path = copy_path;
+                                        let _copy_activity = copy_activity;
+                                        let expectation = DownloadExpectation {
+                                            edited_time_ms: cloud_file
+                                                .edited_time
+                                                .map(|time| time.timestamp_millis()),
+                                            size: u64::try_from(cloud_file.size).ok(),
+                                            content_hash: cloud_file.content_hash.clone(),
+                                            // main 从未移动；只允许替换仍与冲突决策时相同的原文件。
+                                            destination_snapshot: Some(local_snapshot.clone()),
+                                            placeholder_file_id: None,
+                                        };
+                                        match self
+                                            .download_api
+                                            .download_with_expectation(
+                                                &cloud_file.id,
+                                                &local_path,
+                                                Some(&expectation),
+                                                None,
+                                            )
+                                            .await
+                                        {
+                                            Ok(()) => {
+                                                let finalized: AppResult<()> = async {
+                                                    let mount =
+                                                        self.mount.as_ref().ok_or_else(|| {
+                                                            AppError::generic(
+                                                                "冲突下载已完成，但 mount manager 未初始化",
+                                                            )
+                                                        })?;
+                                                    // 下载会原子替换 inode，先恢复稳定身份，再发布 downloaded。
+                                                    mount
+                                                        .set_file_id_xattr(
+                                                            &local_path,
+                                                            &cloud_file.id,
+                                                        )
+                                                        .await?;
+                                                    mount.mark_downloaded(&local_path).await?;
+                                                    Ok(())
+                                                }
+                                                .await;
+                                                match finalized {
+                                                    Ok(()) => ActionResult {
+                                                        success: true,
+                                                        error_message: None,
+                                                        deferred: false,
+                                                        cloud_file: None,
+                                                    },
+                                                    Err(error) => ActionResult {
+                                                        success: false,
+                                                        error_message: Some(format!(
+                                                            "云端冲突版本已下载，但本地身份结算失败：{error}"
+                                                        )),
+                                                        deferred: false,
+                                                        cloud_file: None,
+                                                    },
+                                                }
+                                            }
+                                            Err(error) => {
+                                                // main 仍是原内容，已发布副本此时只是冗余；
+                                                // 趁 copy activity 仍持有时删除，避免重试累积副本。
+                                                let cleanup = remove_redundant_conflict_copy(
+                                                    &resolution.copy_path,
+                                                )
+                                                .await;
+                                                ActionResult {
+                                                    success: false,
+                                                    error_message: Some(match cleanup {
+                                                        Ok(()) => error.to_string(),
+                                                        Err(cleanup_error) => {
+                                                            format!("{error}；{cleanup_error}")
+                                                        }
+                                                    }),
+                                                    deferred: false,
+                                                    cloud_file: None,
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
             crate::sync::conflict::ConflictSide::Local => {
-                // 本地获胜：下载云端旧版 → copyPath（败方副本），上传本地覆盖云端。
-                let expectation = DownloadExpectation {
-                    edited_time_ms: cloud_file.edited_time.map(|time| time.timestamp_millis()),
-                    size: u64::try_from(cloud_file.size).ok(),
-                    content_hash: cloud_file.content_hash.clone(),
-                    destination_snapshot: None,
-                    placeholder_file_id: Some(cloud_file.id.clone()),
-                };
-                if let Err(e) = self
-                    .download_api
-                    .download_with_expectation(
-                        &cloud_file.id,
-                        &resolution.copy_path,
-                        Some(&expectation),
-                        None,
-                    )
-                    .await
-                {
-                    ActionResult {
+                // 本地获胜：先下载云端旧版到隐藏暂存，再用 no-replace 发布可见副本。
+                // 只有副本已安全落位，才允许覆盖云端。
+                match Self::allocate_conflict_staging(&local_path) {
+                    Err(error) => ActionResult {
                         success: false,
-                        error_message: Some(format!(
-                            "冲突副本（云端旧版）下载失败，跳过覆盖以保云端旧版：{e}"
-                        )),
+                        error_message: Some(format!("分配云端冲突副本暂存路径失败：{error}")),
                         deferred: false,
                         cloud_file: None,
-                    }
-                } else {
-                    if let Some(m) = &self.mount {
-                        let _ = m.clear_placeholder_xattr(&resolution.copy_path).await;
-                    }
-                    let parent_id = cloud_file
-                        .parent_folder
-                        .as_ref()
-                        .and_then(|v| v.first().map(|s| s.as_str()));
-                    match self
-                        .upload_api
-                        .upload_update(&cloud_file.id, &local_path, parent_id, None)
-                        .await
-                    {
-                        Ok(_) => ActionResult {
-                            success: true,
-                            error_message: None,
-                            deferred: false,
-                            cloud_file: None,
-                        },
-                        Err(e) => ActionResult {
-                            success: false,
-                            error_message: Some(e.to_string()),
-                            deferred: false,
-                            cloud_file: None,
-                        },
+                    },
+                    Ok(staging_path) => {
+                        let expectation = DownloadExpectation {
+                            edited_time_ms: cloud_file
+                                .edited_time
+                                .map(|time| time.timestamp_millis()),
+                            size: u64::try_from(cloud_file.size).ok(),
+                            content_hash: cloud_file.content_hash.clone(),
+                            destination_snapshot: None,
+                            placeholder_file_id: Some(cloud_file.id.clone()),
+                        };
+                        if let Err(error) = self
+                            .download_api
+                            .download_with_expectation(
+                                &cloud_file.id,
+                                &staging_path,
+                                Some(&expectation),
+                                None,
+                            )
+                            .await
+                        {
+                            crate::drive::download_api::discard_resume_artifacts(&staging_path);
+                            let cleanup = match tokio::fs::remove_file(&staging_path).await {
+                                Ok(()) => None,
+                                Err(cleanup_error)
+                                    if cleanup_error.kind() == std::io::ErrorKind::NotFound =>
+                                {
+                                    None
+                                }
+                                Err(cleanup_error) => Some(cleanup_error),
+                            };
+                            ActionResult {
+                                success: false,
+                                error_message: Some(match cleanup {
+                                    Some(cleanup_error) => format!(
+                                        "冲突副本（云端旧版）下载失败，跳过覆盖以保云端旧版：{error}；清理隐藏暂存失败：{cleanup_error}"
+                                    ),
+                                    None => format!(
+                                        "冲突副本（云端旧版）下载失败，跳过覆盖以保云端旧版：{error}"
+                                    ),
+                                }),
+                                deferred: false,
+                                cloud_file: None,
+                            }
+                        } else {
+                            let cleanup = match &self.mount {
+                                Some(mount) => mount.clear_placeholder_xattr(&staging_path).await,
+                                None => Err(AppError::generic(
+                                    "冲突副本已下载，但 mount manager 未初始化",
+                                )),
+                            };
+                            if let Err(error) = cleanup {
+                                let remove_error =
+                                    tokio::fs::remove_file(&staging_path).await.err();
+                                crate::drive::download_api::discard_resume_artifacts(&staging_path);
+                                ActionResult {
+                                    success: false,
+                                    error_message: Some(match remove_error {
+                                        Some(remove_error) => format!(
+                                            "冲突副本身份清理失败，未覆盖云端：{error}；清理隐藏暂存失败：{remove_error}"
+                                        ),
+                                        None => {
+                                            format!("冲突副本身份清理失败，未覆盖云端：{error}")
+                                        }
+                                    }),
+                                    deferred: false,
+                                    cloud_file: None,
+                                }
+                            } else {
+                                let cloud_time =
+                                    cloud_file.edited_time.unwrap_or_else(chrono::Utc::now);
+                                match self.rename_to_unique_copy(
+                                    &staging_path,
+                                    &local_path,
+                                    "云端副本",
+                                    &cloud_time,
+                                ) {
+                                    Err(error) => {
+                                        let remove_error =
+                                            tokio::fs::remove_file(&staging_path).await.err();
+                                        crate::drive::download_api::discard_resume_artifacts(
+                                            &staging_path,
+                                        );
+                                        ActionResult {
+                                            success: false,
+                                            error_message: Some(match remove_error {
+                                                Some(remove_error) => format!(
+                                                    "发布云端冲突副本失败，未覆盖云端：{error}；清理隐藏暂存失败：{remove_error}"
+                                                ),
+                                                None => format!(
+                                                    "发布云端冲突副本失败，未覆盖云端：{error}"
+                                                ),
+                                            }),
+                                            deferred: false,
+                                            cloud_file: None,
+                                        }
+                                    }
+                                    Ok((copy_path, copy_activity)) => {
+                                        resolution.copy_path = copy_path;
+                                        let _copy_activity = copy_activity;
+                                        let parent_id = cloud_file
+                                            .parent_folder
+                                            .as_ref()
+                                            .and_then(|v| v.first().map(|s| s.as_str()));
+                                        match self
+                                            .upload_api
+                                            .upload_update(
+                                                &cloud_file.id,
+                                                &local_path,
+                                                parent_id,
+                                                None,
+                                            )
+                                            .await
+                                        {
+                                            Ok(updated_cloud_file) => ActionResult {
+                                                success: true,
+                                                error_message: None,
+                                                deferred: false,
+                                                // 覆盖上传会产生新的 editedTime/hash/size；
+                                                // 结算必须采用 PATCH 返回的新版本，不能沿用旧冲突快照。
+                                                cloud_file: Some(updated_cloud_file),
+                                            },
+                                            Err(error) => {
+                                                // PATCH 失败时远端旧版仍是正本；已下载的旧版副本
+                                                // 只是冗余。趁 copy activity 仍在持有时删除，防止
+                                                // 下一轮重试持续生成带序号的重复副本。
+                                                let cleanup = remove_redundant_conflict_copy(
+                                                    &resolution.copy_path,
+                                                )
+                                                .await;
+                                                ActionResult {
+                                                    success: false,
+                                                    error_message: Some(match cleanup {
+                                                        Ok(()) => error.to_string(),
+                                                        Err(cleanup_error) => {
+                                                            format!("{error}；{cleanup_error}")
+                                                        }
+                                                    }),
+                                                    deferred: false,
+                                                    cloud_file: None,
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -686,49 +1142,227 @@ impl SyncExecutor {
                 }
             }
         };
-        if !path.exists() {
-            return ActionResult {
-                success: true,
-                error_message: None,
-                deferred: false,
-                cloud_file: None,
-            };
-        }
-        // 本地 mtime 作为副本时间戳（败方=本地的修改时间）
-        let local_mtime = tokio::fs::metadata(&path)
-            .await
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| {
-                chrono::DateTime::from_timestamp(d.as_secs() as i64, d.subsec_nanos())
-                    .unwrap_or(chrono::Utc::now())
-            })
-            .unwrap_or_else(chrono::Utc::now);
-        let copy_path = crate::sync::conflict::dedupe_copy_path(&path, "本地副本", &local_mtime);
-        match tokio::fs::rename(&path, &copy_path).await {
-            Ok(()) => {
-                if let Some(m) = &self.mount {
-                    let _ = m.clear_placeholder_xattr(&copy_path).await;
-                }
-                tracing::info!(
-                    src = %path.display(),
-                    backup = %copy_path.display(),
-                    "云端删除但本地有未上传修改，已备份副本"
-                );
-                ActionResult {
+        match std::fs::symlink_metadata(&path) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return ActionResult {
                     success: true,
                     error_message: None,
                     deferred: false,
                     cloud_file: None,
                 }
             }
-            Err(e) => ActionResult {
+            Err(error) => {
+                return ActionResult {
+                    success: false,
+                    error_message: Some(format!("检查删除冲突源文件失败：{error}")),
+                    deferred: false,
+                    cloud_file: None,
+                }
+            }
+        }
+        let mount = match self.mount.as_ref() {
+            Some(mount) => mount,
+            None => {
+                return ActionResult {
+                    success: false,
+                    error_message: Some("mount manager 未初始化，未改动本地原文件".into()),
+                    deferred: false,
+                    cloud_file: None,
+                }
+            }
+        };
+        let (local_mtime, local_snapshot) = match inspect_conflict_source(&path) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                return ActionResult {
+                    success: false,
+                    error_message: Some(error.to_string()),
+                    deferred: false,
+                    cloud_file: None,
+                }
+            }
+        };
+        let staging_path = match Self::allocate_conflict_staging(&path) {
+            Ok(staging_path) => staging_path,
+            Err(error) => {
+                return ActionResult {
+                    success: false,
+                    error_message: Some(format!("分配删除冲突隐藏暂存失败：{error}")),
+                    deferred: false,
+                    cloud_file: None,
+                }
+            }
+        };
+        if let Err(error) =
+            copy_to_hidden_conflict_staging(&path, &staging_path, &local_snapshot).await
+        {
+            return ActionResult {
                 success: false,
-                error_message: Some(format!("备份副本失败：{e}")),
+                error_message: Some(format!("创建删除冲突隐藏副本失败，原文件保持不变：{error}")),
                 deferred: false,
                 cloud_file: None,
-            },
+            };
         }
+        if let Err(error) = mount.clear_placeholder_xattr(&staging_path).await {
+            let cleanup = remove_redundant_conflict_copy(&staging_path).await;
+            return ActionResult {
+                success: false,
+                error_message: Some(match cleanup {
+                    Ok(()) => format!("删除冲突副本身份清理失败，原文件保持不变：{error}"),
+                    Err(cleanup_error) => {
+                        format!("删除冲突副本身份清理失败：{error}；{cleanup_error}")
+                    }
+                }),
+                deferred: false,
+                cloud_file: None,
+            };
+        }
+        let (copy_path, copy_activity) =
+            match self.rename_to_unique_copy(&staging_path, &path, "本地副本", &local_mtime) {
+                Ok(published) => published,
+                Err(error) => {
+                    let cleanup = remove_redundant_conflict_copy(&staging_path).await;
+                    return ActionResult {
+                        success: false,
+                        error_message: Some(match cleanup {
+                            Ok(()) => format!("发布删除冲突副本失败，原文件保持不变：{error}"),
+                            Err(cleanup_error) => format!("{error}；{cleanup_error}"),
+                        }),
+                        deferred: false,
+                        cloud_file: None,
+                    };
+                }
+            };
+        let _copy_activity = copy_activity;
+
+        // 发布副本后最后一次复核主文件；只有它仍与复制来源一致才可删除。
+        if let Err(error) = verify_conflict_source_snapshot(&path, &local_snapshot) {
+            let cleanup = remove_redundant_conflict_copy(&copy_path).await;
+            return ActionResult {
+                success: false,
+                error_message: Some(match cleanup {
+                    Ok(()) => format!("{error}；已移除冗余副本，原文件保持不变"),
+                    Err(cleanup_error) => format!("{error}；{cleanup_error}"),
+                }),
+                deferred: false,
+                cloud_file: None,
+            };
+        }
+        if let Err(error) = tokio::fs::remove_file(&path).await {
+            let cleanup = remove_redundant_conflict_copy(&copy_path).await;
+            return ActionResult {
+                success: false,
+                error_message: Some(match cleanup {
+                    Ok(()) => format!("删除原路径失败，已移除冗余副本：{error}"),
+                    Err(cleanup_error) => format!("删除原路径失败：{error}；{cleanup_error}"),
+                }),
+                deferred: false,
+                cloud_file: None,
+            };
+        }
+        tracing::info!(
+            src = %path.display(),
+            backup = %copy_path.display(),
+            "云端删除但本地有未上传修改，已备份普通副本并移除原云端身份路径"
+        );
+        ActionResult {
+            success: true,
+            error_message: None,
+            deferred: false,
+            cloud_file: None,
+        }
+    }
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod tests {
+    use super::*;
+    use crate::mount::manager::{
+        MountManager, STATE_DOWNLOADED, XATTR_FILE_ID, XATTR_SIZE, XATTR_STATE,
+    };
+
+    /// 副本先在隐藏路径落盘并清身份，发布后主文件仍保有身份而可见副本绝不保有。
+    #[tokio::test]
+    async fn hidden_copy_is_identity_free_before_visible_publication() {
+        let temp = tempfile::tempdir().unwrap();
+        let mount = MountManager::new(temp.path());
+        let main = temp.path().join("file.txt");
+        let staging = temp.path().join(".hwcloud_conflict-test");
+        let visible = temp.path().join("file (本地副本).txt");
+        std::fs::write(&main, b"local-version").unwrap();
+        for (key, value) in [
+            (XATTR_FILE_ID, b"cloud-file-id".as_slice()),
+            (XATTR_STATE, STATE_DOWNLOADED.as_bytes()),
+            (XATTR_SIZE, b"13".as_slice()),
+        ] {
+            crate::platform::xattr::set(&main, key, value).unwrap();
+        }
+        let (_, snapshot) = inspect_conflict_source(&main).unwrap();
+
+        copy_to_hidden_conflict_staging(&main, &staging, &snapshot)
+            .await
+            .unwrap();
+        assert!(staging
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with(".hwcloud_"));
+        assert!(!visible.exists(), "身份清理前不得存在可见冲突副本");
+
+        mount.clear_placeholder_xattr(&staging).await.unwrap();
+        crate::sync::path_recovery::rename_no_replace(&staging, &visible).unwrap();
+
+        assert_eq!(std::fs::read(&main).unwrap(), b"local-version");
+        assert_eq!(std::fs::read(&visible).unwrap(), b"local-version");
+        assert_eq!(
+            crate::platform::xattr::get(&main, XATTR_FILE_ID)
+                .unwrap()
+                .as_deref(),
+            Some(b"cloud-file-id".as_slice())
+        );
+        assert_eq!(
+            crate::platform::xattr::get(&main, XATTR_STATE)
+                .unwrap()
+                .as_deref(),
+            Some(STATE_DOWNLOADED.as_bytes())
+        );
+        for key in [XATTR_FILE_ID, XATTR_STATE, XATTR_SIZE] {
+            assert_eq!(
+                crate::platform::xattr::get(&visible, key).unwrap(),
+                None,
+                "可见冲突副本不得携带 {key}"
+            );
+        }
+    }
+
+    /// 源文件在快照后变化时不得生成可发布的隐藏副本。
+    #[tokio::test]
+    async fn hidden_copy_rejects_changed_source_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let main = temp.path().join("file.txt");
+        let staging = temp.path().join(".hwcloud_conflict-test");
+        std::fs::write(&main, b"version-one").unwrap();
+        let (_, snapshot) = inspect_conflict_source(&main).unwrap();
+        std::fs::write(&main, b"a-different-longer-version").unwrap();
+
+        let error = copy_to_hidden_conflict_staging(&main, &staging, &snapshot)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("源文件已变化"));
+        assert!(!staging.exists());
+    }
+
+    /// 覆盖上传失败后的云端旧版副本应被移除，后续重试不会累积重复副本。
+    #[tokio::test]
+    async fn failed_local_wins_upload_removes_redundant_copy() {
+        let temp = tempfile::tempdir().unwrap();
+        let copy = temp.path().join("file (云端副本).txt");
+        std::fs::write(&copy, b"remote-old-version").unwrap();
+
+        remove_redundant_conflict_copy(&copy).await.unwrap();
+
+        assert!(!copy.exists());
     }
 }

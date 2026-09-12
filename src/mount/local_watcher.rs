@@ -1,8 +1,8 @@
-//! 本地文件监听 —— FSEvents + 3 段式 debounce。
+//! 本地文件监听 —— FSEvents / inotify + 3 段式 debounce。
 //!
 //! 对齐 `legacy/lib/mount/local_watcher.dart`。
 //!
-//! 使用 notify crate（macOS 底层 FSEvents），递归监听。
+//! 使用 notify crate（macOS 底层 FSEvents、Linux 底层 inotify），递归监听。
 //! - 3s debounce：时间内持续变化则重置计时器（对齐 dart 3s debounceSec）
 //! - 跳过 .hwcloud_ 前缀 / .tmp 后缀文件
 //! - **必须在 BFS 完成后才启动**（否则 _cloudTree 为空 → 误删本地文件）
@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use notify::event::{AccessKind, AccessMode, Flag};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::{mpsc, Mutex};
 
@@ -29,8 +30,8 @@ use crate::mount::skip::SkipMatcher;
 /// 被通知的变更路径集合（相对路径）
 pub type ChangeSet = Vec<String>;
 
-/// warmup 窗口长度（秒）。仅需覆盖 FSEvents 历史回放（watcher 注册后立即涌入的
-/// BFS 目录/占位符创建事件），2s 足够。之前 8s 会误吞用户启动后立即做的删除操作。
+/// warmup 窗口长度（秒）。覆盖 FSEvents 历史回放与扫描/监听切换间隙，
+/// 窗口结束后会请求一次全量补偿扫描。
 const WARMUP_SECS: u64 = 2;
 
 /// 本地文件监视器。
@@ -54,6 +55,8 @@ pub struct LocalWatcher {
     running: Arc<Mutex<bool>>,
     /// 每次 start/stop 都推进 generation；旧 worker/timer 在发布前必须匹配当前代。
     generation: Arc<AtomicU64>,
+    /// notify → async 通道发生饱和时置位；worker 在队列恢复前后各请求一次全量重扫。
+    queue_overflowed: Arc<AtomicBool>,
     /// 取消当前实际 worker/warmup generation。
     stop_tx: Mutex<Option<tokio::sync::watch::Sender<bool>>>,
     worker_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -81,6 +84,7 @@ impl LocalWatcher {
             watcher: Mutex::new(None),
             running: Arc::new(Mutex::new(false)),
             generation: Arc::new(AtomicU64::new(0)),
+            queue_overflowed: Arc::new(AtomicBool::new(false)),
             stop_tx: Mutex::new(None),
             worker_handle: Mutex::new(None),
             warmup_handle: Mutex::new(None),
@@ -94,7 +98,7 @@ impl LocalWatcher {
         self.change_tx.subscribe()
     }
 
-    /// 启动 watcher（创建 FSEvents 监听）。
+    /// 启动 watcher（创建平台推荐的递归文件监听）。
     /// **必须在 BFS 完成后才调用**。
     pub async fn start(&self) -> Result<(), notify::Error> {
         let _lifecycle = self.lifecycle.lock().await;
@@ -106,11 +110,10 @@ impl LocalWatcher {
 
         // 创建 notify watcher
         let (tx, rx) = mpsc::channel(256);
+        let queue_overflowed = self.queue_overflowed.clone();
         let mut watcher = RecommendedWatcher::new(
             move |res: Result<Event, notify::Error>| {
-                if let Ok(event) = res {
-                    let _ = tx.blocking_send(event);
-                }
+                enqueue_notify_result(res, &tx, queue_overflowed.as_ref());
             },
             notify::Config::default(),
         )?;
@@ -144,7 +147,7 @@ impl LocalWatcher {
         let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
         *self.stop_tx.lock().await = Some(stop_tx);
 
-        // 预热期间丢弃历史 FSEvents，结束后用空集合请求一次全量补偿扫描。
+        // 预热期间丢弃历史事件，结束后用空集合请求一次全量补偿扫描。
         let warming_up = Arc::new(AtomicBool::new(warmup));
         if warmup {
             let warming_up = warming_up.clone();
@@ -177,8 +180,10 @@ impl LocalWatcher {
         let change_tx = self.change_tx.clone();
         let current_generation = self.generation.clone();
         let running = self.running.clone();
+        let queue_overflowed = self.queue_overflowed.clone();
         // 主工作器负责收集路径并为每批变化重置消抖计时器。
         let worker_handle = tokio::spawn(async move {
+            let mut overflow_announced = false;
             loop {
                 tokio::select! {
                     changed = stop_rx.changed() => {
@@ -189,10 +194,38 @@ impl LocalWatcher {
                         let Some(event) = event else { break; };
                         if warming_up.load(Ordering::Acquire) {
                             tracing::debug!(kind = ?event.kind, "watcher warmup: 丢弃历史事件");
+                            // 预热结束本就会发布全量重扫；队列已排空时可结束本轮饱和状态。
+                            if rx.is_empty() {
+                                queue_overflowed.store(false, Ordering::Release);
+                            }
                             continue;
                         }
                         if current_generation.load(Ordering::Acquire) != generation {
                             break;
+                        }
+                        let requires_rescan = event.need_rescan();
+                        let overflow_active = queue_overflowed.load(Ordering::Acquire);
+                        if requires_rescan || (overflow_active && !overflow_announced) {
+                            tracing::warn!(
+                                notify_rescan = requires_rescan,
+                                queue_overflow = overflow_active,
+                                "文件事件细节可能不完整，请求全量补偿扫描"
+                            );
+                            let _ = change_tx.send(Vec::new());
+                            overflow_announced |= overflow_active;
+                        }
+
+                        // 队列从饱和恢复时再补一次尾部全量扫描，覆盖首次重扫之后仍被
+                        // 丢弃的事件；后续新事件重新按正常 debounce 流程处理。
+                        if rx.is_empty() && queue_overflowed.swap(false, Ordering::AcqRel) {
+                            if overflow_announced {
+                                tracing::warn!("文件事件队列已恢复，请求尾部全量补偿扫描");
+                                let _ = change_tx.send(Vec::new());
+                            }
+                            overflow_announced = false;
+                        }
+                        if requires_rescan {
+                            continue;
                         }
                         let paths = extract_relative_paths(&event, &mount, &skip_matcher);
                         if paths.is_empty() {
@@ -256,16 +289,17 @@ impl LocalWatcher {
         *self.worker_handle.lock().await = Some(worker_handle);
     }
 
-    /// 停止监视：释放 FSEvents 句柄（drop watcher），清空 pending。
-    /// drop watcher 会关闭底层 FSEvents stream，之后不再接收回调。
+    /// 停止监视：释放平台 watcher 句柄并清空 pending。
+    /// drop watcher 会关闭底层事件流，之后不再接收回调。
     /// 这确保引擎被替换/退出后，旧 watcher 不会继续向 detached 任务喂事件。
     pub async fn stop(&self) {
         let _lifecycle = self.lifecycle.lock().await;
-        // 关闭 FSEvents：drop watcher 即停止底层 stream
+        // drop watcher 即停止平台底层事件流。
         if let Some(w) = self.watcher.lock().await.take() {
             drop(w);
         }
         self.generation.fetch_add(1, Ordering::AcqRel);
+        self.queue_overflowed.store(false, Ordering::Release);
         if let Some(stop) = self.stop_tx.lock().await.take() {
             let _ = stop.send(true);
         }
@@ -287,6 +321,48 @@ impl LocalWatcher {
         }
         self.pending.lock().await.clear();
         tracing::info!("本地文件监视器已停止");
+    }
+}
+
+/// 把 notify 同步回调无阻塞地转交给 async worker。
+///
+/// `notify` 用 `Flag::Rescan` 表示 inotify/FSEvents 已丢事件；错误也转换为同一
+/// 哨兵。若有界通道已满，则只置位饱和状态，由正在排空队列的 worker 发起补偿扫描。
+fn enqueue_notify_result(
+    result: Result<Event, notify::Error>,
+    tx: &mpsc::Sender<Event>,
+    queue_overflowed: &AtomicBool,
+) {
+    let event = match result {
+        Ok(event) => event,
+        Err(error) => {
+            tracing::error!(%error, "文件监视器报告错误，请求全量补偿扫描");
+            Event::new(EventKind::Other).set_flag(Flag::Rescan)
+        }
+    };
+
+    if event.need_rescan() {
+        tracing::warn!("文件监视器要求全量重扫");
+    }
+    // Linux inotify 会为目录遍历产生大量 OPEN/ACCESS/CLOSE_NOWRITE。它们不是本地
+    // 内容变更，若先塞进 256 通道再由 worker 丢弃，会制造假 overflow 和无谓全量扫描。
+    // Rescan 永远优先保留；Access 中只有 CLOSE_WRITE 能证明一次写入已经完成。
+    if !event.need_rescan()
+        && matches!(event.kind, EventKind::Access(access) if access != AccessKind::Close(AccessMode::Write))
+    {
+        tracing::trace!(kind = ?event.kind, "watcher: 入队前丢弃非变更 Access 事件");
+        return;
+    }
+    match tx.try_send(event) {
+        Ok(()) => {}
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            if !queue_overflowed.swap(true, Ordering::AcqRel) {
+                tracing::warn!("文件事件通道已满，合并为全量补偿扫描");
+            }
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            tracing::debug!("文件监视器工作器已关闭，忽略迟到事件");
+        }
     }
 }
 
@@ -317,7 +393,11 @@ fn extract_relative_paths(
     // 仅关注文件/目录变更事件（创建/修改/删除/其他）。
     // EventKind::Other 也需包含：Finder 粘贴/复制等操作在 macOS 上可能产生 Other 事件。
     match event.kind {
-        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) | EventKind::Other => {
+        EventKind::Create(_)
+        | EventKind::Modify(_)
+        | EventKind::Remove(_)
+        | EventKind::Access(AccessKind::Close(AccessMode::Write))
+        | EventKind::Other => {
             tracing::debug!(kind = ?event.kind, paths = ?paths, "watcher: 接受事件");
             paths
         }
@@ -325,5 +405,118 @@ fn extract_relative_paths(
             tracing::debug!(kind = ?event.kind, "watcher: 忽略非变更事件");
             Vec::new()
         }
+    }
+}
+
+#[cfg(test)]
+/// notify 重扫标记与有界通道饱和合同测试。
+mod tests {
+    use super::{enqueue_notify_result, extract_relative_paths, LocalWatcher};
+    use crate::mount::skip::SkipMatcher;
+    use notify::event::{AccessKind, AccessMode, Flag};
+    use notify::{Event, EventKind};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::mpsc;
+
+    /// 无路径的 Rescan 事件必须发布空集合，不能被路径提取逻辑静默丢弃。
+    #[tokio::test]
+    async fn rescan_flag_requests_full_scan() {
+        let directory = tempfile::tempdir().expect("创建 watcher 测试目录失败");
+        let watcher = LocalWatcher::new(directory.path(), Arc::new(SkipMatcher::new(&[])), 1);
+        let mut changes = watcher.subscribe();
+        let (tx, rx) = mpsc::channel(4);
+        watcher.start_event_loop_for_receiver(rx, false).await;
+
+        tx.send(Event::new(EventKind::Other).set_flag(Flag::Rescan))
+            .await
+            .expect("发送 Rescan 事件失败");
+        let batch = tokio::time::timeout(Duration::from_secs(1), changes.recv())
+            .await
+            .expect("未收到全量重扫请求")
+            .expect("重扫广播已关闭");
+        assert!(batch.is_empty());
+
+        drop(tx);
+        watcher.stop().await;
+    }
+
+    /// 通道饱和时回调必须立即返回并置位补偿标记，不能 blocking_send 卡住 notify 线程。
+    #[test]
+    fn full_channel_marks_overflow_without_blocking() {
+        let (tx, _rx) = mpsc::channel(1);
+        tx.try_send(Event::new(EventKind::Other))
+            .expect("预填 watcher 通道失败");
+        let queue_overflowed = AtomicBool::new(false);
+
+        enqueue_notify_result(Ok(Event::new(EventKind::Other)), &tx, &queue_overflowed);
+
+        assert!(queue_overflowed.load(Ordering::Acquire));
+    }
+
+    /// 目录遍历产生的 OPEN/READ 洪水必须在 notify 回调侧丢弃，不能占用有界通道，
+    /// 更不能把一次纯读取误报为 queue overflow。
+    #[test]
+    fn access_open_and_read_flood_never_enters_channel_or_marks_overflow() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let queue_overflowed = AtomicBool::new(false);
+
+        for _ in 0..1024 {
+            enqueue_notify_result(
+                Ok(Event::new(EventKind::Access(AccessKind::Open(
+                    AccessMode::Read,
+                )))),
+                &tx,
+                &queue_overflowed,
+            );
+            enqueue_notify_result(
+                Ok(Event::new(EventKind::Access(AccessKind::Read))),
+                &tx,
+                &queue_overflowed,
+            );
+        }
+
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert!(!queue_overflowed.load(Ordering::Acquire));
+    }
+
+    /// CLOSE_WRITE 是一次真实写入完成信号，既要进入通道，也要被路径提取接受。
+    #[test]
+    fn access_close_write_is_enqueued_and_extracted_as_change() {
+        let directory = tempfile::tempdir().expect("创建 watcher 测试目录失败");
+        let changed = directory.path().join("changed.txt");
+        let event =
+            Event::new(EventKind::Access(AccessKind::Close(AccessMode::Write))).add_path(changed);
+        let (tx, mut rx) = mpsc::channel(1);
+        let queue_overflowed = AtomicBool::new(false);
+
+        enqueue_notify_result(Ok(event), &tx, &queue_overflowed);
+        let received = rx.try_recv().expect("CLOSE_WRITE 应进入 watcher 通道");
+        assert_eq!(
+            extract_relative_paths(&received, directory.path(), &SkipMatcher::new(&[]),),
+            vec!["changed.txt".to_string()]
+        );
+        assert!(!queue_overflowed.load(Ordering::Acquire));
+    }
+
+    /// 即使底层把重扫哨兵附在 Access 事件上，Rescan 也必须优先于访问过滤。
+    #[test]
+    fn rescan_flag_on_access_event_is_never_filtered() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let queue_overflowed = AtomicBool::new(false);
+        let event = Event::new(EventKind::Access(AccessKind::Open(AccessMode::Read)))
+            .set_flag(Flag::Rescan);
+
+        enqueue_notify_result(Ok(event), &tx, &queue_overflowed);
+
+        assert!(rx
+            .try_recv()
+            .expect("Rescan Access 事件应进入 watcher 通道")
+            .need_rescan());
+        assert!(!queue_overflowed.load(Ordering::Acquire));
     }
 }

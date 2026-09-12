@@ -1,24 +1,111 @@
 # PetalLink Release Workflow
-# 当推送 v* 标签时自动构建 macOS (aarch64) 并发布 GitHub Release。
-# 产物包括 .dmg（手动安装）和 .app.tar.gz（自动更新），以及 update.json。
+#
+# 受保护的 v* tag 会分别在 macOS arm64 与 Ubuntu 22.04 x86_64 上构建。
+# 两个平台使用同一把 Tauri 更新私钥签名，最后由单一 publish job 聚合更新清单，
+# 先上传为 draft Release，确认所有资产存在后再公开，避免 latest endpoint 暴露半成品。
 
 name: Release
 
 on:
   push:
-    tags: ['v*']
+    tags:
+      - "v*"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "要发布的已有 tag（例如 v1.2.0）"
+        required: true
+        type: string
 
 permissions:
-  contents: write
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
-  build-and-release:
-    name: Build & Release (macOS aarch64)
-    runs-on: macos-latest
+  validate:
+    name: Validate release version
+    runs-on: ubuntu-22.04
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+      commit: ${{ steps.version.outputs.commit }}
     steps:
-      - name: Checkout
+      - name: Checkout release tag
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.ref }}
+          fetch-depth: 0
+
+      - name: Match tag, Tauri and Cargo versions
+        id: version
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::稳定更新通道只接受 vX.Y.Z tag，例如 v1.2.0"
+            exit 1
+          fi
+
+          TAG_COMMIT="$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")"
+          HEAD_COMMIT="$(git rev-parse HEAD)"
+          if [[ "$TAG_COMMIT" != "$HEAD_COMMIT" ]]; then
+            echo "::error::检出的提交不是 tag $RELEASE_TAG 指向的提交"
+            exit 1
+          fi
+
+          VERSION="${RELEASE_TAG#v}"
+          TAURI_VERSION="$(jq -r '.version' tauri.conf.json)"
+          CARGO_VERSION="$(awk '
+            /^\[package\]$/ { in_package = 1; next }
+            /^\[/ && in_package { exit }
+            in_package && /^version[[:space:]]*=/ {
+              gsub(/^[^"]*"|".*$/, "")
+              print
+              exit
+            }
+          ' Cargo.toml)"
+
+          if [[ "$VERSION" != "$TAURI_VERSION" || "$VERSION" != "$CARGO_VERSION" ]]; then
+            echo "::error::版本不一致：tag=$VERSION tauri.conf.json=$TAURI_VERSION Cargo.toml=$CARGO_VERSION"
+            exit 1
+          fi
+
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "commit=$TAG_COMMIT" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure version advances the stable channel
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          CURRENT_TAG="$(gh release view --json tagName --jq '.tagName')"
+          if [[ ! "$CURRENT_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::当前 latest Release tag 不是稳定 SemVer：$CURRENT_TAG"
+            exit 1
+          fi
+          CURRENT_VERSION="${CURRENT_TAG#v}"
+          if ! dpkg --compare-versions "$RELEASE_VERSION" gt "$CURRENT_VERSION"; then
+            echo "::error::新版本 $RELEASE_VERSION 必须高于当前 latest $CURRENT_VERSION"
+            exit 1
+          fi
+
+  build-macos:
+    name: Build macOS arm64
+    needs: validate
+    runs-on: macos-14
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -28,124 +115,307 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: app/package-lock.json
 
-      - name: Install frontend deps
-        run: |
-          cd app
-          npm ci
+      - name: Install frontend dependencies
+        run: npm ci --prefix app
 
-      - name: Build Tauri app
-        run: |
-          app/node_modules/.bin/tauri build --target aarch64-apple-darwin
+      - name: Verify required release secrets
+        shell: bash
         env:
-          HWCLOUD_CLIENT_ID: ${{ secrets.HWCLOUD_CLIENT_ID || '' }}
-          HWCLOUD_CLIENT_SECRET: ${{ secrets.HWCLOUD_CLIENT_SECRET || '' }}
-          # Tauri 更新签名私钥（构建时自动对 .app.tar.gz 签名，生成 .sig）
+          HWCLOUD_CLIENT_ID: ${{ secrets.HWCLOUD_CLIENT_ID }}
+          HWCLOUD_CLIENT_SECRET: ${{ secrets.HWCLOUD_CLIENT_SECRET }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-
-      - name: Collect and rename artifacts
         run: |
+          set -euo pipefail
+          [[ -n "$HWCLOUD_CLIENT_ID" ]] || { echo "::error::缺少 HWCLOUD_CLIENT_ID"; exit 1; }
+          [[ -n "$HWCLOUD_CLIENT_SECRET" ]] || { echo "::error::缺少 HWCLOUD_CLIENT_SECRET"; exit 1; }
+          [[ -n "$TAURI_SIGNING_PRIVATE_KEY" ]] || { echo "::error::缺少 TAURI_SIGNING_PRIVATE_KEY"; exit 1; }
+
+      - name: Build signed macOS bundles
+        env:
+          HWCLOUD_CLIENT_ID: ${{ secrets.HWCLOUD_CLIENT_ID }}
+          HWCLOUD_CLIENT_SECRET: ${{ secrets.HWCLOUD_CLIENT_SECRET }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: app/node_modules/.bin/tauri build --target aarch64-apple-darwin
+
+      - name: Collect and validate macOS artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
           mkdir -p dist
-          cp target/aarch64-apple-darwin/release/bundle/dmg/*.dmg dist/ 2>/dev/null || true
+          BUNDLE_DIR="target/aarch64-apple-darwin/release/bundle"
 
-          # 拷贝 Tauri 自动生成的更新产物（createUpdaterArtifacts: true + 签名私钥）
-          # 含 .app.tar.gz（更新包）和 .app.tar.gz.sig（签名）
-          BUNDLE_MACOS="target/aarch64-apple-darwin/release/bundle/macos"
-          cp "$BUNDLE_MACOS"/*.app.tar.gz dist/ 2>/dev/null || true
-          cp "$BUNDLE_MACOS"/*.app.tar.gz.sig dist/ 2>/dev/null || true
+          TAR_COUNT="$(find "$BUNDLE_DIR/macos" -maxdepth 1 -type f -name '*.app.tar.gz' | wc -l | tr -d ' ')"
+          DMG_COUNT="$(find "$BUNDLE_DIR/dmg" -maxdepth 1 -type f -name '*.dmg' | wc -l | tr -d ' ')"
+          [[ "$TAR_COUNT" == "1" ]] || { echo "::error::macOS 更新包数量应为 1，实际为 $TAR_COUNT"; exit 1; }
+          [[ "$DMG_COUNT" == "1" ]] || { echo "::error::DMG 数量应为 1，实际为 $DMG_COUNT"; exit 1; }
 
-          # 校验签名文件确实生成（缺失说明 TAURI_SIGNING_PRIVATE_KEY 未配置或为空）
-          if ! ls dist/*.app.tar.gz.sig 1>/dev/null 2>&1; then
-            echo "::error::未找到 .app.tar.gz.sig —— 请检查 GitHub Secret TAURI_SIGNING_PRIVATE_KEY 是否已配置"
-            exit 1
-          fi
+          TAR_FILE="$(find "$BUNDLE_DIR/macos" -maxdepth 1 -type f -name '*.app.tar.gz' -print -quit)"
+          DMG_FILE="$(find "$BUNDLE_DIR/dmg" -maxdepth 1 -type f -name '*.dmg' -print -quit)"
+          [[ -s "$TAR_FILE.sig" ]] || { echo "::error::缺少 macOS 更新签名：$TAR_FILE.sig"; exit 1; }
 
-          # 重命名加架构后缀（.sig 跟随同名 .app.tar.gz）
-          for f in dist/*.dmg; do
-            base=$(basename "$f" .dmg)
-            mv "$f" "dist/${base}_aarch64.dmg"
-          done 2>/dev/null || true
-          for f in dist/*.app.tar.gz; do
-            base=$(basename "$f" .app.tar.gz)
-            mv "$f" "dist/${base}_aarch64.app.tar.gz"
-          done 2>/dev/null || true
-          for f in dist/*.app.tar.gz.sig; do
-            base=$(basename "$f" .app.tar.gz.sig)
-            mv "$f" "dist/${base}_aarch64.app.tar.gz.sig"
-          done 2>/dev/null || true
+          cp "$TAR_FILE" "$TAR_FILE.sig" "$DMG_FILE" dist/
 
-      - name: Generate update.json
+      - name: Upload macOS workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-macos-arm64
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  build-linux:
+    name: Build Linux x86_64 AppImage
+    needs: validate
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+
+      - name: Install Linux build dependencies
         run: |
-          TAG=${GITHUB_REF#refs/tags/}
-          VERSION=${TAG#v}
-          echo "Tag: $TAG, Version: $VERSION"
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            libfuse2 \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            patchelf \
+            xdg-utils
 
-          TAR_FILE=$(ls dist/*_aarch64.app.tar.gz 2>/dev/null | head -1)
-          TAR_NAME=$(basename "$TAR_FILE" 2>/dev/null || echo "")
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
 
-          # 读取 Tauri 生成的签名内容（minisign 格式，多行）
-          SIG_FILE=$(ls dist/*_aarch64.app.tar.gz.sig 2>/dev/null | head -1)
-          SIGNATURE=$(cat "$SIG_FILE" 2>/dev/null || echo "")
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: app/package-lock.json
 
-          # workflow_dispatch 手动触发时无 tag，version 兜底
-          if [ -z "$VERSION" ] || [ "$VERSION" = "$GITHUB_REF" ]; then
-            VERSION="0.0.0-manual"
-          fi
+      - name: Install frontend dependencies
+        run: npm ci --prefix app
 
-          # 用 jq 构造 JSON：signature 是多行 minisign 内容，必须经 jq 转义为 \n
-          # 否则裸换行会破坏 JSON 结构（常见 Tauri update.json 失效坑）
-          URL="https://github.com/yuanbaobaoo/PetalLink/releases/download/$TAG/$TAR_NAME"
-          PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          NOTES="详见 https://github.com/yuanbaobaoo/PetalLink/releases/tag/$TAG"
+      - name: Verify required release secrets
+        shell: bash
+        env:
+          HWCLOUD_CLIENT_ID: ${{ secrets.HWCLOUD_CLIENT_ID }}
+          HWCLOUD_CLIENT_SECRET: ${{ secrets.HWCLOUD_CLIENT_SECRET }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          [[ -n "$HWCLOUD_CLIENT_ID" ]] || { echo "::error::缺少 HWCLOUD_CLIENT_ID"; exit 1; }
+          [[ -n "$HWCLOUD_CLIENT_SECRET" ]] || { echo "::error::缺少 HWCLOUD_CLIENT_SECRET"; exit 1; }
+          [[ -n "$TAURI_SIGNING_PRIVATE_KEY" ]] || { echo "::error::缺少 TAURI_SIGNING_PRIVATE_KEY"; exit 1; }
+
+      - name: Build signed official AppImage
+        env:
+          HWCLOUD_CLIENT_ID: ${{ secrets.HWCLOUD_CLIENT_ID }}
+          HWCLOUD_CLIENT_SECRET: ${{ secrets.HWCLOUD_CLIENT_SECRET }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          PETALLINK_UPDATE_CHANNEL: appimage
+        run: >
+          app/node_modules/.bin/tauri build
+          --bundles appimage
+          --config tauri.linux.updater.conf.json
+
+      - name: Collect and validate Linux artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          BUNDLE_DIR="target/release/bundle/appimage"
+
+          APPIMAGE_COUNT="$(find "$BUNDLE_DIR" -maxdepth 1 -type f -name '*.AppImage' | wc -l | tr -d ' ')"
+          [[ "$APPIMAGE_COUNT" == "1" ]] || { echo "::error::AppImage 数量应为 1，实际为 $APPIMAGE_COUNT"; exit 1; }
+
+          APPIMAGE_FILE="$(find "$BUNDLE_DIR" -maxdepth 1 -type f -name '*.AppImage' -print -quit)"
+          [[ -s "$APPIMAGE_FILE.sig" ]] || { echo "::error::缺少 Linux 更新签名：$APPIMAGE_FILE.sig"; exit 1; }
+
+          cp "$APPIMAGE_FILE" "$APPIMAGE_FILE.sig" dist/
+
+      - name: Upload Linux workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-x86_64
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish signed release
+    needs:
+      - validate
+      - build-macos
+      - build-linux
+    # Jammy 没有 minisign 包；仅发布/验签使用 Noble，不影响 Linux AppImage 的
+    # Ubuntu 22.04 glibc 兼容基线。
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          fetch-depth: 0
+
+      - name: Download all release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Verify signatures and generate update manifest
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y minisign
+
+          TAG_COMMIT="$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")"
+          [[ "$TAG_COMMIT" == "$RELEASE_COMMIT" && "$(git rev-parse HEAD)" == "$RELEASE_COMMIT" ]] || {
+            echo "::error::发布工作区、tag 与已验证提交不一致"
+            exit 1
+          }
+
+          one_file() {
+            local pattern="$1"
+            local label="$2"
+            local count
+            count="$(find dist -maxdepth 1 -type f -name "$pattern" | wc -l | tr -d ' ')"
+            [[ "$count" == "1" ]] || { echo "::error::$label 数量应为 1，实际为 $count"; exit 1; }
+            find dist -maxdepth 1 -type f -name "$pattern" -print -quit
+          }
+
+          MAC_TAR="$(one_file '*.app.tar.gz' 'macOS 更新包')"
+          LINUX_APPIMAGE="$(one_file '*.AppImage' 'Linux AppImage')"
+          [[ -s "$MAC_TAR.sig" ]] || { echo "::error::缺少 macOS 签名"; exit 1; }
+          [[ -s "$LINUX_APPIMAGE.sig" ]] || { echo "::error::缺少 Linux 签名"; exit 1; }
+          one_file '*.dmg' 'macOS DMG' >/dev/null
+
+          jq -r '.plugins.updater.pubkey' tauri.conf.json | base64 --decode > dist/updater.pub
+          base64 --decode < "$MAC_TAR.sig" > dist/macos.minisig
+          base64 --decode < "$LINUX_APPIMAGE.sig" > dist/linux.minisig
+          minisign -Vm "$MAC_TAR" -x dist/macos.minisig -p dist/updater.pub
+          minisign -Vm "$LINUX_APPIMAGE" -x dist/linux.minisig -p dist/updater.pub
+
+          MAC_NAME="$(basename "$MAC_TAR")"
+          LINUX_NAME="$(basename "$LINUX_APPIMAGE")"
+          MAC_SIGNATURE="$(tr -d '\r\n' < "$MAC_TAR.sig")"
+          LINUX_SIGNATURE="$(tr -d '\r\n' < "$LINUX_APPIMAGE.sig")"
+          RELEASE_BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}"
+          PUB_DATE="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          NOTES="详见 https://github.com/${GITHUB_REPOSITORY}/releases/tag/${RELEASE_TAG}"
 
           jq -n \
-            --arg version "$VERSION" \
+            --arg version "$RELEASE_VERSION" \
             --arg notes "$NOTES" \
             --arg pub_date "$PUB_DATE" \
-            --arg signature "$SIGNATURE" \
-            --arg url "$URL" \
+            --arg mac_signature "$MAC_SIGNATURE" \
+            --arg mac_url "$RELEASE_BASE/$MAC_NAME" \
+            --arg linux_signature "$LINUX_SIGNATURE" \
+            --arg linux_url "$RELEASE_BASE/$LINUX_NAME" \
             '{
               version: $version,
               notes: $notes,
               pub_date: $pub_date,
               platforms: {
                 "darwin-aarch64": {
-                  signature: $signature,
-                  url: $url
+                  signature: $mac_signature,
+                  url: $mac_url
+                },
+                "linux-x86_64": {
+                  signature: $linux_signature,
+                  url: $linux_url
                 }
               }
             }' > dist/PetalLink_update.json
 
-          echo "Generated PetalLink_update.json:"
-          cat dist/PetalLink_update.json
-          echo ""
-          # 校验生成的 JSON 合法（signature 转义后应为单行 \n）
-          jq empty dist/PetalLink_update.json && echo "✅ update.json JSON 合法"
+          jq -e '
+            .version != "" and
+            (.platforms["darwin-aarch64"].signature | length > 0) and
+            (.platforms["darwin-aarch64"].url | length > 0) and
+            (.platforms["linux-x86_64"].signature | length > 0) and
+            (.platforms["linux-x86_64"].url | length > 0)
+          ' dist/PetalLink_update.json >/dev/null
 
-      - name: List dist
-        run: ls -la dist/
+          rm dist/updater.pub dist/macos.minisig dist/linux.minisig
+          sha256sum dist/* > dist/SHA256SUMS
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          name: "${{ github.ref_name }}"
-          # generate_release_notes: true 会自动生成「自上个 tag 以来的 commits/PR 变更说明」，
-          # 并接在下方自定义 body 之后（action-gh-release 的 pre-pend 语义）。
-          generate_release_notes: true
-          body: |
-            ## 更新内容
-
-            ${{ github.event.head_commit.message }}
-
-            ---
-
-          files: |
-            dist/*.dmg
-            dist/*.app.tar.gz
-            dist/*.app.tar.gz.sig
-            dist/PetalLink_update.json
-          draft: false
-          prerelease: false
+      - name: Create or update draft release
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          CURRENT_TAG="$(gh release view --json tagName --jq '.tagName')"
+          [[ "$CURRENT_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::当前 latest Release tag 不是稳定 SemVer：$CURRENT_TAG"
+            exit 1
+          }
+          CURRENT_VERSION="${CURRENT_TAG#v}"
+          dpkg --compare-versions "$RELEASE_VERSION" gt "$CURRENT_VERSION" || {
+            echo "::error::发布期间 latest 已变更；$RELEASE_VERSION 不再高于 $CURRENT_VERSION"
+            exit 1
+          }
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            IS_DRAFT="$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft')"
+            [[ "$IS_DRAFT" == "true" ]] || {
+              echo "::error::Release $RELEASE_TAG 已公开，拒绝覆盖不可变发布资产"
+              exit 1
+            }
+            gh release upload "$RELEASE_TAG" dist/* --clobber
+          else
+            gh release create "$RELEASE_TAG" dist/* \
+              --draft \
+              --generate-notes \
+              --title "$RELEASE_TAG" \
+              --verify-tag
+          fi
+
+      - name: Verify draft assets and publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          for file in dist/*; do
+            name="$(basename "$file")"
+            gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | grep -Fx -- "$name" >/dev/null || {
+              echo "::error::Draft Release 缺少资产：$name"
+              exit 1
+            }
+          done
+
+          EXPECTED_ASSETS="$(find dist -maxdepth 1 -type f -printf '%f\n' | sort)"
+          REMOTE_ASSETS="$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | sort)"
+          if [[ "$EXPECTED_ASSETS" != "$REMOTE_ASSETS" ]]; then
+            echo "::error::Draft Release 含缺失或过期资产，拒绝公开；请清理 draft 后重跑"
+            diff -u <(printf '%s\n' "$EXPECTED_ASSETS") <(printf '%s\n' "$REMOTE_ASSETS") || true
+            exit 1
+          fi
+
+          gh release edit "$RELEASE_TAG" --draft=false --latest

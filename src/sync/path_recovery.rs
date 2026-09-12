@@ -246,7 +246,7 @@ fn recover_one(
             .map(|edited_time| edited_time.timestamp_millis());
         if cloud_edited_time
             .zip(root.cloud_edited_time)
-            .map_or(true, |(cloud, baseline)| cloud <= baseline)
+            .is_none_or(|(cloud, baseline)| cloud <= baseline)
         {
             return Err(AppError::generic(format!(
                 "云端路径变化缺少更新版本证明或版本不新，等待 checkpoint 追平：{} -> {new_root}",
@@ -341,7 +341,7 @@ fn recover_one(
     }
     if cloud_tree
         .get(new_root)
-        .map_or(true, |file| file.id != root.file_id)
+        .is_none_or(|file| file.id != root.file_id)
     {
         return Err(AppError::generic(format!(
             "可信云树无法确认目标 fileId，拒绝路径恢复：{new_root}"
@@ -415,31 +415,54 @@ fn rekey_db_subtree(
     let transaction = conn
         .unchecked_transaction()
         .map_err(|error| AppError::generic(format!("开始路径恢复事务失败：{error}")))?;
-    // 先移除旧路径键，避免唯一约束阻碍子树重键。
-    for record in subtree {
-        transaction
+    let roots = subtree
+        .iter()
+        .filter(|record| record.local_path == old_root)
+        .collect::<Vec<_>>();
+    if roots.len() != 1 {
+        return Err(AppError::generic(format!(
+            "路径恢复缺少唯一同步基线根：{old_root}"
+        )));
+    }
+    let root = roots[0];
+    if root.is_folder {
+        rekey_sync_items_subtree_in_transaction(
+            &transaction,
+            subtree,
+            old_root,
+            new_root,
+            cloud_root,
+        )?;
+    } else {
+        // 普通文件只有一个基线键。目录 helper 会有意拒绝文件根，因此这里保留
+        // 单记录重键语义，同时仍在同一事务中取消已经失效的重规划任务。
+        if subtree.len() != 1 || cloud_root.is_folder() || root.file_id != cloud_root.id {
+            return Err(AppError::generic(format!(
+                "文件路径恢复的类型、稳定 fileId 或基线数量不一致：{old_root}"
+            )));
+        }
+        let deleted = transaction
             .execute(
                 "DELETE FROM sync_items WHERE file_id=?1 AND local_path=?2",
-                rusqlite::params![record.file_id, record.local_path],
+                rusqlite::params![root.file_id, root.local_path],
             )
-            .map_err(|error| AppError::generic(format!("删除旧路径基线失败：{error}")))?;
-    }
-    // 再按新根重写每条记录，仅根节点更新云端权威元数据。
-    for record in subtree {
-        let mut moved = record.clone();
-        moved.local_path = rekey_path(&record.local_path, old_root, new_root)?;
-        if moved.file_id == cloud_root.id {
-            moved.name = cloud_root.name.clone();
-            moved.parent_folder_id = cloud_root
-                .parent_folder
-                .as_ref()
-                .and_then(|parents| parents.first().cloned());
-            moved.size = cloud_root.size;
-            moved.cloud_edited_time = cloud_root
-                .edited_time
-                .map(|edited_time| edited_time.timestamp_millis());
+            .map_err(|error| AppError::generic(format!("删除旧文件路径基线失败：{error}")))?;
+        if deleted != 1 {
+            return Err(AppError::generic(format!(
+                "删除旧文件路径基线应影响 1 行，实际 {deleted} 行：{old_root}"
+            )));
         }
-        // 结构移动不能证明内容版本，必须保留本地时间/大小/哈希与同步状态。
+        let mut moved = root.clone();
+        moved.local_path = new_root.to_string();
+        moved.name = cloud_root.name.clone();
+        moved.parent_folder_id = cloud_root
+            .parent_folder
+            .as_ref()
+            .and_then(|parents| parents.first().cloned());
+        moved.size = cloud_root.size;
+        moved.cloud_edited_time = cloud_root
+            .edited_time
+            .map(|edited_time| edited_time.timestamp_millis());
         repository::upsert(&transaction, &moved)?;
     }
     let old_prefix = format!("{old_root}/");
@@ -479,6 +502,89 @@ fn rekey_db_subtree(
         .commit()
         .map_err(|error| AppError::generic(format!("提交路径恢复事务失败：{error}")))?;
     Ok(())
+}
+
+/// 在调用方已经开启的事务中原子重键一棵同步基线子树。
+///
+/// 目录移动只证明结构元数据发生变化，不能证明任一后代内容已经重新同步。因此这里只
+/// 更新根记录的名称、父目录、云端大小与 editedTime；所有后代的内容 hash、本地
+/// mtime/size、状态、错误和最后同步时间均原样保留。
+pub(crate) fn rekey_sync_items_subtree_in_transaction(
+    conn: &Connection,
+    records: &[SyncItem],
+    old_root: &str,
+    new_root: &str,
+    cloud_root: &DriveFile,
+) -> AppResult<usize> {
+    crate::core::paths::validate_relative_path(old_root, false)?;
+    crate::core::paths::validate_relative_path(new_root, false)?;
+    if old_root == new_root {
+        return Err(AppError::generic("同步基线子树重键的源和目标相同"));
+    }
+    if is_in_subtree(new_root, old_root) {
+        return Err(AppError::generic(format!(
+            "拒绝把同步基线目录移动到自身子树：{old_root} -> {new_root}"
+        )));
+    }
+
+    let roots = records
+        .iter()
+        .filter(|record| record.local_path == old_root)
+        .collect::<Vec<_>>();
+    if roots.len() != 1 {
+        return Err(AppError::generic(format!(
+            "同步基线缺少唯一目录根，拒绝子树重键：{old_root}"
+        )));
+    }
+    let root = roots[0];
+    if !root.is_folder || !cloud_root.is_folder() || root.file_id != cloud_root.id {
+        return Err(AppError::generic(format!(
+            "目录根类型或稳定 fileId 不一致，拒绝子树重键：{old_root}"
+        )));
+    }
+
+    let subtree = records
+        .iter()
+        .filter(|record| is_in_subtree(&record.local_path, old_root))
+        .collect::<Vec<_>>();
+    if subtree.is_empty() {
+        return Err(AppError::generic(format!(
+            "同步基线目录子树为空，拒绝重键：{old_root}"
+        )));
+    }
+    if records.iter().any(|record| {
+        !is_in_subtree(&record.local_path, old_root) && is_in_subtree(&record.local_path, new_root)
+    }) {
+        return Err(AppError::generic(format!(
+            "目标同步基线路径已被其他记录占用，拒绝覆盖：{new_root}"
+        )));
+    }
+
+    // 先移除全部旧键，再写新键，避免父子顺序或复合主键阻碍整棵子树移动。
+    for record in &subtree {
+        conn.execute(
+            "DELETE FROM sync_items WHERE file_id=?1 AND local_path=?2",
+            rusqlite::params![record.file_id, record.local_path],
+        )
+        .map_err(|error| AppError::generic(format!("删除旧路径基线失败：{error}")))?;
+    }
+    for record in &subtree {
+        let mut moved = (*record).clone();
+        moved.local_path = rekey_path(&record.local_path, old_root, new_root)?;
+        if record.local_path == old_root {
+            moved.name = cloud_root.name.clone();
+            moved.parent_folder_id = cloud_root
+                .parent_folder
+                .as_ref()
+                .and_then(|parents| parents.first().cloned());
+            moved.size = cloud_root.size;
+            moved.cloud_edited_time = cloud_root
+                .edited_time
+                .map(|edited_time| edited_time.timestamp_millis());
+        }
+        repository::upsert(conn, &moved)?;
+    }
+    Ok(subtree.len())
 }
 
 /// 将旧子树中的相对路径映射到新根路径。
@@ -534,7 +640,7 @@ pub(crate) fn validate_local_type(
 
 /// 读取用于路径恢复身份校验的 fileId xattr。
 pub(crate) fn read_file_id(path: &Path) -> AppResult<Option<String>> {
-    xattr::get(path, XATTR_FILE_ID)
+    crate::platform::xattr::get(path, XATTR_FILE_ID)
         .map_err(|error| {
             AppError::generic(format!(
                 "读取路径恢复 fileId 失败（{}）：{error}",
@@ -584,7 +690,7 @@ pub(crate) fn ensure_safe_target_parent(mount_root: &Path, new_root: &str) -> Ap
     Ok(())
 }
 
-/// macOS 使用不覆盖的原子重命名，非 macOS 回退保留显式存在性检查。
+/// macOS 与 Linux 使用各自的原子不覆盖重命名接口。
 pub fn rename_no_replace(source: &Path, target: &Path) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
     {
@@ -627,7 +733,32 @@ pub fn rename_no_replace(source: &Path, target: &Path) -> std::io::Result<()> {
             Err(std::io::Error::last_os_error())
         }
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let source = CString::new(source.as_os_str().as_bytes())
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "源路径含 NUL"))?;
+        let target = CString::new(target.as_os_str().as_bytes())
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "目标路径含 NUL"))?;
+        // 安全性：C 字符串在调用期间保持存活，两个目录 fd 均按当前工作目录解析。
+        let result = unsafe {
+            libc::renameat2(
+                libc::AT_FDCWD,
+                source.as_ptr(),
+                libc::AT_FDCWD,
+                target.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         if std::fs::symlink_metadata(target).is_ok() {
             return Err(std::io::Error::new(

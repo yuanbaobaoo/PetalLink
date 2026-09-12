@@ -521,7 +521,7 @@ fn verify_local_destination(
                 )))
             }
         };
-        let owner = xattr::get(dest_path, crate::mount::manager::XATTR_FILE_ID)
+        let owner = crate::platform::xattr::get(dest_path, crate::mount::manager::XATTR_FILE_ID)
             .map_err(|error| AppError::generic(format!("读取下载占位身份失败：{error}")))?
             .map(String::from_utf8)
             .transpose()
@@ -548,20 +548,17 @@ fn verify_local_destination(
 fn matches_expectation(remote: &ResumeMetadata, expectation: &DownloadExpectation) -> bool {
     expectation
         .edited_time_ms
-        .map_or(true, |expected| remote.edited_time_ms == Some(expected))
+        .is_none_or(|expected| remote.edited_time_ms == Some(expected))
         && expectation
             .size
-            .map_or(true, |expected| remote.size == expected)
-        && expectation
-            .content_hash
-            .as_deref()
-            .map_or(true, |expected| {
-                remote
-                    .sha256
-                    .as_deref()
-                    .or(remote.content_hash.as_deref())
-                    .is_some_and(|actual| actual.eq_ignore_ascii_case(expected))
-            })
+            .is_none_or(|expected| remote.size == expected)
+        && expectation.content_hash.as_deref().is_none_or(|expected| {
+            remote
+                .sha256
+                .as_deref()
+                .or(remote.content_hash.as_deref())
+                .is_some_and(|actual| actual.eq_ignore_ascii_case(expected))
+        })
 }
 
 /// 返回写入起点。`200` 表示服务端忽略 Range，调用方必须截断后从 0 写。
@@ -752,7 +749,7 @@ mod tests {
         let dest = dir.path().join("video.mp4");
         std::fs::write(&dest, b"").expect("创建目标文件失败");
         for (key, value) in xattrs {
-            xattr::set(&dest, key, value.as_bytes()).expect("写入 xattr 失败");
+            crate::platform::xattr::set(&dest, key, value.as_bytes()).expect("写入 xattr 失败");
         }
         dest
     }

@@ -2,14 +2,15 @@
 
 # PetalLink
 
-华为云盘 Mac 客户端 —— 基于 REST API， 将华为云空间挂载到本地，双向实时同步。
+华为云盘桌面客户端 —— 基于 REST API，将华为云空间映射到本地，双向实时同步。
 
-> 华为云空间目前并不支持 macOS。PetalLink 通过华为 ACG REST API 直连，不依赖 HMS Core SDK，为 macOS 用户提供接近原生的云盘体验。
+> PetalLink 通过华为 AGC REST API 直连，不依赖 HMS Core SDK。macOS 继续使用现有的传统同步目录；Linux x86_64 仅提供 FUSE3 按需云盘，范围与限制见 [Linux 支持说明](docs/Linux.md)。
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Tauri](https://img.shields.io/badge/Tauri-2.x-FFC131?logo=tauri)](https://v2.tauri.app/)
 [![Rust](https://img.shields.io/badge/Rust-1.77+-DEA584?logo=rust)](https://www.rust-lang.org/)
 [![macOS](https://img.shields.io/badge/macOS-12+-silver?logo=apple)](https://www.apple.com/macos/)
+[![Linux](https://img.shields.io/badge/Linux-FUSE3-FCC624?logo=linux&logoColor=black)](docs/Linux.md)
 
 ---
 
@@ -48,11 +49,13 @@
 | **网盘主界面**                        | 双栏布局（侧边栏递归目录树 + 文件列表）；面包屑导航；搜索；新建文件夹 |
 | **文件操作**                         | 上传（≤20MB multipart + >20MB 分片续传）、Range 断点下载、删除、重命名、移动、缩略图；写操作按 fileId 核验后才结算 |
 | **拖拽上传**                         | 文件/文件夹拖入文件列表即复制进同步目录（`.tmp` 原子落盘、同名拒绝覆盖），随后自动上传到云端；传输队列实时可见进度 |
-| **双向同步**                         | 本地 FSEvents + 3s debounce；华为 Changes 增量同步 + BFS 兜底；tree/path/cursor 原子可信 checkpoint；三段式稳定性检查 |
-| **后台运行**                         | 关闭窗口 / ⌘W 不退出，仅隐藏 UI 层（Dock 图标消失）；托盘图标可见时 ⌘Q 同样隐藏至后台；系统菜单栏图标可开关；同步引擎在后台持续运行 |
-| **开机自启动**                        | 设置页开关，LaunchAgent plist（带 `--hidden` 参数，开机只显示菜单栏图标） |
+| **双向同步**                         | 本地 FSEvents/inotify + 3s debounce；华为 Changes 增量同步 + BFS 兜底；tree/path/cursor 原子可信 checkpoint；三段式稳定性检查 |
+| **Linux 按需云盘**                    | Linux 唯一的目录模式；用户只选择一个可见云盘目录，完整云端树立即可见，交互式应用首次读取自动下载；后台缩略图与内容索引不会触发批量落地，私有缓存由应用管理 |
+| **后台运行**                         | 托盘可用时关闭窗口仅隐藏 UI，同步引擎继续运行；托盘隐藏或不可用时关闭窗口会完全退出 |
+| **开机自启动**                        | 设置页开关；macOS 使用 LaunchAgent，Linux 使用 XDG Autostart，均以 `--hidden` 模式启动 |
+| **安全更新**                         | 官方 macOS 与 Linux AppImage 使用同一更新公钥校验签名；AUR/发行版软件包不在应用内自更新，继续由包管理器维护 |
 | **冲突处理**                         | 自动重命名副本（60s 容忍窗口 + 副本去重 + 云端删除时保护本地修改） |
-| **配置管理**                         | 集中设置页：OAuth 回调地址、挂载目录、并发数（默认 6）、debounce 时长（默认 3s）、跳过文件列表、是否显示托盘图标 |
+| **配置管理**                         | 集中设置页：OAuth 回调地址、云盘目录、并发数（默认 6）、debounce 时长（默认 3s）、跳过文件列表、是否显示托盘图标 |
 | **传输队列**                         | 持久化状态机；上传/下载排队执行，主页删除完成后留痕可见；等待网络、退避、远端核验、需重新规划、永久失败分开展示；网络恢复自动续跑 |
 | **释放空间**                         | 支持文件与目录（递归子树）；执行前弹窗列出可释放文件名与大小供二次确认；逐项复核可信云树、远端 fileId、成功基线、本地 mtime/size 与活动任务，防止 TOCTOU 误删 |
 | **日志系统**                         | 三层输出（终端 + 滚动文件 + 环形缓冲）；日志查看导出页面 |
@@ -67,8 +70,9 @@
 | **前端** | Vue 3 + TypeScript + Vite + Pinia |
 | **数据库** | SQLite（rusqlite, bundled） |
 | **HTTP** | reqwest（rustls-tls） |
-| **文件监听** | notify（macOS FSEvents） |
-| **安全存储** | `token.bin` + ChaCha20-Poly1305 AEAD（密钥由本机 IOPlatformUUID 派生） |
+| **文件监听** | notify（macOS FSEvents / Linux inotify） |
+| **Linux 虚拟盘** | fuser + Linux FUSE3（无需动态链接 libfuse） |
+| **安全存储** | `token.bin` + ChaCha20-Poly1305 AEAD（macOS IOPlatformUUID / Linux machine-id） |
 | **UI 设计** | Mate 组件库 + 自建 design token |
 | **日志** | tracing + tracing-appender |
 
@@ -76,10 +80,23 @@
 
 ## 前置要求
 
-- macOS 12 Monterey 及以上
-- [Rust](https://rustup.rs/) 1.77+
+- [Rust](https://rustup.rs/) 1.85+
 - [Node.js](https://nodejs.org/) 20+（推荐 24+）
+
+macOS：
+
+- macOS 12 Monterey 及以上
 - Xcode Command Line Tools（`xcode-select --install`）
+
+Linux：
+
+- x86_64 Linux；目录功能仅提供 FUSE3 按需云盘
+- WebKitGTK 4.1、GTK 3、AppIndicator、OpenSSL、`xdg-open`、FUSE3；建议同时安装 `lsof`
+- 系统必须提供可用的 `/dev/fuse` 与 `fusermount3`
+- 用户选择的云盘目录必须完全为空（包括隐藏文件），其父目录必须允许当前用户挂载
+- 应用私有数据所在文件系统必须支持 `user.*` 扩展属性；应用会在启用前自动探测
+
+Debian/Ubuntu 的完整依赖命令及平台限制见 [docs/Linux.md](docs/Linux.md)。
 
 ---
 
@@ -98,8 +115,8 @@ cd PetalLink
 # Rust 依赖
 cargo fetch
 
-# 前端依赖
-cd app && npm install && cd ..
+# 前端依赖（同时安装项目锁定的 Tauri CLI）
+cd app && npm ci && cd ..
 ```
 
 ### 3. 配置 OAuth 凭据
@@ -113,7 +130,7 @@ cp .env.example .env
 ### 4. 启动开发环境
 
 ```bash
-cargo tauri dev --config tauri.dev.conf.json
+./app/node_modules/.bin/tauri dev --config tauri.dev.conf.json
 ```
 
 前端运行在 `http://localhost:1420`（HMR 热更新），Rust 后端自动编译启动。
@@ -123,8 +140,8 @@ cargo tauri dev --config tauri.dev.conf.json
 Tauri command、event、DTO 和共享常量统一在 Rust 侧定义，并由
 `tauri-specta` 生成 `app/api/generated.ts`。该文件是构建产物，请勿手动修改。
 
-- `cargo tauri dev`：前端 `predev` 在 Vite 启动前自动生成。
-- `cargo tauri build`：前端 `prebuild` 在打包前自动生成。
+- `./app/node_modules/.bin/tauri dev`：前端 `predev` 在 Vite 启动前自动生成。
+- `./app/node_modules/.bin/tauri build`：前端 `prebuild` 在打包前自动生成。
 - `cd app && npm run dev` / `npm run build`：同样会先自动生成。
 - `cd app && npm run bindings`：仅在需要单独刷新或排查生成结果时使用。
 
@@ -179,7 +196,7 @@ cd app && npm run build    # 类型检查 + Vite 打包
 ### 开发打包（.app + DMG，带 Dev 后缀）
 
 ```bash
-cargo tauri build --debug --config tauri.dev.conf.json
+./app/node_modules/.bin/tauri build --debug --config tauri.dev.conf.json
 ```
 
 产物带 `-Dev` 后缀，与正式版共存互不影响（不生成更新包）：
@@ -193,7 +210,7 @@ target/debug/bundle/dmg/PetalLink-Dev_<version>_aarch64.dmg
 
 ```bash
 # 编译期自动读取 .env 文件注入凭据（无需手动设置环境变量）
-cargo tauri build
+./app/node_modules/.bin/tauri build
 ```
 
 **产物位置**：
@@ -223,22 +240,46 @@ xattr -d com.apple.quarantine /Applications/PetalLink.app
 - 最低 macOS 版本：12.0
 - 架构：Apple Silicon (arm64) + Intel (x86_64) Universal Binary
 
+### Linux AppImage
+
+```bash
+./app/node_modules/.bin/tauri build --bundles appimage
+```
+
+Linux 会自动合并 `tauri.linux.conf.json`，产物位于
+`target/release/bundle/appimage/`。普通本地构建不会生成更新签名，也不会启用应用内
+更新；官方 Release 由 Ubuntu 22.04 CI 使用 `tauri.linux.updater.conf.json`
+生成 `.AppImage.sig`，并把 `linux-x86_64` 与 `darwin-aarch64` 一起写入
+`PetalLink_update.json`。发布构建还应遵循“在计划支持的最老基础系统上构建
+AppImage”的兼容要求。
+若滚动发行版因 linuxdeploy 的旧 `strip` 无法识别 `.relr.dyn`，本地冒烟构建可临时
+加 `NO_STRIP=1`；该变量不是发布兼容方案，正式包仍应在 Ubuntu CI 中生成。
+
+官方 AppImage 只有在其所在目录允许当前用户原子替换文件时才显示“检查更新”。AUR、
+Deb/RPM 或安装在 `/opt` 等不可替换位置的版本会关闭应用内更新，避免绕过 pacman/dnf/apt。
+第一份启用 Linux 更新渠道的 AppImage 仍需用户手动安装一次，之后才可自动更新。
+
 ---
 
 ## 应用启动流程
 
 1. 启动 App → 登录页 → 点「使用华为账号登录」→ 浏览器打开华为授权页
 2. 在浏览器中完成授权（账号密码或手机扫码）→ 自动回到 App
-3. **主界面顶部出现「尚未配置同步目录」提示条** → 点「选择目录」→ 选一个空目录
-4. 提示条变为「同步索引」按钮 → 点击开始首次云端索引拉取（拉取全量文件树到本地）
-5. 完成后自动进入「双端对齐」模式：本地文件变更实时上传，云端的变更通过手动点「同步索引」更新
+3. Linux 点「选择云盘目录」，只选择一个完全为空的可见目录；应用自动创建并管理私有缓存，用户不得手动操作该缓存
+4. macOS 仍按现有流程选择传统同步目录，该目录就是实际的本地镜像
+5. 点击「同步索引」拉取云端文件树；Linux 随即可在文件管理器中浏览完整目录，首次打开未下载文件时自动取回内容
+
+从旧 Linux 开发版升级前请先正常退出应用并确认旧目录中的本地修改已经上传。旧传统
+同步目录不会被新版本自动搬移或删除，也不能直接作为 FUSE 云盘目录使用，除非已另行
+备份并清理到完全为空；不要用 FUSE 挂载覆盖仍保存本地数据的旧目录。详细迁移边界见
+[Linux 支持说明](docs/Linux.md#旧开发版迁移)。
 
 **后台运行**：
-- 启动后系统菜单栏右上角出现云朵图标（可关闭），鼠标悬停显示「PetalLink — 后台同步中」
-- 关闭窗口 / ⌘W → **仅隐藏 UI 层**（窗口 + Dock 图标消失），同步引擎继续运行
-- 托盘可见时 ⌘Q → 同样隐藏至后台；托盘隐藏时 ⌘Q → 真正退出
-- 点击菜单栏图标 →「显示主窗口」→ UI 恢复
-- **菜单栏「退出 PetalLink」→ 真正退出进程**
+- 启动后显示 PetalLink 托盘图标（可关闭），鼠标悬停显示「PetalLink — 后台同步中」
+- 托盘可用时关闭窗口 → **仅隐藏 UI 层**，同步引擎继续运行
+- 点击托盘图标 →「显示主窗口」→ UI 恢复
+- **托盘菜单「退出 PetalLink」→ 真正退出进程**
+- 托盘隐藏、创建失败或桌面环境不支持托盘时，关闭主窗口会真正退出
 
 ---
 
@@ -255,10 +296,10 @@ PetalLink/
 │   ├── auth/                    # OAuth + PKCE + token.bin 加密存储
 │   ├── drive/                   # 华为 Drive REST API 客户端（Files/Upload 已按职责拆分）
 │   ├── sync/                    # 同步引擎（engine/executor/TaskRunner 均按职责拆分）
-│   ├── mount/                   # 本地镜像 + FSEvents 监听
+│   ├── mount/                   # 本地镜像 + FSEvents/inotify 监听
 │   ├── data/                    # SQLite 数据层
 │   ├── core/                    # 配置/日志/缓存
-│   └── platform/                # macOS 原生（托盘/activation/开机自启）
+│   └── platform/                # 桌面平台能力（托盘/activation/xattr/开机自启）
 ├── app/                         # Vue3 前端
 │   ├── views/                   # 页面（Login/Main/Settings/LogViewer）
 │   ├── stores/                  # Pinia 状态管理
@@ -275,6 +316,8 @@ PetalLink/
 ├── docs/                        # 需求文档 + 概要设计 + API 整理
 ├── Cargo.toml                   # Rust 依赖
 ├── tauri.conf.json              # Tauri 配置
+├── tauri.linux.conf.json        # Linux AppImage 配置覆盖
+├── tauri.linux.updater.conf.json # 官方 Linux 签名更新构建覆盖
 └── build.rs                     # 构建脚本（图标自动同步）
 ```
 
@@ -284,6 +327,8 @@ PetalLink/
 
 | 文档 | 说明 |
 |---|---|
+| [docs/Linux.md](./docs/Linux.md) | Linux 支持范围、依赖、文件系统要求、验证与 PR 拆分 |
+| [docs/Linux-Test-Report.md](./docs/Linux-Test-Report.md) | Linux 跨发行版、桌面环境与按需读取测试结果 |
 | [docs/概要设计文档.md](./docs/概要设计文档.md) | 项目架构、功能需求、数据流、API 接口、设计决策 |
 | [docs/api调用整理.md](./docs/api调用整理.md) | 华为 Drive REST API 完整清单（23 个调用场景，含分片上传 308/Location 详解） |
 | [design/prototype/](./design/prototype/) | UI 设计原型（login / main / settings） |

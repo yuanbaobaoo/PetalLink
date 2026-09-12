@@ -23,6 +23,8 @@ use crate::sync::engine::SyncEngine;
 use crate::sync::executor::SyncExecutor;
 use crate::sync::state::SyncGlobalState;
 use crate::sync::status_aggregator::StatusAggregator;
+#[cfg(target_os = "linux")]
+use crate::virtual_fs::{FuseMountSession, MutationCoordinator, PathLease, VirtualDriveConfig};
 
 /// 认证相关命令。
 mod auth;
@@ -114,6 +116,14 @@ pub fn mount() -> AppResult<Arc<MountManager>> {
 /// 全局 SyncEngine（setup 或首次配置时注入；运行期共享同一实例）
 static SYNC_ENGINE: Mutex<Option<Arc<SyncEngine>>> = Mutex::new(None);
 
+/// Linux 按需云盘的 FUSE 会话。必须先于 SyncEngine 停止，避免正在读取的请求失去下载服务。
+#[cfg(target_os = "linux")]
+static VIRTUAL_FS_SESSION: Mutex<Option<FuseMountSession>> = Mutex::new(None);
+
+/// 最近一次 Linux 按需云盘启动错误，供文件管理器入口给出可操作反馈。
+#[cfg(target_os = "linux")]
+static VIRTUAL_FS_LAST_ERROR: Mutex<Option<String>> = Mutex::new(None);
+
 /// 串行协调同步引擎安装与替换，防止两个生命周期交叠。
 struct EngineOwnershipProtocol {
     gate: Mutex<()>,
@@ -203,6 +213,408 @@ pub(crate) fn active_transfer_count() -> AppResult<i64> {
     .map_err(|e| AppError::generic(format!("查询活动传输任务失败：{e}")))
 }
 
+/// 返回当前真实挂载中的按需云盘入口；仅凭配置开启不算可用。
+#[cfg(target_os = "linux")]
+pub fn virtual_mountpoint() -> Option<std::path::PathBuf> {
+    let mountpoint = VIRTUAL_FS_SESSION
+        .lock()
+        .as_ref()
+        .map(|session| session.mountpoint().to_path_buf())?;
+    match crate::core::config_store::is_active_petallink_mount(&mountpoint) {
+        Ok(true) => Some(mountpoint),
+        Ok(false) => {
+            *VIRTUAL_FS_LAST_ERROR.lock() =
+                Some("FUSE 会话已退出或挂载已断开，请重启 PetalLink".to_string());
+            None
+        }
+        Err(error) => {
+            *VIRTUAL_FS_LAST_ERROR.lock() = Some(error.to_string());
+            None
+        }
+    }
+}
+
+/// 返回最近一次按需云盘启动失败原因。
+#[cfg(target_os = "linux")]
+pub fn virtual_mount_error() -> Option<String> {
+    VIRTUAL_FS_LAST_ERROR.lock().clone()
+}
+
+/// 非 Linux 平台没有 FUSE 用户可见目录。
+#[cfg(not(target_os = "linux"))]
+pub fn virtual_mountpoint() -> Option<std::path::PathBuf> {
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn virtual_mount_error() -> Option<String> {
+    None
+}
+
+/// 把同步引擎的路径活动门适配为 FUSE 句柄租约。
+#[cfg(target_os = "linux")]
+struct EnginePathLease {
+    guards: Option<Vec<crate::sync::engine::ActivityGuard>>,
+    engine: Arc<SyncEngine>,
+    runtime: tokio::runtime::Handle,
+    notify_local_change: bool,
+}
+
+/// FUSE 回调运行在 libfuse 工作线程，那里没有 Tokio reactor。路径租约可以在这些
+/// 线程析构，因此通知必须先投递到应用运行时，再进入 SyncEngine 的后台周期调度器。
+#[cfg(target_os = "linux")]
+fn dispatch_virtual_drive_change(
+    runtime: &tokio::runtime::Handle,
+    engine: Arc<SyncEngine>,
+) -> tokio::task::JoinHandle<()> {
+    runtime.spawn(async move {
+        engine.notify_virtual_drive_change();
+    })
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for EnginePathLease {
+    fn drop(&mut self) {
+        // 必须先释放路径租约，再请求重扫；否则新周期会立刻被本租约挡回。
+        drop(self.guards.take());
+        if self.notify_local_change {
+            // Handle::spawn 可以从非 Tokio 的 FUSE 工作线程调用；任务真正执行时已
+            // 进入应用 runtime，SyncEngine 内部的 tokio::spawn 因而有 reactor。
+            drop(dispatch_virtual_drive_change(
+                &self.runtime,
+                self.engine.clone(),
+            ));
+        }
+    }
+}
+
+/// FUSE 与同步执行器共用的路径级共享/排他协调器。
+#[cfg(target_os = "linux")]
+struct EngineMutationCoordinator {
+    engine: Arc<SyncEngine>,
+    backing_root: std::path::PathBuf,
+    runtime: tokio::runtime::Handle,
+}
+
+#[cfg(target_os = "linux")]
+impl EngineMutationCoordinator {
+    fn new(
+        engine: Arc<SyncEngine>,
+        backing_root: std::path::PathBuf,
+        runtime: tokio::runtime::Handle,
+    ) -> Self {
+        Self {
+            engine,
+            backing_root,
+            runtime,
+        }
+    }
+
+    async fn acquire(
+        &self,
+        paths: Vec<std::path::PathBuf>,
+        exclusive: bool,
+    ) -> std::io::Result<Box<dyn PathLease>> {
+        if paths.is_empty() {
+            return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+        }
+        let paths = paths
+            .into_iter()
+            .map(|path| {
+                path.to_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EILSEQ))
+            })
+            .collect::<std::io::Result<Vec<_>>>()?;
+
+        loop {
+            if self.engine.is_shutting_down() {
+                return Err(std::io::Error::from_raw_os_error(libc::EINTR));
+            }
+            let mut guards = Vec::with_capacity(paths.len());
+            let mut busy = false;
+            for path in &paths {
+                let acquired = if exclusive {
+                    self.engine.begin_exclusive_path_activity(path)
+                } else {
+                    self.engine.begin_path_activity(path)
+                };
+                match acquired {
+                    Ok(guard) => guards.push(guard),
+                    Err(_) => {
+                        busy = true;
+                        break;
+                    }
+                }
+            }
+            if !busy {
+                return Ok(Box::new(EnginePathLease {
+                    guards: Some(guards),
+                    engine: self.engine.clone(),
+                    runtime: self.runtime.clone(),
+                    notify_local_change: exclusive,
+                }));
+            }
+            // 部分取得的租约先全部释放；短暂退让后按相同顺序重试，避免 ABBA。
+            drop(guards);
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }
+
+    /// 在 backing rename 前核验 DB/云端目标碰撞，并把稳定身份写在源 inode 上。
+    fn prepare_rename_identity(
+        &self,
+        source: &std::path::Path,
+        destination: &std::path::Path,
+        is_directory: bool,
+    ) -> std::io::Result<()> {
+        let (Some(source), Some(destination)) = (source.to_str(), destination.to_str()) else {
+            return Err(std::io::Error::from_raw_os_error(libc::EILSEQ));
+        };
+        let (source_record, destination_record) = {
+            let conn = DB.lock();
+            let records = repository::load_all(&conn).map_err(|error| {
+                tracing::warn!(%error, source, "读取 rename 身份失败");
+                std::io::Error::from_raw_os_error(libc::EIO)
+            })?;
+            let source_records = records
+                .iter()
+                .filter(|record| record.local_path == source)
+                .collect::<Vec<_>>();
+            let destination_records = records
+                .iter()
+                .filter(|record| record.local_path == destination)
+                .collect::<Vec<_>>();
+            if source_records.len() > 1 || destination_records.len() > 1 {
+                tracing::warn!(
+                    source,
+                    destination,
+                    source_records = source_records.len(),
+                    destination_records = destination_records.len(),
+                    "rename 路径对应多条同步基线，拒绝猜测身份"
+                );
+                return Err(std::io::Error::from_raw_os_error(libc::EIO));
+            }
+            (
+                source_records.first().map(|record| (*record).clone()),
+                destination_records.first().map(|record| (*record).clone()),
+            )
+        };
+        if source_record
+            .as_ref()
+            .is_some_and(|record| record.is_folder != is_directory)
+        {
+            return Err(std::io::Error::from_raw_os_error(libc::EIO));
+        }
+
+        let source_path = crate::core::paths::safe_join_under(&self.backing_root, source, false)
+            .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+        let destination_path =
+            crate::core::paths::safe_join_under(&self.backing_root, destination, false)
+                .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+        let source_xattr =
+            crate::platform::xattr::get(&source_path, crate::mount::manager::XATTR_FILE_ID)?;
+        let source_cloud_id = self.engine.path_to_id_lock().get(source).cloned();
+        let source_identity = source_record
+            .as_ref()
+            .map(|record| record.file_id.clone())
+            .or(source_cloud_id)
+            .or_else(|| {
+                source_xattr
+                    .as_ref()
+                    .and_then(|owner| String::from_utf8(owner.clone()).ok())
+            });
+        if let (Some(record), Some(owner)) = (source_identity.as_deref(), source_xattr.as_deref()) {
+            if owner != record.as_bytes() {
+                return Err(std::io::Error::from_raw_os_error(libc::EIO));
+            }
+        }
+
+        let destination_cloud_id = self.engine.path_to_id_lock().get(destination).cloned();
+        let destination_identity = destination_record
+            .as_ref()
+            .map(|record| record.file_id.clone())
+            .or(destination_cloud_id);
+        if let Some(destination_identity) = destination_identity.as_deref() {
+            match source_identity.as_deref() {
+                Some(source_identity) if source_identity == destination_identity => {}
+                Some(_) => return Err(std::io::Error::from_raw_os_error(libc::EEXIST)),
+                None => {
+                    // 无云端身份的临时普通文件覆盖一个真实本地目标是编辑器原子保存；
+                    // 目标在本地已消失却仍被 DB/云索引占用时则拒绝碰撞。
+                    let destination_is_local_file = std::fs::symlink_metadata(&destination_path)
+                        .is_ok_and(|metadata| metadata.is_file());
+                    if is_directory || !destination_is_local_file {
+                        return Err(std::io::Error::from_raw_os_error(libc::EEXIST));
+                    }
+                }
+            }
+        }
+
+        if source_xattr.is_none() {
+            if let Some(source_identity) = source_identity {
+                crate::platform::xattr::set(
+                    &source_path,
+                    crate::mount::manager::XATTR_FILE_ID,
+                    source_identity.as_bytes(),
+                )?;
+                let written = crate::platform::xattr::get(
+                    &source_path,
+                    crate::mount::manager::XATTR_FILE_ID,
+                )?;
+                if written.as_deref() != Some(source_identity.as_bytes()) {
+                    return Err(std::io::Error::from_raw_os_error(libc::EIO));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[async_trait::async_trait]
+impl MutationCoordinator for EngineMutationCoordinator {
+    async fn acquire_shared(
+        &self,
+        paths: Vec<std::path::PathBuf>,
+    ) -> std::io::Result<Box<dyn PathLease>> {
+        self.acquire(paths, false).await
+    }
+
+    async fn acquire_exclusive(
+        &self,
+        paths: Vec<std::path::PathBuf>,
+    ) -> std::io::Result<Box<dyn PathLease>> {
+        self.acquire(paths, true).await
+    }
+
+    async fn prepare_rename(
+        &self,
+        source: std::path::PathBuf,
+        destination: std::path::PathBuf,
+        is_directory: bool,
+    ) -> std::io::Result<()> {
+        self.prepare_rename_identity(&source, &destination, is_directory)
+    }
+
+    async fn rename_observed(
+        &self,
+        _source: std::path::PathBuf,
+        _destination: std::path::PathBuf,
+        _is_directory: bool,
+    ) -> std::io::Result<()> {
+        // backing rename 成功后，exclusive EnginePathLease 析构会在释放路径门禁后统一
+        // 请求一次本地重扫。这里不重复通知，避免同一个 rename 排入两个周期。
+        Ok(())
+    }
+}
+
+/// 为已经装配好任务队列的引擎创建 Linux FUSE 会话。
+#[cfg(target_os = "linux")]
+fn create_virtual_fs_session(
+    config: &crate::core::config::AppConfig,
+    engine: Arc<SyncEngine>,
+    mount: Arc<MountManager>,
+) -> AppResult<Option<FuseMountSession>> {
+    if !config.virtual_drive_enabled {
+        return Err(AppError::config(
+            "Linux 仅支持按需云盘，拒绝以传统同步模式启动".to_string(),
+        ));
+    }
+    crate::core::config_store::validate_virtual_drive_capabilities(config)?;
+    let hydrator = Arc::new(crate::sync::hydration::HydrationService::new(
+        engine.clone(),
+        mount,
+        DB.clone(),
+        FILES_API.clone(),
+    ));
+    let backing_root = config.expanded_mount_dir();
+    let runtime = tauri::async_runtime::handle().inner().clone();
+    let coordinator = Arc::new(EngineMutationCoordinator::new(
+        engine,
+        backing_root.clone(),
+        runtime.clone(),
+    ));
+    let session = crate::virtual_fs::mount_virtual_drive(VirtualDriveConfig::new(
+        backing_root,
+        config.expanded_virtual_mount_dir(),
+        runtime,
+        hydrator,
+        coordinator,
+    ))
+    .map_err(|error| AppError::generic(format!("按需云盘挂载失败：{error}")))?;
+    tracing::info!(
+        mountpoint = %session.mountpoint().display(),
+        backing = %config.expanded_mount_dir().display(),
+        "Linux 按需云盘已挂载"
+    );
+    Ok(Some(session))
+}
+
+/// 仅在目标引擎仍是当前实例时发布 FUSE 会话，防止启动与配置替换交错。
+#[cfg(target_os = "linux")]
+fn install_virtual_fs_session(
+    config: &crate::core::config::AppConfig,
+    engine: Arc<SyncEngine>,
+    mount: Arc<MountManager>,
+) -> AppResult<()> {
+    ENGINE_OWNERSHIP.install(|| {
+        let is_current = SYNC_ENGINE
+            .lock()
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &engine));
+        if !is_current {
+            return Err(AppError::generic("同步引擎已被替换，取消按需云盘挂载"));
+        }
+        if VIRTUAL_FS_SESSION.lock().is_some() {
+            return Ok(());
+        }
+        let session = create_virtual_fs_session(config, engine, mount)?;
+        *VIRTUAL_FS_SESSION.lock() = session;
+        *VIRTUAL_FS_LAST_ERROR.lock() = None;
+        Ok(())
+    })
+}
+
+/// 取出并优雅卸载 FUSE 会话。调用时不持有全局锁，避免卸载等待期间阻塞状态查询。
+#[cfg(target_os = "linux")]
+fn stop_virtual_fs() {
+    let session = VIRTUAL_FS_SESSION.lock().take();
+    if let Some(mut session) = session {
+        let mountpoint = session.mountpoint().to_path_buf();
+        match session.unmount() {
+            Ok(()) => tracing::info!(mountpoint = %mountpoint.display(), "Linux 按需云盘已卸载"),
+            Err(error) => {
+                tracing::error!(mountpoint = %mountpoint.display(), %error, "Linux 按需云盘正常卸载失败，尝试安全 detach");
+                match crate::core::config_store::detach_owned_petallink_mount(&mountpoint) {
+                    Ok(true) => {
+                        tracing::warn!(mountpoint = %mountpoint.display(), "已安全 detach 当前 PetalLink FUSE 挂载")
+                    }
+                    Ok(false) => tracing::debug!(
+                        mountpoint = %mountpoint.display(),
+                        "卸载失败后挂载记录已消失，或目标已不再是 PetalLink"
+                    ),
+                    Err(detach_error) => tracing::error!(
+                        mountpoint = %mountpoint.display(),
+                        error = %detach_error,
+                        "PetalLink FUSE 安全 detach 失败"
+                    ),
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn stop_virtual_fs() {}
+
+/// 异步生命周期中把可能等待 FUSE worker 退出的卸载放到阻塞线程池。
+async fn stop_virtual_fs_async() {
+    if let Err(error) = tokio::task::spawn_blocking(stop_virtual_fs).await {
+        tracing::error!(%error, "等待按需云盘卸载线程失败");
+    }
+}
+
 /// 清理已配置但失去登录态的孤儿同步状态。
 pub fn cleanup_orphan_state() {
     // 守卫：必须确实有旧同步配置才清
@@ -227,6 +639,8 @@ pub fn cleanup_orphan_state() {
         None,
         Some(String::new()),
         Some(false),
+        Some(false),
+        Some(String::new()),
         None,
         None,
         None,
@@ -241,10 +655,18 @@ pub fn cleanup_orphan_state() {
 
 /// 同步释放全局运行时。
 pub fn drop_runtime() {
-    if let Some(eng) = SYNC_ENGINE.lock().take() {
-        eng.shutdown_sync();
+    let _replacement = ENGINE_OWNERSHIP.begin_replacement();
+    let engine = {
+        let _gate = ENGINE_OWNERSHIP.gate.lock();
+        let engine = SYNC_ENGINE.lock().take();
+        *MOUNT_MANAGER.lock() = None;
+        engine
+    };
+    // 先关闭新的传输准入，再卸载可能仍在接收 read/write 的 FUSE 入口。
+    if let Some(engine) = &engine {
+        engine.shutdown_sync();
     }
-    *MOUNT_MANAGER.lock() = None;
+    stop_virtual_fs();
 }
 
 /// 异步释放运行时，并等待旧同步周期与已提交任务完成结算。
@@ -257,6 +679,11 @@ pub async fn drop_runtime_async() {
         *MOUNT_MANAGER.lock() = None;
         engine
     };
+    // 先阻止新 IPC/FUSE 请求进入 TaskRunner；已经登记的传输仍可完成并持久化结算。
+    if let Some(engine) = &engine {
+        engine.shutdown_sync();
+    }
+    stop_virtual_fs_async().await;
     if let Some(engine) = engine {
         engine.shutdown().await;
     }
@@ -276,6 +703,11 @@ pub(crate) async fn replace_runtime_with_mount(
         *MOUNT_MANAGER.lock() = None;
         engine
     };
+    // FUSE 仍可能持有引擎的路径租约；先关闭新准入并卸载入口，再等待旧任务结算。
+    if let Some(engine) = &old_engine {
+        engine.shutdown_sync();
+    }
+    stop_virtual_fs_async().await;
     if let Some(engine) = old_engine {
         engine.shutdown().await;
     }
@@ -298,28 +730,27 @@ pub(crate) fn install_runtime_with_mount(
     })
 }
 
-/// 重启 App：fork 独立 shell 子进程（sleep 后 open -n）+ 当前进程退出。
-/// 对齐 legacy AppDelegate.relaunchApp（fork /bin/sh，子进程独立于本进程存活）。
+/// 收束状态后通过 Tauri 的平台安全路径重启。
+///
+/// Tauri 会在 Linux 解析 AppImage 原始路径，并在 macOS 按 `Info.plist`
+/// 解析 bundle 内的真实可执行文件；统一走核心实现可保持更新前后的平台语义。
 pub fn relaunch(app: &AppHandle) {
-    #[cfg(target_os = "macos")]
     crate::platform::activation::mark_restarting();
-    // .app bundle 路径（binary 上溯两级）
-    let bundle = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().and_then(|p| p.parent()).map(|p| p.to_path_buf()))
-        .unwrap_or_else(|| std::env::current_exe().unwrap_or_default());
-    let path = bundle.to_string_lossy().to_string();
-    let _ = std::process::Command::new("/bin/sh")
-        .arg("-c")
-        .arg(format!("sleep 0.5; open -n '{}'", path))
-        .spawn();
-    app.exit(0);
+    app.request_restart();
 }
 
 /// 若已配置同步目录且引擎未启动，则构造并启动 SyncEngine + 状态桥接。
 /// setup 与 config_save（首次配置）共用。
 pub fn ensure_engine_started(app: &AppHandle) -> AppResult<()> {
-    ENGINE_OWNERSHIP.install(|| ensure_engine_started_owned(app))
+    let result = ENGINE_OWNERSHIP.install(|| ensure_engine_started_owned(app));
+    #[cfg(target_os = "linux")]
+    if let Err(error) = &result {
+        // 配置能力探测、MountManager 或 TaskRunner 若在异步启动前失败，也必须进入
+        // 挂载状态快照；否则前端只能永久显示“正在启动”且没有失败原因。
+        *VIRTUAL_FS_LAST_ERROR.lock() = Some(error.to_string());
+        emit_virtual_drive_status(app);
+    }
+    result
 }
 
 /// 在生命周期门禁内按持久化配置安装并异步启动同步引擎。
@@ -330,6 +761,12 @@ fn ensure_engine_started_owned(app: &AppHandle) -> AppResult<()> {
     let config = ConfigStore::load()?;
     if !config.mount_configured {
         return Ok(()); // 未配置目录，不启动
+    }
+    #[cfg(target_os = "linux")]
+    crate::core::config_store::validate_virtual_drive_capabilities(&config)?;
+    #[cfg(not(target_os = "linux"))]
+    {
+        crate::core::config_store::validate_configured_mount_dir_access(&config)?;
     }
 
     let mount = mount()?;
@@ -399,6 +836,10 @@ fn ensure_engine_started_owned(app: &AppHandle) -> AppResult<()> {
     // 异步启动引擎（start 内含 BFS + watcher，不阻塞调用方）
     let app_handle = app.clone();
     let eng = engine.clone();
+    #[cfg(target_os = "linux")]
+    let virtual_config = config.clone();
+    #[cfg(target_os = "linux")]
+    let virtual_mount = mount.clone();
     tracing::info!("SyncEngine 异步启动中...");
     tauri::async_runtime::spawn(async move {
         // 先订阅状态广播，保证启动期状态也能转发到前端。
@@ -430,8 +871,28 @@ fn ensure_engine_started_owned(app: &AppHandle) -> AppResult<()> {
         // 启动引擎（BFS + 首次 sync cycle + watcher）；桥接已订阅，启动期广播会被转发
         if let Err(e) = eng.start().await {
             tracing::error!(error = %e, "SyncEngine 启动失败");
+            #[cfg(target_os = "linux")]
+            if virtual_config.virtual_drive_enabled {
+                *VIRTUAL_FS_LAST_ERROR.lock() =
+                    Some(format!("同步引擎启动失败，按需云盘未挂载：{e}"));
+                emit_virtual_drive_status(&app_handle);
+            }
         } else {
             tracing::info!("SyncEngine 启动完成 ✓");
+            #[cfg(target_os = "linux")]
+            if virtual_config.virtual_drive_enabled {
+                if let Err(error) =
+                    install_virtual_fs_session(&virtual_config, eng.clone(), virtual_mount.clone())
+                {
+                    let message = error.to_string();
+                    *VIRTUAL_FS_LAST_ERROR.lock() = Some(message.clone());
+                    tracing::error!(
+                        error = %message,
+                        "按需云盘启动失败；私有 backing 不会作为用户目录暴露"
+                    );
+                }
+                emit_virtual_drive_status(&app_handle);
+            }
         }
         // 桥接任务独立运行，直到引擎释放。
     });
@@ -475,5 +936,78 @@ mod engine_ownership_tests {
 
         drop(first_operation);
         assert!(protocol.replacement_gate.try_lock().is_ok());
+    }
+}
+
+/// 推送 Linux 按需云盘的真实挂载状态。
+#[cfg(target_os = "linux")]
+pub fn emit_virtual_drive_status(app: &AppHandle) {
+    match platform::virtual_drive_status() {
+        Ok(status) => {
+            let _ = crate::ipc::VirtualDriveStatusEvent(status).emit(app);
+        }
+        Err(error) => tracing::warn!(%error, "读取按需云盘状态失败，未发送状态事件"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_os = "linux")]
+    use super::EnginePathLease;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fuse_lease_drop_dispatches_sync_notification_from_non_tokio_thread() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        use parking_lot::Mutex;
+        use rusqlite::Connection;
+
+        let runtime = tokio::runtime::Runtime::new().expect("创建测试 runtime 失败");
+        let auth = Arc::new(crate::auth::service::AuthService::new());
+        let client = Arc::new(crate::drive::client::DriveClient::new(auth));
+        let files_api = Arc::new(crate::drive::files_api::FilesApi::new(client.clone()));
+        let changes_api = Arc::new(crate::drive::changes_api::ChangesApi::new(client));
+        let online_checks = Arc::new(AtomicUsize::new(0));
+        let observed_checks = online_checks.clone();
+        let mut engine = crate::sync::engine::SyncEngine::new(
+            files_api,
+            changes_api,
+            Arc::new(Mutex::new(
+                Connection::open_in_memory().expect("创建内存数据库失败"),
+            )),
+            Arc::new(crate::sync::status_aggregator::StatusAggregator::default()),
+            Vec::new(),
+            0,
+            0,
+        );
+        // 保持周期离线，使测试不访问数据库或网络；只验证通知已进入 runtime。
+        engine.set_online_check(Arc::new(move || {
+            observed_checks.fetch_add(1, Ordering::SeqCst);
+            false
+        }));
+        let lease = EnginePathLease {
+            guards: Some(Vec::new()),
+            engine: Arc::new(engine),
+            runtime: runtime.handle().clone(),
+            notify_local_change: true,
+        };
+
+        // fuser 的 release 回调正是在这种没有 Tokio reactor 的工作线程上析构句柄。
+        std::thread::spawn(move || drop(lease))
+            .join()
+            .expect("FUSE 工作线程析构租约不应 panic");
+
+        runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while online_checks.load(Ordering::SeqCst) == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("同步通知应在应用 runtime 中得到执行");
+        });
     }
 }

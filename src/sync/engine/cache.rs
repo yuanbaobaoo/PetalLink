@@ -49,17 +49,49 @@ impl SyncEngine {
         let mut tree = self.cloud_tree.lock().clone();
         let mut path_to_id = self.path_to_id.lock().clone();
         for recovered_file in recovered {
-            let stale_paths = tree
+            let existing_paths = tree
                 .iter()
-                .filter(|(path, file)| {
-                    path.as_str() != recovered_file.relative_path
-                        && file.id == recovered_file.file.id
-                })
+                .filter(|(_, file)| file.id == recovered_file.file.id)
                 .map(|(path, _)| path.clone())
                 .collect::<Vec<_>>();
-            for stale_path in stale_paths {
-                tree.remove(&stale_path);
-                path_to_id.remove(&stale_path);
+            if existing_paths.len() > 1 {
+                return Err(AppError::generic(format!(
+                    "可信云端缓存中 fileId 重复，拒绝提交恢复结果：{}",
+                    recovered_file.file.id
+                )));
+            }
+            if let Some(existing_path) = existing_paths.first() {
+                let existing = tree
+                    .get(existing_path)
+                    .ok_or_else(|| AppError::generic("云端缓存身份索引在恢复提交前发生变化"))?;
+                if existing.is_folder() != recovered_file.file.is_folder() {
+                    return Err(AppError::generic(format!(
+                        "恢复结果类型与缓存稳定身份不一致：{}",
+                        recovered_file.file.id
+                    )));
+                }
+                if existing_path != &recovered_file.relative_path {
+                    if recovered_file.file.is_folder() {
+                        cloud_tree::rekey_folder_subtree(
+                            &mut tree,
+                            &mut path_to_id,
+                            existing_path,
+                            &recovered_file.relative_path,
+                        )?;
+                    } else {
+                        tree.remove(existing_path);
+                        path_to_id.remove(existing_path);
+                    }
+                }
+            }
+            if tree
+                .get(&recovered_file.relative_path)
+                .is_some_and(|file| file.id != recovered_file.file.id)
+            {
+                return Err(AppError::generic(format!(
+                    "恢复结果目标路径已属于其他云端身份：{}",
+                    recovered_file.relative_path
+                )));
             }
             tree.insert(
                 recovered_file.relative_path.clone(),

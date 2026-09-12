@@ -10,6 +10,8 @@ pub mod conflict;
 pub mod engine;
 /// 执行规划动作并桥接持久传输任务。
 pub mod executor;
+/// 将占位读取转换为可复用的持久下载任务。
+pub(crate) mod hydration;
 /// 恢复已验证的本地路径移动。
 pub mod path_recovery;
 /// 根据三方快照生成同步动作。

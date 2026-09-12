@@ -6,7 +6,7 @@
 import { computed } from "vue";
 import { MateButton, MateIcon } from "@/components/mate";
 import { useUpdaterStore } from "@/stores/updater";
-import { relaunch } from "@tauri-apps/plugin-process";
+import { commands } from "@/api/generated";
 
 // 应用更新状态。
 const updater = useUpdaterStore();
@@ -61,14 +61,14 @@ const badgeClass = computed(() => {
 /**
  * 确认传输状态后开始下载并安装更新。
  */
-async function handleStartUpdate(): Promise<void> {
+async function runUpdateFlow(): Promise<void> {
   await updater.downloadAndInstall();
   // 下载完成后自动等待传输
   if (updater.phase === "downloaded") {
     // 用户确认或等待操作的结果。
     const ok = await updater.waitForTransfers();
     if (ok) {
-      await relaunch();
+      await commands.appRelaunch();
     }
   }
 }
@@ -77,14 +77,14 @@ async function handleStartUpdate(): Promise<void> {
  * 重新执行上一次失败的初始化动作。
  */
 async function handleRetry(): Promise<void> {
-  await updater.downloadAndInstall();
+  await runUpdateFlow();
 }
 
 /**
  * 请求后端重启应用以完成更新。
  */
 async function handleRelaunch(): Promise<void> {
-  await relaunch();
+  await commands.appRelaunch();
 }
 
 /**
@@ -157,7 +157,7 @@ function handleClose(): void {
         <div class="update-dialog__footer">
           <template v-if="updater.phase === 'available'">
             <MateButton variant="text" @click="handleClose">稍后提醒</MateButton>
-            <MateButton variant="primary" icon="download" @click="handleStartUpdate">立即更新</MateButton>
+            <MateButton variant="primary" icon="download" @click="runUpdateFlow">立即更新</MateButton>
           </template>
           <template v-else-if="updater.phase === 'error'">
             <MateButton variant="text" @click="handleClose">关闭</MateButton>

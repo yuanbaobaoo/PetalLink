@@ -92,6 +92,12 @@ impl TaskRunner {
         current: TransferTask,
         run_backend_preflight: bool,
     ) -> AppResult<TaskExecutionOutcome> {
+        // 统一传输入口在同一信号量上排队；FUSE hydration 不得绕过 planner 的并发上限。
+        let _execution_slot = self
+            .execution_slots()
+            .acquire_owned()
+            .await
+            .map_err(|error| AppError::generic(format!("传输并发控制已关闭：{error}")))?;
         // 活动许可覆盖校验、执行和结算，关闭同步时不会留下半准入任务。
         let state = current.state_kind().map_err(transition_error)?;
         // 这里是单行任务的线性化点，且有意先于静态校验：校验失败需要持久化，

@@ -16,6 +16,7 @@
 //!    若都非 → 拦截退出，隐藏窗口 + accessory 模式，保持后台运行。
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 
 #[cfg(target_os = "macos")]
 use std::sync::Mutex;
@@ -23,15 +24,22 @@ use std::sync::Mutex;
 #[cfg(target_os = "macos")]
 use objc2::runtime::Imp;
 
+/// 用户在界面触发重启时写入 Application Support 的一次性前台启动标记。
+const RELAUNCH_VISIBLE_MARKER: &str = ".relaunch-visible";
+/// 一次性重启标记的最长有效期，避免崩溃遗留影响后续登录自启动。
+const RELAUNCH_VISIBLE_MAX_AGE_MS: u64 = 120_000;
 /// 仅 tray「退出 PetalLink」/ relaunch 置 true，放开退出拦截。
 static REAL_QUIT: AtomicBool = AtomicBool::new(false);
 /// relaunch 场景置 true，跳过关机 flush（缓存已清）。
 static RESTARTING: AtomicBool = AtomicBool::new(false);
 /// 当前是否处于 accessory 模式（关窗/Cmd+Q 拦截后）。供窗口获焦时判断是否需切回 regular。
+#[cfg(target_os = "macos")]
 static IS_ACCESSORY: AtomicBool = AtomicBool::new(false);
 /// 托盘图标是否可见（默认可见）。托盘隐藏时后台保活失去退出入口，
 /// Cmd+Q/Dock 退出应直接放行真退出，不再拦截转后台。
 static TRAY_ICON_VISIBLE: AtomicBool = AtomicBool::new(true);
+/// 当前进程启动来源只探测一次，保证 setup 内多次查询得到同一结果。
+static LAUNCHED_MANUALLY: OnceLock<bool> = OnceLock::new();
 
 /// 记录托盘图标可见性（启动时按配置初始化，切换开关时更新）。
 pub fn set_tray_icon_visible(visible: bool) {
@@ -54,6 +62,11 @@ pub fn should_real_quit() -> bool {
 pub fn mark_restarting() {
     RESTARTING.store(true, Ordering::SeqCst);
     REAL_QUIT.store(true, Ordering::SeqCst);
+    // Tauri 重启会保留原参数；登录启动的进程仍带 --hidden。写一次性标记让新进程
+    // 覆盖该参数，避免用户主动重启后窗口再次隐藏。
+    if let Err(error) = write_relaunch_visible_marker() {
+        tracing::warn!(%error, "写入重启前台标记失败，新进程可能保持隐藏");
+    }
 }
 
 /// 窗口获焦时调用：若当前处于 accessory 模式（关窗/Cmd+Q 后台），切回 regular 恢复可交互。
@@ -76,7 +89,81 @@ pub fn is_restarting() -> bool {
 
 /// 未携带 `--hidden` 参数时视为用户手动启动。
 pub fn is_launched_manually() -> bool {
-    !std::env::args().any(|a| a == "--hidden")
+    *LAUNCHED_MANUALLY.get_or_init(|| {
+        if !std::env::args().any(|argument| argument == "--hidden") {
+            remove_relaunch_visible_marker();
+            true
+        } else {
+            consume_relaunch_visible_marker()
+        }
+    })
+}
+
+/// 返回当前 Application Support 中的一次性重启标记路径。
+fn relaunch_visible_marker_path() -> crate::error::AppResult<std::path::PathBuf> {
+    Ok(crate::core::config_store::support_dir()?.join(RELAUNCH_VISIBLE_MARKER))
+}
+
+/// 写入当前时间，供紧随其后的新进程以前台模式恢复。
+fn write_relaunch_visible_marker() -> crate::error::AppResult<()> {
+    let path = relaunch_visible_marker_path()?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let now = current_unix_millis().ok_or_else(|| {
+        crate::error::AppError::generic("系统时间早于 Unix epoch，无法写入重启标记")
+    })?;
+    std::fs::write(path, now.to_string())?;
+    Ok(())
+}
+
+/// 手动启动时清理可能由异常重启遗留的标记。
+fn remove_relaunch_visible_marker() {
+    if let Ok(path) = relaunch_visible_marker_path() {
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => tracing::debug!(%error, "清理重启前台标记失败"),
+        }
+    }
+}
+
+/// 读取后立即删除一次性标记，仅接受足够新的合法时间戳。
+fn consume_relaunch_visible_marker() -> bool {
+    let Ok(path) = relaunch_visible_marker_path() else {
+        return false;
+    };
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(error) => {
+            tracing::debug!(%error, "读取重启前台标记失败");
+            return false;
+        }
+    };
+    let _ = std::fs::remove_file(&path);
+    let Some(now) = current_unix_millis() else {
+        return false;
+    };
+    content
+        .trim()
+        .parse::<u64>()
+        .map(|created_at| relaunch_marker_is_recent(created_at, now))
+        .unwrap_or(false)
+}
+
+/// 获取当前 Unix 毫秒时间戳。
+fn current_unix_millis() -> Option<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+}
+
+/// 判断标记时间是否位于允许的重启窗口内，并容忍最多五秒的时钟偏差。
+fn relaunch_marker_is_recent(created_at: u64, now: u64) -> bool {
+    created_at <= now.saturating_add(5_000)
+        && now.saturating_sub(created_at) <= RELAUNCH_VISIBLE_MAX_AGE_MS
 }
 
 /// 切换为普通应用模式，使 Dock 与窗口恢复交互。
@@ -255,3 +342,26 @@ pub fn install_terminate_interceptor() {
 /// 非 macOS 平台不安装原生退出拦截器。
 #[cfg(not(target_os = "macos"))]
 pub fn install_terminate_interceptor() {}
+
+#[cfg(test)]
+/// 跨平台启动来源辅助逻辑测试。
+mod tests {
+    use super::{relaunch_marker_is_recent, RELAUNCH_VISIBLE_MAX_AGE_MS};
+
+    /// 重启标记只在短窗口内有效，并容忍小幅时钟偏差。
+    #[test]
+    fn relaunch_marker_has_bounded_lifetime() {
+        let now = 1_000_000;
+        assert!(relaunch_marker_is_recent(now, now));
+        assert!(relaunch_marker_is_recent(now + 5_000, now));
+        assert!(relaunch_marker_is_recent(
+            now - RELAUNCH_VISIBLE_MAX_AGE_MS,
+            now
+        ));
+        assert!(!relaunch_marker_is_recent(now + 5_001, now));
+        assert!(!relaunch_marker_is_recent(
+            now - RELAUNCH_VISIBLE_MAX_AGE_MS - 1,
+            now
+        ));
+    }
+}

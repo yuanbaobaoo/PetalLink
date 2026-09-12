@@ -1,8 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import type { SyncGlobalState } from "@/api/sync";
+import type { AppConfig } from "@/api/config";
 import * as configApi from "@/api/config";
 import { useSyncStore } from "@/stores/sync";
+
+const platformMock = vi.hoisted(() => vi.fn(() => false));
+
+vi.mock("@/utils/platform", () => ({
+  isLinuxPlatform: platformMock,
+}));
 
 /**
  * 构造可按字段覆盖的同步状态快照。
@@ -32,8 +39,9 @@ function snapshot(overrides: Partial<SyncGlobalState> = {}): SyncGlobalState {
 
 describe("sync store 权威快照字段", () => {
   beforeEach(() => {
-    setActivePinia(createPinia());
     vi.restoreAllMocks();
+    platformMock.mockReturnValue(false);
+    setActivePinia(createPinia());
   });
 
   it("接收 waiting_network 并保持等待态为活动中", () => {
@@ -113,5 +121,99 @@ describe("sync store 权威快照字段", () => {
     expect(store.mountConfigured).toBe(true);
     expect(store.mountDir).toBe("/Users/test/PetalLink");
     expect(store.setupPhase).toBe("active");
+  });
+
+  it("Linux 配置提交只更新 FUSE 可见目录而不覆盖 backing", () => {
+    platformMock.mockReturnValue(true);
+    const store = useSyncStore();
+    store.mountDir = "/home/user/.local/share/petallink/backing";
+
+    store.applyMountConfiguration("/home/user/PetalLinkDrive");
+
+    expect(store.mountConfigured).toBe(true);
+    expect(store.virtualDriveEnabled).toBe(true);
+    expect(store.virtualMountDir).toBe("/home/user/PetalLinkDrive");
+    expect(store.mountDir).toBe("/home/user/.local/share/petallink/backing");
+    expect(store.setupPhase).toBe("active");
+  });
+
+  it("配置已开启但 FUSE 未挂载时不把空目录冒充用户云盘", async () => {
+    vi.spyOn(configApi, "loadConfig").mockResolvedValue({
+      oauth_redirect_uri: "http://127.0.0.1:9999/oauth/callback",
+      oauth_callback_port: 9999,
+      mount_dir: "/mnt/petallink-cache",
+      mount_configured: false,
+      virtual_drive_enabled: true,
+      virtual_mount_dir: "/home/user/PetalLinkDrive",
+      concurrency: 6,
+      poll_interval_sec: 900,
+      debounce_sec: 3,
+      skip_patterns: [],
+      sort_field: "name",
+      sort_order: "ascending",
+      show_tray_icon: true,
+    });
+    const store = useSyncStore();
+
+    await store.init();
+
+    expect(store.virtualDriveEnabled).toBe(true);
+    expect(store.virtualMountDir).toBe("/home/user/PetalLinkDrive");
+    expect(store.virtualDriveMounted).toBe(false);
+    expect(store.userVisibleRoot).toBe("");
+  });
+
+  it("只在后端确认 FUSE 已挂载后暴露用户可见目录", () => {
+    const store = useSyncStore();
+    expect(store.applyVirtualDriveStatus({
+      enabled: true,
+      mounted: true,
+      mount_dir: "/home/user/PetalLinkDrive",
+      error: null,
+    })).toBe(true);
+
+    expect(store.virtualDriveMounted).toBe(true);
+    expect(store.userVisibleRoot).toBe("/home/user/PetalLinkDrive");
+  });
+
+  it("Linux 旧传统配置进入重新选择状态且不暴露旧目录", async () => {
+    platformMock.mockReturnValue(true);
+    vi.spyOn(configApi, "loadConfig").mockResolvedValue({
+      oauth_redirect_uri: "http://127.0.0.1:9999/oauth/callback",
+      oauth_callback_port: 9999,
+      mount_dir: "/mnt/petallink",
+      mount_configured: true,
+      concurrency: 6,
+      poll_interval_sec: 900,
+      debounce_sec: 3,
+      skip_patterns: [],
+      sort_field: "name",
+      sort_order: "ascending",
+      show_tray_icon: true,
+    } as unknown as AppConfig);
+    const store = useSyncStore();
+
+    await store.init();
+
+    expect(store.virtualDriveEnabled).toBe(true);
+    expect(store.virtualMountDir).toBe("");
+    expect(store.mountConfigured).toBe(false);
+    expect(store.setupPhase).toBe("needsSetup");
+    expect(store.userVisibleRoot).toBe("");
+  });
+
+  it("Linux 后端报告 FUSE 未启用时也不回退暴露 hidden backing", () => {
+    platformMock.mockReturnValue(true);
+    const store = useSyncStore();
+    store.mountDir = "/home/user/.local/share/petallink/backing";
+
+    expect(store.applyVirtualDriveStatus({
+      enabled: false,
+      mounted: false,
+      mount_dir: null,
+      error: "FUSE unavailable",
+    })).toBe(true);
+
+    expect(store.userVisibleRoot).toBe("");
   });
 });

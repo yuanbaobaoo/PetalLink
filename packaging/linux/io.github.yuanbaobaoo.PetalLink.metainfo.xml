@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.yuanbaobaoo.PetalLink</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>Apache-2.0</project_license>
+
+  <name>PetalLink</name>
+  <summary>Synchronize Huawei Cloud Drive with a local directory</summary>
+  <summary xml:lang="zh-CN">将华为云空间与本地目录双向同步</summary>
+
+  <description>
+    <p>
+      PetalLink is an open source desktop client that connects directly to
+      Huawei Cloud Drive through its REST API. It maps cloud files to a local
+      directory and keeps changes synchronized in both directions.
+    </p>
+    <p xml:lang="zh-CN">
+      PetalLink 是通过华为云 REST API 直连的开源桌面客户端，可将云端文件映射到
+      本地目录并保持双向同步。
+    </p>
+    <ul>
+      <li>OAuth 2.0 authorization with PKCE</li>
+      <li>On-demand downloads and local placeholder metadata</li>
+      <li>Real-time local file monitoring and cloud change polling</li>
+      <li>Persistent transfer queue and conflict handling</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">io.github.yuanbaobaoo.PetalLink.desktop</launchable>
+  <provides>
+    <binary>petallink</binary>
+  </provides>
+
+  <url type="homepage">https://github.com/yuanbaobaoo/PetalLink</url>
+  <url type="bugtracker">https://github.com/yuanbaobaoo/PetalLink/issues</url>
+  <url type="vcs-browser">https://github.com/yuanbaobaoo/PetalLink</url>
+
+  <developer id="io.github.yuanbaobaoo">
+    <name>yuanbaobaoo</name>
+  </developer>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="1.1.3" date="2026-07-27">
+      <description>
+        <p>Current stable macOS baseline and initial Linux porting base.</p>
+      </description>
+    </release>
+  </releases>
+</component>

@@ -3,11 +3,12 @@
 //! 对齐 `legacy/lib/mount/mount_manager.dart` 的 `_shouldSkipNameTopLevel` +
 //! `local_watcher.dart` 的 `_shouldSkip` + `sync_engine.dart` 的 `_shouldSkipName`。
 //!
-//! 四类统一过滤（v1.8 全局过滤，无论用户如何配置 skipPatterns）：
+//! 五类统一过滤（全局过滤，无论用户如何配置 skipPatterns）：
 //! 1. `.hwcloud_` 前缀（内部缓存/快照文件）
 //! 2. `.hwcloud_placeholder` 后缀（旧版占位符）
 //! 3. `.tmp` 后缀（下载原子写临时文件）
-//! 4. 用户配置的 skipPatterns（简化 glob）
+//! 4. Linux `.Trash` / `.Trash-$uid` 回收站
+//! 5. 用户配置的 skipPatterns（简化 glob）
 
 use std::collections::HashSet;
 
@@ -48,6 +49,15 @@ impl SkipMatcher {
         if name.starts_with(crate::constants::INTERNAL_FILE_PREFIX)
             || name.ends_with(".hwcloud_placeholder")
             || name.ends_with(crate::constants::TMP_SUFFIX)
+        {
+            return true;
+        }
+        // Linux 外置文件系统顶层回收站禁止被重新扫描并上传。
+        #[cfg(target_os = "linux")]
+        if name == ".Trash"
+            || name
+                .strip_prefix(".Trash-")
+                .is_some_and(|uid| !uid.is_empty() && uid.bytes().all(|byte| byte.is_ascii_digit()))
         {
             return true;
         }
@@ -130,5 +140,17 @@ mod tests {
         assert!(matcher.should_skip("legacy.hwcloud_placeholder"));
         assert!(matcher.should_skip("download.tmp"));
         assert!(!matcher.should_skip("download.tmp.txt"));
+    }
+
+    /// Linux 外置盘回收站必须硬跳过，普通相似名称仍可由用户决定是否同步。
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_trash_directories_are_skipped() {
+        let matcher = SkipMatcher::new(&[]);
+
+        assert!(matcher.should_skip(".Trash"));
+        assert!(matcher.should_skip(".Trash-1000"));
+        assert!(matcher.should_skip_relative_path(".Trash-1000/files/report.pdf"));
+        assert!(!matcher.should_skip(".Trash-project"));
     }
 }

@@ -55,24 +55,26 @@ onMounted(async () => {
 
   // 启动后延迟静默检查更新（不阻塞启动流程）
   const updater = useUpdaterStore();
-  // ① 首次检查（启动 3s 后，强制不节流）
-  initialCheckTimer = setTimeout(() => {
-    updater.silentCheck();
-  }, 3000);
+  if (await updater.detectSupport()) {
+    // ① 首次检查（启动 3s 后，强制不节流）
+    initialCheckTimer = setTimeout(() => {
+      updater.silentCheck();
+    }, 3000);
 
-  // ② 每 1 小时定时检查（内部 1 小时节流，重复触发也不会超频）
-  periodicCheckTimer = setInterval(() => {
-    updater.periodicCheck();
-  }, CHECK_INTERVAL_MS);
+    // ② 每 1 小时定时检查（内部 1 小时节流，重复触发也不会超频）
+    periodicCheckTimer = setInterval(() => {
+      updater.periodicCheck();
+    }, CHECK_INTERVAL_MS);
 
-  // ③ 窗口获得焦点时检查（节流 10 分钟）——覆盖从后台恢复、托盘/Dock 点击、
-  //   单实例聚焦等所有「主窗口重新显示」的路径
-  // 保存清理函数，组件卸载时解除原生窗口监听。
-  try {
-    unlistenFocus = await getCurrentWindow().onFocusChanged(({ payload: focused }) => {
-      if (focused) updater.checkOnFocus();
-    });
-  } catch {}
+    // ③ 窗口获得焦点时检查（节流 10 分钟）——覆盖从后台恢复、托盘/Dock 点击、
+    //   单实例聚焦等所有「主窗口重新显示」的路径
+    // 保存清理函数，组件卸载时解除原生窗口监听。
+    try {
+      unlistenFocus = await getCurrentWindow().onFocusChanged(({ payload: focused }) => {
+        if (focused) updater.checkOnFocus();
+      });
+    } catch {}
+  }
 });
 
 onUnmounted(() => {

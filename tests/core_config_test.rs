@@ -94,6 +94,8 @@ fn test_with_chain() {
         None,
         None,
         Some(true),
+        None,
+        None,
         Some(10),
         None,
         None,
@@ -113,6 +115,8 @@ fn test_show_tray_icon_default_and_with() {
     let c = AppConfig::default();
     assert!(c.show_tray_icon);
     let hidden = c.with(
+        None,
+        None,
         None,
         None,
         None,

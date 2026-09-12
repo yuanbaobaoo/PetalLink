@@ -12,7 +12,6 @@ import { useFileBrowserStore } from "@/stores/fileBrowser";
 import { useSyncStore } from "@/stores/sync";
 import { commands } from "@/api/generated";
 import * as driveApi from "@/api/drive";
-import * as configApi from "@/api/config";
 import { useAsyncAction } from "@/composables/useAsyncAction";
 
 // 当前文件浏览器状态。
@@ -32,7 +31,7 @@ const showTransferPopover = ref(false);
 // 异步按钮 loading + 防重复点击
 const { loading: refreshLoading, run: runRefresh } = useAsyncAction();
 // 系统文件管理器操作的互斥执行状态。
-const { loading: finderLoading, run: runFinder } = useAsyncAction();
+const { loading: fileManagerLoading, run: runFileManager } = useAsyncAction();
 
 // 定义事件
 const emit = defineEmits<{ (e: "open-settings"): void }>();
@@ -67,11 +66,17 @@ async function handleSearch(): Promise<void> {
 function handleClearSearch(): void { searchKeyword.value = ""; searchResults.value = []; }
 
 /**
- * 在系统文件管理器中打开同步目录。
+ * 在系统文件管理器中打开用户可见的云盘/同步目录。
  */
-async function handleOpenInFinder(): Promise<void> {
-  await runFinder(async () => {
-    try { const c = await configApi.loadConfig(); await commands.openInFinder(c.mount_dir); } catch {}
+async function handleOpenInFileManager(): Promise<void> {
+  await runFileManager(async () => {
+    try {
+      await commands.openInFinder();
+    } catch {
+      // 会话可能在前端上次状态快照后断开；立即刷新真实 mountinfo 状态，
+      // 让按钮禁用并显示后端记录的可操作挂载错误。
+      await sync.refreshVirtualDriveStatus();
+    }
   });
 }
 
@@ -99,13 +104,25 @@ async function handleRefreshAll(): Promise<void> {
         <div class="app-bar__tools">
           <MateButton v-if="mountConfigured" variant="primary" icon="refresh" tooltip="读取云端文件并同步到本地" :loading="refreshLoading || sync.isIndexing" :disabled="refreshLoading || sync.isIndexing" @click="handleRefreshAll">同步索引</MateButton>
           <MateButton variant="soft" icon="transfer" tooltip="传输队列" @click="showTransferPopover = !showTransferPopover">传输队列</MateButton>
-          <MateButton v-if="mountConfigured" variant="icon-text" icon="folder-open" tooltip="在 Finder 中打开同步目录" :loading="finderLoading" :disabled="finderLoading" @click="handleOpenInFinder">Finder</MateButton>
+          <MateButton
+            v-if="mountConfigured"
+            variant="icon-text"
+            icon="folder-open"
+            :tooltip="sync.usesVirtualDrive ? '在系统文件管理器中打开云盘目录' : '在系统文件管理器中打开同步目录'"
+            :loading="fileManagerLoading"
+            :disabled="fileManagerLoading || !sync.userVisibleRoot"
+            @click="handleOpenInFileManager"
+          >{{ sync.usesVirtualDrive ? "云盘目录" : "同步目录" }}</MateButton>
         </div>
         <MateButton variant="icon" icon="settings" tooltip="设置" @click="handleOpenSettings" />
       </div>
       <!-- 信息/错误提示区（面包屑上方） -->
       <div class="info-area">
-        <SyncSetupBanner v-if="!mountConfigured || sync.setupPhase === 'needsFirstSync'" />
+        <SyncSetupBanner
+          v-if="!mountConfigured
+            || sync.setupPhase === 'needsFirstSync'
+            || (sync.usesVirtualDrive && !sync.virtualDriveMounted)"
+        />
         <SyncStatusBar v-if="mountConfigured" />
         <div v-if="browser.errorMessage" class="info-area__error">
           <MateInfoBanner variant="error">{{ browser.errorMessage }}</MateInfoBanner>

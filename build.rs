@@ -44,6 +44,10 @@ const PNG_COPY_MAP: &[(&str, &str)] = &[
 
 /// 注入构建配置并同步图标资源。
 fn main() {
+    // 官方 Linux AppImage 构建用该变量启用应用内更新；让同一 target 目录在
+    // 普通构建和发布构建之间切换时也会重新执行构建脚本。
+    println!("cargo:rerun-if-env-changed=PETALLINK_UPDATE_CHANNEL");
+
     // ★ 最早阶段：注入凭证（缺失则 panic 阻断构建）
     inject_env_credentials();
 

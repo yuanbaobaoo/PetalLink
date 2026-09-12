@@ -7,7 +7,7 @@ use petal_link_lib::auth::service::AuthService;
 use petal_link_lib::drive::changes_api::ChangesApi;
 use petal_link_lib::drive::client::DriveClient;
 use petal_link_lib::drive::files_api::FilesApi;
-use petal_link_lib::drive::models::DriveFile;
+use petal_link_lib::drive::models::{DriveFile, FileCategory};
 use petal_link_lib::sync::engine::SyncEngine;
 use petal_link_lib::sync::state::{ActionResult, SyncAction, SyncActionType};
 use petal_link_lib::sync::status_aggregator::StatusAggregator;
@@ -17,6 +17,8 @@ use rusqlite::{params, Connection};
 const SYNCED: i32 = 0;
 /// 持久化同步失败状态值。
 const FAILED: i32 = 4;
+/// 持久化同步冲突状态值。
+const CONFLICT: i32 = 5;
 /// 同步基线测试表结构。
 const SYNC_ITEMS_DDL: &str = "
     CREATE TABLE sync_items (
@@ -103,6 +105,33 @@ fn insert_baseline(
                 3_333_i64,
                 status,
                 error_message,
+            ],
+        )
+        .unwrap();
+}
+
+/// 插入带可区分内容字段的目录基线。
+fn insert_folder_baseline(
+    connection: &Connection,
+    file_id: &str,
+    local_path: &str,
+    parent_folder_id: &str,
+) {
+    connection
+        .execute(
+            "INSERT INTO sync_items (
+                file_id, local_path, parent_folder_id, name, is_folder, size,
+                local_size, sha256, local_mtime, cloud_edited_time,
+                last_sync_time, status, error_message
+             ) VALUES (?1, ?2, ?3, ?4, 1, 17, 0, ?5, 1111, 2222, 3333, ?6, ?7)",
+            params![
+                file_id,
+                local_path,
+                parent_folder_id,
+                local_path.rsplit('/').next().unwrap_or(local_path),
+                format!("folder-baseline-{file_id}"),
+                SYNCED,
+                format!("preserved-{file_id}"),
             ],
         )
         .unwrap();
@@ -232,6 +261,78 @@ fn apply_results_upload_preserves_task_runner_baseline_and_updates_cloud_cache()
     );
 }
 
+/// 本地优先冲突覆盖后必须用 PATCH 返回的新版本结算，不能沿用动作中的旧云快照。
+#[test]
+fn apply_results_local_wins_conflict_uses_updated_cloud_version() {
+    let (engine, db) = new_engine();
+    insert_baseline(
+        &db.lock(),
+        "conflict-file-id",
+        "docs/report.txt",
+        SYNCED,
+        None,
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let local_path = temp.path().join("report.txt");
+    std::fs::write(&local_path, b"new-local-version").unwrap();
+    let old_cloud = DriveFile {
+        id: "conflict-file-id".into(),
+        name: "report.txt".into(),
+        size: 333,
+        parent_folder: Some(vec!["old-parent".into()]),
+        edited_time: chrono::DateTime::from_timestamp_millis(2_222),
+        content_hash: Some("old-cloud-hash".into()),
+        ..Default::default()
+    };
+    let updated_cloud = DriveFile {
+        id: "conflict-file-id".into(),
+        name: "report.txt".into(),
+        size: b"new-local-version".len() as i64,
+        parent_folder: Some(vec!["updated-parent".into()]),
+        edited_time: chrono::DateTime::from_timestamp_millis(9_999),
+        content_hash: Some("updated-cloud-hash".into()),
+        ..Default::default()
+    };
+    let action = SyncAction {
+        action_type: SyncActionType::CreateConflictCopy,
+        relative_path: Some("docs/report.txt".into()),
+        file_id: Some("conflict-file-id".into()),
+        parent_file_id: Some("old-parent".into()),
+        local_path: Some(local_path.to_string_lossy().into_owned()),
+        cloud_file: Some(old_cloud),
+        reason: Some("本地优先冲突覆盖".into()),
+    };
+    let result = ActionResult {
+        success: true,
+        error_message: None,
+        deferred: false,
+        cloud_file: Some(updated_cloud.clone()),
+    };
+
+    engine.apply_results(&[action], &[result]).unwrap();
+
+    let (parent, size, edited_time, status): (Option<String>, i64, Option<i64>, i32) = db
+        .lock()
+        .query_row(
+            "SELECT parent_folder_id, size, cloud_edited_time, status
+             FROM sync_items WHERE file_id=?1 AND local_path=?2",
+            params!["conflict-file-id", "docs/report.txt"],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(parent.as_deref(), Some("updated-parent"));
+    assert_eq!(size, updated_cloud.size);
+    assert_eq!(edited_time, Some(9_999));
+    assert_eq!(status, CONFLICT);
+    let cached = engine
+        .cloud_tree_lock()
+        .get("docs/report.txt")
+        .cloned()
+        .unwrap();
+    assert_eq!(cached.content_hash.as_deref(), Some("updated-cloud-hash"));
+    assert_eq!(cached.edited_time, updated_cloud.edited_time);
+}
+
 /// 验证同目录改名按结构变化结算，并保留最后确认的内容基线。
 #[test]
 fn apply_results_same_folder_rename_rekeys_without_advancing_content_baseline() {
@@ -325,6 +426,184 @@ fn apply_results_same_folder_rename_rekeys_without_advancing_content_baseline() 
             .get("contracts/new.docx")
             .map(String::as_str),
         Some("rename-file-id")
+    );
+}
+
+/// 运行一次嵌套目录根移动结算，并核验 DB 与内存云树整棵重键。
+fn assert_directory_root_move_rekeys_nested_subtree(
+    old_root: &str,
+    new_root: &str,
+    source_parent_id: &str,
+    target_parent_id: &str,
+) {
+    let (engine, db) = new_engine();
+    let old_nested = format!("{old_root}/nested");
+    let old_file = format!("{old_nested}/document.txt");
+    let new_nested = format!("{new_root}/nested");
+    let new_file = format!("{new_nested}/document.txt");
+    {
+        let connection = db.lock();
+        insert_folder_baseline(&connection, "folder-root-id", old_root, source_parent_id);
+        insert_folder_baseline(
+            &connection,
+            "folder-nested-id",
+            &old_nested,
+            "folder-root-id",
+        );
+        insert_baseline(
+            &connection,
+            "nested-file-id",
+            &old_file,
+            FAILED,
+            Some("keep-me"),
+        );
+    }
+    let child_before = baseline_snapshot(&db.lock(), "nested-file-id", &old_file);
+    let nested_before = baseline_snapshot(&db.lock(), "folder-nested-id", &old_nested);
+
+    let old_root_cloud = DriveFile {
+        id: "folder-root-id".into(),
+        name: old_root.rsplit('/').next().unwrap().into(),
+        category: FileCategory::Folder,
+        parent_folder: Some(vec![source_parent_id.into()]),
+        ..Default::default()
+    };
+    let nested_cloud = DriveFile {
+        id: "folder-nested-id".into(),
+        name: "nested".into(),
+        category: FileCategory::Folder,
+        parent_folder: Some(vec!["folder-root-id".into()]),
+        ..Default::default()
+    };
+    let file_cloud = DriveFile {
+        id: "nested-file-id".into(),
+        name: "document.txt".into(),
+        size: 333,
+        parent_folder: Some(vec!["folder-nested-id".into()]),
+        ..Default::default()
+    };
+    for (path, file) in [
+        (old_root.to_string(), old_root_cloud.clone()),
+        (old_nested.clone(), nested_cloud),
+        (old_file.clone(), file_cloud),
+    ] {
+        engine.path_to_id_insert(path.clone(), file.id.clone());
+        engine.cloud_tree_insert(path, file);
+    }
+
+    let moved_root = DriveFile {
+        id: "folder-root-id".into(),
+        name: new_root.rsplit('/').next().unwrap().into(),
+        category: FileCategory::Folder,
+        size: 99,
+        parent_folder: Some(vec![target_parent_id.into()]),
+        edited_time: chrono::DateTime::from_timestamp_millis(4_444),
+        ..Default::default()
+    };
+    let action = SyncAction {
+        action_type: SyncActionType::MoveInCloud,
+        relative_path: Some(new_root.into()),
+        file_id: Some("folder-root-id".into()),
+        parent_file_id: Some(target_parent_id.into()),
+        local_path: Some(format!("/mount/{new_root}")),
+        cloud_file: Some(old_root_cloud),
+        reason: Some("目录根路径变化".into()),
+    };
+    let result = ActionResult {
+        success: true,
+        error_message: None,
+        deferred: false,
+        cloud_file: Some(moved_root),
+    };
+
+    engine.apply_results(&[action], &[result]).unwrap();
+
+    let connection = db.lock();
+    let remaining_old: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sync_items
+             WHERE local_path=?1 OR local_path LIKE ?2",
+            params![old_root, format!("{old_root}/%")],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(remaining_old, 0, "旧目录子树基线必须全部移除");
+    assert_eq!(
+        baseline_snapshot(&connection, "folder-nested-id", &new_nested),
+        nested_before,
+        "后代目录的内容与状态基线不得因根移动而推进"
+    );
+    assert_eq!(
+        baseline_snapshot(&connection, "nested-file-id", &new_file),
+        child_before,
+        "后代文件的内容与失败状态基线必须原样保留"
+    );
+    let moved_root_baseline = baseline_snapshot(&connection, "folder-root-id", new_root);
+    assert_eq!(moved_root_baseline.0.as_deref(), Some(target_parent_id));
+    assert_eq!(moved_root_baseline.1, new_root.rsplit('/').next().unwrap());
+    assert_eq!(moved_root_baseline.2, 1);
+    assert_eq!(moved_root_baseline.3, 99);
+    assert_eq!(moved_root_baseline.4, Some(0));
+    assert_eq!(
+        moved_root_baseline.5.as_deref(),
+        Some("folder-baseline-folder-root-id")
+    );
+    assert_eq!(moved_root_baseline.6, Some(1_111));
+    assert_eq!(moved_root_baseline.7, Some(4_444));
+    assert_eq!(moved_root_baseline.8, Some(3_333));
+    assert_eq!(moved_root_baseline.9, SYNCED);
+    assert_eq!(
+        moved_root_baseline.10.as_deref(),
+        Some("preserved-folder-root-id")
+    );
+    drop(connection);
+
+    let cloud = engine.cloud_tree_lock();
+    assert!(!cloud.contains_key(old_root));
+    assert!(!cloud.contains_key(&old_nested));
+    assert!(!cloud.contains_key(&old_file));
+    assert_eq!(
+        cloud.get(new_root).map(|file| file.id.as_str()),
+        Some("folder-root-id")
+    );
+    assert_eq!(
+        cloud.get(&new_nested).map(|file| file.id.as_str()),
+        Some("folder-nested-id")
+    );
+    assert_eq!(
+        cloud.get(&new_file).map(|file| file.id.as_str()),
+        Some("nested-file-id")
+    );
+    drop(cloud);
+    let path_to_id = engine.path_to_id_lock();
+    assert!(!path_to_id.contains_key(old_root));
+    assert!(!path_to_id.contains_key(&old_nested));
+    assert!(!path_to_id.contains_key(&old_file));
+    assert_eq!(
+        path_to_id.get(&new_file).map(String::as_str),
+        Some("nested-file-id")
+    );
+}
+
+/// 同一父目录内改名也必须作为一个目录根移动结算。
+#[test]
+fn apply_results_same_parent_directory_rename_rekeys_nested_subtree() {
+    assert_directory_root_move_rekeys_nested_subtree(
+        "projects/old",
+        "projects/new",
+        "projects-id",
+        "projects-id",
+    );
+}
+
+/// 跨父目录移动必须整棵重键，同时只更新根的 parentFolder。
+#[test]
+fn apply_results_cross_parent_directory_move_rekeys_nested_subtree() {
+    assert_directory_root_move_rekeys_nested_subtree(
+        "projects/old",
+        "archive/new",
+        "projects-id",
+        "archive-id",
     );
 }
 

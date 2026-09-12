@@ -60,6 +60,24 @@ pub struct FolderSyncProgressEvent {
 #[tauri_specta(event_name = "navigate_settings")]
 pub struct NavigateSettingsEvent;
 
+/// Linux 按需云盘的真实运行状态，而不是仅反映配置开关。
+#[derive(Clone, Debug, Serialize, Type)]
+pub struct VirtualDriveStatus {
+    /// 配置中是否启用了按需云盘。
+    pub enabled: bool,
+    /// FUSE 会话是否已经成功挂载。
+    pub mounted: bool,
+    /// 当前真实挂载目录；尚未挂载时为空。
+    pub mount_dir: Option<String>,
+    /// 最近一次挂载失败原因。
+    pub error: Option<String>,
+}
+
+/// 按需云盘挂载成功或失败后推送真实状态。
+#[derive(Clone, Serialize, Type, Event)]
+#[tauri_specta(event_name = "virtual_drive_status")]
+pub struct VirtualDriveStatusEvent(pub VirtualDriveStatus);
+
 /// 传输方向持久化值，供前端生成同源常量。
 #[derive(Serialize, Type)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -170,9 +188,15 @@ pub fn builder() -> Builder<Wry> {
             commands::transfer_clear_finished,
             commands::transfer_retry,
             commands::open_in_finder,
+            commands::open_local_item,
+            commands::reveal_local_item,
+            commands::open_external_url,
+            commands::virtual_drive_status,
             commands::launch_at_login_is_enabled,
             commands::launch_at_login_set_enabled,
             commands::tray_is_visible,
+            commands::updater_is_supported,
+            commands::app_relaunch,
             commands::app_clear_cache,
             commands::logs_list,
             commands::logs_export,
@@ -186,6 +210,7 @@ pub fn builder() -> Builder<Wry> {
             UploadFailedEvent,
             FolderSyncProgressEvent,
             NavigateSettingsEvent,
+            VirtualDriveStatusEvent,
         ])
         // 保持当前前端语义：成功 resolve，AppError 通过 Promise rejection 抛出。
         .error_handling(ErrorHandlingMode::Throw)
