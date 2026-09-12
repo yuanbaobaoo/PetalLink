@@ -1,7 +1,7 @@
 [package]
 name = "PetalLink"
-version = "1.1.6"
-description = "PetalLink — 基于 Tauri 的华为云盘桌面开源客户端"
+version = "1.1.7"
+description = "PetalLink — 基于 Tauri 的 macOS 华为云盘开源客户端"
 authors = ["PetalLink"]
 edition = "2021"
 rust-version = "1.85"

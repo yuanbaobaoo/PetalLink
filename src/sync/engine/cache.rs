@@ -447,6 +447,14 @@ impl SyncEngine {
                 .await;
                 match incremental {
                     Ok(changed) => return Ok(changed),
+                    Err(error) if error.is_transient() => {
+                        // 瞬时网络/token 错误：全量 BFS 同样依赖网络，立即回退大概率再失败
+                        // 并浪费一次全量扫描。候选树为克隆、cursor 未推进，活动状态无任何
+                        // 变更，撤销信任后保留现场，等待下一周期用同一 cursor 增量补跑。
+                        self.set_cloud_tree_trusted(false);
+                        tracing::info!(%error, "增量刷新遇到瞬时错误，保留 cursor 等待下一周期重试");
+                        return Err(error);
+                    }
                     Err(error) => {
                         self.set_cloud_tree_trusted(false);
                         tracing::warn!(%error, "增量 checkpoint 失败，保留旧盘并回退可信全量刷新");

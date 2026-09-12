@@ -207,3 +207,36 @@ fn structured_status_matching_never_reads_display_message() {
     assert_eq!(fake_status.drive_status(), None);
     assert_eq!(structured.drive_status(), Some(404));
 }
+
+/// 验证增量重放的瞬时错误分类：网络传输类与 token 错误可等待补跑，结构性错误必须全量重建。
+#[test]
+fn transient_classification_splits_network_from_structural_errors() {
+    // 网络传输类与 token 未就绪：等待下一周期重试即可恢复。
+    assert!(AppError::drive_network(Some("offline")).is_transient());
+    assert!(AppError::drive_transport(
+        DriveTransportKind::Connect,
+        RequestSemantics::Read,
+        false,
+        None,
+    )
+    .is_transient());
+    assert!(AppError::drive_transport(
+        DriveTransportKind::Timeout,
+        RequestSemantics::Read,
+        false,
+        None,
+    )
+    .is_transient());
+    assert!(AppError::token_refresh_failed(Some("invalid_grant")).is_transient());
+
+    // 结构性错误：cursor/响应已不可信，必须回退全量刷新重建候选树。
+    assert!(!AppError::drive_from_status(400, "{}").is_transient());
+    assert!(!AppError::drive_transport(
+        DriveTransportKind::Decode,
+        RequestSemantics::Read,
+        false,
+        None,
+    )
+    .is_transient());
+    assert!(!AppError::generic("changes 应用歧义").is_transient());
+}

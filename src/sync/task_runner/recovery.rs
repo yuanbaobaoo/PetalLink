@@ -1,5 +1,7 @@
 //! 提供任务恢复流程。
 
+use std::collections::HashMap;
+
 use super::admission::has_ambiguous_remote_write_result;
 use super::contracts::{
     RecoveredCloudFile, RemoteVerification, StartupRecoverySummary, TaskDisposition,
@@ -14,6 +16,10 @@ use crate::sync::transfer_state::{TransferErrorKind, TransferOperation, Transfer
 /// 远端核验的最大自动次数。Ambiguous/核验不可用达到上限后转 Failed 交人工重试，
 /// 避免任务在网络长期异常或云端始终不返回完整元数据时在 VerifyingRemote 永久循环。
 const MAX_VERIFY_ATTEMPTS: i64 = 60;
+
+/// 孤儿 RestartRequired 任务的最低年龄。文件改名/替换瞬间可能短暂消失，
+/// 低龄任务不回收，交由后续周期重新复核，规避监听器竞态。
+const ORPHAN_RESTART_MIN_AGE_MS: i64 = 24 * 60 * 60 * 1000;
 
 impl TaskRunner {
     /// 将保存了远端结果 ID 的 RestartRequired 恢复为待核验状态。
@@ -30,6 +36,105 @@ impl TaskRunner {
             self.notify_best_effort();
         }
         Ok(promoted)
+    }
+
+    /// 取消源与云端同路径对象均已消失、长期滞留的 RestartRequired 上传任务。
+    ///
+    /// RestartRequired 只能被同路径新规划意图收编（admission replan）复活；本地文件
+    /// 被改名/删除后该路径不会再产生意图，任务将永久滞留并连带阻塞残余基线清理。
+    /// 仅回收上传任务：下载任务的本地路径缺失是执行中的常态。任一守卫不满足即保留，
+    /// 由下一周期重新复核。
+    pub fn cancel_orphaned_restart_tasks(
+        &self,
+        cloud_contains: &dyn Fn(&str) -> bool,
+    ) -> AppResult<usize> {
+        let now = (self.now_ms)();
+        // 一次性读出全部任务后立即释放锁：后续 transition 需再次加锁，禁止跨锁持有。
+        let tasks = {
+            let conn = self.db.lock();
+            repository::list_all_transfers(&conn)?
+        };
+        // 统计各路径的非终态任务数：候选任务自身也计入，计数 >1 即存在活跃兄弟任务。
+        let mut active_by_path: HashMap<String, usize> = HashMap::new();
+        for task in &tasks {
+            if let (Some(path), Ok(state)) = (task.relative_path.as_ref(), task.state_kind()) {
+                if !matches!(
+                    state,
+                    TransferState::Completed | TransferState::Failed | TransferState::Canceled
+                ) {
+                    *active_by_path.entry(path.clone()).or_default() += 1;
+                }
+            }
+        }
+
+        let mut cancelled = 0usize;
+        for task in tasks {
+            if task.state_kind().map_err(transition_error)? != TransferState::RestartRequired {
+                continue;
+            }
+            // 只回收上传类任务；下载任务的本地缺失是执行中的正常状态。
+            let is_upload = matches!(
+                task.operation_kind().map_err(transition_error)?,
+                Some(TransferOperation::Create | TransferOperation::Update)
+            );
+            if !is_upload {
+                continue;
+            }
+            let Some(relative_path) = task.relative_path.as_deref() else {
+                continue;
+            };
+            // 年龄守卫：规避改名/替换瞬间文件短暂消失的监听器竞态。
+            if now.saturating_sub(task.created_at) < ORPHAN_RESTART_MIN_AGE_MS {
+                continue;
+            }
+            // 云端同路径仍存在时保留：该路径仍可能产生重新规划意图。
+            if cloud_contains(relative_path) {
+                continue;
+            }
+            // 本地文件仍存在时保留：可能只是等待网络恢复重试。
+            if self
+                .mount_root
+                .join(relative_path)
+                .symlink_metadata()
+                .is_ok()
+            {
+                continue;
+            }
+            // 同路径存在其他非终态任务时保留，避免误杀核验/重放流程中的任务。
+            if active_by_path
+                .get(relative_path)
+                .is_some_and(|count| *count > 1)
+            {
+                continue;
+            }
+            // 终态迁移带 CAS：任务已被并发恢复/取消时放弃本次取消，保留对方结果。
+            if let Err(error) = self.transition(
+                task.id,
+                task.state_revision,
+                TransferState::Canceled,
+                TransferPatch {
+                    error_kind: ColumnPatch::Set(TransferErrorKind::LocalChanged),
+                    error_message: ColumnPatch::Set(
+                        "本地文件已消失且云端无同路径对象，任务自动取消".to_string(),
+                    ),
+                    finished_at: ColumnPatch::Set(now),
+                    ..Default::default()
+                },
+            ) {
+                tracing::warn!(task_id = task.id, %error, "孤儿 RestartRequired 任务取消失败，跳过");
+                continue;
+            }
+            tracing::info!(
+                task_id = task.id,
+                relative_path,
+                "已取消长期滞留的孤儿 RestartRequired 任务"
+            );
+            cancelled += 1;
+        }
+        if cancelled > 0 {
+            self.notify_best_effort();
+        }
+        Ok(cancelled)
     }
 
     /// 恢复并核验远端写入结果不确定的任务。
