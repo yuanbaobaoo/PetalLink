@@ -25,17 +25,11 @@ export interface DownloadProgress {
 /**
  * 检查是否有可用更新。
  * 返回 UpdateInfo 表示有新版本，null 表示已是最新。
+ * 检查失败时抛出错误，由调用方决定静默（自动检查）或提示（手动检查）。
  */
 export async function checkForUpdate(): Promise<UpdateInfo | null> {
   // 保留插件返回对象，供后续下载流程持有。
-  let update: Update | null = null;
-  // 自动检查失败时保持静默，不干扰应用启动。
-  try {
-    update = await check();
-  } catch {
-    // 网络错误等静默返回 null
-    return null;
-  }
+  const update = await check();
   if (!update) return null;
   return {
     version: update.version,

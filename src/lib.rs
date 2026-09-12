@@ -37,8 +37,11 @@ pub mod sync;
 pub fn init_logger() {
     use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
+    // 默认过滤器：业务模块 INFO 起步；tauri_plugin_updater 关闭——静默检查失败已由
+    // 前端按退避间隔重试（stores/updater.ts），手动检查失败在 UI 呈现，插件的 ERROR
+    // 只会在网络不可达时周期性刷日志且不承载用户可见信息。排查更新问题时可用 RUST_LOG 覆盖。
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,petal_link_lib=info,tauri_plugin_updater=warn"));
+        .unwrap_or_else(|_| EnvFilter::new("info,petal_link_lib=info,tauri_plugin_updater=off"));
 
     let stdout_layer = fmt::layer()
         .with_target(false)

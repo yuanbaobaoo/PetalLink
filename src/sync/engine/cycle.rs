@@ -551,10 +551,18 @@ impl SyncEngine {
                 &cloud,
                 blocked_path_changes,
             )?;
+            // 孤儿任务回收依赖可信云树判定「云端无同路径对象」，与失败复核同守卫。
+            let stale_cancelled = match &self.task_runner {
+                Some(task_runner) => {
+                    task_runner.cancel_orphaned_restart_tasks(&|path| cloud.contains_key(path))?
+                }
+                None => 0,
+            };
             db = self.load_db_snapshot()?;
             tracing::info!(
                 healed = reconciliation.healed,
                 purged = reconciliation.purged,
+                stale_cancelled,
                 remaining_failed = reconciliation.remaining_failed,
                 blocked = blocked_path_changes.len(),
                 "可信同步周期已完成失败状态复核与残余清理"

@@ -11,6 +11,8 @@ import type { UpdateInfo, DownloadProgress } from "@/api/updater";
 export const CHECK_INTERVAL_MS = 60 * 60 * 1000;
 // 窗口聚焦检查节流：距上次检查不足 10 分钟则跳过
 export const FOCUS_THROTTLE_MS = 10 * 60 * 1000;
+// 静默检查连续失败时的最大退避倍数：检查间隔按连续失败次数翻倍延长，上限 8 小时
+export const MAX_CHECK_BACKOFF_MULTIPLIER = 8;
 
 export type UpdatePhase =
   | "idle"           // 空闲
@@ -43,6 +45,8 @@ export const useUpdaterStore = defineStore("updater", () => {
   const lastCheckTime = ref<number | null>(null);
   // 对话框是否打开（控制 UpdateDialog 显隐）
   const dialogOpen = ref(false);
+  // 静默检查连续失败次数：任一次成功即清零，用于按倍数退避自动检查间隔
+  const consecutiveCheckFailures = ref(0);
 
   // ---- 计算 ----
   const updateAvailable = computed(() => phase.value === "available");
@@ -66,6 +70,8 @@ export const useUpdaterStore = defineStore("updater", () => {
     try {
       // 最新更新元数据。
       const info = await updaterApi.checkForUpdate();
+      // 检查成功（无论是否有新版本）即清零退避计数。
+      consecutiveCheckFailures.value = 0;
       if (info) {
         updateInfo.value = info;
         phase.value = "available";
@@ -73,7 +79,8 @@ export const useUpdaterStore = defineStore("updater", () => {
         dialogOpen.value = false; // 静默检查不弹窗
       }
     } catch {
-      // 静默失败
+      // 静默失败：递增退避计数，由 periodicCheck 拉长下次自动检查间隔。
+      consecutiveCheckFailures.value += 1;
     }
     lastCheckTime.value = Date.now();
   }
@@ -99,7 +106,9 @@ export const useUpdaterStore = defineStore("updater", () => {
    * 每 1 小时定时检查（由 setInterval 驱动）
    */
   async function periodicCheck(): Promise<void> {
-    await throttledCheck(CHECK_INTERVAL_MS);
+    // 连续失败时按倍数退避（健康时为基准间隔），避免网络不可达时每小时重复请求刷日志。
+    const multiplier = Math.min(consecutiveCheckFailures.value, MAX_CHECK_BACKOFF_MULTIPLIER);
+    await throttledCheck(CHECK_INTERVAL_MS * multiplier);
   }
 
   /**
@@ -118,6 +127,8 @@ export const useUpdaterStore = defineStore("updater", () => {
     try {
       // 手动检查得到的最新更新元数据。
       const info = await updaterApi.checkForUpdate();
+      // 手动检查成功同样清零退避计数。
+      consecutiveCheckFailures.value = 0;
       if (info) {
         updateInfo.value = info;
         phase.value = "available";

@@ -276,6 +276,26 @@ impl AppError {
         }
     }
 
+    /// 判断是否为等待下一周期重试即可恢复的瞬时错误（网络传输类或 token 未就绪）。
+    ///
+    /// 供增量刷新失败时区分「立即回退全量刷新」与「保留 cursor 等待补跑」：
+    /// 瞬时错误下全量 BFS 同样依赖网络，立即回退大概率再失败并浪费一次全量扫描。
+    /// 结构性错误（changes 歧义、cursor 失效、响应解析失败）不在此列，必须走全量重建。
+    pub fn is_transient(&self) -> bool {
+        match self {
+            Self::DriveApi { transport_kind, .. } => matches!(
+                transport_kind,
+                Some(
+                    DriveTransportKind::Network
+                        | DriveTransportKind::Connect
+                        | DriveTransportKind::Timeout
+                )
+            ),
+            Self::Token { .. } => true,
+            _ => false,
+        }
+    }
+
     // ===== Auth 工厂 =====
     /// 用户主动取消授权（非错误，UI 不应显示为失败）
     pub fn auth_cancelled() -> Self {
