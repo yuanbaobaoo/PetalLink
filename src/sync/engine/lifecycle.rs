@@ -145,12 +145,14 @@ impl SyncEngine {
         self.activity.begin_exclusive(relative_path)
     }
 
-    /// 当前引擎是否已经关闭新活动准入。
+    /// 当前引擎是否已经关闭新活动准入。仅 Linux FUSE 路径租约使用。
+    #[cfg(target_os = "linux")]
     pub(crate) fn is_shutting_down(&self) -> bool {
         *self.shutdown.lock()
     }
 
     /// 把 FUSE 已提交的本地修改立即并入现有 watcher 重扫通道。
+    #[cfg(target_os = "linux")]
     pub(crate) fn notify_virtual_drive_change(self: &Arc<Self>) {
         if !self.is_shutting_down() {
             self.request_cycle_background("local-watcher");

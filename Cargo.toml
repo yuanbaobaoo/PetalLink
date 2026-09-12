@@ -1,6 +1,6 @@
 [package]
 name = "PetalLink"
-version = "1.1.7"
+version = "1.1.8"
 description = "PetalLink — 基于 Tauri 的 macOS 华为云盘开源客户端"
 authors = ["PetalLink"]
 edition = "2021"
@@ -22,7 +22,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 # === Tauri 核心 ===
-tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-single-instance = "2"
@@ -93,7 +93,6 @@ anyhow = "1"
 
 # === macOS 原生集成（activationPolicy / 系统托盘 / 开机自启） ===
 [target.'cfg(target_os = "macos")'.dependencies]
-tauri = { version = "2", features = ["macos-private-api"] }
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSNotification", "NSString", "NSProcessInfo"] }
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSStatusItem", "NSMenu", "NSWorkspace", "NSWindow", "NSRunningApplication", "NSImage", "NSResponder"] }

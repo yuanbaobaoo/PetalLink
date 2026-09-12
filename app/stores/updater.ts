@@ -48,6 +48,8 @@ export const useUpdaterStore = defineStore("updater", () => {
   const dialogOpen = ref(false);
   // 当前平台是否已接入签名更新产物；null 表示尚未查询。
   const updateSupported = ref<boolean | null>(null);
+  // 静默检查连续失败次数：任一次成功即清零，用于按倍数退避自动检查间隔
+  const consecutiveCheckFailures = ref(0);
 
   // ---- 计算 ----
   const updateAvailable = computed(() => phase.value === "available");
@@ -110,10 +112,11 @@ export const useUpdaterStore = defineStore("updater", () => {
         markUpToDate();
       }
     } catch (error) {
+      // 平台缺失按「无更新」呈现；无论失败类型都计入退避，拉长下次自动检查间隔。
       if (updaterApi.isUpdatePlatformUnavailableError(error)) {
         markUpToDate();
       }
-      // 其他静默检查错误不打扰用户。
+      consecutiveCheckFailures.value += 1;
     }
     lastCheckTime.value = Date.now();
   }

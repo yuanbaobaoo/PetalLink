@@ -156,6 +156,7 @@ fn allocate_linux_managed_backing() -> AppResult<PathBuf> {
 }
 
 /// 保存入口的跨平台规范化。非 Linux 保持传统同步合同不变。
+#[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
 fn normalize_for_save(mut config: AppConfig) -> AppResult<AppConfig> {
     #[cfg(target_os = "linux")]
     {
@@ -1078,6 +1079,9 @@ mod tests {
         assert!(!reset_sync_state);
     }
 
+    // from_json 在非 Linux 平台会把 virtual 字段连同 mount_configured 一起安全降级清零，
+    // roundtrip 合同仅在 Linux 成立，因此本测试只在 Linux 运行。
+    #[cfg(target_os = "linux")]
     #[test]
     fn virtual_drive_fields_roundtrip_through_json_contract() {
         let config = AppConfig {

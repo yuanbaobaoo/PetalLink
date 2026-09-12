@@ -77,7 +77,10 @@ cd ..
 ./app/node_modules/.bin/tauri build --bundles appimage
 ```
 
-Linux 构建会自动合并 `tauri.linux.conf.json`。AppImage 产物位于：
+Linux 构建会自动合并 `tauri.linux.conf.json`。该覆盖文件只调整打包目标（AppImage）
+与更新产物开关；`Cargo.toml` 主表 `tauri` 的 `macos-private-api` feature 是全平台
+构建的硬性约束（tauri-build 只校验主表 `tauri` 声明，且该 feature 在 Linux 上由
+cfg 门控、无副作用），不要把它挪进 target 专属表或从主表移除。AppImage 产物位于：
 
 ```text
 target/release/bundle/appimage/

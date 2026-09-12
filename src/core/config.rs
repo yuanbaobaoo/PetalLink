@@ -307,6 +307,8 @@ mod tests {
         assert!(config.validate().is_ok());
     }
 
+    // 虚拟云盘校验分支仅在 Linux 编译；macOS 上 validate 直接拒绝启用，合同见上方 cfg(not(linux)) 守卫。
+    #[cfg(target_os = "linux")]
     #[test]
     fn virtual_drive_requires_a_configured_backing_directory() {
         let config = AppConfig {
@@ -363,6 +365,8 @@ mod tests {
         }
     }
 
+    // 重叠校验属于 Linux 虚拟云盘合同；macOS 上启用虚拟云盘本身即被拒绝。
+    #[cfg(target_os = "linux")]
     #[test]
     fn backing_and_virtual_mount_must_not_overlap() {
         for virtual_mount in [

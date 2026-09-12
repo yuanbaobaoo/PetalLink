@@ -307,10 +307,10 @@ pub(super) fn parse_verified_written_drive_file(
     let file = parse_written_drive_file(body, ctx, auth_already_replayed)?;
     if file.id.trim().is_empty()
         || file.name.trim().is_empty()
-        || !file
+        || file
             .mime_type
             .as_deref()
-            .is_some_and(|mime_type| !mime_type.trim().is_empty())
+            .is_none_or(|mime_type| mime_type.trim().is_empty())
     {
         return Err(write_protocol_error(
             ctx,
