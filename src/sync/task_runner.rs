@@ -24,6 +24,8 @@ mod publication;
 mod recovery;
 /// 结算成功、重试、失败与取消状态。
 mod settlement;
+/// 用户对同名冲突与滞留任务的显式操作入口。
+mod user_actions;
 
 /// 持久传输任务的公开合同类型。
 pub use crate::data::repository::TransferTask;

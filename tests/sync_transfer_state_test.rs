@@ -63,13 +63,14 @@ fn persisted_error_kind_values_are_stable() {
         (TransferErrorKind::RemoteAmbiguous, 9),
         (TransferErrorKind::LocalChanged, 10),
         (TransferErrorKind::Unknown, 11),
+        (TransferErrorKind::NameConflict, 12),
     ];
 
     for (kind, value) in values {
         assert_eq!(i32::from(kind), value);
         assert_eq!(TransferErrorKind::try_from(value).unwrap(), kind);
     }
-    assert!(TransferErrorKind::try_from(12).is_err());
+    assert!(TransferErrorKind::try_from(13).is_err());
 }
 
 /// 验证状态机只允许声明过的迁移边。

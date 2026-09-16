@@ -103,3 +103,27 @@ pub async fn transfer_retry(task_id: i64) -> AppResult<()> {
     let engine = sync_engine()?;
     engine.retry_transfer(task_id).await
 }
+
+/// 同名冲突决策：覆盖远端（远端旧版自动改名为云端副本保留，不丢数据）。
+#[tauri::command]
+#[specta::specta]
+pub async fn transfer_overwrite_remote(task_id: i64) -> AppResult<()> {
+    let engine = sync_engine()?;
+    engine.overwrite_remote_conflict(task_id).await
+}
+
+/// 同名冲突决策：保留两者（本地文件改名为本地副本后作为新文件上传，云端原文件不动）。
+#[tauri::command]
+#[specta::specta]
+pub async fn transfer_keep_both(task_id: i64) -> AppResult<()> {
+    let engine = sync_engine()?;
+    engine.keep_both_conflict(task_id).await
+}
+
+/// 取消「需要重新检查」或失败的传输任务。
+#[tauri::command]
+#[specta::specta]
+pub async fn transfer_cancel(task_id: i64) -> AppResult<()> {
+    let engine = sync_engine()?;
+    engine.cancel_transfer_task(task_id).await
+}

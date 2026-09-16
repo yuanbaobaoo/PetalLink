@@ -35,7 +35,7 @@ struct ExecutorTransferOperations {
 }
 
 /// 确认上传源的类型、修改时间与大小仍匹配持久任务。
-fn verify_source_snapshot(task: &TransferTask, path: &std::path::Path) -> AppResult<()> {
+pub(crate) fn verify_source_snapshot(task: &TransferTask, path: &std::path::Path) -> AppResult<()> {
     let metadata = std::fs::metadata(path)
         .map_err(|error| AppError::generic(format!("读取上传源失败：{error}")))?;
     let mtime = metadata
@@ -66,6 +66,58 @@ fn content_hash_matches(file: &DriveFile, local_sha256: Option<&str>) -> bool {
     match (comparable_sha256(file), local_sha256) {
         (Some(remote), Some(local)) => remote.eq_ignore_ascii_case(local),
         _ => true,
+    }
+}
+
+/// 同名候选创建窗口：以任务创建时间为锚，向前容忍时钟偏差，向后覆盖慢速或中断续传。
+const COLLISION_WINDOW_BACK_MS: i64 = 120_000;
+const COLLISION_WINDOW_FORWARD_MS: i64 = 30_i64 * 24 * 60 * 60 * 1_000;
+
+/// 同名碰撞的一致性判定结果。
+enum NameCollisionDecision {
+    /// 内容一致性已证明，采纳远端文件直接结算，禁止重复创建。
+    Adopt(Box<DriveFile>),
+    /// 无法证明内容一致，必须等用户选择处理方式，绝不自动覆盖。
+    Conflict,
+}
+
+/// 在同名候选中判定是否存在可证明内容一致的远端文件。
+///
+/// 判定语义与 `verify_remote` 的无 ID 收敛分支一致：size 必须相等；
+/// 远端提供可比 SHA-256 时以哈希为准（相等即采纳，不依赖创建窗口）；
+/// 哈希不可比时回退创建时间窗口。唯一候选才可采纳，零个或多个都判冲突。
+fn decide_name_collision(
+    candidates: Vec<DriveFile>,
+    expected_size: i64,
+    task_created_at: i64,
+    local_sha256: Option<&str>,
+) -> NameCollisionDecision {
+    let lower_bound = task_created_at.saturating_sub(COLLISION_WINDOW_BACK_MS);
+    let upper_bound = task_created_at.saturating_add(COLLISION_WINDOW_FORWARD_MS);
+    let mut adoptable: Vec<DriveFile> = Vec::new();
+    for file in candidates {
+        if file.is_folder() || file.size != expected_size {
+            continue;
+        }
+        // 哈希可比时以内容指纹裁决；不可比时回退创建时间窗口。
+        match (comparable_sha256(&file), local_sha256) {
+            (Some(remote), Some(local)) => {
+                if remote.eq_ignore_ascii_case(local) {
+                    adoptable.push(file);
+                }
+            }
+            _ => match file.created_time.map(|time| time.timestamp_millis()) {
+                Some(created_at) if (lower_bound..=upper_bound).contains(&created_at) => {
+                    adoptable.push(file)
+                }
+                _ => {}
+            },
+        }
+    }
+    if adoptable.len() == 1 {
+        NameCollisionDecision::Adopt(Box::new(adoptable.remove(0)))
+    } else {
+        NameCollisionDecision::Conflict
     }
 }
 
@@ -218,16 +270,70 @@ impl TransferOperations for ExecutorTransferOperations {
                         ));
                     }
                 } else {
-                    let collision = self
+                    let same_name: Vec<DriveFile> = self
                         .files_api
                         .list_all(task.parent_file_id.as_deref())
                         .await?
                         .into_iter()
-                        .any(|file| file.name == task.name);
-                    if collision {
-                        return Err(TaskExecutionError::RestartRequired(
-                            "目标目录已存在同名远端文件，拒绝重复创建".to_string(),
-                        ));
+                        .filter(|file| {
+                            file.name == task.name
+                                && task.parent_file_id.as_deref().is_none_or(|parent| {
+                                    file.parent_folder.as_deref().is_some_and(|parents| {
+                                        parents.len() == 1 && parents[0] == parent
+                                    })
+                                })
+                        })
+                        .collect();
+                    if !same_name.is_empty() {
+                        let expected_size = task.source_size.unwrap_or(task.total_size);
+                        // 仅在候选提供可比哈希时才计算本地 SHA-256。
+                        let local_sha256 = if same_name
+                            .iter()
+                            .any(|file| comparable_sha256(file).is_some())
+                        {
+                            self.source_sha256_if_current(task).await?
+                        } else {
+                            None
+                        };
+                        match decide_name_collision(
+                            same_name,
+                            expected_size,
+                            task.created_at,
+                            local_sha256.as_deref(),
+                        ) {
+                            NameCollisionDecision::Adopt(file) => {
+                                tracing::info!(
+                                    task_id = task.id,
+                                    file_id = %file.id,
+                                    "同名远端文件内容一致，采纳远端结果并结算"
+                                );
+                                // fileId xattr 必须先可靠落盘；失败保留重试机会，禁止重复创建。
+                                match self.set_upload_file_id_if_current(task, &file.id).await {
+                                    Ok(true) => {}
+                                    Ok(false) => {
+                                        return Err(TaskExecutionError::RestartRequired(
+                                            "远端同名文件内容一致，但本地源在身份落盘前发生变化"
+                                                .to_string(),
+                                        ));
+                                    }
+                                    Err(error) => {
+                                        return Err(TaskExecutionError::RestartRequired(format!(
+                                            "远端同名文件内容一致，但 fileId 落盘失败：{error}"
+                                        )));
+                                    }
+                                }
+                                return Ok(TaskExecutionOutcome {
+                                    cloud_file: Some(*file),
+                                    disposition: TaskDisposition::Completed,
+                                });
+                            }
+                            NameCollisionDecision::Conflict => {
+                                return Err(TaskExecutionError::NameConflict(
+                                    "目标目录已存在同名远端文件且内容不一致，请选择处理方式"
+                                        .to_string(),
+                                ));
+                            }
+                        }
                     }
                 }
                 // 进度与续传回调只回写当前 lease，过期回调会被 reporter 丢弃。
@@ -429,9 +535,19 @@ impl TransferOperations for ExecutorTransferOperations {
                         || file.name != task.name
                         || file.size != task.source_size.unwrap_or(task.total_size)
                     {
-                        return Ok(RemoteVerification::Ambiguous(
-                            "远端结果 ID 存在，但名称或大小与创建任务不一致".to_string(),
-                        ));
+                        // 按 ID 拿到的资源与任务身份不一致，说明该 ID 证明不了本次写入
+                        // （典型场景：任务滞留期间本地又被编辑）。判未提交走重放，
+                        // 由重放前的同名碰撞检查收敛，避免在歧义态空等约 1 小时。
+                        tracing::info!(
+                            task_id = task.id,
+                            remote_id,
+                            remote_name = %file.name,
+                            remote_size = file.size,
+                            task_name = %task.name,
+                            task_size = task.source_size.unwrap_or(task.total_size),
+                            "远端结果 ID 与任务身份不一致，按未提交处理"
+                        );
+                        return Ok(RemoteVerification::NotCommitted);
                     }
                     // 服务端提供可比哈希时，同时核对当前上传源内容。
                     let local_sha256 = if comparable_sha256(&file).is_some() {
@@ -762,6 +878,136 @@ impl SyncExecutor {
             error_kind: None,
             remote_result_file_id: None,
             state_revision: 0,
+        }
+    }
+}
+
+#[cfg(test)]
+mod collision_tests {
+    use chrono::TimeZone;
+
+    use super::{decide_name_collision, NameCollisionDecision, COLLISION_WINDOW_BACK_MS};
+    use crate::drive::models::{DriveFile, FileCategory};
+
+    fn file(id: &str, size: i64, created_offset_ms: i64, hash: Option<&str>) -> DriveFile {
+        let task_created_at = 1_000_000_000_i64;
+        DriveFile {
+            id: id.to_string(),
+            name: "报告.docx".to_string(),
+            category: FileCategory::Document,
+            size,
+            parent_folder: None,
+            description: None,
+            created_time: Some(
+                chrono::Utc
+                    .timestamp_millis_opt(task_created_at + created_offset_ms)
+                    .unwrap(),
+            ),
+            edited_time: None,
+            mime_type: None,
+            content_hash: hash.map(str::to_string),
+            thumbnail_link: None,
+        }
+    }
+
+    const TASK_CREATED_AT: i64 = 1_000_000_000;
+    const SIZE: i64 = 2048;
+    const HASH_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const HASH_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    #[test]
+    fn no_candidates_is_conflict() {
+        match decide_name_collision(vec![], SIZE, TASK_CREATED_AT, None) {
+            NameCollisionDecision::Conflict => {}
+            _ => panic!("无同名候选应判冲突"),
+        }
+    }
+
+    #[test]
+    fn unique_candidate_in_window_without_hash_is_adopted() {
+        let candidate = file("f1", SIZE, 60_000, None);
+        match decide_name_collision(vec![candidate], SIZE, TASK_CREATED_AT, None) {
+            NameCollisionDecision::Adopt(file) => assert_eq!(file.id, "f1"),
+            _ => panic!("窗口内唯一同名同大小候选应被采纳"),
+        }
+    }
+
+    #[test]
+    fn candidate_outside_window_without_hash_is_conflict() {
+        // 窗口下界之外（早于任务创建 120s 容忍）
+        let candidate = file("f1", SIZE, -COLLISION_WINDOW_BACK_MS - 1, None);
+        match decide_name_collision(vec![candidate], SIZE, TASK_CREATED_AT, None) {
+            NameCollisionDecision::Conflict => {}
+            _ => panic!("窗口外且哈希不可比的候选应判冲突"),
+        }
+    }
+
+    #[test]
+    fn hash_equal_candidate_is_adopted_regardless_of_window() {
+        // 远早于窗口下界，但哈希一致即内容已证明。
+        let candidate = file("f1", SIZE, -30 * 24 * 60 * 60 * 1_000, Some(HASH_A));
+        match decide_name_collision(vec![candidate], SIZE, TASK_CREATED_AT, Some(HASH_A)) {
+            NameCollisionDecision::Adopt(file) => assert_eq!(file.id, "f1"),
+            _ => panic!("哈希一致的候选应无视创建窗口被采纳"),
+        }
+    }
+
+    #[test]
+    fn hash_mismatch_is_conflict_even_in_window() {
+        let candidate = file("f1", SIZE, 60_000, Some(HASH_B));
+        match decide_name_collision(vec![candidate], SIZE, TASK_CREATED_AT, Some(HASH_A)) {
+            NameCollisionDecision::Conflict => {}
+            _ => panic!("哈希不一致的候选必须判冲突，绝不采纳"),
+        }
+    }
+
+    #[test]
+    fn size_mismatch_is_conflict() {
+        let candidate = file("f1", SIZE + 1, 60_000, None);
+        match decide_name_collision(vec![candidate], SIZE, TASK_CREATED_AT, None) {
+            NameCollisionDecision::Conflict => {}
+            _ => panic!("大小不一致应判冲突"),
+        }
+    }
+
+    #[test]
+    fn multiple_candidates_are_conflict() {
+        let c1 = file("f1", SIZE, 60_000, None);
+        let c2 = file("f2", SIZE, 120_000, None);
+        match decide_name_collision(vec![c1, c2], SIZE, TASK_CREATED_AT, None) {
+            NameCollisionDecision::Conflict => {}
+            _ => panic!("多个候选无法证明唯一性，应判冲突"),
+        }
+    }
+
+    #[test]
+    fn hash_disambiguates_multiple_candidates() {
+        // 两个同名同大小候选，只有哈希一致者可被证明。
+        let c1 = file("f1", SIZE, 60_000, Some(HASH_B));
+        let c2 = file("f2", SIZE, 120_000, Some(HASH_A));
+        match decide_name_collision(vec![c1, c2], SIZE, TASK_CREATED_AT, Some(HASH_A)) {
+            NameCollisionDecision::Adopt(file) => assert_eq!(file.id, "f2"),
+            _ => panic!("哈希应从多候选中收敛出唯一匹配"),
+        }
+    }
+
+    #[test]
+    fn folder_candidate_is_never_adopted() {
+        let mut candidate = file("f1", SIZE, 60_000, None);
+        candidate.category = FileCategory::Folder;
+        match decide_name_collision(vec![candidate], SIZE, TASK_CREATED_AT, None) {
+            NameCollisionDecision::Conflict => {}
+            _ => panic!("目录候选不应被采纳"),
+        }
+    }
+
+    #[test]
+    fn missing_created_time_without_hash_is_conflict() {
+        let mut candidate = file("f1", SIZE, 60_000, None);
+        candidate.created_time = None;
+        match decide_name_collision(vec![candidate], SIZE, TASK_CREATED_AT, None) {
+            NameCollisionDecision::Conflict => {}
+            _ => panic!("缺创建时间且哈希不可比的候选应判冲突"),
         }
     }
 }

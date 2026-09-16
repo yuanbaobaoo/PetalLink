@@ -79,6 +79,23 @@ export function canRetryTransferTask(task: TransferTask): boolean {
 }
 
 /**
+ * 任务是否处于「同名冲突待用户决策」：目标目录有同名远端文件且内容不一致。
+ * 此类任务不会自动推进，必须等用户在覆盖/保留两者/取消中选择。
+ */
+export function isNameConflictTask(task: TransferTask): boolean {
+  return task.state === TRANSFER_STATE.RESTART_REQUIRED
+    && task.error_kind === TRANSFER_ERROR_KIND.NAME_CONFLICT;
+}
+
+/**
+ * 仅暴露后端真正支持的取消入口（「需要重新检查」/失败任务，见 transfer_cancel）。
+ */
+export function canCancelTransferTask(task: TransferTask): boolean {
+  return task.state === TRANSFER_STATE.RESTART_REQUIRED
+    || task.state === TRANSFER_STATE.FAILED;
+}
+
+/**
  * 读取并收窄后端传输状态数值。
  */
 export async function listAllTransfers(): Promise<TransferTask[]> {

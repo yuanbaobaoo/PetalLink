@@ -445,8 +445,12 @@ fn parse_change_file(value: &Value) -> AppResult<(String, bool, Option<DriveFile
         match size {
             Value::Null => {}
             Value::Number(number) if number.as_i64().is_some() => {}
+            // 华为 schema 漂移会把 size 返回为字符串，字符串型整数同样接受。
+            Value::String(text) if text.trim().parse::<i64>().is_ok() => {}
             _ => {
-                return Err(protocol_error("change.file 的 size 必须是 i64 整数或 null"));
+                return Err(protocol_error(
+                    "change.file 的 size 必须是 i64 整数、整数字符串或 null",
+                ));
             }
         }
     }

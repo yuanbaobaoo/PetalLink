@@ -133,10 +133,18 @@ impl DriveFile {
             .and_then(Value::as_str)
             .map(String::from);
         let category = FileCategory::from_mime_type(mime_type.as_deref());
-        let size = json
-            .get("size")
-            .and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f as i64)))
-            .unwrap_or(0);
+        // size 容忍数字与字符串（2026-09 华为响应 schema 漂移把 size 返回为字符串）；
+        // 缺失或无法解析时回退 0 并落日志，保留现场可观测。
+        let raw_size = json.get("size");
+        let size = match tolerant_parse_int(raw_size) {
+            Some(size) => size,
+            None => {
+                if raw_size.is_some_and(|value| !value.is_null()) {
+                    tracing::debug!(id = %id, raw_size = %raw_size.unwrap(), "size 字段无法解析为整数，按 0 处理");
+                }
+                0
+            }
+        };
         let parent_folder = json
             .get("parentFolder")
             .and_then(Value::as_array)
@@ -188,9 +196,8 @@ impl DriveFile {
         let mut map = serde_json::Map::new();
         map.insert("id".into(), Value::String(self.id.clone()));
         map.insert("fileName".into(), Value::String(self.name.clone()));
-        if self.size > 0 {
-            map.insert("size".into(), Value::Number(self.size.into()));
-        }
+        // size 始终写出：0 字节文件与未知大小在缓存往返中必须可区分。
+        map.insert("size".into(), Value::Number(self.size.into()));
         if let Some(pf) = &self.parent_folder {
             map.insert(
                 "parentFolder".into(),

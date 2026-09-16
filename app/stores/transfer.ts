@@ -125,10 +125,41 @@ export const useTransferStore = defineStore("transfer", () => {
     await loadAll();
   }
 
+  /**
+   * 同名冲突决策：覆盖远端（远端旧版自动保留为云端副本，不丢数据）。
+   *
+   * @param taskId - 传输任务 ID
+   */
+  async function overwriteRemote(taskId: number): Promise<void> {
+    await commands.transferOverwriteRemote(taskId);
+    await loadAll();
+  }
+
+  /**
+   * 同名冲突决策：保留两者（本地文件改名后作为新文件上传，云端原文件不动）。
+   *
+   * @param taskId - 传输任务 ID
+   */
+  async function keepBoth(taskId: number): Promise<void> {
+    await commands.transferKeepBoth(taskId);
+    await loadAll();
+  }
+
+  /**
+   * 取消「需要重新检查」或失败的任务。
+   *
+   * @param taskId - 传输任务 ID
+   */
+  async function cancel(taskId: number): Promise<void> {
+    await commands.transferCancel(taskId);
+    await loadAll();
+  }
+
   return {
     tasks, uploads, downloads,
     running, pending, waitingNetwork, backingOff, verifyingRemote, restartRequired,
     completed, failed, canceled, processing, waiting, active, hasActiveTasks,
     loadAll, clearCompleted, clearFailed, clearFinished, retry,
+    overwriteRemote, keepBoth, cancel,
   };
 });

@@ -14,6 +14,8 @@ use tokio::sync::broadcast;
 mod action_filters;
 /// 读取和提交云端树缓存。
 mod cache;
+/// 同名冲突的用户决策操作。
+mod conflict_actions;
 /// 协调同步周期所有权与活动关闭屏障。
 mod coordination;
 /// 执行单次同步周期的阶段编排。

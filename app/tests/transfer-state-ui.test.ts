@@ -117,6 +117,13 @@ describe("TransferPopover 后端状态呈现", () => {
       expect.stringContaining("task-8"),
     ]));
     expect(retriableNames).toHaveLength(2);
+
+    // 不可重试但可取消的任务（Failed 删除）渲染更多操作菜单，其余行没有。
+    const menuNames = wrapper
+      .findAll(".tp-item")
+      .filter((item) => item.find(".tp-item__menu").exists())
+      .map((item) => item.find(".tp-item__name").text());
+    expect(menuNames).toEqual([expect.stringContaining("task-10")]);
   });
 });
 

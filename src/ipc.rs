@@ -133,6 +133,7 @@ struct TransferErrorKindConstants {
     remote_ambiguous: i32,
     local_changed: i32,
     unknown: i32,
+    name_conflict: i32,
 }
 
 /// 前端自动生成 bindings 的固定位置。
@@ -187,6 +188,9 @@ pub fn builder() -> Builder<Wry> {
             commands::transfer_clear_failed,
             commands::transfer_clear_finished,
             commands::transfer_retry,
+            commands::transfer_overwrite_remote,
+            commands::transfer_keep_both,
+            commands::transfer_cancel,
             commands::open_in_finder,
             commands::open_local_item,
             commands::reveal_local_item,
@@ -273,6 +277,7 @@ pub fn builder() -> Builder<Wry> {
                 remote_ambiguous: TransferErrorKind::RemoteAmbiguous as i32,
                 local_changed: TransferErrorKind::LocalChanged as i32,
                 unknown: TransferErrorKind::Unknown as i32,
+                name_conflict: TransferErrorKind::NameConflict as i32,
             },
         )
         // 现有 IPC 使用 number 承载文件大小、时间戳和 SQLite ID。

@@ -209,6 +209,8 @@ fn require_nonempty_string(
 }
 
 /// 校验可选字段为非负整数或空值。
+/// 华为 schema 漂移会把 size 返回为字符串（如 "12345"），字符串型非负整数同样接受，
+/// 归一化由下游 `DriveFile::from_json` 的容忍解析完成。
 fn validate_optional_nonnegative_i64(
     value: Option<&Value>,
     ctx: &str,
@@ -219,9 +221,12 @@ fn validate_optional_nonnegative_i64(
     match value {
         None | Some(Value::Null) => Ok(()),
         Some(Value::Number(number)) if number.as_i64().is_some_and(|value| value >= 0) => Ok(()),
+        Some(Value::String(text)) if text.trim().parse::<i64>().is_ok_and(|value| value >= 0) => {
+            Ok(())
+        }
         _ => Err(files_protocol_error(
             ctx,
-            &format!("{prefix}.{field} 必须是非负整数或 null"),
+            &format!("{prefix}.{field} 必须是非负整数、非负整数字符串或 null"),
             auth_already_replayed,
         )),
     }
@@ -567,5 +572,28 @@ mod tests {
         );
 
         assert!(result.is_err());
+    }
+
+    /// 华为 schema 漂移会把 size 返回为字符串，严格读路径必须接受并正确归一化。
+    #[test]
+    fn strict_parse_accepts_string_size() {
+        let value = json!({
+            "id": "f1",
+            "fileName": "漂移.txt",
+            "mimeType": "text/plain",
+            "size": "4096",
+        });
+        let file = super::parse_drive_file_strict(&value, "test", false, None)
+            .expect("字符串 size 应通过严格校验");
+        assert_eq!(file.size, 4096);
+
+        // 非数字字符串仍必须拒绝，不能静默吞掉坏数据。
+        let value = json!({
+            "id": "f2",
+            "fileName": "坏.txt",
+            "mimeType": "text/plain",
+            "size": "abc",
+        });
+        assert!(super::parse_drive_file_strict(&value, "test", false, None).is_err());
     }
 }

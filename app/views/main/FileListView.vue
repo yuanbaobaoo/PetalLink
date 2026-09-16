@@ -1002,7 +1002,7 @@ function handleSort(field: "name" | "size" | "modifiedTime"): void {
     </MateDialog>
 
     <!-- 释放空间预览对话框 -->
-    <MateDialog :open="showFreeUpDialog" title="释放空间" title-icon="cloud" danger :close-on-overlay="!freeUpConfirmLoading" @update:open="(v) => (showFreeUpDialog = v)">
+    <MateDialog :open="showFreeUpDialog" title="释放空间" title-icon="cloud" danger :width="640" :close-on-overlay="!freeUpConfirmLoading" @update:open="(v) => (showFreeUpDialog = v)">
       <div class="freeup-pane">
         <p class="freeup-summary">
           共 {{ freeUpPreviewItems.length }} 项，可释放
@@ -1011,7 +1011,7 @@ function handleSort(field: "name" | "size" | "modifiedTime"): void {
         <div class="freeup-list">
           <div v-for="it in freeUpPreviewItems" :key="it.fileId" class="freeup-row">
             <MateIcon name="file" :size="14" />
-            <span class="freeup-row__name" :title="it.name">{{ it.name }}</span>
+            <span class="freeup-row__name" :title="it.relPath">{{ it.relPath }}</span>
             <span class="freeup-row__size">{{ formatFileSize(it.size) }}</span>
           </div>
         </div>
@@ -1170,8 +1170,9 @@ function handleSort(field: "name" | "size" | "modifiedTime"): void {
 .freeup-pane { display: flex; flex-direction: column; gap: var(--space-sm); }
 .freeup-summary { font-size: var(--font-body-sm); color: var(--ink-600); margin: 0; }
 .freeup-summary strong { color: var(--ink-900); }
-.freeup-list { max-height: 280px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
-.freeup-row { display: flex; align-items: center; gap: var(--space-sm); padding: 4px 0; font-size: var(--font-body-sm); color: var(--ink-900); }
-.freeup-row__name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.freeup-list { max-height: 280px; overflow-y: auto; overflow-x: auto; display: flex; flex-direction: column; gap: 2px; }
+.freeup-row { display: flex; align-items: center; gap: var(--space-sm); padding: 4px 0; font-size: var(--font-body-sm); color: var(--ink-900); width: max-content; min-width: 100%; }
+/* 路径不截断，超出弹窗宽度时整表横向滚动 */
+.freeup-row__name { flex: 1; white-space: nowrap; }
 .freeup-row__size { flex-shrink: 0; color: var(--ink-400); font-variant-numeric: tabular-nums; }
 </style>

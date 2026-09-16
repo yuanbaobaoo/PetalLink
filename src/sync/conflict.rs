@@ -150,3 +150,35 @@ pub fn dedupe_copy_path(local_path: &Path, side_label: &str, stamp: &DateTime<Ut
 fn format_timestamp(dt: &DateTime<Utc>) -> String {
     dt.format("%Y-%m-%d %H-%M-%S").to_string()
 }
+
+/// 为云端同名冲突生成去重副本名：`原名 (云端副本 YYYY-MM-DD HH-mm-ss).ext`，重名加序号。
+/// `existing_names` 为目标目录下既有远端文件名集合。
+pub fn dedupe_cloud_copy_name(
+    name: &str,
+    existing_names: &std::collections::HashSet<String>,
+    stamp: &DateTime<Utc>,
+) -> String {
+    let path = Path::new(name);
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| name.to_string());
+    let ext = path
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    let stamp_str = format_timestamp(stamp);
+
+    for seq in 0..1000 {
+        let candidate = if seq == 0 {
+            format!("{stem} (云端副本 {stamp_str}){ext}")
+        } else {
+            format!("{stem} (云端副本 {stamp_str}) ({seq}){ext}")
+        };
+        if !existing_names.contains(&candidate) {
+            return candidate;
+        }
+    }
+    // 兜底（不应触发）
+    format!("{stem} (云端副本 {}){ext}", Utc::now().timestamp_millis())
+}

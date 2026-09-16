@@ -22,6 +22,7 @@ mod local_delete;
 mod transfer_operations;
 
 pub(crate) use local_delete::verify_local_delete_snapshot;
+pub(crate) use transfer_operations::verify_source_snapshot;
 
 /// 同步执行器 —— 持有全部外部依赖。
 pub struct SyncExecutor {

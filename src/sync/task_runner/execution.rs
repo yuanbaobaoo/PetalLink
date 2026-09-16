@@ -293,6 +293,23 @@ impl TaskRunner {
                     disposition: TaskDisposition::RestartRequired,
                 })
             }
+            Err(TaskExecutionError::NameConflict(message)) => {
+                tracing::warn!(
+                    task_id = running.id,
+                    technical_reason = %message,
+                    "同名远端文件内容不一致，等待用户选择处理方式"
+                );
+                self.transition_failure(
+                    &running,
+                    TransferState::RestartRequired,
+                    TransferErrorKind::NameConflict,
+                    &message,
+                )?;
+                Ok(TaskExecutionOutcome {
+                    cloud_file: None,
+                    disposition: TaskDisposition::RestartRequired,
+                })
+            }
             Err(TaskExecutionError::App(error)) => self.settle_error(&running, error),
         }
     }

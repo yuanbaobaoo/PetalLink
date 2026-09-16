@@ -48,6 +48,8 @@ pub enum TransferErrorKind {
     RemoteAmbiguous = 9,
     LocalChanged = 10,
     Unknown = 11,
+    /// 目标目录存在同名但内容不一致的远端文件，等待用户选择处理方式。
+    NameConflict = 12,
 }
 
 /// 乐观传输状态迁移被拒绝的原因。
@@ -153,6 +155,7 @@ impl_persistent_enum!(
         9 => TransferErrorKind::RemoteAmbiguous,
         10 => TransferErrorKind::LocalChanged,
         11 => TransferErrorKind::Unknown,
+        12 => TransferErrorKind::NameConflict,
     ]
 );
 

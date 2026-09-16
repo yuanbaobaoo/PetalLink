@@ -7,6 +7,8 @@ import {
   TRANSFER_STATE,
   DIR_LABEL,
   canRetryTransferTask,
+  canCancelTransferTask,
+  isNameConflictTask,
   capTransferHistory,
 } from "@/api/transfer";
 import type { TransferTask } from "@/api/transfer";
@@ -16,6 +18,7 @@ import {
   MateLinearProgress,
   MateEmpty,
   MatePopupMenu,
+  confirmDialog,
   showToast,
 } from "@/components/mate";
 import type { PopupItem } from "@/components/mate";
@@ -58,6 +61,8 @@ const emit = defineEmits<{ (e: "close"): void }>();
 
 // 正在重试的任务 id（防抖：重试中禁用该按钮，避免连点）
 const retryingId = ref<number | null>(null);
+// 正在执行冲突决策/取消的任务 id（防抖）
+const actingId = ref<number | null>(null);
 
 onMounted(() => {
   transfer.loadAll();
@@ -154,6 +159,72 @@ async function onRetry(item: TransferTask): Promise<void> {
     retryingId.value = null;
   }
 }
+
+/**
+ * 任务行的处理菜单项：同名冲突给三个决策出口，其他可取消任务只给取消。
+ *
+ * @param item - 传输任务
+ */
+function rowActionItems(item: TransferTask): PopupItem[] {
+  if (isNameConflictTask(item)) {
+    return [
+      { value: "overwrite", label: "覆盖远端（旧版保留副本）", icon: "transfer", danger: true },
+      { value: "keep-both", label: "保留两者（本地改名上传）", icon: "file" },
+      { value: "cancel", label: "取消任务", icon: "x" },
+    ];
+  }
+  return [{ value: "cancel", label: "取消任务", icon: "x" }];
+}
+
+/**
+ * 执行任务行决策操作（覆盖远端 / 保留两者 / 取消任务），均先弹确认。
+ *
+ * @param value - 菜单项值
+ * @param item - 传输任务
+ */
+async function onRowAction(value: string | number, item: TransferTask): Promise<void> {
+  if (actingId.value !== null) return; // 防抖
+  if (value === "overwrite") {
+    const ok = await confirmDialog({
+      title: "覆盖远端", titleIcon: "transfer", danger: true, confirmText: "覆盖上传",
+      content: `将用本地文件「${item.name}」覆盖云端同名文件。\n\n云端现有版本会自动改名为「${item.name} (云端副本 …)」保留，不会丢失任何数据。`,
+    });
+    if (!ok) return;
+  } else if (value === "keep-both") {
+    const ok = await confirmDialog({
+      title: "保留两者", titleIcon: "file", confirmText: "改名并上传",
+      content: `本地文件「${item.name}」将改名为「… (本地副本 …)」并作为新文件上传；云端同名文件保持不变，两份内容都会保留。`,
+    });
+    if (!ok) return;
+  } else if (value === "cancel") {
+    const ok = await confirmDialog({
+      title: "取消任务", titleIcon: "x", danger: true, confirmText: "取消任务",
+      content: `取消后「${item.name}」不再自动同步，直到本地或云端出现新变化。确定取消吗？`,
+    });
+    if (!ok) return;
+  } else {
+    return;
+  }
+
+  actingId.value = item.id;
+  try {
+    if (value === "overwrite") {
+      await transfer.overwriteRemote(item.id);
+      showToast("已保留云端旧版为副本，开始覆盖上传", { variant: "success" });
+    } else if (value === "keep-both") {
+      await transfer.keepBoth(item.id);
+      showToast("本地文件已改名，将作为新文件上传", { variant: "success" });
+    } else {
+      await transfer.cancel(item.id);
+      showToast("任务已取消", { variant: "success" });
+    }
+  } catch (e) {
+    const msg = extractErrorMessage(e);
+    showToast("操作失败：" + msg, { variant: "error" });
+  } finally {
+    actingId.value = null;
+  }
+}
 </script>
 
 <template>
@@ -233,7 +304,7 @@ async function onRetry(item: TransferTask): Promise<void> {
         </div>
         <!-- 只展示后端真正支持的上传、下载重试或重新检查入口。 -->
         <MateButton
-          v-if="canRetryTransferTask(item)"
+          v-if="canRetryTransferTask(item) && !isNameConflictTask(item)"
           variant="icon"
           icon="refresh"
           :tooltip="item.state === TRANSFER_STATE.RESTART_REQUIRED ? '重新检查并重试' : '重试'"
@@ -242,6 +313,21 @@ async function onRetry(item: TransferTask): Promise<void> {
           class="tp-item__retry"
           @click="onRetry(item)"
         />
+        <!-- 同名冲突待决策（或其他可取消任务）的处理菜单。 -->
+        <MatePopupMenu
+          v-else-if="canCancelTransferTask(item)"
+          :items="rowActionItems(item)"
+          class="tp-item__menu"
+          @select="(value) => onRowAction(value, item)"
+        >
+          <MateButton
+            variant="icon"
+            icon="list"
+            :tooltip="isNameConflictTask(item) ? '处理同名冲突' : '更多操作'"
+            :loading="actingId === item.id"
+            :disabled="actingId !== null"
+          />
+        </MatePopupMenu>
       </div>
       <!-- 终态历史超上限时的折叠提示 -->
       <div v-if="hiddenTerminalCount > 0" class="tp-truncated">
@@ -324,6 +410,7 @@ async function onRetry(item: TransferTask): Promise<void> {
   flex-shrink: 0; display: inline-flex; align-items: center; gap: 5px;
 }
 .tp-item__retry { flex-shrink: 0; }
+.tp-item__menu { flex-shrink: 0; }
 
 /* 终态历史折叠提示 */
 .tp-truncated {

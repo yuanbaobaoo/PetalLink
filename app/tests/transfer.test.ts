@@ -2,8 +2,11 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import {
   TRANSFER_DIR,
+  TRANSFER_ERROR_KIND,
   TRANSFER_OPERATION,
   TRANSFER_STATE,
+  canCancelTransferTask,
+  isNameConflictTask,
   type TransferState,
   type TransferTask,
 } from "@/api/transfer";
@@ -87,5 +90,27 @@ describe("transfer store 状态派生", () => {
     store.tasks = [task(1, state)];
 
     expect(store.hasActiveTasks).toBe(true);
+  });
+});
+
+describe("同名冲突任务判定", () => {
+  it("RestartRequired + NameConflict 才判定为同名冲突任务", () => {
+    const conflicted = { ...task(1, TRANSFER_STATE.RESTART_REQUIRED), error_kind: TRANSFER_ERROR_KIND.NAME_CONFLICT };
+    expect(isNameConflictTask(conflicted)).toBe(true);
+    // 普通「需要重新检查」（LocalChanged）不是同名冲突。
+    const plain = { ...task(2, TRANSFER_STATE.RESTART_REQUIRED), error_kind: TRANSFER_ERROR_KIND.LOCAL_CHANGED };
+    expect(isNameConflictTask(plain)).toBe(false);
+    // 其他状态即使带 NameConflict 分类也不应命中（防御脏数据）。
+    const failed = { ...task(3, TRANSFER_STATE.FAILED), error_kind: TRANSFER_ERROR_KIND.NAME_CONFLICT };
+    expect(isNameConflictTask(failed)).toBe(false);
+  });
+
+  it("仅 RestartRequired/Failed 可取消", () => {
+    expect(canCancelTransferTask(task(1, TRANSFER_STATE.RESTART_REQUIRED))).toBe(true);
+    expect(canCancelTransferTask(task(2, TRANSFER_STATE.FAILED))).toBe(true);
+    expect(canCancelTransferTask(task(3, TRANSFER_STATE.PENDING))).toBe(false);
+    expect(canCancelTransferTask(task(4, TRANSFER_STATE.RUNNING))).toBe(false);
+    expect(canCancelTransferTask(task(5, TRANSFER_STATE.VERIFYING_REMOTE))).toBe(false);
+    expect(canCancelTransferTask(task(6, TRANSFER_STATE.COMPLETED))).toBe(false);
   });
 });

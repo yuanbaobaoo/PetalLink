@@ -103,6 +103,12 @@ export const commands = {
 	transferClearFinished: () => __TAURI_INVOKE<null>("transfer_clear_finished"),
 	// 重试传输任务。
 	transferRetry: (taskId: number) => __TAURI_INVOKE<null>("transfer_retry", { taskId }),
+	// 同名冲突决策：覆盖远端（远端旧版自动改名为云端副本保留，不丢数据）。
+	transferOverwriteRemote: (taskId: number) => __TAURI_INVOKE<null>("transfer_overwrite_remote", { taskId }),
+	// 同名冲突决策：保留两者（本地文件改名为本地副本后作为新文件上传，云端原文件不动）。
+	transferKeepBoth: (taskId: number) => __TAURI_INVOKE<null>("transfer_keep_both", { taskId }),
+	// 取消「需要重新检查」或失败的传输任务。
+	transferCancel: (taskId: number) => __TAURI_INVOKE<null>("transfer_cancel", { taskId }),
 	// 在系统文件管理器中打开路径。
 	openInFinder: () => __TAURI_INVOKE<boolean>("open_in_finder"),
 	// 使用系统默认应用打开同步目录内的本地文件或目录。
@@ -162,7 +168,7 @@ export const SYNC_USER_MESSAGE_RULES = [{"message":"云端文件已更新。为�
 
 export const TRANSFER_DIR = {"DELETE":2,"DOWNLOAD":1,"DOWNLOAD_UPDATE":3,"UPLOAD":0} as const;
 
-export const TRANSFER_ERROR_KIND = {"AUTH":2,"LOCAL_CHANGED":10,"NETWORK":0,"PERMISSION":6,"QUOTA":5,"RATE_LIMIT":3,"REMOTE_AMBIGUOUS":9,"SERVER":4,"SESSION_EXPIRED":8,"TIMEOUT":1,"UNKNOWN":11,"VALIDATION":7} as const;
+export const TRANSFER_ERROR_KIND = {"AUTH":2,"LOCAL_CHANGED":10,"NAME_CONFLICT":12,"NETWORK":0,"PERMISSION":6,"QUOTA":5,"RATE_LIMIT":3,"REMOTE_AMBIGUOUS":9,"SERVER":4,"SESSION_EXPIRED":8,"TIMEOUT":1,"UNKNOWN":11,"VALIDATION":7} as const;
 
 export const TRANSFER_OPERATION = {"CREATE":0,"CREATE_FOLDER":7,"DELETE":4,"DOWNLOAD":2,"DOWNLOAD_UPDATE":3,"MOVE":5,"RENAME":6,"UPDATE":1} as const;
 

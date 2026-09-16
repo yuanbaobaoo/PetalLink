@@ -329,7 +329,10 @@ impl TaskRunner {
             )
             .map_err(transition_error)?
         };
-        // 清理旧错误与远端结果，并沿用替代意图提供的续传字段。
+        // 清理旧错误，沿用替代意图提供的续传字段。
+        // remote_result_file_id 必须保留：它是歧义远端写入的唯一身份证据，
+        // 清空会让 promote_ambiguous_restarts 无法把任务升回核验态，同名碰撞检查又拒绝重复创建，
+        // 任务就会陷入「重试 → 重规划 → 撞同名 → 再重启」的死循环。
         let pending = repository::transition_transfer_in_transaction(
             &transaction,
             restart.id,
@@ -340,7 +343,7 @@ impl TaskRunner {
                 error_message: ColumnPatch::Clear,
                 next_retry_at: ColumnPatch::Clear,
                 finished_at: ColumnPatch::Clear,
-                remote_result_file_id: ColumnPatch::Clear,
+                remote_result_file_id: ColumnPatch::Keep,
                 session_url: replacement
                     .session_url
                     .clone()

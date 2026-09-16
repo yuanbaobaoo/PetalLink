@@ -31,23 +31,18 @@ impl SyncEngine {
         restart_required
     }
 
-    /// 通过自动同步与启动恢复共用的 TaskRunner 重试单个持久化传输任务。
-    pub async fn retry_transfer(self: &Arc<Self>, task_id: i64) -> AppResult<()> {
-        let activity = self.begin_external_activity()?;
-        let task_runner = self.task_runner()?;
-        let pending = match task_runner.prepare_retry(task_id).await {
-            Ok(pending) => pending,
-            Err(error) => {
-                if self.request_retry_replan_if_restart_required(task_id) {
-                    return Ok(());
-                }
-                return Err(error);
-            }
-        };
+    /// 后台执行已迁移为 Pending 的任务，并按结果更新云树缓存或触发重规划。
+    /// 手动重试与冲突决策重放共用此执行链。
+    pub(super) fn run_prepared_in_background(
+        self: &Arc<Self>,
+        activity: super::ActivityGuard,
+        task_runner: Arc<crate::sync::task_runner::TaskRunner>,
+        task_id: i64,
+    ) {
         let engine = self.clone();
         tauri::async_runtime::spawn(async move {
             let _activity = activity;
-            match task_runner.run_prepared(pending.id).await {
+            match task_runner.run_prepared(task_id).await {
                 Ok(outcome) => {
                     if outcome.disposition == TaskDisposition::RestartRequired {
                         engine.request_retry_replan_if_restart_required(task_id);
@@ -73,6 +68,22 @@ impl SyncEngine {
             }
             engine.notify_backoff_schedule_changed();
         });
+    }
+
+    /// 通过自动同步与启动恢复共用的 TaskRunner 重试单个持久化传输任务。
+    pub async fn retry_transfer(self: &Arc<Self>, task_id: i64) -> AppResult<()> {
+        let activity = self.begin_external_activity()?;
+        let task_runner = self.task_runner()?;
+        let pending = match task_runner.prepare_retry(task_id).await {
+            Ok(pending) => pending,
+            Err(error) => {
+                if self.request_retry_replan_if_restart_required(task_id) {
+                    return Ok(());
+                }
+                return Err(error);
+            }
+        };
+        self.run_prepared_in_background(activity, task_runner, pending.id);
         Ok(())
     }
 }

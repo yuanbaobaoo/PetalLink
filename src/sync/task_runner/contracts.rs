@@ -142,6 +142,8 @@ pub trait TransferOperations: Send + Sync {
 pub enum TaskExecutionError {
     App(AppError),
     RestartRequired(String),
+    /// 目标目录存在同名但内容不一致的远端文件，必须等用户选择处理方式。
+    NameConflict(String),
 }
 
 impl From<AppError> for TaskExecutionError {

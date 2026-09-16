@@ -74,3 +74,41 @@ fn test_parse_empty_terminal_page() {
     assert_eq!(result.next_cursor, None);
     assert_eq!(result.new_start_cursor.as_deref(), Some("311296"));
 }
+
+/// 验证 change 事件容忍字符串形式的 size（2026-09 华为响应 schema 漂移）。
+#[test]
+fn test_parse_change_with_string_size() {
+    let json = json!({
+        "category": "drive#changeList",
+        "changes": [{
+            "category": "drive#change",
+            "changeType": "update",
+            "deleted": false,
+            "file": { "id": "fs1", "fileName": "漂移.txt", "mimeType": "text/plain", "size": "2048", "parentFolder": ["root-folder-id"] },
+            "fileId": "fs1",
+            "type": "File"
+        }],
+        "newStartCursor": "311300"
+    });
+    let result = ChangesPage::from_json(&json).expect("字符串 size 的 change 应解析成功");
+    assert_eq!(result.changes.len(), 1);
+    assert_eq!(result.changes[0].file().map(|file| file.size), Some(2048));
+}
+
+/// 验证非数字字符串 size 仍被拒绝，不能静默吞掉坏数据。
+#[test]
+fn test_parse_change_rejects_invalid_string_size() {
+    let json = json!({
+        "category": "drive#changeList",
+        "changes": [{
+            "category": "drive#change",
+            "changeType": "update",
+            "deleted": false,
+            "file": { "id": "fs2", "fileName": "坏.txt", "mimeType": "text/plain", "size": "abc" },
+            "fileId": "fs2",
+            "type": "File"
+        }],
+        "newStartCursor": "311301"
+    });
+    assert!(ChangesPage::from_json(&json).is_err());
+}

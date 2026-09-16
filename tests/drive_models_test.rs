@@ -140,3 +140,35 @@ fn test_file_list_result_pagination() {
     let result = FileListResult::from_json(&json!({ "files": [] }));
     assert!(!result.has_next());
 }
+
+/// 验证 size 容忍字符串形式（2026-09 华为响应 schema 漂移）。
+#[test]
+fn test_drive_file_size_accepts_string() {
+    let json = json!({
+        "id": "f-str",
+        "fileName": "漂移.bin",
+        "size": "1048576",
+    });
+    let file = DriveFile::from_json(&json).unwrap();
+    assert_eq!(file.size, 1048576);
+
+    // 带空白与非法内容回退为 0，不 panic。
+    let json = json!({ "id": "f-bad", "fileName": "坏.bin", "size": "abc" });
+    assert_eq!(DriveFile::from_json(&json).unwrap().size, 0);
+    let json = json!({ "id": "f-null", "fileName": "空.bin", "size": null });
+    assert_eq!(DriveFile::from_json(&json).unwrap().size, 0);
+    // 数字与浮点保持兼容。
+    let json = json!({ "id": "f-num", "fileName": "数.bin", "size": 42.0 });
+    assert_eq!(DriveFile::from_json(&json).unwrap().size, 42);
+}
+
+/// 验证 0 字节文件在 to_json 往返后仍保留 size=0（与未知大小区分）。
+#[test]
+fn test_drive_file_zero_size_roundtrip() {
+    let json = json!({ "id": "f0", "fileName": "空.txt", "size": 0 });
+    let file = DriveFile::from_json(&json).unwrap();
+    let reencoded = file.to_json();
+    assert_eq!(reencoded.get("size").and_then(|v| v.as_i64()), Some(0));
+    let reparsed = DriveFile::from_json(&reencoded).unwrap();
+    assert_eq!(reparsed.size, 0);
+}
