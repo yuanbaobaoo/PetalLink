@@ -37,6 +37,7 @@ if (import.meta.env.PROD) {
 import { useSyncStore } from "@/stores/sync";
 import { useFileBrowserStore } from "@/stores/fileBrowser";
 import { useTransferStore } from "@/stores/transfer";
+import { throttleTrailing } from "@/utils/debounce";
 import { showToast } from "@/components/mate";
 
 // 上传失败提示（自动同步的上传失败，非用户手动操作）
@@ -92,8 +93,13 @@ async function registerGlobalListeners(): Promise<void> {
   } catch {}
 
   try {
-    await events.transferUpdate.listen(() => {
+    // 传输事件在高峰（大批量上传 + 进度回调）可达每秒十余次；
+    // 拖尾节流合并洪峰，每次仍触发全量 loadAll，但每秒最多 ~3 次。
+    const scheduleTransferReload = throttleTrailing(() => {
       void reloadTransfers();
+    }, 300);
+    await events.transferUpdate.listen(() => {
+      scheduleTransferReload();
     });
   } catch {}
 

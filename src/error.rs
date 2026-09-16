@@ -525,9 +525,13 @@ impl AppError {
         }
     }
 
-    /// 附加 cause（仅用于内部诊断，不序列化到前端）
+    /// 附加 cause（保留的诊断扩展点）。
+    ///
+    /// 注意：当前实现既不把 body 透出到前端 message，也不落日志——历史上注释声称
+    /// 「仅记录到日志」但实际是 no-op，曾导致上传歧义失败的根因完全丢失
+    /// （2026-09-15 事故）。诊断信息请在各构造/分类调用点用 tracing 显式落日志
+    /// （见 `client::classify_transport_error`、`upload_api::protocol::remote_ambiguity`）。
     fn with_cause_body(self, _body: &str) -> Self {
-        // body 仅记录到日志，不透出到前端 message（避免泄露）
         self
     }
 }

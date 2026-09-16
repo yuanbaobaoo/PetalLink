@@ -25,6 +25,10 @@ impl CycleRequest {
     pub(super) const RETRY: Self = Self(1 << 5);
     /// 仅重新规划一个 RestartRequired 任务，不接受所有失败的同步项进行重试。
     pub(super) const REPLAN: Self = Self(1 << 6);
+    /// 退避到期驱动的周期。仅用于日志标签区分：退避周期同样携带 ONLINE_RECOVERY
+    /// 完成核验/恢复，若不加独立位会被标签反推误标为 "network-recovery"
+    /// （2026-09-15 排障时被 2,204 个误标周期误导）。
+    pub(super) const BACKOFF: Self = Self(1 << 7);
 
     /// 判断当前请求集合是否不含任何工作。
     pub(super) fn is_empty(self) -> bool {

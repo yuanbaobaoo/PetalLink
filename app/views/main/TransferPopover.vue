@@ -7,6 +7,7 @@ import {
   TRANSFER_STATE,
   DIR_LABEL,
   canRetryTransferTask,
+  capTransferHistory,
 } from "@/api/transfer";
 import type { TransferTask } from "@/api/transfer";
 import {
@@ -24,8 +25,12 @@ import { extractErrorMessage, formatUserMessage } from "@/utils/error";
 // 传输 store
 const transfer = useTransferStore();
 
-// 当前传输队列（全部任务）
-const allItems = computed(() => transfer.tasks);
+// 当前传输队列的渲染范围：非终态全量 + 终态历史限量（大批量同步时全量渲染会卡死 UI）
+const cappedItems = computed(() => capTransferHistory(transfer.tasks));
+// 实际渲染的任务行
+const allItems = computed(() => cappedItems.value.items);
+// 被折叠的终态历史条数
+const hiddenTerminalCount = computed(() => cappedItems.value.hiddenTerminalCount);
 
 interface StateMeta { icon: string; label: string; color: string; spin?: boolean; }
 // 各传输状态的展示元信息（图标/文案/颜色）
@@ -238,6 +243,10 @@ async function onRetry(item: TransferTask): Promise<void> {
           @click="onRetry(item)"
         />
       </div>
+      <!-- 终态历史超上限时的折叠提示 -->
+      <div v-if="hiddenTerminalCount > 0" class="tp-truncated">
+        仅显示最近 100 条历史记录，其余 {{ hiddenTerminalCount }} 条已折叠
+      </div>
     </div>
   </div>
 </template>
@@ -315,4 +324,10 @@ async function onRetry(item: TransferTask): Promise<void> {
   flex-shrink: 0; display: inline-flex; align-items: center; gap: 5px;
 }
 .tp-item__retry { flex-shrink: 0; }
+
+/* 终态历史折叠提示 */
+.tp-truncated {
+  padding: 12px 20px; text-align: center;
+  font-size: var(--font-caption); color: var(--ink-400);
+}
 </style>

@@ -5,7 +5,7 @@
 use parking_lot::Mutex;
 use rusqlite::Connection;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
@@ -158,4 +158,8 @@ pub struct SyncEngine {
     /// 连续增量刷新计数。达 INCREMENTAL_FORCED_FULL_THRESHOLD 后强制一次全量 BFS，
     /// 纠正增量无法处理的改名/移动/新建文件累积偏差。全量后归零。
     incremental_since_full: AtomicU32,
+    /// 上次云端 checkpoint 落盘时间（毫秒）。空增量（无变更、仅 cursor 前进）周期
+    /// 按时间合并落盘，避免 27k 文件的 JSON 序列化 + fsync 每个周期都来一遍
+    /// （2026-09-15 一天 3,875 次 ≈ 85GB 写入）。
+    last_checkpoint_persist_ms: AtomicI64,
 }

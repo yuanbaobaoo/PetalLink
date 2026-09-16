@@ -7,8 +7,8 @@ use serde_json::Value;
 use crate::error::{AppError, AppResult, RequestSemantics};
 
 use super::protocol::{
-    complete_upload_file, is_remote_ambiguity, parse_confirmed_offset, remote_ambiguity,
-    upload_response_error,
+    complete_upload_file, is_remote_ambiguity, log_incomplete_final_body, parse_confirmed_offset,
+    remote_ambiguity, upload_response_error,
 };
 use super::{ChunkResult, ResumeSession, UploadApi};
 
@@ -142,6 +142,7 @@ impl UploadApi {
             }
         }
 
+        log_incomplete_final_body("分片完成", &body, total_size, None);
         let original = remote_ambiguity(
             "分片返回 2xx，但既无完整 File 也无有效服务端确认偏移",
             auth_replayed,
@@ -275,6 +276,7 @@ impl UploadApi {
                 });
             }
         }
+        log_incomplete_final_body("上传状态查询", &body, total_size, None);
         Err(remote_ambiguity(
             "上传状态返回 2xx，但缺少完整 File 或有效服务端确认偏移",
             auth_replayed,

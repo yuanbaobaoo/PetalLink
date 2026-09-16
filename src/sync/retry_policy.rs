@@ -106,7 +106,14 @@ fn classify_transport(
             consumes_retry_budget: false,
         },
         _ if operation_modifies_remote(context.operation) && request_may_have_reached_server => {
-            verify_remote()
+            // 预算耗尽后不再转入远端核验：核验后确认未提交的重放路径会重新执行上传，
+            // 不消耗预算的核验决策会让「失败→核验→未提交→重放」形成无限循环
+            // （2026-09-15 五个大文件任务各循环 2,200+ 次）。
+            if budget_exhausted(context) {
+                permanent(TransferErrorKind::RemoteAmbiguous)
+            } else {
+                verify_remote()
+            }
         }
         DriveTransportKind::Network => ClassifiedRecovery {
             kind: TransferErrorKind::Network,
@@ -165,12 +172,11 @@ fn classify_status(
             consumes_retry_budget: true,
         },
         Some(500 | 502 | 503 | 504) if budget_exhausted(context) => {
+            // 预算耗尽即终态失败，不再做最后一次核验：写已落云的场景由人工重试的
+            // 同名碰撞检查 → 远端核验收敛（见 transfer_operations 执行前碰撞检查）。
+            // 可能已提交的写保留歧义分类，读与未提交的写维持服务端分类。
             if operation_modifies_remote(context.operation) && request_may_have_reached_server {
-                ClassifiedRecovery {
-                    kind: TransferErrorKind::Server,
-                    decision: RecoveryDecision::VerifyRemote,
-                    consumes_retry_budget: false,
-                }
+                permanent(TransferErrorKind::RemoteAmbiguous)
             } else {
                 permanent(TransferErrorKind::Server)
             }
@@ -214,10 +220,12 @@ fn permanent(kind: TransferErrorKind) -> ClassifiedRecovery {
 }
 
 /// 构造需向云端核实写入结果的歧义决策。
+/// 消耗重试预算：远端写入歧义说明一次完整上传尝试已失败，
+/// 不消耗预算会让核验-重放环路绕过 MAX_AUTOMATIC_ATTEMPTS 永不终止。
 fn verify_remote() -> ClassifiedRecovery {
     ClassifiedRecovery {
         kind: TransferErrorKind::RemoteAmbiguous,
         decision: RecoveryDecision::VerifyRemote,
-        consumes_retry_budget: false,
+        consumes_retry_budget: true,
     }
 }

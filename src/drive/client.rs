@@ -244,6 +244,24 @@ pub fn classify_transport_error(
     } else {
         DriveTransportKind::Other
     };
+    // Decode/ResponseBody/Request/Other 的用户文案统一坍缩为“云端响应异常”或“网络连接失败”，
+    // 原始 reqwest 错误文本不落日志就无法定位（2026-09-15 上传收尾大面积失败即因此卡排查）。
+    // Connect/Timeout/Network 是断网期常态，保持静默避免刷屏。
+    if matches!(
+        kind,
+        DriveTransportKind::Decode
+            | DriveTransportKind::ResponseBody
+            | DriveTransportKind::Request
+            | DriveTransportKind::Other
+    ) {
+        tracing::warn!(
+            ?kind,
+            ?semantics,
+            auth_already_replayed,
+            cause = %error,
+            "请求传输层失败（解码/协议类），按结构化错误上抛"
+        );
+    }
     AppError::drive_transport(
         kind,
         semantics,

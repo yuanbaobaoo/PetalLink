@@ -158,7 +158,7 @@ fn token_errors_are_permanent_auth_failures() {
     );
 }
 
-/// 验证不确定写超时要求远端核验。
+/// 验证不确定写超时要求远端核验，且消耗重试预算（防止核验-重放环路绕过预算上限）。
 #[test]
 fn ambiguous_write_timeout_requires_remote_verification() {
     let error = AppError::drive_transport(
@@ -173,12 +173,34 @@ fn ambiguous_write_timeout_requires_remote_verification() {
         ClassifiedRecovery {
             kind: TransferErrorKind::RemoteAmbiguous,
             decision: RecoveryDecision::VerifyRemote,
+            consumes_retry_budget: true,
+        }
+    );
+}
+
+/// 验证预算耗尽的不确定写直接终态失败，不再转核验（核验-重放环路已由预算兜底）。
+#[test]
+fn budget_exhausted_ambiguous_write_fails_instead_of_verifying() {
+    let error = AppError::drive_transport(
+        DriveTransportKind::Timeout,
+        RequestSemantics::Write,
+        false,
+        Some("timeout after submit"),
+    );
+    let mut exhausted = context(TransferOperation::Update);
+    exhausted.attempt_count = exhausted.max_attempts;
+
+    assert_eq!(
+        classify_transfer_error(&error, exhausted),
+        ClassifiedRecovery {
+            kind: TransferErrorKind::RemoteAmbiguous,
+            decision: RecoveryDecision::Fail,
             consumes_retry_budget: false,
         }
     );
 }
 
-/// 验证已提交的旧式网络写错误要求远端核验。
+/// 验证已提交的旧式网络写错误要求远端核验，且消耗重试预算。
 #[test]
 fn submitted_legacy_network_write_requires_remote_verification() {
     let error = AppError::drive_transport(
@@ -193,7 +215,7 @@ fn submitted_legacy_network_write_requires_remote_verification() {
         ClassifiedRecovery {
             kind: TransferErrorKind::RemoteAmbiguous,
             decision: RecoveryDecision::VerifyRemote,
-            consumes_retry_budget: false,
+            consumes_retry_budget: true,
         }
     );
 }
@@ -218,7 +240,7 @@ fn write_timeout_known_pre_submit_waits_for_network() {
     );
 }
 
-/// 验证不确定写响应解码失败要求远端核验。
+/// 验证不确定写响应解码失败要求远端核验，且消耗重试预算。
 #[test]
 fn ambiguous_write_decode_requires_remote_verification() {
     let error = AppError::drive_transport(
@@ -233,7 +255,7 @@ fn ambiguous_write_decode_requires_remote_verification() {
         ClassifiedRecovery {
             kind: TransferErrorKind::RemoteAmbiguous,
             decision: RecoveryDecision::VerifyRemote,
-            consumes_retry_budget: false,
+            consumes_retry_budget: true,
         }
     );
 }
@@ -358,9 +380,11 @@ fn server_backoff_is_exponential_deterministic_and_capped() {
     );
 }
 
-/// 验证服务端预算耗尽后写入转核验而读取失败。
+/// 验证服务端预算耗尽后写与读都终态失败；可能已提交的写保留歧义分类。
+/// 耗尽后不再转核验：核验-重放环路会绕过预算上限形成无限循环（2026-09-15 事故），
+/// 写已落云的场景由人工重试的同名碰撞检查 + 远端核验收敛。
 #[test]
-fn exhausted_server_budget_verifies_writes_but_fails_reads() {
+fn exhausted_server_budget_fails_writes_and_reads() {
     let write_error =
         AppError::drive_from_response(503, "{}", None, RequestSemantics::Write, false);
     let read_error = AppError::drive_from_response(503, "{}", None, RequestSemantics::Read, false);
@@ -371,16 +395,15 @@ fn exhausted_server_budget_verifies_writes_but_fails_reads() {
     let mut read_context = context(TransferOperation::Download);
     read_context.attempt_count = read_context.max_attempts;
 
-    assert_eq!(
-        classify_transfer_error(&write_error, write_context).decision,
-        RecoveryDecision::VerifyRemote
-    );
-    assert_eq!(
-        classify_transfer_error(&read_error, read_context).decision,
-        RecoveryDecision::Fail
-    );
-    assert_eq!(
-        classify_transfer_error(&pre_submit_write_error, write_context).decision,
-        RecoveryDecision::Fail
-    );
+    let write_recovery = classify_transfer_error(&write_error, write_context);
+    assert_eq!(write_recovery.decision, RecoveryDecision::Fail);
+    assert_eq!(write_recovery.kind, TransferErrorKind::RemoteAmbiguous);
+
+    let read_recovery = classify_transfer_error(&read_error, read_context);
+    assert_eq!(read_recovery.decision, RecoveryDecision::Fail);
+    assert_eq!(read_recovery.kind, TransferErrorKind::Server);
+
+    let pre_submit_recovery = classify_transfer_error(&pre_submit_write_error, write_context);
+    assert_eq!(pre_submit_recovery.decision, RecoveryDecision::Fail);
+    assert_eq!(pre_submit_recovery.kind, TransferErrorKind::Server);
 }

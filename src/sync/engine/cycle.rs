@@ -196,6 +196,7 @@ impl SyncEngine {
                 CycleRequest::LOCAL_RESCAN
                     | CycleRequest::CLOUD_INCREMENTAL
                     | CycleRequest::ONLINE_RECOVERY
+                    | CycleRequest::BACKOFF
             }
             _ => CycleRequest::LOCAL_RESCAN,
         }
@@ -260,6 +261,10 @@ impl SyncEngine {
             "retry-failed"
         } else if request.contains(CycleRequest::REPLAN) {
             "retry-replan"
+        } else if request.contains(CycleRequest::BACKOFF) {
+            // BACKOFF 必须先于 ONLINE_RECOVERY 判断：退避周期同样携带
+            // ONLINE_RECOVERY 完成核验/恢复，但标签必须如实反映触发源。
+            "backoff-deadline"
         } else if request.contains(CycleRequest::ONLINE_RECOVERY) {
             "network-recovery"
         } else if request.contains(CycleRequest::CLOUD_INCREMENTAL) {

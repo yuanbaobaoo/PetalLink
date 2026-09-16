@@ -84,3 +84,47 @@ export function canRetryTransferTask(task: TransferTask): boolean {
 export async function listAllTransfers(): Promise<TransferTask[]> {
   return await commands.transferListAll() as TransferTask[];
 }
+
+// 终态（已完成/失败/取消）历史在列表中的最大渲染条数。
+// 大批量同步时队列可达数千行，全量渲染会打满 webview 主线程
+// （2026-09-15 拖入两个大目录后传输队列卡死事故）。
+export const TRANSFER_TERMINAL_HISTORY_LIMIT = 100;
+
+/**
+ * 收窄传输列表的渲染范围：非终态任务全量保留（数量天然小），
+ * 终态历史只保留最近的若干条（入参按 created_at DESC 排列，靠前者最新）。
+ *
+ * @param tasks - 后端返回的全部传输任务
+ * @param limit - 终态历史渲染上限
+ * @returns 渲染用列表与被折叠的终态条数
+ */
+export function capTransferHistory(
+  tasks: TransferTask[],
+  limit: number = TRANSFER_TERMINAL_HISTORY_LIMIT,
+): { items: TransferTask[]; hiddenTerminalCount: number } {
+  // 终态任务集合。
+  const terminalStates: ReadonlySet<number> = new Set([
+    TRANSFER_STATE.COMPLETED,
+    TRANSFER_STATE.FAILED,
+    TRANSFER_STATE.CANCELED,
+  ]);
+  const items: TransferTask[] = [];
+  // 已保留的终态条数。
+  let terminalKept = 0;
+  // 被折叠的终态条数。
+  let hiddenTerminalCount = 0;
+  for (const task of tasks) {
+    if (!terminalStates.has(task.state)) {
+      items.push(task);
+      continue;
+    }
+    if (terminalKept < limit) {
+      items.push(task);
+      terminalKept += 1;
+    } else {
+      hiddenTerminalCount += 1;
+    }
+  }
+  return { items, hiddenTerminalCount };
+}
+

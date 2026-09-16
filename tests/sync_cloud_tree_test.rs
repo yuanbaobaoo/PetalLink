@@ -128,3 +128,25 @@ fn test_persist_internal_atomic_and_readable() {
     assert!(loaded.is_some());
     assert_eq!(loaded.unwrap().root_folder_id.as_deref(), Some("root"));
 }
+
+/// checkpoint 必须落紧凑 JSON（无 pretty 缩进），控制高频写盘的体积与 CPU。
+/// serde_json 对紧凑/美观格式解析无差别，旧格式文件仍可加载。
+#[test]
+fn test_persist_writes_compact_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let abs = dir.path().to_string_lossy().to_string();
+    let mut tree = HashMap::new();
+    tree.insert("学习".into(), sample_file());
+    let mut p2i = HashMap::new();
+    p2i.insert("学习".into(), "f1".into());
+    let checkpoint =
+        CloudTreeCache::new_trusted(Some("root".into()), tree, p2i, "c1".into()).unwrap();
+    persist_cloud_checkpoint(&abs, &checkpoint).unwrap();
+
+    let cache_file = cache_paths::cloud_tree_cache_file(&abs).unwrap();
+    let raw = std::fs::read_to_string(&cache_file).unwrap();
+    assert!(!raw.contains('\n'), "checkpoint 应为单行紧凑 JSON");
+    // 紧凑格式仍可完整读回。
+    let loaded = load_persisted_cloud_tree(&abs).unwrap();
+    assert_eq!(loaded.cursor.as_deref(), Some("c1"));
+}

@@ -272,7 +272,10 @@ impl TaskRunner {
                     error_message: ColumnPatch::Clear,
                     next_retry_at: ColumnPatch::Clear,
                     finished_at: ColumnPatch::Clear,
-                    attempt_count: Some(current.attempt_count.saturating_add(1)),
+                    // 人工重试是显式开启的新一轮预算周期：计数器归零，
+                    // 否则预算耗尽而 Failed 的任务重试后第一次歧义就会再次终态失败。
+                    attempt_count: Some(0),
+                    verify_attempt_count: Some(0),
                     ..Default::default()
                 },
             )

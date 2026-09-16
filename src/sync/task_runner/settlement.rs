@@ -73,6 +73,8 @@ impl TaskRunner {
             target_state = ?state,
             error_kind = ?classified.kind,
             technical_reason = %technical_message,
+            // Display 只含稳定文案；Debug 带上 status_code/transport_kind/auth 标志等结构化字段
+            error_debug = ?error,
             user_message = %user_message,
             "传输任务执行失败"
         );

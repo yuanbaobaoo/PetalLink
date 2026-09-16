@@ -7,7 +7,9 @@ use serde_json::Value;
 use crate::drive::models::DriveFile;
 use crate::error::{AppError, AppResult, RequestSemantics};
 
-use super::protocol::{build_metadata_json, complete_upload_file, remote_ambiguity};
+use super::protocol::{
+    build_metadata_json, complete_upload_file, log_incomplete_final_body, remote_ambiguity,
+};
 use super::{ProgressFn, UploadApi, SMALL_LARGE_THRESHOLD};
 
 impl UploadApi {
@@ -77,7 +79,11 @@ impl UploadApi {
         if let Some(cb) = on_progress {
             cb(1.0);
         }
-        complete_upload_file(&json, size, Some(&file_name)).ok_or_else(|| {
+        let completed = complete_upload_file(&json, size, Some(&file_name));
+        if completed.is_none() {
+            log_incomplete_final_body("PATCH 更新", &json, size, Some(&file_name));
+        }
+        completed.ok_or_else(|| {
             remote_ambiguity(
                 "PATCH 更新返回 2xx，但文件身份/名称/长度不完整或不匹配",
                 auth_replayed,
@@ -128,14 +134,21 @@ impl UploadApi {
                 &e.to_string(),
             )
         })?;
-        complete_upload_file(&body_json, file_bytes.len() as u64, Some(&file_name)).ok_or_else(
-            || {
-                remote_ambiguity(
-                    "小文件上传返回 2xx，但文件身份/名称/长度不完整或不匹配",
-                    auth_replayed,
-                )
-            },
-        )
+        let completed = complete_upload_file(&body_json, file_bytes.len() as u64, Some(&file_name));
+        if completed.is_none() {
+            log_incomplete_final_body(
+                "小文件上传",
+                &body_json,
+                file_bytes.len() as u64,
+                Some(&file_name),
+            );
+        }
+        completed.ok_or_else(|| {
+            remote_ambiguity(
+                "小文件上传返回 2xx，但文件身份/名称/长度不完整或不匹配",
+                auth_replayed,
+            )
+        })
     }
 
     /// 401 表示写请求尚未授权，可用刷新后的 token 原样重放一次。

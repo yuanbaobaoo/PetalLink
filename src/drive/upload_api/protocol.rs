@@ -163,13 +163,45 @@ pub(super) fn notify_resume_progress(
 }
 
 /// 构造“写请求可能已到达服务端”的恢复型错误。
+///
+/// cause 不会进入对用户可见的 message（`AppError` 的 Display 只输出稳定文案），
+/// 必须在此落日志，否则所有歧义失败在结算日志里都坍缩成一句“云端响应异常”。
 pub(super) fn remote_ambiguity(cause: &str, auth_already_replayed: bool) -> AppError {
+    tracing::warn!(
+        cause,
+        auth_already_replayed,
+        "上传写入结果歧义，转入远端核验"
+    );
     AppError::drive_transport_with_submission(
         DriveTransportKind::Decode,
         true,
         auth_already_replayed,
         Some(cause),
     )
+}
+
+/// 上传收尾 2xx 响应未通过完整 File 校验时，打印原始 body（截断 2KB）与解析摘要。
+/// 华为响应 schema 漂移的取证手段：2026-09-15 起 finalize 大面积校验失败，
+/// 真实响应字段必须先落日志，才能据此修正解析器。
+pub(super) fn log_incomplete_final_body(
+    context: &str,
+    body: &Value,
+    expected_size: u64,
+    expected_name: Option<&str>,
+) {
+    let raw = body.to_string();
+    let truncated: String = raw.chars().take(2048).collect();
+    let parsed = DriveFile::from_json(body);
+    tracing::warn!(
+        context,
+        expected_size,
+        expected_name = expected_name.unwrap_or(""),
+        parsed_id = parsed.as_ref().map(|f| f.id.as_str()).unwrap_or(""),
+        parsed_name = parsed.as_ref().map(|f| f.name.as_str()).unwrap_or(""),
+        parsed_size = parsed.as_ref().map(|f| f.size).unwrap_or(-1),
+        body = %truncated,
+        "上传收尾响应未通过完整 File 校验"
+    );
 }
 
 /// 判断错误是否要求沿同一会话远端核验而非重新新建。

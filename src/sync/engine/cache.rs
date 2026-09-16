@@ -21,6 +21,30 @@ use crate::sync::task_runner::RecoveredCloudFile;
 use super::action_filters::is_blocked_path_identity;
 use super::{SyncEngine, INCREMENTAL_FORCED_FULL_THRESHOLD};
 
+/// 空增量（无实际变更、仅 cursor 前进）checkpoint 落盘的最小间隔。
+/// cursor 滞后只会在崩溃重启后重放已应用的 changes，`apply_changes_to_candidate`
+/// 按 id 写入/删除，幂等，因此允许按时间合并落盘而不损失正确性。
+const CHECKPOINT_EMPTY_PERSIST_INTERVAL_MS: i64 = 60_000;
+
+/// 决定增量刷新后是否需要落盘 checkpoint：
+/// - 有实际变更：立即落盘（崩溃恢复语义不变）；
+/// - 无变更且 cursor 未前进：完全跳过（昨天 3,875 次落盘中的大多数周期属于此类）；
+/// - 无变更但 cursor 前进：按时间合并，避免每个周期都全量序列化 + fsync。
+fn should_persist_incremental_checkpoint(
+    changed: bool,
+    cursor_advanced: bool,
+    last_persist_ms: i64,
+    now_ms: i64,
+) -> bool {
+    if changed {
+        return true;
+    }
+    if !cursor_advanced {
+        return false;
+    }
+    now_ms.saturating_sub(last_persist_ms) >= CHECKPOINT_EMPTY_PERSIST_INTERVAL_MS
+}
+
 /// 结束索引标记；仅成功刷新可推进阶段，失败时保留活动 phase 等待原子错误终态。
 fn finish_indexing_phase(
     runtime: &mut RuntimeStatus,
@@ -125,6 +149,8 @@ impl SyncEngine {
             self.set_cloud_tree_trusted(false);
             return Err(error);
         }
+        self.last_checkpoint_persist_ms
+            .store(chrono::Utc::now().timestamp_millis(), Ordering::Relaxed);
         self.install_cloud_checkpoint(checkpoint);
         tracing::info!(
             recovered = recovered.len(),
@@ -302,6 +328,8 @@ impl SyncEngine {
             )?;
             self.ensure_cycle_active()?;
             cloud_tree::persist_cloud_checkpoint(abs_dir, &checkpoint)?;
+            self.last_checkpoint_persist_ms
+                .store(chrono::Utc::now().timestamp_millis(), Ordering::Relaxed);
             self.ensure_cycle_active()?;
             self.install_cloud_checkpoint(checkpoint);
             if let Ok(legacy_cursor) = crate::core::cache_paths::changes_cursor_file(abs_dir) {
@@ -435,10 +463,29 @@ impl SyncEngine {
                         root_folder_id,
                         tree,
                         path_to_id,
-                        final_cursor,
+                        final_cursor.clone(),
                     )?;
                     self.ensure_cycle_active()?;
-                    cloud_tree::persist_cloud_checkpoint(abs_dir, &checkpoint)?;
+                    // 空增量周期合并落盘；内存态始终安装（cursor 需前进而不管落盘与否）。
+                    let now_ms = chrono::Utc::now().timestamp_millis();
+                    let cursor_advanced = final_cursor != cursor;
+                    let should_persist = should_persist_incremental_checkpoint(
+                        changed,
+                        cursor_advanced,
+                        self.last_checkpoint_persist_ms.load(Ordering::Relaxed),
+                        now_ms,
+                    );
+                    if should_persist {
+                        cloud_tree::persist_cloud_checkpoint(abs_dir, &checkpoint)?;
+                        self.last_checkpoint_persist_ms
+                            .store(now_ms, Ordering::Relaxed);
+                    } else {
+                        tracing::debug!(
+                            changed,
+                            cursor_advanced,
+                            "空增量周期合并落盘窗口内，跳过本次 checkpoint 写盘"
+                        );
+                    }
                     self.ensure_cycle_active()?;
                     self.install_cloud_checkpoint(checkpoint);
                     self.incremental_since_full.fetch_add(1, Ordering::Relaxed);
@@ -677,5 +724,61 @@ mod phase_tests {
             runtime.sync_phase.as_deref(),
             Some(SYNC_PHASE_PLANNING_STARTUP)
         );
+    }
+}
+
+/// 覆盖空增量 checkpoint 落盘合并决策的核心合同：变更立即落盘、不变跳过、
+/// 仅 cursor 前进按时间合并。该决策依赖私有实现，无法经公开合同覆盖。
+#[cfg(test)]
+mod checkpoint_persist_tests {
+    use super::should_persist_incremental_checkpoint;
+
+    /// 有实际变更时无视合并窗口立即落盘。
+    #[test]
+    fn changed_checkpoint_persists_immediately() {
+        assert!(should_persist_incremental_checkpoint(
+            true,
+            false,
+            i64::MAX,
+            i64::MAX
+        ));
+        assert!(should_persist_incremental_checkpoint(true, true, 0, 1_000));
+    }
+
+    /// 无变更且 cursor 未前进时完全跳过落盘。
+    #[test]
+    fn empty_cycle_without_cursor_advance_skips_persist() {
+        assert!(!should_persist_incremental_checkpoint(
+            false,
+            false,
+            0,
+            i64::MAX
+        ));
+    }
+
+    /// 仅 cursor 前进时按时间合并：窗口内跳过，窗口外落盘。
+    #[test]
+    fn cursor_only_advance_coalesces_by_time() {
+        // 启动后首轮（last=0，now 为真实 epoch 毫秒）应落盘。
+        assert!(should_persist_incremental_checkpoint(
+            false,
+            true,
+            0,
+            1_800_000_000_000
+        ));
+        // 窗口内跳过。
+        assert!(!should_persist_incremental_checkpoint(
+            false,
+            true,
+            10_000,
+            10_000 + 59_999
+        ));
+        // 窗口外落盘。
+        assert!(should_persist_incremental_checkpoint(
+            false,
+            true,
+            10_000,
+            10_000 + 60_000
+        ));
     }
 }

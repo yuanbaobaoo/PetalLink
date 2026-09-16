@@ -17,6 +17,11 @@ use crate::sync::transfer_state::{TransferErrorKind, TransferOperation, Transfer
 /// 避免任务在网络长期异常或云端始终不返回完整元数据时在 VerifyingRemote 永久循环。
 const MAX_VERIFY_ATTEMPTS: i64 = 60;
 
+/// 「核验确认未提交 → 重放」环路的最大轮次。每轮重放都是一次完整上传尝试；
+/// 历史上该路径会把核验计数清零（2026-09-15 事故），配合不消耗预算的歧义决策
+/// 形成无限循环，五个大文件任务全天各循环 2,200+ 次、白烧上百 GB 上行流量。
+const MAX_REPLAY_ROUNDS: i64 = 5;
+
 /// 孤儿 RestartRequired 任务的最低年龄。文件改名/替换瞬间可能短暂消失，
 /// 低龄任务不回收，交由后续周期重新复核，规避监听器竞态。
 const ORPHAN_RESTART_MIN_AGE_MS: i64 = 24 * 60 * 60 * 1000;
@@ -234,6 +239,38 @@ impl TaskRunner {
             }
             Ok(RemoteVerification::NotCommitted) => {
                 // 只有明确证明未提交后才可清理旧会话并重新进入 Pending。
+                // 重放轮次递增且不再清零：反复「未提交 + 重放失败」说明会话或请求
+                // 本身已损坏，达到上限后转 Failed 并清理会话，人工重试从全新会话开始。
+                let rounds = task.verify_attempt_count.saturating_add(1);
+                if rounds >= MAX_REPLAY_ROUNDS {
+                    tracing::warn!(
+                        task_id = task.id,
+                        rounds,
+                        "远端核验多次确认未提交且重放仍失败，停止自动重试并清理会话"
+                    );
+                    self.transition(
+                        task.id,
+                        task.state_revision,
+                        TransferState::Failed,
+                        TransferPatch {
+                            error_kind: ColumnPatch::Set(TransferErrorKind::RemoteAmbiguous),
+                            error_message: ColumnPatch::Set(
+                                "多次重传仍无法确认云端结果，已停止自动重试，请手动重试"
+                                    .to_string(),
+                            ),
+                            next_retry_at: ColumnPatch::Clear,
+                            finished_at: ColumnPatch::Set((self.now_ms)()),
+                            remote_result_file_id: ColumnPatch::Clear,
+                            // 清除续传会话与断点：损坏会话无法证明服务端已接收哪些字节，
+                            // 续传不可信，人工重试必须走全新会话。
+                            session_url: ColumnPatch::Clear,
+                            resume_offset: Some(0),
+                            verify_attempt_count: Some(rounds),
+                            ..Default::default()
+                        },
+                    )?;
+                    return Ok(None);
+                }
                 let session_expired = task.error_kind_typed().map_err(transition_error)?
                     == Some(TransferErrorKind::SessionExpired);
                 let restart_patch = TransferPatch {
@@ -250,8 +287,9 @@ impl TaskRunner {
                     next_retry_at: ColumnPatch::Clear,
                     finished_at: ColumnPatch::Clear,
                     remote_result_file_id: ColumnPatch::Clear,
-                    // 已确认未提交并重放，核验计数归零，重传后若再核验从头计。
-                    verify_attempt_count: Some(0),
+                    // 核验计数跨重放轮次累积，作为环路熔断依据；
+                    // 仅在成功结算（`settle_success`）时归零。
+                    verify_attempt_count: Some(rounds),
                     ..Default::default()
                 };
                 let restart = if session_expired {

@@ -90,6 +90,7 @@ impl SyncEngine {
             activity: Arc::new(ActivityTracker::default()),
             background_scheduled: AtomicBool::new(false),
             incremental_since_full: AtomicU32::new(0),
+            last_checkpoint_persist_ms: AtomicI64::new(0),
         }
     }
 
