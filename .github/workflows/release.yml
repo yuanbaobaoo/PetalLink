@@ -387,11 +387,22 @@ jobs:
             }
             gh release upload "$RELEASE_TAG" dist/* --clobber
           else
-            gh release create "$RELEASE_TAG" dist/* \
-              --draft \
-              --generate-notes \
-              --title "$RELEASE_TAG" \
-              --verify-tag
+            # 发布说明优先使用仓库内提交的具体说明文件（docs/release-notes/<tag>.md），
+            # 缺失时才回退 GitHub 自动生成的 Full Changelog。
+            NOTES_FILE="docs/release-notes/${RELEASE_TAG}.md"
+            if [[ -s "$NOTES_FILE" ]]; then
+              gh release create "$RELEASE_TAG" dist/* \
+                --draft \
+                --notes-file "$NOTES_FILE" \
+                --title "$RELEASE_TAG" \
+                --verify-tag
+            else
+              gh release create "$RELEASE_TAG" dist/* \
+                --draft \
+                --generate-notes \
+                --title "$RELEASE_TAG" \
+                --verify-tag
+            fi
           fi
 
       - name: Verify draft assets and publish
