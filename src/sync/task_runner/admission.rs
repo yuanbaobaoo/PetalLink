@@ -219,14 +219,21 @@ impl TaskRunner {
         Ok(EnqueuedTaskOutcome { task_id, outcome })
     }
 
-    /// 校验并接受失败任务的手动重试。
+    /// 校验并接受失败/待重启任务的手动重试。
+    ///
+    /// RestartRequired 也直接接受并重跑：它的「等重规划」不能依赖 planner 重新产生意图——
+    /// 同名碰撞场景下 planner 看到「本地有+云端有+无基线」只会 Skip，任务会永久滞留。
+    /// 直接重跑让 execute 的同名碰撞检查基于远端实时状态收敛（采纳或进入 NameConflict）。
     pub async fn prepare_retry(&self, task_id: i64) -> AppResult<TransferTask> {
         let current = self.load(task_id)?;
         // 重试校验可能持久化拒绝结果，因此关闭准入必须先于校验并持续到 Pending 迁移完成。
         let _activity = self.begin_activity(&current)?;
-        if current.state_kind().map_err(transition_error)? != TransferState::Failed {
+        if !matches!(
+            current.state_kind().map_err(transition_error)?,
+            TransferState::Failed | TransferState::RestartRequired
+        ) {
             self.notify_rejection();
-            return Err(AppError::generic("任务不存在或非失败状态"));
+            return Err(AppError::generic("任务不存在或当前状态不可重试"));
         }
         if let Err(failure) = self.validate_static(&current) {
             self.persist_preflight_rejection(&current, failure.clone())?;
@@ -248,7 +255,10 @@ impl TaskRunner {
     ) -> AppResult<TransferTask> {
         let current = self.load(task_id)?;
         if current.state_revision != expected_revision
-            || current.state_kind().map_err(transition_error)? != TransferState::Failed
+            || !matches!(
+                current.state_kind().map_err(transition_error)?,
+                TransferState::Failed | TransferState::RestartRequired
+            )
         {
             self.notify_rejection();
             return Err(AppError::generic("传输任务状态已变化，请刷新后重试"));
@@ -280,12 +290,14 @@ impl TaskRunner {
                 },
             )
             .map_err(transition_error)?;
+            // 任务已被接受重跑，无条件把兼容状态拨回 SYNCING；
+            // RestartRequired 来源的行未必处于 FAILED，按旧状态门控会漏拨。
             update_compatibility_sync_status(
                 &transaction,
                 &pending,
                 repository::sync_status::SYNCING,
                 None,
-                Some(repository::sync_status::FAILED),
+                None,
             )?;
             transaction
                 .commit()

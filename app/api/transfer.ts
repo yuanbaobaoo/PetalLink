@@ -56,7 +56,8 @@ export type TransferTask = Omit<
 
 /**
  * 仅暴露统一 TaskRunner 确实能处理的重试入口。
- * RestartRequired 由引擎接管并触发重新规划，Failed 则按原 task ID 重新执行。
+ * Failed 与 RestartRequired 都由 TaskRunner 直接重跑
+ * （RestartRequired 不能等 planner 重规划：同名碰撞场景 planner 只会 Skip，任务会永久滞留）。
  */
 export function canRetryTransferTask(task: TransferTask): boolean {
   if (

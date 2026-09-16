@@ -424,3 +424,40 @@ async fn requeue_name_conflict_task_resets_and_pends() {
     assert_eq!(persisted.2, 0, "用户显式操作开启新一轮预算周期");
     assert_eq!(persisted.3, 0);
 }
+
+/// RestartRequired 任务必须能直接重试：同名碰撞场景下 planner 对该路径只会 Skip
+/// （本地有+云端有+无基线），等重规划会永久滞留（v1.1.10 两条滞留记录的根因）。
+#[tokio::test]
+async fn restart_required_task_can_retry_directly() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mount_root, local_path) = create_local_source(&temp);
+    let database = open_database(&temp.path().join("state.db"));
+    let runner = build_runner(
+        database.clone(),
+        mount_root,
+        Arc::new(NameConflictOperations {
+            execute_calls: Arc::new(AtomicUsize::new(0)),
+        }),
+    );
+
+    let mut restart = pending_create_task(&local_path);
+    restart.state = i32::from(TransferState::RestartRequired);
+    restart.error_kind = Some(i32::from(TransferErrorKind::LocalChanged));
+    restart.error_message = Some("目标目录已存在同名远端文件，拒绝重复创建".to_string());
+    restart.attempt_count = 2;
+    let restart_id = insert_task(&database.lock(), &restart);
+
+    let retried = runner.prepare_retry(restart_id).await.unwrap();
+    assert_eq!(retried.state, i32::from(TransferState::Pending));
+    let persisted: (Option<i32>, Option<String>, i64) = database
+        .lock()
+        .query_row(
+            "SELECT error_kind, error_message, attempt_count FROM transfer_queue WHERE id=?1",
+            [restart_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(persisted.0, None);
+    assert_eq!(persisted.1, None);
+    assert_eq!(persisted.2, 0, "直接重试同样开启新一轮预算周期");
+}

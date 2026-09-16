@@ -118,12 +118,15 @@ describe("TransferPopover 后端状态呈现", () => {
     ]));
     expect(retriableNames).toHaveLength(2);
 
-    // 不可重试但可取消的任务（Failed 删除）渲染更多操作菜单，其余行没有。
+    // 可取消行渲染更多操作菜单：普通「需要重新检查」（取消出口）与不可重试的失败删除。
     const menuNames = wrapper
       .findAll(".tp-item")
       .filter((item) => item.find(".tp-item__menu").exists())
       .map((item) => item.find(".tp-item__name").text());
-    expect(menuNames).toEqual([expect.stringContaining("task-10")]);
+    expect(menuNames).toEqual([
+      expect.stringContaining("task-6"),
+      expect.stringContaining("task-10"),
+    ]);
   });
 });
 

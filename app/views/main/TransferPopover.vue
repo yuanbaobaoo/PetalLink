@@ -161,6 +161,19 @@ async function onRetry(item: TransferTask): Promise<void> {
 }
 
 /**
+ * 是否显示行级更多操作菜单：同名冲突三项决策；普通「需要重新检查」附带取消出口；
+ * 不可重试的失败任务（如删除）也提供取消。
+ *
+ * @param item - 传输任务
+ */
+function showRowMenu(item: TransferTask): boolean {
+  if (!canCancelTransferTask(item)) return false;
+  if (isNameConflictTask(item)) return true;
+  if (item.state === TRANSFER_STATE.RESTART_REQUIRED) return true;
+  return !canRetryTransferTask(item);
+}
+
+/**
  * 任务行的处理菜单项：同名冲突给三个决策出口，其他可取消任务只给取消。
  *
  * @param item - 传输任务
@@ -313,9 +326,9 @@ async function onRowAction(value: string | number, item: TransferTask): Promise<
           class="tp-item__retry"
           @click="onRetry(item)"
         />
-        <!-- 同名冲突待决策（或其他可取消任务）的处理菜单。 -->
+        <!-- 同名冲突三项决策 / 普通待重启与不可重试失败任务的取消出口。 -->
         <MatePopupMenu
-          v-else-if="canCancelTransferTask(item)"
+          v-if="showRowMenu(item)"
           :items="rowActionItems(item)"
           class="tp-item__menu"
           @select="(value) => onRowAction(value, item)"
