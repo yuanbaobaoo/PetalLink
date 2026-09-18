@@ -10,15 +10,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 #[cfg(target_os = "linux")]
-use std::ffi::OsString;
-#[cfg(target_os = "linux")]
 use std::fs::OpenOptions;
-#[cfg(target_os = "linux")]
-use std::os::unix::ffi::OsStringExt;
-#[cfg(target_os = "linux")]
-use std::path::Path;
-#[cfg(target_os = "linux")]
-use std::process::Command;
 
 #[cfg(test)]
 use serde_json::json;

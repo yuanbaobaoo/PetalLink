@@ -794,7 +794,7 @@ impl VirtualDriveFs {
         flags: OpenFlags,
         hydration_caller: Option<(u32, &ProcessIdentity)>,
     ) -> io::Result<FileHandle> {
-        let mut namespace_guard = self.namespace_read().await?;
+        let namespace_guard = self.namespace_read().await?;
         let relative_path = self.relative_for_inode(inode)?;
         let path = self.backing_path(&relative_path);
         let readable = flags.acc_mode() != OpenAccMode::O_WRONLY;
@@ -840,16 +840,11 @@ impl VirtualDriveFs {
         }
         if initial_placeholder && writable && !truncate {
             // 下载期间释放命名空间读锁：慢速下载不得冻结全挂载点的建/删/改名。
-            // 完成后重新取锁并复核 backing 身份与 inode→路径映射，防止下载期间
-            // 的 rename 把本次打开指向另一文件。
-            let expected_identity = path_identity_beneath(&self.backing_root, &relative_path)?;
+            // 每路径水合锁保证 in-band rename 先水合 pending 句柄、排在本下载之后；
+            // 下载以临时文件原子替换落盘，完成后重新取锁即可。
             drop(namespace_guard);
             self.ensure_hydrated(&relative_path, &path).await?;
-            namespace_guard = self.namespace_read().await?;
-            verify_path_identity(&self.backing_root, &relative_path, expected_identity)?;
-            if self.relative_for_inode(inode)? != relative_path {
-                return Err(os_error(libc::EBUSY));
-            }
+            let _namespace_guard = self.namespace_read().await?;
         }
         let path_lease = if writable {
             let expected_identity = path_identity_beneath(&self.backing_root, &relative_path)?;
@@ -1024,7 +1019,7 @@ impl VirtualDriveFs {
         };
         debug_assert!(pending);
 
-        let mut namespace_guard = self.namespace_read().await?;
+        let namespace_guard = self.namespace_read().await?;
         // 另一请求可能已在等待 namespace lock 时完成 hydration。
         {
             let handles = self.open_handles.lock();
@@ -1053,27 +1048,11 @@ impl VirtualDriveFs {
                 }
             }
             // 下载期间释放命名空间读锁：慢速下载不得冻结全挂载点的建/删/改名。
-            // 完成后重新取锁并复核 backing 身份、inode→路径映射与句柄有效性。
-            let expected_identity = path_identity_beneath(&self.backing_root, &relative_path)?;
+            // 每路径水合锁保证 in-band rename 先水合 pending 句柄、排在本下载之后；
+            // 句柄有效性由下方统一 match 复核（含并发 promote 复用）。
             drop(namespace_guard);
             self.ensure_hydrated(&relative_path, &path).await?;
-            namespace_guard = self.namespace_read().await?;
-            verify_path_identity(&self.backing_root, &relative_path, expected_identity)?;
-            if self.relative_for_inode(inode)? != relative_path {
-                return Err(os_error(libc::EBUSY));
-            }
-            // 并发打开者可能已在放锁窗口内完成 promote；直接复用其结果。
-            {
-                let handles = self.open_handles.lock();
-                match handles.get(&handle) {
-                    Some(OpenHandle::File(opened)) if opened.inode == inode => {
-                        if let Some(file) = &opened.file {
-                            return Ok(Arc::clone(file));
-                        }
-                    }
-                    _ => return Err(os_error(libc::EBADF)),
-                }
-            }
+            let _namespace_guard = self.namespace_read().await?;
         }
         let file = Arc::new(open_read_only_no_follow(&path)?);
         let metadata = file.metadata()?;
@@ -3722,12 +3701,37 @@ mod tests {
         }
     }
 
-    /// 下载期间命名空间读锁必须释放：rename 不被下载阻塞，且完成下载后
-    /// 身份复核必须让打开失败（EBUSY），不得返回改名后另一文件的内容。
+    /// 总是授予租约的协调器：把租约互斥排除在外，单独验证命名空间锁行为。
+    #[derive(Debug)]
+    struct PermissiveCoordinator;
+
+    #[async_trait]
+    impl MutationCoordinator for PermissiveCoordinator {
+        async fn acquire_shared(&self, _paths: Vec<PathBuf>) -> io::Result<Box<dyn PathLease>> {
+            Ok(Box::new(()))
+        }
+
+        async fn acquire_exclusive(&self, _paths: Vec<PathBuf>) -> io::Result<Box<dyn PathLease>> {
+            Ok(Box::new(()))
+        }
+
+        async fn prepare_rename(
+            &self,
+            _source: PathBuf,
+            _destination: PathBuf,
+            _is_directory: bool,
+        ) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// 命名空间读锁在下载期间必须释放：一个占位文件的阻塞下载不得阻塞
+    /// 其他路径的 FUSE rename；下载放行后读取正常完成。
     #[test]
-    fn rename_during_placeholder_hydration_fails_open_instead_of_serving_wrong_file() {
+    fn rename_of_other_file_completes_during_placeholder_hydration() {
         let backing = tempfile::tempdir().unwrap();
         write_placeholder(&backing.path().join("placeholder.txt"), "file-1", 7);
+        std::fs::write(backing.path().join("real-b.txt"), b"b").unwrap();
         let entered = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
         let hydrator = Arc::new(BlockingHydrator {
@@ -3736,12 +3740,11 @@ mod tests {
             release: Arc::clone(&release),
         });
         let runtime = tokio::runtime::Runtime::new().expect("创建 Tokio runtime 失败");
-        // 无协调器：把租约互斥排除在外，单独验证命名空间锁行为。
         let filesystem = VirtualDriveFs::new(
             backing.path().to_path_buf(),
             runtime.handle().clone(),
             hydrator,
-            None,
+            Some(Arc::new(PermissiveCoordinator)),
             false,
             Arc::new(MountCancellation::default()),
         );
@@ -3762,15 +3765,67 @@ mod tests {
         runtime
             .block_on(filesystem.rename_entry(
                 INodeNo::ROOT,
-                OsStr::new("placeholder.txt"),
+                OsStr::new("real-b.txt"),
                 INodeNo::ROOT,
-                OsStr::new("renamed.txt"),
+                OsStr::new("moved-b.txt"),
                 RenameFlags::empty(),
             ))
-            .expect("下载期间 rename 必须能完成（命名空间锁已释放）");
+            .expect("其他路径的 rename 不得被下载中的命名空间锁阻塞");
 
         release.notify_waiters();
-        let outcome = runtime.block_on(read_task).expect("read 任务不应 panic");
-        assert_eq!(outcome.unwrap_err().raw_os_error(), Some(libc::EBUSY));
+        let content = runtime
+            .block_on(read_task)
+            .expect("read 任务不应 panic")
+            .expect("下载完成后读取应成功");
+        assert_eq!(content, b"content");
+    }
+
+    /// 下载窗口内 backing 被外部进程改名时，水合的原子替换会按原路径落盘，
+    /// 读取仍返回正确的已下载内容（不因外部改名返回错误或他文件内容）。
+    #[test]
+    fn out_of_band_rename_during_hydration_read_gets_hydrated_content() {
+        let backing = tempfile::tempdir().unwrap();
+        write_placeholder(&backing.path().join("placeholder.txt"), "file-1", 7);
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let hydrator = Arc::new(BlockingHydrator {
+            data: b"content".to_vec(),
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        });
+        let runtime = tokio::runtime::Runtime::new().expect("创建 Tokio runtime 失败");
+        let filesystem = VirtualDriveFs::new(
+            backing.path().to_path_buf(),
+            runtime.handle().clone(),
+            hydrator,
+            Some(Arc::new(PermissiveCoordinator)),
+            false,
+            Arc::new(MountCancellation::default()),
+        );
+
+        let attr = filesystem
+            .entry_for_relative(Path::new("placeholder.txt"))
+            .unwrap();
+        let handle = runtime
+            .block_on(filesystem.open_inode(attr.ino, OpenFlags(libc::O_RDONLY)))
+            .unwrap();
+
+        let fs_for_read = filesystem.clone();
+        let read_task =
+            runtime.spawn(async move { fs_for_read.read_inode(attr.ino, handle, 0, 7).await });
+        runtime.block_on(entered.notified());
+        // 绕过 FUSE 直接在 backing 上改名（模拟外部进程/文件管理器直接操作 backing）。
+        std::fs::rename(
+            backing.path().join("placeholder.txt"),
+            backing.path().join("moved.txt"),
+        )
+        .expect("直接改名 backing 文件");
+
+        release.notify_waiters();
+        let content = runtime
+            .block_on(read_task)
+            .expect("read 任务不应 panic")
+            .expect("水合落盘后读取应成功");
+        assert_eq!(content, b"content");
     }
 }
