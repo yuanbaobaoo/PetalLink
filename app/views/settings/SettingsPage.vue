@@ -10,23 +10,16 @@ import type { AppConfig } from "@/api/config";
 import * as authApi from "@/api/auth";
 import LogViewerPage from "@/views/settings/LogViewerPage.vue";
 import { useAuthStore } from "@/stores/auth";
-import { useSyncStore } from "@/stores/sync";
-import { useFileBrowserStore } from "@/stores/fileBrowser";
 import { useUpdaterStore } from "@/stores/updater";
 import { useTransferStore } from "@/stores/transfer";
 import { useAsyncAction } from "@/composables/useAsyncAction";
-import { selectAndConfigureSyncDirectory } from "@/composables/useSyncDirectorySetup";
-import { open } from "@tauri-apps/plugin-dialog";
+import { selectAndConfigureSyncDirectory, selectLinuxDriveDirectory } from "@/composables/useSyncDirectorySetup";
 import { formatFileSize } from "@/utils/format";
-import { isCompletelyEmptyDir } from "@/utils/fs";
 import { isLinuxPlatform } from "@/utils/platform";
 import { extractErrorMessage } from "@/utils/error";
 
 // 当前认证状态。
 const auth = useAuthStore();
-// 目录配置保存后用于立即提交状态并刷新文件列表。
-const sync = useSyncStore();
-const browser = useFileBrowserStore();
 // 应用更新状态。
 const updater = useUpdaterStore();
 // 传输队列状态（用于传输中禁用清空缓存/退出登录）。
@@ -84,8 +77,6 @@ const autoLaunch = ref(false);
 const showTrayIcon = ref(true);
 // 保存状态
 const saving = ref(false);
-// 最近一次保存是否成功。
-const saved = ref(false);
 // 保存失败提示。
 const errorMessage = ref<string | null>(null);
 // 异步按钮 loading + 防重复点击
@@ -120,6 +111,33 @@ const projectLinks = {
 
 // 配置类页签才展示保存底栏。
 const showFooter = computed(() => ["syncDir", "transfer", "advanced"].includes(activeTab.value));
+// 表单与最近一次持久化配置是否有差异，驱动保存按钮可用状态。
+// 加载失败时也允许保存：buildFormConfig 有完整兜底配置。
+// showTrayIcon / autoLaunch 改动即时生效并持久化，不参与 dirty 判定。
+const dirty = computed(() => {
+  // 最近一次成功加载或保存的完整配置快照。
+  const loaded = loadedConfig.value;
+  if (!loaded) return true;
+  // 快照中的 FUSE 可见目录（空值归一）。
+  const loadedVirtualMountDir = loaded.virtual_mount_dir ?? "";
+  // 去除空白与空项后的当前 skipPatterns。
+  const patterns = skipPatterns.value
+    .split(",")
+    .map((pattern) => pattern.trim())
+    .filter((pattern) => pattern);
+  return (
+    concurrency.value !== loaded.concurrency
+    || debounceSec.value !== loaded.debounce_sec
+    || pollIntervalSec.value !== loaded.poll_interval_sec
+    || oauthPort.value !== loaded.oauth_callback_port
+    || mountDir.value !== loaded.mount_dir
+    || virtualMountDir.value !== loadedVirtualMountDir
+    || mountConfigured.value !== (loaded.mount_configured && (!isLinux || Boolean(loadedVirtualMountDir.trim())))
+    || virtualDriveEnabled.value !== (isLinux || (loaded.virtual_drive_enabled ?? false))
+    || patterns.length !== loaded.skip_patterns.length
+    || patterns.some((pattern, i) => pattern !== loaded.skip_patterns[i])
+  );
+});
 // Linux 云盘目录的即时提示；路径、权限与挂载能力仍以后端校验为准。
 const virtualDirectoryError = computed<string | null>(() => {
   // 尚未开始目录配置时仍允许先保存传输/高级设置；用户一旦选择目录再要求完整。
@@ -160,7 +178,6 @@ onMounted(async () => {
   try { appVersion.value = await commands.appGetVersion(); } catch {}
   // 进入设置页时刷新一次传输队列，保证清空缓存/退出登录的禁用状态准确。
   try { await transfer.loadAll(); } catch {}
-  saved.value = true;
 });
 
 /**
@@ -225,7 +242,6 @@ async function handleSave(): Promise<void> {
     const config = buildFormConfig();
     await commands.configSave(config);
     loadedConfig.value = config;
-    saved.value = true;
     showToast("配置已保存");
   } catch (e) { errorMessage.value = String(e); }
   finally { saving.value = false; }
@@ -249,7 +265,6 @@ async function handleReset(): Promise<void> {
     virtualDriveEnabled.value = isLinux || (config.virtual_drive_enabled ?? false);
     oauthPort.value = config.oauth_callback_port;
     pollIntervalSec.value = config.poll_interval_sec;
-    saved.value = true;
   } catch {}
 }
 
@@ -380,40 +395,22 @@ async function handleSelectDir(): Promise<void> {
           skip_patterns: [...config.skip_patterns],
         };
       } else {
-        const selected = await open({
-          directory: true,
-          multiple: false,
-          title: "选择云盘目录",
-        });
-        if (!selected || typeof selected !== "string") return;
-
-        let isEmpty = false;
-        try {
-          isEmpty = await isCompletelyEmptyDir(selected);
-        } catch {
-          // 无法读取目录时按非空处理，避免挂载覆盖未知内容。
-        }
-        if (!isEmpty) {
+        const outcome = await selectLinuxDriveDirectory(config);
+        if (outcome.status === "cancelled") return;
+        if (outcome.status === "not-empty") {
           showToast("云盘目录必须完全为空（包括隐藏文件）", { variant: "warning" });
           return;
         }
-
-        const nextConfig = configApi.withSelectedDriveDirectory(config, selected, true);
-        await commands.configSave(nextConfig);
-        sync.applyMountConfiguration(selected);
-        virtualMountDir.value = selected;
+        virtualMountDir.value = outcome.path;
         virtualDriveEnabled.value = true;
         mountConfigured.value = true;
         loadedConfig.value = {
-          ...nextConfig,
-          skip_patterns: [...nextConfig.skip_patterns],
+          ...outcome.config,
+          skip_patterns: [...outcome.config.skip_patterns],
         };
-        await sync.init();
-        await browser.loadRoot();
       }
 
       errorMessage.value = null;
-      saved.value = true;
       showToast("配置已保存");
     } catch (e) {
       showToast(
@@ -683,10 +680,10 @@ function fmtSize(bytes: number): string {
 
     <!-- 底部保存栏（毛玻璃） -->
     <div v-if="showFooter" class="settings-footer">
-      <MateButton variant="primary" icon="check" :disabled="saved || saving" :loading="saving" @click="handleSave">{{ saving ? "保存中…" : "保存设置" }}</MateButton>
+      <MateButton variant="primary" icon="check" :disabled="!dirty || saving" :loading="saving" @click="handleSave">{{ saving ? "保存中…" : "保存设置" }}</MateButton>
       <MateButton variant="text" @click="handleReset">重置默认</MateButton>
       <span v-if="errorMessage" class="footer-error">{{ errorMessage }}</span>
-      <span v-else-if="saved" class="chip chip--ok footer-saved"><span class="footer-dot" /> 配置已保存</span>
+      <span v-else-if="!dirty" class="chip chip--ok footer-saved"><span class="footer-dot" /> 配置已保存</span>
     </div>
   </div>
 </template>

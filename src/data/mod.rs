@@ -31,12 +31,6 @@ pub fn open() -> AppResult<Connection> {
     open_at_with_mount(&db_file_path()?, mount_root.as_deref())
 }
 
-/// 在指定路径打开数据库（测试用，可指向临时文件）。
-#[allow(dead_code)]
-pub fn open_at(path: &Path) -> AppResult<Connection> {
-    open_at_with_mount(path, None)
-}
-
 /// 打开数据库并提供可信挂载根，以恢复 v5 旧任务。
 pub fn open_at_with_mount(path: &Path, mount_root: Option<&Path>) -> AppResult<Connection> {
     if let Some(parent) = path.parent() {

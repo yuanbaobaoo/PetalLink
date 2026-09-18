@@ -67,14 +67,4 @@ impl FilesApi {
             pagination: PaginationPolicy::production(),
         }
     }
-
-    /// 使用可控的分页上限构造真实 Files API wrapper。
-    ///
-    /// 该 seam 仍走 [`DriveClient`] 的生产请求链，只替换防无限分页的客户端上限。
-    pub fn with_pagination_policy(
-        client: Arc<crate::drive::client::DriveClient>,
-        pagination: PaginationPolicy,
-    ) -> Self {
-        Self { client, pagination }
-    }
 }

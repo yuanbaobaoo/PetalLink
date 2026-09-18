@@ -176,7 +176,6 @@ pub(super) fn remote_ambiguity(cause: &str, auth_already_replayed: bool) -> AppE
         DriveTransportKind::Decode,
         true,
         auth_already_replayed,
-        Some(cause),
     )
 }
 

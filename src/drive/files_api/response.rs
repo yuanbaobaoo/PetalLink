@@ -596,4 +596,30 @@ mod tests {
         });
         assert!(super::parse_drive_file_strict(&value, "test", false, None).is_err());
     }
+
+    /// 分页游标语义：缺失/null/空串按终页，非字符串拒绝，字符串原样透传。
+    #[test]
+    fn list_page_cursor_passthrough() {
+        let file = json!({"id": "f1", "fileName": "a.txt", "mimeType": "text/plain"});
+        let with_cursor = super::parse_file_list_page(
+            &json!({"files": [file.clone()], "nextCursor": "next-page-token"}),
+            "test",
+            false,
+        )
+        .expect("带游标分页应解析成功");
+        assert_eq!(with_cursor.next_cursor.as_deref(), Some("next-page-token"));
+
+        for terminal in [
+            json!({"files": [file.clone()]}),
+            json!({"files": [file.clone()], "nextCursor": null}),
+            json!({"files": [file.clone()], "nextCursor": ""}),
+        ] {
+            let page =
+                super::parse_file_list_page(&terminal, "test", false).expect("终页应解析成功");
+            assert_eq!(page.next_cursor, None);
+        }
+
+        let bad = json!({"files": [file], "nextCursor": 42});
+        assert!(super::parse_file_list_page(&bad, "test", false).is_err());
+    }
 }

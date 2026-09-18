@@ -3,6 +3,7 @@
 import { computed } from "vue";
 import MateIcon from "./MateIcon.vue";
 
+// 组件输入参数类型。
 interface Props {
   modelValue?: string;
   placeholder?: string;

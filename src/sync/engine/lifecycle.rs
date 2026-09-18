@@ -60,11 +60,7 @@ impl SyncEngine {
             cycle: CycleCoordinator::default(),
             syncing: Mutex::new(false),
             folder_syncing: Mutex::new(false),
-            cloud_tree: Mutex::new(HashMap::new()),
-            path_to_id: Mutex::new(HashMap::new()),
-            root_folder_id: Mutex::new(None),
-            cloud_cursor: Mutex::new(None),
-            cloud_tree_trusted: AtomicBool::new(false),
+            cloud: Mutex::new(super::CloudCheckpointState::default()),
             recently_deleted_paths: Mutex::new(HashMap::new()),
             state: Mutex::new(SyncGlobalState::default()),
             status_aggregator,
@@ -86,7 +82,6 @@ impl SyncEngine {
                 crate::core::net_guard::request_offline_confirmation()
             }),
             known_waiting_count: Mutex::new(None),
-            cycle_observer: Arc::new(|_| {}),
             activity: Arc::new(ActivityTracker::default()),
             background_scheduled: AtomicBool::new(false),
             incremental_since_full: AtomicU32::new(0),
@@ -114,11 +109,6 @@ impl SyncEngine {
     /// 替换引擎的实时网络可用性判定器。
     pub fn set_online_check(&mut self, online_check: Arc<dyn Fn() -> bool + Send + Sync>) {
         self.online_check = online_check;
-    }
-
-    /// 设置周期启动观察器，用于记录真实触发来源。
-    pub fn set_cycle_observer(&mut self, cycle_observer: Arc<dyn Fn(&'static str) + Send + Sync>) {
-        self.cycle_observer = cycle_observer;
     }
 
     /// 读取当前网络可用性快照。

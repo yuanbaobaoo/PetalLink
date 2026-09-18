@@ -11,7 +11,9 @@ const emit = defineEmits<{ (e: "update:modelValue", v: boolean): void }>();
 /**
  * 切换当前控件值并向父组件提交。
  */
-function toggle(): void { emit("update:modelValue", !props.modelValue); }
+function toggle(): void {
+  emit("update:modelValue", !props.modelValue);
+}
 </script>
 
 <template>

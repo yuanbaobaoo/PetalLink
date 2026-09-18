@@ -55,8 +55,7 @@ impl SyncEngine {
                                 .and_then(|task| task.relative_path)
                         };
                         if let Some(relative_path) = relative_path {
-                            engine.cloud_tree_insert(relative_path.clone(), cloud_file.clone());
-                            engine.path_to_id_insert(relative_path, cloud_file.id.clone());
+                            engine.cloud_entry_insert(relative_path.clone(), cloud_file.clone());
                         }
                     }
                 }

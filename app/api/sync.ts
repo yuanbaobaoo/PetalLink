@@ -7,11 +7,7 @@ export type {
   FreeUpBatchResult,
   SyncGlobalState,
 } from "./generated";
-import type {
-  FileLocalStatus,
-  FreeUpCheckResult,
-  SyncGlobalState,
-} from "./generated";
+import type { SyncGlobalState } from "./generated";
 
 /**
  * 判断动态值是否为可安全表示的非负整数。
@@ -74,16 +70,6 @@ export function isSyncGlobalState(value: unknown): value is SyncGlobalState {
 }
 
 /**
- * 释放空间安全校验结果
- */
-export type FreeUpResult = FreeUpCheckResult;
-
-/**
  * 文件本地同步状态（供删除确认用）
  */
 export type { FileLocalStatus } from "./generated";
-
-/**
- * 批量文件状态映射（fileId → 同步状态字符串）
- */
-export type BatchFileStatusMap = Record<string, FileLocalStatus>;

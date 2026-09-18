@@ -2,21 +2,15 @@
 <script setup lang="ts">
 import { ref } from "vue";
 import { useSyncStore } from "@/stores/sync";
-import { useFileBrowserStore } from "@/stores/fileBrowser";
 import { MateInfoBanner, MateButton } from "@/components/mate";
-import { commands } from "@/api/generated";
 import * as configApi from "@/api/config";
-import { open } from "@tauri-apps/plugin-dialog";
 import { useAsyncAction } from "@/composables/useAsyncAction";
 import { extractErrorMessage } from "@/utils/error";
-import { selectAndConfigureSyncDirectory } from "@/composables/useSyncDirectorySetup";
-import { isCompletelyEmptyDir } from "@/utils/fs";
+import { selectAndConfigureSyncDirectory, selectLinuxDriveDirectory } from "@/composables/useSyncDirectorySetup";
 import { isLinuxPlatform } from "@/utils/platform";
 
 // 当前同步状态。
 const sync = useSyncStore();
-// 当前文件浏览器状态。
-const browser = useFileBrowserStore();
 // 当前操作的错误提示。
 const errorMessage = ref("");
 // 目录选择按钮的互斥执行状态。
@@ -38,26 +32,12 @@ async function handleSelectDir(): Promise<void> {
         const result = await selectAndConfigureSyncDirectory(config);
         if (!result) return;
       } else {
-        // Linux 用户只选择 FUSE 可见挂载目录，不能覆盖隐藏 backing。
-        const selected = await open({
-          directory: true,
-          multiple: false,
-          title: "选择云盘目录",
-        });
-        if (!selected || typeof selected !== "string") return;
-
-        if (!(await isCompletelyEmptyDir(selected))) {
+        const outcome = await selectLinuxDriveDirectory(config);
+        if (outcome.status === "cancelled") return;
+        if (outcome.status === "not-empty") {
           errorMessage.value = "所选目录不为空。请选择一个完全空的目录作为云盘目录。";
           return;
         }
-
-        await commands.configSave(
-          configApi.withSelectedDriveDirectory(config, selected, true),
-        );
-        // 保存成功后立即提交配置事实，再做配置与文件列表收敛刷新。
-        sync.applyMountConfiguration(selected);
-        await sync.init();
-        await browser.loadRoot();
       }
       errorMessage.value = "";
     } catch (e) {

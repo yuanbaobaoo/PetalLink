@@ -72,7 +72,6 @@ function mountList(file: DriveFile): {
   browser.files = [file];
   sync.mountConfigured = true;
   sync.mountDir = "/sync-root";
-  sync.isIndexing = false;
   wrapper = mount(FileListView, {
     attachTo: document.body,
     global: { plugins: [pinia] },

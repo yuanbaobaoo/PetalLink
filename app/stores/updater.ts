@@ -50,6 +50,8 @@ export const useUpdaterStore = defineStore("updater", () => {
   const updateSupported = ref<boolean | null>(null);
   // 静默检查连续失败次数：任一次成功即清零，用于按倍数退避自动检查间隔
   const consecutiveCheckFailures = ref(0);
+  // 「后台等待」取消标记：用户关闭对话框即停止传输等待轮询。
+  let transferWaitCancelled = false;
 
   // ---- 计算 ----
   const updateAvailable = computed(() => phase.value === "available");
@@ -257,10 +259,12 @@ export const useUpdaterStore = defineStore("updater", () => {
   }
 
   /**
-   * 检查传输并决定是否可重启。完成后如果对话框已关闭则自动弹出提醒。
+   * 检查传输并决定是否可重启。用户关闭对话框（后台等待）即取消等待，
+   * 不再强制弹回对话框，更不会继续触发重启。
    */
   async function waitForTransfers(): Promise<boolean> {
     phase.value = "waitingTransfer";
+    transferWaitCancelled = false;
     // 最多等待传输五分钟。
     const maxWaitMs = 5 * 60 * 1000;
     // 活跃传输轮询间隔。
@@ -268,6 +272,10 @@ export const useUpdaterStore = defineStore("updater", () => {
     // 等待开始时间。
     const startTime = Date.now();
     while (Date.now() - startTime < maxWaitMs) {
+      if (transferWaitCancelled) {
+        phase.value = "downloaded";
+        return false;
+      }
       try {
       // 后端当前是否仍有活跃传输。
         const hasActive = await commands.transferHasActive();
@@ -281,9 +289,8 @@ export const useUpdaterStore = defineStore("updater", () => {
       }
       await new Promise((r) => setTimeout(r, pollIntervalMs));
     }
-    // 超时，但传输仍在进行 → 提示用户
+    // 超时，但传输仍在进行 → 仅保留侧边栏进度提示，不强制弹回对话框
     phase.value = "downloaded";
-    dialogOpen.value = true;
     return false;
   }
 
@@ -295,17 +302,11 @@ export const useUpdaterStore = defineStore("updater", () => {
   }
 
   /**
-   * 关闭对话框
+   * 关闭对话框；若正在等待传输完成，同时取消等待（用户选择了后台等待）。
    */
   function closeDialog(): void {
     dialogOpen.value = false;
-    if (
-      phase.value === "available"
-      || phase.value === "upToDate"
-      || phase.value === "error"
-    ) {
-      // 保持 available 状态以便侧边栏继续显示提示
-    }
+    transferWaitCancelled = true;
   }
 
   /**

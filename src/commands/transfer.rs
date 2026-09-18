@@ -45,55 +45,49 @@ fn clear_transfer_history_and_snapshot(
     aggregator.snapshot(conn, RuntimeStatus::default())
 }
 
-/// 清除已完成传输。
-#[tauri::command]
-#[specta::specta]
-pub fn transfer_clear_completed(app: AppHandle) -> AppResult<()> {
+/// 清除指定终态传输并广播最新状态；引擎在线时走引擎路径保证任务视图一致。
+fn clear_transfers(
+    app: &AppHandle,
+    include_completed: bool,
+    include_failed: bool,
+) -> AppResult<()> {
     if let Some(engine) = try_sync_engine() {
-        engine.clear_transfer_history_and_broadcast(true, false)?;
+        engine.clear_transfer_history_and_broadcast(include_completed, include_failed)?;
         return Ok(());
     }
     let _publish_guard = STATUS_AGGREGATOR.lock_publication();
     let snapshot = {
         let conn = DB.lock();
-        clear_transfer_history_and_snapshot(&conn, &STATUS_AGGREGATOR, true, false)?
+        clear_transfer_history_and_snapshot(
+            &conn,
+            &STATUS_AGGREGATOR,
+            include_completed,
+            include_failed,
+        )?
     };
-    emit_sync_state(&app, &snapshot);
+    emit_sync_state(app, &snapshot);
     Ok(())
+}
+
+/// 清除已完成传输。
+#[tauri::command]
+#[specta::specta]
+pub fn transfer_clear_completed(app: AppHandle) -> AppResult<()> {
+    clear_transfers(&app, true, false)
 }
 
 /// 清除失败传输。
 #[tauri::command]
 #[specta::specta]
 pub fn transfer_clear_failed(app: AppHandle) -> AppResult<()> {
-    if let Some(engine) = try_sync_engine() {
-        engine.clear_transfer_history_and_broadcast(false, true)?;
-        return Ok(());
-    }
-    let _publish_guard = STATUS_AGGREGATOR.lock_publication();
-    let snapshot = {
-        let conn = DB.lock();
-        clear_transfer_history_and_snapshot(&conn, &STATUS_AGGREGATOR, false, true)?
-    };
-    emit_sync_state(&app, &snapshot);
-    Ok(())
+    clear_transfers(&app, false, true)
 }
 
 /// 清除已结束传输。
 #[tauri::command]
 #[specta::specta]
 pub fn transfer_clear_finished(app: AppHandle) -> AppResult<()> {
-    if let Some(engine) = try_sync_engine() {
-        engine.clear_transfer_history_and_broadcast(true, true)?;
-        return Ok(());
-    }
-    let _publish_guard = STATUS_AGGREGATOR.lock_publication();
-    let snapshot = {
-        let conn = DB.lock();
-        clear_transfer_history_and_snapshot(&conn, &STATUS_AGGREGATOR, true, true)?
-    };
-    emit_sync_state(&app, &snapshot);
-    Ok(())
+    clear_transfers(&app, true, true)
 }
 
 /// 重试传输任务。

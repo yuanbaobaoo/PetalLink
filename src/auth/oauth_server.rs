@@ -44,6 +44,8 @@ impl OauthCallbackResult {
 ///
 /// 使用 tokio TcpListener 监听 127.0.0.1，手工解析 HTTP 请求行（足够覆盖 OAuth 回调）。
 pub struct OauthServer {
+    /// 实际绑定的端口（传入 0 时由系统分配，供测试读取）。
+    port: u16,
     /// 停止句柄（发送信号让监听任务退出）
     stop_handle: OauthServerStopHandle,
     /// 监听任务句柄
@@ -74,6 +76,10 @@ impl OauthServer {
         let listener = TcpListener::bind(&addr)
             .await
             .map_err(|e| AppError::generic(format!("绑定回调端口失败：{e}")))?;
+        let port = listener
+            .local_addr()
+            .map(|addr| addr.port())
+            .unwrap_or(port);
 
         let (result_tx, result_rx) = oneshot::channel::<OauthCallbackResult>();
         let (stop_tx, mut stop_rx) = watch::channel(false);
@@ -91,14 +97,21 @@ impl OauthServer {
                     accept = listener.accept() => {
                         match accept {
                             Ok((mut stream, _)) => {
-                                let result = handle_request(&mut stream).await;
-                                // 回写响应页
-                                let html = build_response_page(&result);
-                                let _ = write_response(&mut stream, &html).await;
-                                // 完成回调
-                                let _ = result_tx.send(result.clone());
-                                // 单次使用：拿到结果后停止监听
-                                break;
+                                match handle_request(&mut stream).await {
+                                    Some(result) => {
+                                        // 回写响应页
+                                        let html = build_response_page(&result);
+                                        let _ = write_response(&mut stream, &html).await;
+                                        // 完成回调
+                                        let _ = result_tx.send(result);
+                                        // 单次使用：拿到结果后停止监听
+                                        break;
+                                    }
+                                    None => {
+                                        // 浏览器预检/favicon 等无关请求不得消耗回调机会。
+                                        let _ = write_not_found(&mut stream).await;
+                                    }
+                                }
                             }
                             Err(e) => {
                                 tracing::warn!(error = %e, "OAuth 回调 accept 失败");
@@ -111,10 +124,16 @@ impl OauthServer {
         });
 
         Ok(Self {
+            port,
             stop_handle,
             listen_task: Some(listen_task),
             result_rx: Some(result_rx),
         })
+    }
+
+    /// 实际监听的端口号。
+    pub fn port(&self) -> u16 {
+        self.port
     }
 
     /// 获取可克隆停止句柄，供取消授权从外部关闭监听。
@@ -160,26 +179,55 @@ impl OauthServer {
     }
 }
 
-/// 解析 HTTP 请求，提取回调参数。
-async fn handle_request(stream: &mut (impl tokio::io::AsyncRead + Unpin)) -> OauthCallbackResult {
-    let mut buf = [0u8; 4096];
-    let n = stream.read(&mut buf).await.unwrap_or(0);
-    let request = String::from_utf8_lossy(&buf[..n]);
+/// 请求头读取上限（超过即截断解析，回调 query 远在之内）。
+const MAX_REQUEST_HEAD_BYTES: usize = 8 * 1024;
+
+/// 单个连接的读取超时：挂起的连接不能阻塞监听循环接收真正的回调。
+const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// 读取并解析连接上的 HTTP 请求；命中回调路径才返回结果，其余请求返回 None。
+async fn handle_request(
+    stream: &mut (impl tokio::io::AsyncRead + Unpin),
+) -> Option<OauthCallbackResult> {
+    let head = match timeout(REQUEST_READ_TIMEOUT, read_request_head(stream)).await {
+        Ok(head) => head,
+        Err(_) => {
+            tracing::warn!("OAuth 回调连接读取超时，关闭该连接并继续监听");
+            return None;
+        }
+    };
 
     // 解析请求行：GET /oauth/callback?code=xxx&state=yyy HTTP/1.1
-    let request_line = request.lines().next().unwrap_or("");
+    let request_line = head.lines().next().unwrap_or("");
     let path = request_line.split_whitespace().nth(1).unwrap_or("");
 
     if !path.starts_with(constants::CALLBACK_PATH) {
-        return OauthCallbackResult {
-            error: Some("无效回调路径".to_string()),
-            ..Default::default()
-        };
+        return None;
     }
 
     // 提取 query string
     let query = path.split('?').nth(1).unwrap_or("");
-    parse_query(query)
+    Some(parse_query(query))
+}
+
+/// 循环读取直到请求头结束（`\r\n\r\n`）或达到上限；单次 read 不保证读满。
+async fn read_request_head(stream: &mut (impl tokio::io::AsyncRead + Unpin)) -> String {
+    let mut buf = Vec::with_capacity(2048);
+    let mut chunk = [0u8; 2048];
+    loop {
+        match stream.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                buf.extend_from_slice(&chunk[..n]);
+                if buf.windows(4).any(|window| window == b"\r\n\r\n")
+                    || buf.len() >= MAX_REQUEST_HEAD_BYTES
+                {
+                    break;
+                }
+            }
+        }
+    }
+    String::from_utf8_lossy(&buf).into_owned()
 }
 
 /// 解析 query string 为回调结果。
@@ -219,6 +267,19 @@ async fn write_response(
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         html.len(),
         html
+    );
+    stream.write_all(response.as_bytes()).await?;
+    stream.flush().await?;
+    Ok(())
+}
+
+/// 对非回调请求应答 404 并关闭连接，不影响继续等待真正的授权回调。
+async fn write_not_found(stream: &mut (impl tokio::io::AsyncWrite + Unpin)) -> std::io::Result<()> {
+    let body = "Not Found";
+    let response = format!(
+        "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
     );
     stream.write_all(response.as_bytes()).await?;
     stream.flush().await?;

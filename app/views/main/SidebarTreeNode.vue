@@ -192,8 +192,7 @@ async function handleToggleExpand(event: Event): Promise<void> {
  * 切换文件浏览器到当前目录节点。
  */
 function handleNavigate(): void {
-  browser.pathStack = [...props.path];
-  browser.loadCurrent();
+  void browser.navigateTo(props.path);
 }
 </script>
 

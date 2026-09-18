@@ -419,7 +419,6 @@ impl AppError {
             request_may_have_reached_server,
             auth_already_replayed,
         }
-        .with_cause_body(body)
     }
 
     /// 构造断点上传会话已失效、但仍须远端复核写入结果的错误。
@@ -438,42 +437,22 @@ impl AppError {
         }
     }
 
-    /// 配额不足
-    pub fn drive_quota_exceeded() -> Self {
-        Self::DriveApi {
-            code: DriveApiErrorCode::QuotaExceeded,
-            message: "云盘空间不足".to_string(),
-            status_code: None,
-            error_code: Some("quota_exceeded".to_string()),
-            retry_after: None,
-            transport_kind: None,
-            request_may_have_reached_server: false,
-            auth_already_replayed: false,
-        }
-    }
-
     /// 网络连接失败
-    pub fn drive_network(cause: Option<&str>) -> Self {
-        Self::drive_transport(
-            DriveTransportKind::Network,
-            RequestSemantics::Read,
-            false,
-            cause,
-        )
+    pub fn drive_network() -> Self {
+        Self::drive_transport(DriveTransportKind::Network, RequestSemantics::Read, false)
     }
 
     /// 从传输失败构造，供 DriveClient 及直接上传/下载请求复用。
+    /// 诊断细节由调用方落 tracing 日志（错误 message 保持稳定、不回显底层细节）。
     pub fn drive_transport(
         transport_kind: DriveTransportKind,
         semantics: RequestSemantics,
         auth_already_replayed: bool,
-        cause: Option<&str>,
     ) -> Self {
         Self::drive_transport_with_submission(
             transport_kind,
             semantics.is_write() && transport_kind != DriveTransportKind::Connect,
             auth_already_replayed,
-            cause,
         )
     }
 
@@ -482,7 +461,6 @@ impl AppError {
         transport_kind: DriveTransportKind,
         request_may_have_reached_server: bool,
         auth_already_replayed: bool,
-        cause: Option<&str>,
     ) -> Self {
         let message = match transport_kind {
             DriveTransportKind::Decode => "云端响应异常",
@@ -498,7 +476,6 @@ impl AppError {
             request_may_have_reached_server,
             auth_already_replayed,
         }
-        .with_cause_body(cause.unwrap_or(""))
     }
 
     // ===== Config / Quota 工厂 =====
@@ -523,16 +500,6 @@ impl AppError {
         Self::Generic {
             message: message.into(),
         }
-    }
-
-    /// 附加 cause（保留的诊断扩展点）。
-    ///
-    /// 注意：当前实现既不把 body 透出到前端 message，也不落日志——历史上注释声称
-    /// 「仅记录到日志」但实际是 no-op，曾导致上传歧义失败的根因完全丢失
-    /// （2026-09-15 事故）。诊断信息请在各构造/分类调用点用 tracing 显式落日志
-    /// （见 `client::classify_transport_error`、`upload_api::protocol::remote_ambiguity`）。
-    fn with_cause_body(self, _body: &str) -> Self {
-        self
     }
 }
 

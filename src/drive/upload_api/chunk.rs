@@ -13,6 +13,23 @@ use super::protocol::{
 use super::{ChunkResult, ResumeSession, UploadApi};
 
 impl UploadApi {
+    /// 命中 401 时刷新一次会话 token 并写回共享状态；后续请求重用新 token。
+    /// 返回是否命中并刷新（调用方据此重放原请求）。
+    pub(super) async fn refresh_session_token_on_401(
+        &self,
+        is_unauthorized: bool,
+        token: &mut String,
+        auth_replayed: &mut bool,
+    ) -> AppResult<()> {
+        if !is_unauthorized {
+            return Ok(());
+        }
+        let refreshed = self.client.auth().refresher().refresh().await?;
+        *token = refreshed.access_token;
+        *auth_replayed = true;
+        Ok(())
+    }
+
     /// PUT 单个分片。401 只刷新并重放一次，且 URL/body/Content-Range 完全不变。
     /// 对请求阶段不确定、5xx 或成功响应无法解析的情况，不按本地长度猜偏移，先查询
     /// 同一会话的服务端状态。
@@ -55,10 +72,13 @@ impl UploadApi {
         };
 
         // 认证失败只允许原样重放一次，避免无限刷新循环。
-        if response.status() == StatusCode::UNAUTHORIZED {
-            let refreshed = self.client.auth().refresher().refresh().await?;
-            *token = refreshed.access_token;
-            auth_replayed = true;
+        self.refresh_session_token_on_401(
+            response.status() == StatusCode::UNAUTHORIZED,
+            token,
+            &mut auth_replayed,
+        )
+        .await?;
+        if auth_replayed {
             response = match self
                 .send_chunk_request(&url, token, &content_range, chunk)
                 .await
@@ -212,10 +232,13 @@ impl UploadApi {
                 )
             })?;
         // 查询是只读语义，但认证刷新同样限制为一次。
-        if response.status() == StatusCode::UNAUTHORIZED {
-            let refreshed = self.client.auth().refresher().refresh().await?;
-            *token = refreshed.access_token;
-            auth_replayed = true;
+        self.refresh_session_token_on_401(
+            response.status() == StatusCode::UNAUTHORIZED,
+            token,
+            &mut auth_replayed,
+        )
+        .await?;
+        if auth_replayed {
             response = self
                 .send_status_request(&url, token, &content_range)
                 .await

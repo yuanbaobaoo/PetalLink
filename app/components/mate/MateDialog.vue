@@ -36,7 +36,12 @@ const emit = defineEmits<{
 function close(): void {
   emit("update:open", false);
   emit("close");
-}function onOverlay(): void {
+}
+
+/**
+ * 遮罩点击：仅在允许遮罩关闭时关闭对话框。
+ */
+function onOverlay(): void {
   if (props.closeOnOverlay) close();
 }
 </script>

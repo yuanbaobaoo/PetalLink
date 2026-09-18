@@ -74,12 +74,6 @@ impl ResumeMetadata {
     }
 }
 
-/// 从下载前云端元数据查询得到的版本快照。
-#[derive(Debug, Clone)]
-struct RemoteMetadata {
-    resume: ResumeMetadata,
-}
-
 impl DownloadApi {
     /// 使用共享 Drive 客户端创建下载接口。
     pub fn new(client: Arc<DriveClient>) -> Self {
@@ -125,7 +119,7 @@ impl DownloadApi {
             }
         };
         if let Some(expectation) = expectation {
-            if !matches_expectation(&remote.resume, expectation) {
+            if !matches_expectation(&remote, expectation) {
                 discard_resume_artifacts(dest_path);
                 return Err(AppError::generic(
                     "云端文件版本已变化，当前下载任务已过期，请重新规划同步",
@@ -134,24 +128,22 @@ impl DownloadApi {
         }
 
         let tmp = tmp_path(dest_path);
-        let mut offset = self
-            .validated_resume_offset(dest_path, &remote.resume)
-            .await?;
-        write_resume_metadata(dest_path, &remote.resume).await?;
+        let mut offset = self.validated_resume_offset(dest_path, &remote).await?;
+        write_resume_metadata(dest_path, &remote).await?;
 
         // 上次响应已经写完，但在最终核验或 rename 前断网/崩溃：不重复下载。
-        if tmp.exists() && offset == remote.resume.size {
+        if tmp.exists() && offset == remote.size {
             // 先上报满额进度：校验安装（大文件 sha256 需数秒）期间界面不应停在 0%
             if let Some(callback) = on_progress {
-                callback(remote.resume.size, remote.resume.size);
+                callback(remote.size, remote.size);
             }
             return self
-                .verify_and_install(file_id, dest_path, &remote.resume, expectation)
+                .verify_and_install(file_id, dest_path, &remote, expectation)
                 .await;
         }
 
         // 空文件没有内容请求也可以安全落盘。
-        if remote.resume.size == 0 {
+        if remote.size == 0 {
             let file = File::create(&tmp)
                 .await
                 .map_err(|error| AppError::generic(format!("创建临时文件失败：{error}")))?;
@@ -159,7 +151,7 @@ impl DownloadApi {
                 .await
                 .map_err(|error| AppError::generic(format!("同步临时文件失败：{error}")))?;
             return self
-                .verify_and_install(file_id, dest_path, &remote.resume, expectation)
+                .verify_and_install(file_id, dest_path, &remote, expectation)
                 .await;
         }
 
@@ -167,7 +159,7 @@ impl DownloadApi {
         let mut restarted_from_zero = offset == 0;
         loop {
             let (response, auth_replayed) = match self
-                .send_content_request(file_id, offset, remote.resume.etag.as_deref())
+                .send_content_request(file_id, offset, remote.etag.as_deref())
                 .await
             {
                 Ok(response) => response,
@@ -182,7 +174,7 @@ impl DownloadApi {
                 && !restarted_from_zero
             {
                 discard_resume_artifacts(dest_path);
-                write_resume_metadata(dest_path, &remote.resume).await?;
+                write_resume_metadata(dest_path, &remote).await?;
                 offset = 0;
                 restarted_from_zero = true;
                 continue;
@@ -198,16 +190,12 @@ impl DownloadApi {
                 return Err(error);
             }
 
-            let write_offset = match validated_response_offset(
-                &response,
-                offset,
-                remote.resume.size,
-            ) {
+            let write_offset = match validated_response_offset(&response, offset, remote.size) {
                 Ok(write_offset) => write_offset,
                 Err(message) if offset > 0 && !restarted_from_zero => {
                     tracing::warn!(requested_offset = offset, %message, "Range 响应不可信，从 0 重启");
                     discard_resume_artifacts(dest_path);
-                    write_resume_metadata(dest_path, &remote.resume).await?;
+                    write_resume_metadata(dest_path, &remote).await?;
                     offset = 0;
                     restarted_from_zero = true;
                     continue;
@@ -233,7 +221,7 @@ impl DownloadApi {
 
             let mut received = write_offset;
             if let Some(callback) = on_progress {
-                callback(received, remote.resume.size);
+                callback(received, remote.size);
             }
             let mut stream = response.bytes_stream();
             while let Some(chunk_result) = stream.next().await {
@@ -254,7 +242,7 @@ impl DownloadApi {
                     .map_err(|error| AppError::generic(format!("写入临时文件失败：{error}")))?;
                 received = received.saturating_add(chunk.len() as u64);
                 if let Some(callback) = on_progress {
-                    callback(received, remote.resume.size);
+                    callback(received, remote.size);
                 }
             }
             file.flush()
@@ -269,29 +257,31 @@ impl DownloadApi {
                 .await
                 .map_err(|error| AppError::generic(format!("读取临时文件长度失败：{error}")))?
                 .len();
-            if actual_size != remote.resume.size {
-                if actual_size > remote.resume.size {
+            if actual_size != remote.size {
+                if actual_size > remote.size {
                     discard_resume_artifacts(dest_path);
                     return Err(AppError::generic(format!(
                         "下载长度异常：期望 {} 字节，实际 {actual_size} 字节",
-                        remote.resume.size
+                        remote.size
                     )));
                 }
                 // 某些代理会干净地提前结束响应；保留部分文件，下一次继续 Range。
-                return Err(AppError::drive_network(Some(&format!(
-                    "下载响应提前结束：期望 {} 字节，已接收 {actual_size} 字节",
-                    remote.resume.size
-                ))));
+                tracing::warn!(
+                    expected = remote.size,
+                    actual_size,
+                    "下载响应提前结束，等待下次断点续传"
+                );
+                return Err(AppError::drive_network());
             }
 
             return self
-                .verify_and_install(file_id, dest_path, &remote.resume, expectation)
+                .verify_and_install(file_id, dest_path, &remote, expectation)
                 .await;
         }
     }
 
     /// 获取并严格校验下载所需的云端版本元数据。
-    async fn fetch_remote_metadata(&self, file_id: &str) -> AppResult<RemoteMetadata> {
+    async fn fetch_remote_metadata(&self, file_id: &str) -> AppResult<ResumeMetadata> {
         let encoded_id = crate::drive::files_api::urlencoding(file_id);
         let response = self
             .client
@@ -303,11 +293,11 @@ impl DownloadApi {
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned);
         let body: Value = response.json().await.map_err(|error| {
+            tracing::warn!(%error, "下载元数据响应解析失败");
             AppError::drive_transport(
                 crate::error::DriveTransportKind::Decode,
                 RequestSemantics::Read,
                 false,
-                Some(&error.to_string()),
             )
         })?;
 
@@ -336,16 +326,14 @@ impl DownloadApi {
             .find_map(|field| nonempty_string(body.get(*field)));
         let etag = header_etag.or_else(|| nonempty_string(body.get("etag")));
 
-        Ok(RemoteMetadata {
-            resume: ResumeMetadata {
-                file_id: file_id.to_string(),
-                size,
-                revision,
-                edited_time_ms,
-                etag,
-                sha256,
-                content_hash,
-            },
+        Ok(ResumeMetadata {
+            file_id: file_id.to_string(),
+            size,
+            revision,
+            edited_time_ms,
+            etag,
+            sha256,
+            content_hash,
         })
     }
 
@@ -377,45 +365,33 @@ impl DownloadApi {
         Ok(length)
     }
 
-    /// 发送内容 GET；遇到 401 时刷新 token 并原样重放一次。
+    /// 发送内容 GET；401 时由 DriveClient 统一刷新并重放一次。
     async fn send_content_request(
         &self,
         file_id: &str,
         offset: u64,
         etag: Option<&str>,
     ) -> AppResult<(reqwest::Response, bool)> {
-        let token = self.client.auth().ensure_valid_access_token().await?;
-        let response = self
-            .build_content_request(file_id, offset, etag, &token)
-            .send()
+        self.client
+            .send_with_auth_replay(
+                self.client.streaming_http(),
+                RequestSemantics::Read,
+                |http, token| self.build_content_request(http, file_id, offset, etag, token),
+            )
             .await
-            .map_err(|error| classify_transport_error(&error, RequestSemantics::Read, false))?;
-        if response.status() != StatusCode::UNAUTHORIZED {
-            return Ok((response, false));
-        }
-
-        // 只刷新一次，并对同一个 URL 和同一个 Range 原样重放。
-        let refreshed = self.client.auth().refresher().refresh().await?;
-        let response = self
-            .build_content_request(file_id, offset, etag, &refreshed.access_token)
-            .send()
-            .await
-            .map_err(|error| classify_transport_error(&error, RequestSemantics::Read, true))?;
-        Ok((response, true))
     }
 
     /// 构造带可选 Range 与版本条件的已认证内容请求。
     fn build_content_request(
         &self,
+        http: &reqwest::Client,
         file_id: &str,
         offset: u64,
         etag: Option<&str>,
         token: &str,
     ) -> reqwest::RequestBuilder {
         let encoded_id = crate::drive::files_api::urlencoding(file_id);
-        let mut request = self
-            .client
-            .streaming_http()
+        let mut request = http
             .get(format!(
                 "{}/files/{encoded_id}?form=content",
                 self.drive_base
@@ -447,7 +423,12 @@ impl DownloadApi {
             if actual_size > downloaded_version.size {
                 discard_resume_artifacts(dest_path);
             }
-            return Err(AppError::drive_network(Some("断点文件尚未下载完整")));
+            tracing::warn!(
+                expected = downloaded_version.size,
+                actual_size,
+                "断点文件尚未下载完整"
+            );
+            return Err(AppError::drive_network());
         }
 
         if let Some(expected_sha256) = downloaded_version.sha256.as_deref() {
@@ -466,7 +447,7 @@ impl DownloadApi {
                 return Err(error);
             }
         };
-        if current.resume != *downloaded_version {
+        if current != *downloaded_version {
             discard_resume_artifacts(dest_path);
             return Err(AppError::generic(
                 "下载期间云端文件发生变化，已丢弃旧断点并等待重新下载",
@@ -495,11 +476,7 @@ fn verify_local_destination(
     if let Some(snapshot) = expectation.destination_snapshot.as_ref() {
         let metadata = std::fs::symlink_metadata(dest_path)
             .map_err(|error| AppError::generic(format!("安装下载结果前读取原文件失败：{error}")))?;
-        let mtime_ms = metadata
-            .modified()
-            .ok()
-            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|duration| duration.as_millis() as i64);
+        let mtime_ms = crate::core::fs_meta::metadata_mtime_ms(&metadata);
         if metadata.file_type().is_symlink()
             || !metadata.is_file()
             || metadata.len() != snapshot.size

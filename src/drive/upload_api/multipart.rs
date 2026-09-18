@@ -1,7 +1,6 @@
 //! Multipart 小文件上传与已有文件的受限覆盖更新。
 
 use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE};
-use reqwest::StatusCode;
 use serde_json::Value;
 
 use crate::drive::models::DriveFile;
@@ -22,23 +21,8 @@ impl UploadApi {
         parent_id: Option<&str>,
         on_progress: Option<&ProgressFn>,
     ) -> AppResult<DriveFile> {
-        reject_unsafe_large_update(file_id, file_path)?;
-        self.ensure_capacity_for(file_path).await?;
-        let token = self.client.auth().ensure_valid_access_token().await?;
-        self.upload_update_with_token(file_id, file_path, parent_id, on_progress, &token)
-            .await
-    }
-
-    /// 使用给定 token 覆盖小文件，并严格核验返回文件的名称和长度。
-    async fn upload_update_with_token(
-        &self,
-        file_id: &str,
-        file_path: &std::path::Path,
-        parent_id: Option<&str>,
-        on_progress: Option<&ProgressFn>,
-        token: &str,
-    ) -> AppResult<DriveFile> {
         let size = reject_unsafe_large_update(file_id, file_path)?;
+        self.ensure_capacity_for(file_path).await?;
         let file_name = file_path
             .file_name()
             .and_then(|n| n.to_str())
@@ -53,7 +37,7 @@ impl UploadApi {
         let url = format!("{}/files/{file_id}?uploadType=multipart", self.upload_base);
 
         let (resp, auth_replayed) = self
-            .send_multipart_with_auth_replay(reqwest::Method::PATCH, &url, &boundary, &body, token)
+            .send_multipart_with_auth_replay(reqwest::Method::PATCH, &url, &boundary, &body)
             .await?;
         if !resp.status().is_success() {
             tracing::warn!(
@@ -110,10 +94,9 @@ impl UploadApi {
             .await
             .map_err(|e| AppError::generic(format!("读取文件失败：{e}")))?;
         let body = build_multipart_related(&boundary, metadata.as_bytes(), &file_bytes);
-        let token = self.client.auth().ensure_valid_access_token().await?;
         let url = format!("{}/files?uploadType=multipart", self.upload_base);
         let (resp, auth_replayed) = self
-            .send_multipart_with_auth_replay(reqwest::Method::POST, &url, &boundary, &body, &token)
+            .send_multipart_with_auth_replay(reqwest::Method::POST, &url, &boundary, &body)
             .await?;
         if !resp.status().is_success() {
             return Err(crate::drive::client::handle_error_response_with_metadata(
@@ -151,44 +134,26 @@ impl UploadApi {
         })
     }
 
-    /// 401 表示写请求尚未授权，可用刷新后的 token 原样重放一次。
+    /// 发送 multipart 请求；401 时由 DriveClient 统一刷新并重放一次。
     async fn send_multipart_with_auth_replay(
         &self,
         method: reqwest::Method,
         url: &str,
         boundary: &str,
         body: &[u8],
-        token: &str,
     ) -> AppResult<(reqwest::Response, bool)> {
-        let send = |token: &str| {
-            self.http
-                .request(method.clone(), url)
-                .header(
-                    CONTENT_TYPE,
-                    format!("multipart/related; boundary={boundary}"),
-                )
-                .header(CONTENT_LENGTH, body.len().to_string())
-                .bearer_auth(token)
-                .body(body.to_vec())
-        };
-        let response = send(token).send().await.map_err(|error| {
-            crate::drive::client::classify_transport_error(&error, RequestSemantics::Write, false)
-        })?;
-        if response.status() != StatusCode::UNAUTHORIZED {
-            return Ok((response, false));
-        }
-        let refreshed = self.client.auth().refresher().refresh().await?;
-        let response = send(&refreshed.access_token)
-            .send()
+        self.client
+            .send_with_auth_replay(&self.http, RequestSemantics::Write, |http, token| {
+                http.request(method.clone(), url)
+                    .header(
+                        CONTENT_TYPE,
+                        format!("multipart/related; boundary={boundary}"),
+                    )
+                    .header(CONTENT_LENGTH, body.len().to_string())
+                    .bearer_auth(token)
+                    .body(body.to_vec())
+            })
             .await
-            .map_err(|error| {
-                crate::drive::client::classify_transport_error(
-                    &error,
-                    RequestSemantics::Write,
-                    true,
-                )
-            })?;
-        Ok((response, true))
     }
 }
 

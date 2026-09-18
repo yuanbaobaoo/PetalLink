@@ -114,11 +114,6 @@ impl StabilityChecker {
         self.tracking.remove(&path_key);
         StabilityResult::Stable
     }
-
-    /// 清除某路径的追踪状态（文件已被删除/不再同步时调用）。
-    pub fn clear_tracking(&mut self, path: &str) {
-        self.tracking.remove(path);
-    }
 }
 
 impl Default for StabilityChecker {

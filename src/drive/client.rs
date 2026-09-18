@@ -68,11 +68,6 @@ impl DriveClient {
         &self.auth
     }
 
-    /// 获取底层 reqwest client（upload/download 等需自定义 URL 时用）。
-    pub fn raw_http(&self) -> &Client {
-        &self.http
-    }
-
     /// 获取流式传输专用 reqwest client（整文件内容下载，无总超时）。
     pub fn streaming_http(&self) -> &Client {
         &self.http_stream
@@ -129,6 +124,33 @@ impl DriveClient {
         Ok(self.http.request(method, url).bearer_auth(token))
     }
 
+    /// 用任意 reqwest client 执行一次带单次 401 刷新重放的请求。
+    /// `build` 必须能以最新 token 重建整个请求（body/头不可复用的场景）。
+    /// 返回 (最终响应, 是否已发生认证重放)；响应状态码由调用方自行处理。
+    pub async fn send_with_auth_replay(
+        &self,
+        http: &Client,
+        semantics: RequestSemantics,
+        build: impl Fn(&Client, &str) -> RequestBuilder,
+    ) -> AppResult<(reqwest::Response, bool)> {
+        let token = self.auth.ensure_valid_access_token().await?;
+        let resp = build(http, &token)
+            .send()
+            .await
+            .map_err(|error| classify_transport_error(&error, semantics, false))?;
+        if resp.status() != StatusCode::UNAUTHORIZED {
+            return Ok((resp, false));
+        }
+        // 401：强制刷新后重放一次
+        tracing::warn!("收到 401，刷新 token 后重放");
+        let new_token = self.auth.refresher().refresh().await?;
+        let resp = build(http, &new_token.access_token)
+            .send()
+            .await
+            .map_err(|error| classify_transport_error(&error, semantics, true))?;
+        Ok((resp, true))
+    }
+
     /// GET 请求（相对 driveApiBase 路径）。只返回最终 2xx 响应。
     pub async fn get(&self, path: &str) -> AppResult<reqwest::Response> {
         let url = format!("{}{}", self.base_url, path);
@@ -173,49 +195,6 @@ impl DriveClient {
     pub async fn delete(&self, path: &str) -> AppResult<reqwest::Response> {
         let url = format!("{}{}", self.base_url, path);
         self.execute_with_retry(Method::DELETE, &url, |r| r).await
-    }
-
-    /// GET 请求（完整 URL，不拼接 base_url）。
-    /// 供 FilesApi 等已自行构造完整 URL 的调用方使用，复用统一的 auth + 401 重放逻辑。
-    pub async fn get_full(&self, url: &str) -> AppResult<reqwest::Response> {
-        self.execute_with_retry(Method::GET, url, |r| r).await
-    }
-
-    /// 向完整 URL 发送 POST，并沿用统一的成功校验与单次认证重放。
-    pub async fn post_full(
-        &self,
-        url: &str,
-        body: Option<Vec<u8>>,
-        content_type: &str,
-    ) -> AppResult<reqwest::Response> {
-        let ct = content_type.to_string();
-        self.execute_with_retry(Method::POST, url, move |r| {
-            let mut r = r.header("Content-Type", &ct);
-            if let Some(b) = &body {
-                r = r.body(b.clone());
-            }
-            r
-        })
-        .await
-    }
-
-    /// 向完整 URL 发送 PATCH，并保留写后响应不确定性的结构化错误信息。
-    pub async fn patch_full(
-        &self,
-        url: &str,
-        body: Vec<u8>,
-        content_type: &str,
-    ) -> AppResult<reqwest::Response> {
-        let ct = content_type.to_string();
-        self.execute_with_retry(Method::PATCH, url, move |r| {
-            r.header("Content-Type", &ct).body(body.clone())
-        })
-        .await
-    }
-
-    /// 向完整 URL 发送 DELETE，并沿用统一的成功校验与单次认证重放。
-    pub async fn delete_full(&self, url: &str) -> AppResult<reqwest::Response> {
-        self.execute_with_retry(Method::DELETE, url, |r| r).await
     }
 }
 
@@ -262,12 +241,7 @@ pub fn classify_transport_error(
             "请求传输层失败（解码/协议类），按结构化错误上抛"
         );
     }
-    AppError::drive_transport(
-        kind,
-        semantics,
-        auth_already_replayed,
-        Some(&error.to_string()),
-    )
+    AppError::drive_transport(kind, semantics, auth_already_replayed)
 }
 
 /// 处理非 2xx 响应，返回 AppError（读取 body 用于错误码）。
@@ -400,7 +374,6 @@ pub fn response_decode_error(
     auth_already_replayed: bool,
     cause: &str,
 ) -> AppError {
-    let diagnostic = format!("解析{ctx}响应失败：{cause}");
     // 用户可见错误保持稳定且不回显响应体；把无凭据的解析上下文写入本地日志，
     // 否则所有 schema/身份校验失败都会坍缩成无法定位的“云端响应异常”。
     tracing::warn!(
@@ -410,10 +383,5 @@ pub fn response_decode_error(
         cause,
         "Drive API 响应解码或协议校验失败"
     );
-    AppError::drive_transport(
-        DriveTransportKind::Decode,
-        semantics,
-        auth_already_replayed,
-        Some(&diagnostic),
-    )
+    AppError::drive_transport(DriveTransportKind::Decode, semantics, auth_already_replayed)
 }

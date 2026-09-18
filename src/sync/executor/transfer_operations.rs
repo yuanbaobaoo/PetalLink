@@ -21,7 +21,7 @@ use crate::sync::task_runner::{
     BackendPreflightFailure, OnlineCheck, RemoteVerification, TaskDisposition, TaskExecutionError,
     TaskExecutionOutcome, TaskProgressReporter, TaskRunner, TaskStateSink, TransferOperations,
 };
-use crate::sync::transfer_state::{TransferOperation, TransferState};
+use crate::sync::transfer_state::TransferOperation;
 
 use super::SyncExecutor;
 
@@ -38,16 +38,7 @@ struct ExecutorTransferOperations {
 pub(crate) fn verify_source_snapshot(task: &TransferTask, path: &std::path::Path) -> AppResult<()> {
     let metadata = std::fs::metadata(path)
         .map_err(|error| AppError::generic(format!("读取上传源失败：{error}")))?;
-    let mtime = metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|duration| duration.as_millis() as i64);
-    if !metadata.is_file()
-        || task.source_mtime != mtime
-        || task.source_size != Some(metadata.len() as i64)
-        || task.total_size != metadata.len() as i64
-    {
+    if !metadata.is_file() || !task.matches_source_metadata(&metadata) {
         return Err(AppError::generic("本地上传源在执行前发生变化"));
     }
     Ok(())
@@ -252,7 +243,10 @@ impl TransferOperations for ExecutorTransferOperations {
                     .map_err(|error| TaskExecutionError::RestartRequired(error.to_string()))?;
                 // 更新校验远端版本，创建校验同名碰撞，二者都禁止盲目覆盖。
                 if operation == TransferOperation::Update {
-                    let file_id = task.file_id.as_deref().expect("preflight requires file id");
+                    let file_id = task
+                        .file_id
+                        .as_deref()
+                        .ok_or_else(|| AppError::generic("更新任务缺少 fileId"))?;
                     let current = self.files_api.get(file_id).await?;
                     let current_edited = current.edited_time.map(|time| time.timestamp_millis());
                     if current.id != file_id || current_edited != task.expected_cloud_edited_time {
@@ -363,7 +357,9 @@ impl TransferOperations for ExecutorTransferOperations {
                 let upload_result = if operation == TransferOperation::Update {
                     self.upload_api
                         .upload_update(
-                            task.file_id.as_deref().expect("preflight requires file id"),
+                            task.file_id
+                                .as_deref()
+                                .ok_or_else(|| AppError::generic("更新任务缺少 fileId"))?,
                             &local_path,
                             parent_id,
                             Some(&on_progress),
@@ -465,7 +461,10 @@ impl TransferOperations for ExecutorTransferOperations {
                             tracing::debug!(%error, "忽略过期下载进度回调");
                         }
                     });
-                let file_id = task.file_id.as_deref().expect("preflight requires file id");
+                let file_id = task
+                    .file_id
+                    .as_deref()
+                    .ok_or_else(|| AppError::generic("下载任务缺少 fileId"))?;
                 // 期望快照让落盘前的最终替换具备并发修改保护。
                 let expectation = DownloadExpectation {
                     edited_time_ms: task.expected_cloud_edited_time,
@@ -728,44 +727,22 @@ impl SyncExecutor {
     pub(super) async fn execute_transfer_action(&self, action: &SyncAction) -> ActionResult {
         let runner = match self.task_runner() {
             Ok(runner) => runner,
-            Err(error) => {
-                return ActionResult {
-                    success: false,
-                    error_message: Some(error.to_string()),
-                    deferred: false,
-                    cloud_file: None,
-                }
-            }
+            Err(error) => return ActionResult::fail(error.to_string(), false),
         };
         let task = self.pending_task_for_action(action);
         match runner.enqueue_and_run(task).await {
             Ok(enqueued) => match enqueued.outcome.disposition {
-                TaskDisposition::Completed => ActionResult {
-                    success: true,
-                    error_message: None,
-                    deferred: false,
-                    cloud_file: enqueued.outcome.cloud_file,
-                },
+                TaskDisposition::Completed => ActionResult::ok(enqueued.outcome.cloud_file),
                 disposition => {
                     tracing::info!(
                         disposition = ?disposition,
                         user_message = disposition.user_message(),
                         "传输动作进入等待处理状态"
                     );
-                    ActionResult {
-                        success: false,
-                        error_message: Some(disposition.user_message().to_string()),
-                        deferred: true,
-                        cloud_file: None,
-                    }
+                    ActionResult::fail(disposition.user_message().to_string(), true)
                 }
             },
-            Err(error) => ActionResult {
-                success: false,
-                error_message: Some(error.to_string()),
-                deferred: false,
-                cloud_file: None,
-            },
+            Err(error) => ActionResult::fail(error.to_string(), false),
         }
     }
 
@@ -818,13 +795,9 @@ impl SyncExecutor {
                 .and_then(|path| std::fs::metadata(path).ok())
         })
         .flatten();
-        let source_mtime = source_metadata.as_ref().and_then(|metadata| {
-            metadata
-                .modified()
-                .ok()
-                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|duration| duration.as_millis() as i64)
-        });
+        let source_mtime = source_metadata
+            .as_ref()
+            .and_then(crate::core::fs_meta::metadata_mtime_ms);
         let source_size = source_metadata
             .as_ref()
             .map(|metadata| metadata.len() as i64);
@@ -843,7 +816,6 @@ impl SyncExecutor {
         };
         // 新任务统一从 id=0/revision=0/Pending 进入准入层。
         TransferTask {
-            id: 0,
             direction,
             file_id: action.file_id.clone(),
             local_path: action.local_path.clone(),
@@ -854,15 +826,7 @@ impl SyncExecutor {
                 .unwrap_or("unknown")
                 .to_string(),
             total_size,
-            transferred: 0,
-            state: i32::from(TransferState::Pending),
-            error_message: None,
             created_at: chrono::Utc::now().timestamp_millis(),
-            finished_at: None,
-            server_id: None,
-            upload_id: None,
-            resume_offset: 0,
-            session_url: None,
             relative_path: action.relative_path.clone(),
             parent_file_id: action.parent_file_id.clone(),
             operation: Some(i32::from(operation)),
@@ -872,12 +836,7 @@ impl SyncExecutor {
                 .cloud_file
                 .as_ref()
                 .and_then(|file| file.edited_time.map(|time| time.timestamp_millis())),
-            attempt_count: 0,
-            verify_attempt_count: 0,
-            next_retry_at: None,
-            error_kind: None,
-            remote_result_file_id: None,
-            state_revision: 0,
+            ..TransferTask::fresh_intent()
         }
     }
 }

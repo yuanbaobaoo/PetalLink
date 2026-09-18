@@ -36,22 +36,12 @@ const MAGIC: &[u8; 4] = b"PTL1";
 /// ChaCha20-Poly1305 nonce 长度（12 字节）
 const NONCE_LEN: usize = 12;
 
-/// Token 存储 trait（对外接口稳定，调用方零改动）
-pub trait TokenStore: Send + Sync {
-    /// 读取并解密已持久化的 token；不存在时返回空值。
-    fn load(&self) -> AppResult<Option<TokenPair>>;
-    /// 加密并原子保存 token。
-    fn save(&self, token: &TokenPair) -> AppResult<()>;
-    /// 删除已持久化的 token。
-    fn clear(&self) -> AppResult<()>;
-}
-
 /// 加密文件存储：token.bin，机器码绑定的 ChaCha20-Poly1305 加密。
 pub struct EncryptedFileStore;
 
-impl TokenStore for EncryptedFileStore {
+impl EncryptedFileStore {
     /// 读取 token 文件；文件不可读或认证失败均按未登录处理，路径解析错误才向上传播。
-    fn load(&self) -> AppResult<Option<TokenPair>> {
+    pub fn load(&self) -> AppResult<Option<TokenPair>> {
         let path = file_path()?;
         if !path.exists() {
             return Ok(None);
@@ -77,7 +67,7 @@ impl TokenStore for EncryptedFileStore {
     }
 
     /// 加密 token 并通过临时文件替换完成原子写入。
-    fn save(&self, token: &TokenPair) -> AppResult<()> {
+    pub fn save(&self, token: &TokenPair) -> AppResult<()> {
         let path = file_path()?;
         if let Some(parent) = path.parent() {
             if !parent.exists() {
@@ -100,7 +90,7 @@ impl TokenStore for EncryptedFileStore {
     }
 
     /// 删除本机 token 文件；文件不存在视为成功。
-    fn clear(&self) -> AppResult<()> {
+    pub fn clear(&self) -> AppResult<()> {
         let path = file_path()?;
         // 不存在视为已清除（幂等）
         if !path.exists() {

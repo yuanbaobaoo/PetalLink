@@ -197,12 +197,7 @@ impl TransferOperations for NotCommittedReplayOperations {
     ) -> Result<TaskExecutionOutcome, TaskExecutionError> {
         self.execute_calls.fetch_add(1, Ordering::SeqCst);
         Err(TaskExecutionError::App(
-            AppError::drive_transport_with_submission(
-                DriveTransportKind::Decode,
-                true,
-                false,
-                Some("finalize response rejected"),
-            ),
+            AppError::drive_transport_with_submission(DriveTransportKind::Decode, true, false),
         ))
     }
 

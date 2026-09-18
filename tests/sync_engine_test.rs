@@ -247,16 +247,14 @@ fn apply_results_upload_preserves_task_runner_baseline_and_updates_cloud_cache()
     drop(connection);
 
     let cached = engine
-        .cloud_tree_lock()
-        .get("A/new.txt")
-        .cloned()
+        .cloud_file_at("A/new.txt")
         .expect("上传结果应写入 cloud_tree");
     assert_eq!(cached.id, cloud.id);
     assert_eq!(cached.name, cloud.name);
     assert_eq!(cached.size, cloud.size);
     assert_eq!(cached.edited_time, cloud.edited_time);
     assert_eq!(
-        engine.path_to_id_lock().get("A/new.txt").cloned(),
+        engine.cloud_path_to_id_get("A/new.txt"),
         Some("cloud-id-1".to_string())
     );
 }
@@ -324,11 +322,7 @@ fn apply_results_local_wins_conflict_uses_updated_cloud_version() {
     assert_eq!(size, updated_cloud.size);
     assert_eq!(edited_time, Some(9_999));
     assert_eq!(status, CONFLICT);
-    let cached = engine
-        .cloud_tree_lock()
-        .get("docs/report.txt")
-        .cloned()
-        .unwrap();
+    let cached = engine.cloud_file_at("docs/report.txt").unwrap();
     assert_eq!(cached.content_hash.as_deref(), Some("updated-cloud-hash"));
     assert_eq!(cached.edited_time, updated_cloud.edited_time);
 }
@@ -411,20 +405,17 @@ fn apply_results_same_folder_rename_rekeys_without_advancing_content_baseline() 
     );
     drop(connection);
 
-    assert!(!engine.cloud_tree_lock().contains_key("contracts/old.docx"));
+    assert!(engine.cloud_file_at("contracts/old.docx").is_none());
     assert_eq!(
         engine
-            .cloud_tree_lock()
-            .get("contracts/new.docx")
-            .map(|file| file.id.as_str()),
+            .cloud_file_at("contracts/new.docx")
+            .map(|file| file.id)
+            .as_deref(),
         Some("rename-file-id")
     );
-    assert!(!engine.path_to_id_lock().contains_key("contracts/old.docx"));
+    assert!(engine.cloud_path_to_id_get("contracts/old.docx").is_none());
     assert_eq!(
-        engine
-            .path_to_id_lock()
-            .get("contracts/new.docx")
-            .map(String::as_str),
+        engine.cloud_path_to_id_get("contracts/new.docx").as_deref(),
         Some("rename-file-id")
     );
 }
@@ -558,29 +549,35 @@ fn assert_directory_root_move_rekeys_nested_subtree(
     );
     drop(connection);
 
-    let cloud = engine.cloud_tree_lock();
-    assert!(!cloud.contains_key(old_root));
-    assert!(!cloud.contains_key(&old_nested));
-    assert!(!cloud.contains_key(&old_file));
+    assert!(engine.cloud_file_at(old_root).is_none());
+    assert!(engine.cloud_file_at(&old_nested).is_none());
+    assert!(engine.cloud_file_at(&old_file).is_none());
     assert_eq!(
-        cloud.get(new_root).map(|file| file.id.as_str()),
+        engine
+            .cloud_file_at(new_root)
+            .map(|file| file.id)
+            .as_deref(),
         Some("folder-root-id")
     );
     assert_eq!(
-        cloud.get(&new_nested).map(|file| file.id.as_str()),
+        engine
+            .cloud_file_at(&new_nested)
+            .map(|file| file.id)
+            .as_deref(),
         Some("folder-nested-id")
     );
     assert_eq!(
-        cloud.get(&new_file).map(|file| file.id.as_str()),
+        engine
+            .cloud_file_at(&new_file)
+            .map(|file| file.id)
+            .as_deref(),
         Some("nested-file-id")
     );
-    drop(cloud);
-    let path_to_id = engine.path_to_id_lock();
-    assert!(!path_to_id.contains_key(old_root));
-    assert!(!path_to_id.contains_key(&old_nested));
-    assert!(!path_to_id.contains_key(&old_file));
+    assert!(engine.cloud_path_to_id_get(old_root).is_none());
+    assert!(engine.cloud_path_to_id_get(&old_nested).is_none());
+    assert!(engine.cloud_path_to_id_get(&old_file).is_none());
     assert_eq!(
-        path_to_id.get(&new_file).map(String::as_str),
+        engine.cloud_path_to_id_get(&new_file).as_deref(),
         Some("nested-file-id")
     );
 }
@@ -639,8 +636,8 @@ fn test_apply_results_delete_from_cloud_clears_state() {
 
     engine.apply_results(&[action], &[result]).unwrap();
 
-    assert!(!engine.cloud_tree_lock().contains_key("old.txt"));
-    assert!(!engine.path_to_id_lock().contains_key("old.txt"));
+    assert!(engine.cloud_file_at("old.txt").is_none());
+    assert!(engine.cloud_path_to_id_get("old.txt").is_none());
     let row_count: i64 = db
         .lock()
         .query_row(

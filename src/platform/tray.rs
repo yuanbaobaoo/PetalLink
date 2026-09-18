@@ -23,7 +23,7 @@ use tauri::menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager, Wry};
 
-use crate::data::repository::{self, transfer_direction, transfer_state};
+use crate::data::repository::{self, transfer_direction};
 use crate::error::AppResult;
 
 /// 托盘唯一标识
@@ -169,7 +169,7 @@ fn build_one_transfer_item(
     app: &AppHandle<Wry>,
     task: &repository::TransferTask,
 ) -> Vec<MenuItem<Wry>> {
-    // 名字行：文件名（disabled 灰色展示），超长截断为最多 10 字符 + 省略号
+    // 名字行：文件名（disabled 灰色展示），超长截断为最多 MAX_NAME_CHARS 字符 + 省略号
     let display_name = truncate_name(&task.name, MAX_NAME_CHARS);
     let name_item = match MenuItem::with_id(
         app,
@@ -244,22 +244,7 @@ fn truncate_name(name: &str, max_chars: usize) -> String {
 /// 从全局 DB 查询进行中的传输任务（state IN PENDING/RUNNING，created_at 升序）。
 fn load_active_transfers() -> AppResult<Vec<repository::TransferTask>> {
     let conn = crate::commands::DB.lock();
-    let mut stmt = conn
-        .prepare("SELECT * FROM transfer_queue WHERE state IN (?1, ?2) ORDER BY created_at ASC")
-        .map_err(|e| crate::error::AppError::generic(format!("查询传输任务失败：{e}")))?;
-    let rows = stmt
-        .query_map(
-            rusqlite::params![transfer_state::PENDING, transfer_state::RUNNING],
-            repository::TransferTask::from_row,
-        )
-        .map_err(|e| crate::error::AppError::generic(format!("查询传输任务失败：{e}")))?;
-    let mut tasks = Vec::new();
-    for row in rows {
-        tasks.push(row.map_err(|error| {
-            crate::error::AppError::generic(format!("读取传输任务失败：{error}"))
-        })?);
-    }
-    Ok(tasks)
+    repository::list_active_transfers(&conn)
 }
 
 /// 重建托盘菜单（在传输变化时调用，刷新「正在传输」段）。

@@ -11,12 +11,22 @@ use rand::RngCore;
 use sha2::{Digest, Sha256};
 
 /// PKCE 对
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PkcePair {
     /// 原始随机串，换 token 时回传给华为（仅本次会话使用）
     pub code_verifier: String,
     /// code_verifier 的 S256 摘要 base64url（去 = 填充），授权请求携带
     pub code_challenge: String,
+}
+
+impl std::fmt::Debug for PkcePair {
+    /// Debug 同样隐藏 verifier：任何 `{:?}`/`?pkce` 日志都不得泄露授权凭据。
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PkcePair")
+            .field("code_verifier", &"<hidden>")
+            .field("code_challenge", &self.code_challenge)
+            .finish()
+    }
 }
 
 impl std::fmt::Display for PkcePair {

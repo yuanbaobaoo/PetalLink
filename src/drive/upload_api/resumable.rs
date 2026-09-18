@@ -75,8 +75,9 @@ impl UploadApi {
                     .await
                 {
                     Err(error) if error.drive_status() == Some(401) => {
-                        let refreshed = self.client.auth().refresher().refresh().await?;
-                        token = refreshed.access_token;
+                        let mut replayed = false;
+                        self.refresh_session_token_on_401(true, &mut token, &mut replayed)
+                            .await?;
                         self.init_resume_session(&file_name, parent_id, total_size, &token)
                             .await
                     }

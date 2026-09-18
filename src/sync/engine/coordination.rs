@@ -200,7 +200,7 @@ impl ActivityTracker {
             if state
                 .exclusive_paths
                 .iter()
-                .any(|leased| sync_paths_overlap(leased, path))
+                .any(|leased| crate::core::paths::paths_overlap(leased, path))
             {
                 return Err(AppError::generic("该路径正在执行破坏性操作，请稍后重试"));
             }
@@ -225,11 +225,11 @@ impl ActivityTracker {
         if state
             .active_paths
             .keys()
-            .any(|active| sync_paths_overlap(active, relative_path))
+            .any(|active| crate::core::paths::paths_overlap(active, relative_path))
             || state
                 .exclusive_paths
                 .iter()
-                .any(|leased| sync_paths_overlap(leased, relative_path))
+                .any(|leased| crate::core::paths::paths_overlap(leased, relative_path))
         {
             return Err(AppError::generic("该路径或其子树存在活动任务，请稍后重试"));
         }
@@ -268,17 +268,6 @@ pub(crate) struct ActivityGuard {
 enum ActivityKind {
     Shared(Option<String>),
     Exclusive(String),
-}
-
-/// 判断两个相对路径是否相同或存在祖先关系。
-fn sync_paths_overlap(left: &str, right: &str) -> bool {
-    left == right
-        || left
-            .strip_prefix(right)
-            .is_some_and(|suffix| suffix.starts_with('/'))
-        || right
-            .strip_prefix(left)
-            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 /// 在作用域结束时自动释放目录同步门禁。

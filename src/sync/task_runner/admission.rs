@@ -27,6 +27,8 @@ pub(super) enum RunningGateOutcome {
 }
 
 /// 判断持久状态是否会阻止同路径新意图。
+/// 与 `TransferState::occupies_path` 刻意不同：RestartRequired 的滞留行由
+/// 重试/清除流程处理，不阻塞新意图的准入判定。
 pub(super) fn is_path_blocking_state(state: TransferState) -> bool {
     matches!(
         state,
@@ -79,19 +81,6 @@ pub(super) fn has_persisted_remote_result(task: &TransferTask) -> bool {
     task.remote_result_file_id
         .as_deref()
         .is_some_and(|file_id| !file_id.trim().is_empty())
-}
-
-/// 将活动持久状态映射为调度去向。
-pub(super) fn active_task_disposition(state: TransferState) -> Option<TaskDisposition> {
-    match state {
-        TransferState::Pending => Some(TaskDisposition::Pending),
-        TransferState::Running => Some(TaskDisposition::Running),
-        TransferState::WaitingForNetwork => Some(TaskDisposition::WaitingForNetwork),
-        TransferState::BackingOff => Some(TaskDisposition::BackingOff),
-        TransferState::VerifyingRemote => Some(TaskDisposition::VerifyingRemote),
-        TransferState::RestartRequired => Some(TaskDisposition::RestartRequired),
-        TransferState::Completed | TransferState::Failed | TransferState::Canceled => None,
-    }
 }
 
 impl TaskRunner {

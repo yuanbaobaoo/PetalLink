@@ -1,0 +1,62 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test-linux:
+    name: cargo test / clippy (Linux)
+    runs-on: ubuntu-latest
+    env:
+      # build.rs 要求构建期凭据非空；CI 不访问真实 API，占位值即可。
+      HWCLOUD_CLIENT_ID: ci-placeholder-client-id
+      HWCLOUD_CLIENT_SECRET: ci-placeholder-client-secret
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            libfuse3-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            libwebkit2gtk-4.1-dev \
+            librsvg2-dev
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      # generate_context! 编译期嵌入 app/dist，cargo test 前必须先构建前端。
+      - name: Build frontend
+        run: |
+          npm ci --prefix app
+          npm run build --prefix app
+
+      # virtual_fs 等 cfg(linux) 模块只有在本 job 才会被编译和测试。
+      - name: cargo test
+        run: cargo test --all-targets
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: frontend tests
+        run: npm test --prefix app

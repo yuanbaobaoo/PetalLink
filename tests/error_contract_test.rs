@@ -53,7 +53,7 @@ fn test_serde_flat_structure() {
 /// 验证网络错误与 token 刷新错误可区分。
 #[test]
 fn test_serde_network_vs_refresh_distinct() {
-    let net = AppError::drive_network(Some("timeout"));
+    let net = AppError::drive_network();
     let refresh = AppError::token_refresh_failed(Some("invalid_grant"));
     let nv: serde_json::Value = serde_json::to_value(&net).unwrap();
     let rv: serde_json::Value = serde_json::to_value(&refresh).unwrap();
@@ -145,18 +145,10 @@ fn retry_after_parser_accepts_delta_seconds_and_http_date() {
 /// 验证写请求结构化元数据区分连接与超时。
 #[test]
 fn write_transport_metadata_distinguishes_connect_from_timeout() {
-    let connect = AppError::drive_transport(
-        DriveTransportKind::Connect,
-        RequestSemantics::Write,
-        false,
-        Some("connect failed"),
-    );
-    let timeout = AppError::drive_transport(
-        DriveTransportKind::Timeout,
-        RequestSemantics::Write,
-        true,
-        Some("timed out"),
-    );
+    let connect =
+        AppError::drive_transport(DriveTransportKind::Connect, RequestSemantics::Write, false);
+    let timeout =
+        AppError::drive_transport(DriveTransportKind::Timeout, RequestSemantics::Write, true);
 
     assert!(matches!(
         connect,
@@ -212,31 +204,22 @@ fn structured_status_matching_never_reads_display_message() {
 #[test]
 fn transient_classification_splits_network_from_structural_errors() {
     // 网络传输类与 token 未就绪：等待下一周期重试即可恢复。
-    assert!(AppError::drive_network(Some("offline")).is_transient());
-    assert!(AppError::drive_transport(
-        DriveTransportKind::Connect,
-        RequestSemantics::Read,
-        false,
-        None,
-    )
-    .is_transient());
-    assert!(AppError::drive_transport(
-        DriveTransportKind::Timeout,
-        RequestSemantics::Read,
-        false,
-        None,
-    )
-    .is_transient());
+    assert!(AppError::drive_network().is_transient());
+    assert!(
+        AppError::drive_transport(DriveTransportKind::Connect, RequestSemantics::Read, false,)
+            .is_transient()
+    );
+    assert!(
+        AppError::drive_transport(DriveTransportKind::Timeout, RequestSemantics::Read, false,)
+            .is_transient()
+    );
     assert!(AppError::token_refresh_failed(Some("invalid_grant")).is_transient());
 
     // 结构性错误：cursor/响应已不可信，必须回退全量刷新重建候选树。
     assert!(!AppError::drive_from_status(400, "{}").is_transient());
-    assert!(!AppError::drive_transport(
-        DriveTransportKind::Decode,
-        RequestSemantics::Read,
-        false,
-        None,
-    )
-    .is_transient());
+    assert!(
+        !AppError::drive_transport(DriveTransportKind::Decode, RequestSemantics::Read, false,)
+            .is_transient()
+    );
     assert!(!AppError::generic("changes 应用歧义").is_transient());
 }

@@ -189,38 +189,6 @@ impl DriveFile {
             thumbnail_link,
         })
     }
-
-    /// 序列化为华为 JSON（用于云端树缓存持久化）。
-    /// 对齐 dart `DriveFile.toJson`。
-    pub fn to_json(&self) -> Value {
-        let mut map = serde_json::Map::new();
-        map.insert("id".into(), Value::String(self.id.clone()));
-        map.insert("fileName".into(), Value::String(self.name.clone()));
-        // size 始终写出：0 字节文件与未知大小在缓存往返中必须可区分。
-        map.insert("size".into(), Value::Number(self.size.into()));
-        if let Some(pf) = &self.parent_folder {
-            map.insert(
-                "parentFolder".into(),
-                Value::Array(pf.iter().map(|s| Value::String(s.clone())).collect()),
-            );
-        }
-        if let Some(d) = &self.description {
-            map.insert("description".into(), Value::String(d.clone()));
-        }
-        if let Some(t) = self.created_time {
-            map.insert("createdTime".into(), Value::String(t.to_rfc3339()));
-        }
-        if let Some(t) = self.edited_time {
-            map.insert("editedTime".into(), Value::String(t.to_rfc3339()));
-        }
-        if let Some(m) = &self.mime_type {
-            map.insert("mimeType".into(), Value::String(m.clone()));
-        }
-        if let Some(h) = &self.content_hash {
-            map.insert("sha256".into(), Value::String(h.clone()));
-        }
-        Value::Object(map)
-    }
 }
 
 /// 解析 ISO8601 时间字符串。对齐 dart `parseTime`。
@@ -295,30 +263,4 @@ fn tolerant_parse_int(v: Option<&Value>) -> Option<i64> {
 pub struct FileListResult {
     pub files: Vec<DriveFile>,
     pub next_cursor: Option<String>,
-}
-
-impl FileListResult {
-    /// 是否还有下一页
-    pub fn has_next(&self) -> bool {
-        self.next_cursor
-            .as_deref()
-            .map(|s| !s.is_empty())
-            .unwrap_or(false)
-    }
-
-    /// 从华为 list 响应构造。
-    pub fn from_json(json: &Value) -> Self {
-        let files = json
-            .get("files")
-            .and_then(Value::as_array)
-            .map(|arr| arr.iter().filter_map(DriveFile::from_json).collect())
-            .unwrap_or_default();
-        let next_cursor = json
-            .get("nextCursor")
-            .or_else(|| json.get("cursor"))
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .map(String::from);
-        Self { files, next_cursor }
-    }
 }

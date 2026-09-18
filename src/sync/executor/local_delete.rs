@@ -9,15 +9,6 @@ use crate::sync::state::{ActionResult, SyncAction};
 
 use super::SyncExecutor;
 
-/// 将文件元数据的修改时间转为 epoch 毫秒。
-fn metadata_mtime_ms(metadata: &std::fs::Metadata) -> Option<i64> {
-    metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|duration| duration.as_millis() as i64)
-}
-
 /// 核验待删除内容仍与持久化同步基线一致。
 pub(crate) fn verify_local_delete_snapshot(
     path: &Path,
@@ -38,7 +29,7 @@ pub(crate) fn verify_local_delete_snapshot(
             .get(relative_path)
             .ok_or_else(|| AppError::generic(format!("目录不在同步基线中：{relative_path}")))?;
         if !baseline.is_folder
-            || baseline.local_mtime != metadata_mtime_ms(&metadata)
+            || baseline.local_mtime != crate::core::fs_meta::metadata_mtime_ms(&metadata)
             || baseline.local_size != Some(metadata.len() as i64)
         {
             return Err(AppError::generic(format!(
@@ -88,7 +79,7 @@ pub(crate) fn verify_local_delete_snapshot(
         .get(relative_path)
         .ok_or_else(|| AppError::generic(format!("文件不在同步基线中：{relative_path}")))?;
     if baseline.is_folder
-        || baseline.local_mtime != metadata_mtime_ms(&metadata)
+        || baseline.local_mtime != crate::core::fs_meta::metadata_mtime_ms(&metadata)
         || baseline.local_size != Some(metadata.len() as i64)
     {
         return Err(AppError::generic(format!(
@@ -104,14 +95,7 @@ impl SyncExecutor {
         // 缺少本地路径表示仅清理数据库，不需要文件系统副作用。
         let path = match &action.local_path {
             Some(p) => PathBuf::from(p),
-            None => {
-                return ActionResult {
-                    success: true,
-                    error_message: None,
-                    deferred: false,
-                    cloud_file: None,
-                }
-            } // DB 清理场景
+            None => return ActionResult::ok(None), // DB 清理场景
         };
         let rel = action.relative_path.as_deref().unwrap_or("?");
         let fail = |technical_message: String, deferred: bool| {
@@ -222,20 +206,10 @@ impl SyncExecutor {
 
         // 两次校验均通过后才进入不可逆删除；已不存在按幂等成功处理。
         let result = if !path_exists {
-            ActionResult {
-                success: true,
-                error_message: None,
-                deferred: false,
-                cloud_file: None,
-            }
+            ActionResult::ok(None)
         } else {
             match mount.delete_local_confirmed(&path).await {
-                Ok(()) => ActionResult {
-                    success: true,
-                    error_message: None,
-                    deferred: false,
-                    cloud_file: None,
-                },
+                Ok(()) => ActionResult::ok(None),
                 Err(error) => fail(error.to_string(), true),
             }
         };

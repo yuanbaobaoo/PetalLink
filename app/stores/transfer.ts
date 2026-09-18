@@ -24,32 +24,53 @@ export const useTransferStore = defineStore("transfer", () => {
     (t) => t.direction === TRANSFER_DIR.DOWNLOAD
       || t.direction === TRANSFER_DIR.DOWNLOAD_UPDATE,
   ));
+  // 各状态计数一次遍历聚合；下方同名 computed 仅做读取转发。
+  const stateCounts = computed(() => {
+    // 按传输状态分类的任务计数。
+    const counts = {
+      running: 0,
+      pending: 0,
+      waitingNetwork: 0,
+      backingOff: 0,
+      verifyingRemote: 0,
+      restartRequired: 0,
+      completed: 0,
+      failed: 0,
+      canceled: 0,
+    };
+    for (const task of tasks.value) {
+      switch (task.state) {
+        case TRANSFER_STATE.RUNNING: counts.running++; break;
+        case TRANSFER_STATE.PENDING: counts.pending++; break;
+        case TRANSFER_STATE.WAITING_FOR_NETWORK: counts.waitingNetwork++; break;
+        case TRANSFER_STATE.BACKING_OFF: counts.backingOff++; break;
+        case TRANSFER_STATE.VERIFYING_REMOTE: counts.verifyingRemote++; break;
+        case TRANSFER_STATE.RESTART_REQUIRED: counts.restartRequired++; break;
+        case TRANSFER_STATE.COMPLETED: counts.completed++; break;
+        case TRANSFER_STATE.FAILED: counts.failed++; break;
+        case TRANSFER_STATE.CANCELED: counts.canceled++; break;
+      }
+    }
+    return counts;
+  });
   // 进行中
-  const running = computed(() => tasks.value.filter((t) => t.state === TRANSFER_STATE.RUNNING).length);
+  const running = computed(() => stateCounts.value.running);
   // 等待调度
-  const pending = computed(() => tasks.value.filter((t) => t.state === TRANSFER_STATE.PENDING).length);
+  const pending = computed(() => stateCounts.value.pending);
   // 等待网络恢复
-  const waitingNetwork = computed(
-    () => tasks.value.filter((t) => t.state === TRANSFER_STATE.WAITING_FOR_NETWORK).length,
-  );
+  const waitingNetwork = computed(() => stateCounts.value.waitingNetwork);
   // 等待退避截止时间
-  const backingOff = computed(
-    () => tasks.value.filter((t) => t.state === TRANSFER_STATE.BACKING_OFF).length,
-  );
+  const backingOff = computed(() => stateCounts.value.backingOff);
   // 正在核验有歧义的远端结果
-  const verifyingRemote = computed(
-    () => tasks.value.filter((t) => t.state === TRANSFER_STATE.VERIFYING_REMOTE).length,
-  );
+  const verifyingRemote = computed(() => stateCounts.value.verifyingRemote);
   // 原任务不能原样重试，等待同步引擎重新规划
-  const restartRequired = computed(
-    () => tasks.value.filter((t) => t.state === TRANSFER_STATE.RESTART_REQUIRED).length,
-  );
+  const restartRequired = computed(() => stateCounts.value.restartRequired);
   // 已完成
-  const completed = computed(() => tasks.value.filter((t) => t.state === TRANSFER_STATE.COMPLETED).length);
+  const completed = computed(() => stateCounts.value.completed);
   // 永久失败历史
-  const failed = computed(() => tasks.value.filter((t) => t.state === TRANSFER_STATE.FAILED).length);
+  const failed = computed(() => stateCounts.value.failed);
   // 已取消
-  const canceled = computed(() => tasks.value.filter((t) => t.state === TRANSFER_STATE.CANCELED).length);
+  const canceled = computed(() => stateCounts.value.canceled);
   // 真正执行中的状态（传输或远端核验）
   const processing = computed(() => running.value + verifyingRemote.value);
   // 尚未执行完成、但当前在等待条件的状态
@@ -92,27 +113,32 @@ export const useTransferStore = defineStore("transfer", () => {
   }
 
   /**
+   * 执行后端命令后重载队列（队列靠 transfer_update 重载，主页靠 sync_state 更新）。
+   */
+  async function runAndReload(action: () => Promise<unknown>): Promise<void> {
+    await action();
+    await loadAll();
+  }
+
+  /**
    * 清除已完成
    */
   async function clearCompleted(): Promise<void> {
-    await commands.transferClearCompleted();
-    await loadAll();
+    await runAndReload(commands.transferClearCompleted);
   }
 
   /**
    * 清除失败项
    */
   async function clearFailed(): Promise<void> {
-    await commands.transferClearFailed();
-    await loadAll();
+    await runAndReload(commands.transferClearFailed);
   }
 
   /**
    * 清除已完成+失败
    */
   async function clearFinished(): Promise<void> {
-    await commands.transferClearFinished();
-    await loadAll();
+    await runAndReload(commands.transferClearFinished);
   }
 
   /**
@@ -121,8 +147,7 @@ export const useTransferStore = defineStore("transfer", () => {
    * @param taskId - 传输任务 ID
    */
   async function retry(taskId: number): Promise<void> {
-    await commands.transferRetry(taskId);
-    await loadAll();
+    await runAndReload(() => commands.transferRetry(taskId));
   }
 
   /**
@@ -131,8 +156,7 @@ export const useTransferStore = defineStore("transfer", () => {
    * @param taskId - 传输任务 ID
    */
   async function overwriteRemote(taskId: number): Promise<void> {
-    await commands.transferOverwriteRemote(taskId);
-    await loadAll();
+    await runAndReload(() => commands.transferOverwriteRemote(taskId));
   }
 
   /**
@@ -141,8 +165,7 @@ export const useTransferStore = defineStore("transfer", () => {
    * @param taskId - 传输任务 ID
    */
   async function keepBoth(taskId: number): Promise<void> {
-    await commands.transferKeepBoth(taskId);
-    await loadAll();
+    await runAndReload(() => commands.transferKeepBoth(taskId));
   }
 
   /**
@@ -151,8 +174,7 @@ export const useTransferStore = defineStore("transfer", () => {
    * @param taskId - 传输任务 ID
    */
   async function cancel(taskId: number): Promise<void> {
-    await commands.transferCancel(taskId);
-    await loadAll();
+    await runAndReload(() => commands.transferCancel(taskId));
   }
 
   return {

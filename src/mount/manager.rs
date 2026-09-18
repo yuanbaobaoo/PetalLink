@@ -587,11 +587,7 @@ fn restore_free_up_staging(
 ) -> AppResult<()> {
     let metadata = std::fs::metadata(staging_path)
         .map_err(|error| AppError::generic(format!("读取待恢复原文件失败：{error}")))?;
-    let local_mtime = metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|duration| duration.as_millis() as i64);
+    let local_mtime = crate::core::fs_meta::metadata_mtime_ms(&metadata);
     crate::sync::path_recovery::rename_no_replace(staging_path, target)
         .map_err(|error| AppError::generic(format!("恢复释放空间原文件失败：{error}")))?;
     let changed = match conn.execute(
@@ -806,12 +802,7 @@ fn scan_recursive(
             .to_string_lossy()
             .to_string();
         let meta = entry.metadata()?;
-        let mtime = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
+        let mtime = crate::core::fs_meta::metadata_mtime_ms(&meta).unwrap_or(0);
 
         if file_type.is_dir() {
             out.push(LocalFileEntry {

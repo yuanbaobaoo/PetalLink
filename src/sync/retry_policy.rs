@@ -199,10 +199,17 @@ fn budget_exhausted(context: RecoveryContext) -> bool {
     context.attempt_count >= context.max_attempts
 }
 
+/// 有上限的指数退避秒数：1, 2, 4, 8, ... 直到 cap（指数溢出按最大值处理）。
+pub(crate) fn capped_backoff_secs(exponent: u32, cap_secs: u64) -> u64 {
+    1_u64
+        .checked_shl(exponent.min(63))
+        .unwrap_or(u64::MAX)
+        .min(cap_secs)
+}
+
 /// 计算包含抖动且不超过上限的下次重试时间。
 fn exponential_backoff_at(context: RecoveryContext) -> i64 {
-    let exponent = context.attempt_count.min(63);
-    let seconds = 1_u64.checked_shl(exponent).unwrap_or(u64::MAX).min(300);
+    let seconds = capped_backoff_secs(context.attempt_count, 300);
     let delay_ms = seconds
         .saturating_mul(1_000)
         .saturating_add(context.jitter_ms)

@@ -6,14 +6,14 @@ import type { UserInfo } from "./generated";
 
 // 匿名账号的显示名称
 const ANONYMOUS_LABEL = "匿名账号";
+// 空白身份字段不参与展示（trim 后为空视为缺失）。
+const ne = (s?: string | null) => s?.trim() || null;
 
 /**
  * 用户主要展示名（对齐后端 primary_label 逻辑）
  */
 export function primaryLabel(u?: UserInfo | null): string | null {
   if (!u) return null;
-  // 空白身份字段不参与展示名回退。
-  const ne = (s?: string | null) => s?.trim() || null;
   return (
     ne(u.display_name) ||
     ne(u.mobile) ||
@@ -32,8 +32,6 @@ export function secondaryLabel(u?: UserInfo | null): string | null {
   if (!u) return null;
   // 主展示名用于排除重复副标题。
   const pri = primaryLabel(u);
-  // 空白身份字段不参与副标题选择。
-  const ne = (s?: string | null) => s?.trim() || null;
   // 邮箱优先作为副标题。
   const email = ne(u.email);
   if (email && email !== pri) return email;

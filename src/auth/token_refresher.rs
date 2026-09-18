@@ -7,49 +7,35 @@
 
 use std::future::Future;
 use std::sync::Arc;
-use std::time::Duration;
 
 use parking_lot::Mutex;
 use serde_json::Value;
 use tokio::sync::Notify;
 
 use crate::auth::models::{now_ms, TokenPair};
-use crate::auth::token_store::TokenStore;
+use crate::auth::token_store::global_store;
 use crate::constants;
 use crate::error::{AppError, AppResult};
 
 /// 将刷新请求的传输阶段标志映射为稳定错误类别。
+/// 底层细节落日志（错误 message 对用户保持稳定文案）。
 fn classify_refresh_transport_flags(
     is_timeout: bool,
     is_connect: bool,
     is_body: bool,
     cause: &str,
 ) -> AppError {
-    if is_connect {
-        return AppError::drive_transport(
-            crate::error::DriveTransportKind::Connect,
-            crate::error::RequestSemantics::Read,
-            false,
-            Some(cause),
-        );
-    }
-    if is_timeout {
-        return AppError::drive_transport(
-            crate::error::DriveTransportKind::Timeout,
-            crate::error::RequestSemantics::Read,
-            false,
-            Some(cause),
-        );
-    }
-    if is_body {
-        return AppError::drive_transport(
-            crate::error::DriveTransportKind::ResponseBody,
-            crate::error::RequestSemantics::Read,
-            false,
-            Some(cause),
-        );
-    }
-    AppError::token_refresh_failed(Some(cause))
+    let kind = if is_connect {
+        crate::error::DriveTransportKind::Connect
+    } else if is_timeout {
+        crate::error::DriveTransportKind::Timeout
+    } else if is_body {
+        crate::error::DriveTransportKind::ResponseBody
+    } else {
+        return AppError::token_refresh_failed(Some(cause));
+    };
+    tracing::warn!(?kind, cause, "token 刷新请求传输层失败");
+    AppError::drive_transport(kind, crate::error::RequestSemantics::Read, false)
 }
 
 /// 保存当前共享刷新任务，确保并发请求只执行一次刷新。
@@ -168,7 +154,6 @@ impl RefreshSingleflight {
 ///
 /// 并发去重：刷新期间所有并发调用共享同一次成功或失败结果。
 pub struct TokenRefresher {
-    token_store: Arc<dyn TokenStore>,
     http: reqwest::Client,
     /// 同一时刻的并发刷新共享同一个完成结果（成功或失败）。
     refresh_flight: RefreshSingleflight,
@@ -176,16 +161,17 @@ pub struct TokenRefresher {
     current: Mutex<Option<TokenPair>>,
 }
 
+impl Default for TokenRefresher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TokenRefresher {
-    /// 使用指定 token store 构造 refresher。
-    pub fn new(token_store: Arc<dyn TokenStore>) -> Self {
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .expect("构建 reqwest client 失败");
+    /// 构造 refresher（token 持久化走全局加密存储）。
+    pub fn new() -> Self {
         Self {
-            token_store,
-            http,
+            http: super::http_client(),
             refresh_flight: RefreshSingleflight::default(),
             current: Mutex::new(None),
         }
@@ -206,7 +192,7 @@ impl TokenRefresher {
         if let Some(t) = self.current.lock().clone() {
             return Ok(Some(t));
         }
-        self.token_store.load()
+        global_store().load()
     }
 
     /// 刷新 token 并持久化。返回新 token。
@@ -309,7 +295,7 @@ impl TokenRefresher {
             scope,
         };
 
-        self.token_store.save(&new_token)?;
+        global_store().save(&new_token)?;
         *self.current.lock() = Some(new_token.clone());
         tracing::info!("token 刷新成功");
         let _ = status; // 状态码已隐含在 data 解析中

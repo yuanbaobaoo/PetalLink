@@ -7,6 +7,7 @@ import MateIcon from "./MateIcon.vue";
  */
 type BannerVariant = "info" | "success" | "warning" | "error";
 
+// 组件输入参数类型。
 interface Props {
   variant?: BannerVariant;
   /**

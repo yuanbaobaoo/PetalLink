@@ -1,9 +1,10 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { commands } from "@/api/generated";
+import * as configApi from "@/api/config";
 import type { AppConfig } from "@/api/config";
 import { useSyncStore } from "@/stores/sync";
 import { useFileBrowserStore } from "@/stores/fileBrowser";
-import { isEmptyDir } from "@/utils/fs";
+import { isCompletelyEmptyDir, isEmptyDir } from "@/utils/fs";
 
 // 原生目录选择器标题。
 const DIRECTORY_PICKER_TITLE = "选择同步目录";
@@ -98,4 +99,46 @@ export async function selectAndConfigureSyncDirectory(
     refreshSyncState: sync.init,
     refreshBrowser: browser.loadRoot,
   });
+}
+
+/**
+ * Linux 云盘目录选择结果：取消 / 非空（调用方自定提示文案）/ 已选定并提交。
+ */
+export type LinuxDriveSelection =
+  | { status: "cancelled" }
+  | { status: "not-empty" }
+  | { status: "selected"; path: string; config: AppConfig };
+
+/**
+ * Linux 云盘目录配置的唯一生产入口（设置页与首次引导共用）：
+ * 选择完全空的 FUSE 可见目录、提交配置并收敛全局状态。
+ * 用户可见目录不覆盖后端管理的 backing。
+ *
+ * @param config - 调用方当前完整配置快照
+ */
+export async function selectLinuxDriveDirectory(
+  config: AppConfig,
+): Promise<LinuxDriveSelection> {
+  const sync = useSyncStore();
+  const browser = useFileBrowserStore();
+
+  // 用户在系统目录选择器中选中的路径。
+  const selected = await open({
+    directory: true,
+    multiple: false,
+    title: "选择云盘目录",
+  });
+  if (!selected || typeof selected !== "string") return { status: "cancelled" };
+
+  // 目录是否为完全空的挂载候选；无法读取时按非空处理，避免挂载覆盖未知内容。
+  const isEmpty = await isCompletelyEmptyDir(selected).catch(() => false);
+  if (!isEmpty) return { status: "not-empty" };
+
+  // 合并用户可见目录后的完整待提交配置。
+  const nextConfig = configApi.withSelectedDriveDirectory(config, selected, true);
+  await commands.configSave(nextConfig);
+  sync.applyMountConfiguration(selected);
+  await sync.init();
+  await browser.loadRoot();
+  return { status: "selected", path: selected, config: nextConfig };
 }

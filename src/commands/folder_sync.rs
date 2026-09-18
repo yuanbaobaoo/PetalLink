@@ -237,7 +237,6 @@ async fn sync_folder_recursive_impl(
             .ok()
             .is_some_and(|metadata| metadata.is_file() && metadata.len() > 0);
         let task = repository::TransferTask {
-            id: 0,
             direction: if is_update {
                 repository::transfer_direction::DOWNLOAD_UPDATE
             } else {
@@ -247,15 +246,7 @@ async fn sync_folder_recursive_impl(
             local_path: Some(dest.to_string_lossy().into_owned()),
             name: f.name.clone(),
             total_size: f.size,
-            transferred: 0,
-            state: i32::from(crate::sync::transfer_state::TransferState::Pending),
-            error_message: None,
             created_at: chrono::Utc::now().timestamp_millis(),
-            finished_at: None,
-            server_id: None,
-            upload_id: None,
-            resume_offset: 0,
-            session_url: None,
             relative_path: Some(full_rel.clone()),
             parent_file_id: f
                 .parent_folder
@@ -269,12 +260,7 @@ async fn sync_folder_recursive_impl(
             source_mtime: None,
             source_size: None,
             expected_cloud_edited_time: f.edited_time.map(|time| time.timestamp_millis()),
-            attempt_count: 0,
-            verify_attempt_count: 0,
-            next_retry_at: None,
-            error_kind: None,
-            remote_result_file_id: None,
-            state_revision: 0,
+            ..repository::TransferTask::fresh_intent()
         };
         match task_runner.enqueue_and_run(task).await {
             Ok(result)
@@ -330,25 +316,14 @@ async fn sync_folder_recursive_impl(
         let source_mtime = local_path
             .metadata()
             .ok()
-            .and_then(|metadata| metadata.modified().ok())
-            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|duration| duration.as_millis() as i64);
+            .and_then(|metadata| crate::core::fs_meta::metadata_mtime_ms(&metadata));
         let task = repository::TransferTask {
-            id: 0,
             direction: repository::transfer_direction::UPLOAD,
             file_id: None,
             local_path: Some(local_path.to_string_lossy().into_owned()),
             name: subrel.rsplit('/').next().unwrap_or(subrel).to_string(),
             total_size: file_size,
-            transferred: 0,
-            state: i32::from(crate::sync::transfer_state::TransferState::Pending),
-            error_message: None,
             created_at: chrono::Utc::now().timestamp_millis(),
-            finished_at: None,
-            server_id: None,
-            upload_id: None,
-            resume_offset: 0,
-            session_url: None,
             relative_path: Some(full_rel.clone()),
             parent_file_id: Some(parent_id.to_string()),
             operation: Some(i32::from(
@@ -357,12 +332,7 @@ async fn sync_folder_recursive_impl(
             source_mtime,
             source_size: Some(file_size),
             expected_cloud_edited_time: None,
-            attempt_count: 0,
-            verify_attempt_count: 0,
-            next_retry_at: None,
-            error_kind: None,
-            remote_result_file_id: None,
-            state_revision: 0,
+            ..repository::TransferTask::fresh_intent()
         };
         match task_runner.enqueue_and_run(task).await {
             Ok(result)
@@ -370,8 +340,7 @@ async fn sync_folder_recursive_impl(
                     == crate::sync::task_runner::TaskDisposition::Completed =>
             {
                 if let Some(uploaded) = result.outcome.cloud_file {
-                    eng.cloud_tree_insert(full_rel.clone(), uploaded.clone());
-                    eng.path_to_id_insert(full_rel.clone(), uploaded.id);
+                    eng.cloud_entry_insert(full_rel.clone(), uploaded.clone());
                 }
             }
             Ok(result) => tracing::warn!(

@@ -22,7 +22,6 @@ export { default as MateSearchField } from "./MateSearchField.vue";
 // ===== 选择 =====
 export { default as MateSwitch } from "./MateSwitch.vue";
 export { default as MateCheckbox } from "./MateCheckbox.vue";
-export { default as MateRadio } from "./MateRadio.vue";
 
 // ===== 进度 =====
 export { default as MateLinearProgress } from "./MateLinearProgress.vue";

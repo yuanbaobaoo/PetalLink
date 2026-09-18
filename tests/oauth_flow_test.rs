@@ -169,6 +169,14 @@ fn test_display_hides_verifier() {
     assert!(!s.contains(&pkce.code_verifier));
 }
 
+/// 验证 Debug 输出同样不泄露 verifier（日志中的 {:?} 走的是 Debug）。
+#[test]
+fn test_debug_hides_verifier() {
+    let pkce = generate_pkce();
+    let s = format!("{pkce:?}");
+    assert!(!s.contains(&pkce.code_verifier));
+}
+
 /// 验证停止句柄会结束等待中的回调任务。
 #[tokio::test]
 async fn test_stop_handle_closes_wait_for_callback() {
@@ -183,6 +191,81 @@ async fn test_stop_handle_closes_wait_for_callback() {
         result.is_err(),
         "stop 后 wait_for_callback 不应继续等到超时"
     );
+}
+
+/// 验证无关请求（favicon/预检）不会消耗唯一的回调机会。
+#[tokio::test]
+async fn test_non_callback_request_does_not_consume_callback() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let server = OauthServer::start(0).await.expect("启动 OAuth 测试 server");
+    let port = server.port();
+    let waiter = tokio::spawn(server.wait_for_callback());
+
+    // 浏览器常见的 favicon 预请求应先得到 404，且不关闭监听。
+    let mut favicon = tokio::net::TcpStream::connect((constants::LOOPBACK_HOST, port))
+        .await
+        .expect("连接 favicon 请求");
+    favicon
+        .write_all(b"GET /favicon.ico HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+        .await
+        .expect("发送 favicon 请求");
+    let mut resp = Vec::new();
+    favicon
+        .read_to_end(&mut resp)
+        .await
+        .expect("读取 favicon 响应");
+    assert!(String::from_utf8_lossy(&resp).starts_with("HTTP/1.1 404"));
+
+    // 真正的授权回调仍应被接收。
+    let mut callback = tokio::net::TcpStream::connect((constants::LOOPBACK_HOST, port))
+        .await
+        .expect("连接回调请求");
+    callback
+        .write_all(b"GET /oauth/callback?code=abc&state=xyz HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+        .await
+        .expect("发送回调请求");
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
+        .await
+        .expect("回调等待超时")
+        .expect("等待任务应结束")
+        .expect("应拿到回调结果");
+    assert_eq!(result.code.as_deref(), Some("abc"));
+    assert_eq!(result.state.as_deref(), Some("xyz"));
+}
+
+/// 验证回调请求被 TCP 分包时仍能完整解析 query。
+#[tokio::test]
+async fn test_callback_request_split_across_packets() {
+    use tokio::io::AsyncWriteExt;
+
+    let server = OauthServer::start(0).await.expect("启动 OAuth 测试 server");
+    let port = server.port();
+    let waiter = tokio::spawn(server.wait_for_callback());
+
+    let mut stream = tokio::net::TcpStream::connect((constants::LOOPBACK_HOST, port))
+        .await
+        .expect("连接回调请求");
+    // 模拟分包：请求行被拆到两个 TCP 段里。
+    stream
+        .write_all(b"GET /oauth/callback?code=sp")
+        .await
+        .expect("发送第一段");
+    stream.flush().await.expect("flush 第一段");
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    stream
+        .write_all(b"lit&state=pq HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+        .await
+        .expect("发送第二段");
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
+        .await
+        .expect("回调等待超时")
+        .expect("等待任务应结束")
+        .expect("应拿到回调结果");
+    assert_eq!(result.code.as_deref(), Some("split"));
+    assert_eq!(result.state.as_deref(), Some("pq"));
 }
 
 /// 验证授权 scope 中的斜杠不被编码。

@@ -26,7 +26,7 @@ const SKIP_PATTERNS = [".DS_Store", ".tmp", "~$*", ".Trash"];
 export async function isEmptyDir(dir: string): Promise<boolean> {
   // 目录中的全部条目。
   const entries = await readDir(dir);
-  // 当前内容是否可见或可参与后续处理。
+  // 排除隐藏文件与忽略模式后的可见条目。
   const visible = entries.filter((e) => {
     // 当前目录项名称。
     const name = e.name ?? "";

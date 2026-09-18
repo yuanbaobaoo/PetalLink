@@ -13,6 +13,8 @@
 pub mod activation;
 /// macOS 登录项注册。
 pub mod launch_at_login;
+/// Linux 挂载能力探测与挂载身份管理（非 Linux 由 stub 保持行为）。
+pub mod linux_mount;
 /// 使用系统默认应用打开 URL 或本地路径。
 pub mod opener;
 /// 真实退出时的同步收束。

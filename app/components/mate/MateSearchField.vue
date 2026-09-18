@@ -26,7 +26,12 @@ const emit = defineEmits<{
  *
  * @param v - 输入值
  */
-function onInput(v: string): void { emit("update:modelValue", v); }function onEnter(): void { emit("submit", ""); }
+function onInput(v: string): void {
+  emit("update:modelValue", v);
+}
+function onEnter(): void {
+  emit("submit", "");
+}
 </script>
 
 <template>

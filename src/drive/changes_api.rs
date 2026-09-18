@@ -120,9 +120,6 @@ pub struct ChangesPage {
     pub new_start_cursor: Option<String>,
 }
 
-/// 兼容旧调用名称；语义已严格升级为 [`ChangesPage`]。
-pub type ChangeListResult = ChangesPage;
-
 impl ChangesPage {
     /// 严格解析单页变更及两个用途不同的 cursor。
     pub fn from_json(json: &Value) -> AppResult<Self> {
@@ -172,14 +169,6 @@ impl ChangesApi {
             client,
             max_pages: DEFAULT_MAX_CHANGE_PAGES,
         }
-    }
-
-    /// 使用受控页数上限构造 paginator。生产默认值与测试/诊断值相互独立。
-    pub fn with_page_limit(client: Arc<DriveClient>, max_pages: usize) -> AppResult<Self> {
-        if max_pages == 0 {
-            return Err(AppError::generic("Changes 分页上限必须大于 0"));
-        }
-        Ok(Self { client, max_pages })
     }
 
     /// 获取初始游标。官方要求显式请求 `fields=*`。

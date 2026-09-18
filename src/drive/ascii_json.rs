@@ -15,9 +15,11 @@
 /// 所有 > 0x7F 的 Unicode 码点转义为 `\uXXXX`。
 ///
 /// 对齐 dart `asciiJsonEncode(Object? obj)`。
-pub fn ascii_json_encode<T: serde::Serialize>(obj: &T) -> String {
-    let raw = serde_json::to_string(obj).unwrap_or_default();
-    escape_non_ascii(&raw)
+/// 序列化失败必须显式报错——调用点都在写路径，静默成空串会让远端 400 误导排查。
+pub fn ascii_json_encode<T: serde::Serialize>(obj: &T) -> crate::error::AppResult<String> {
+    let raw = serde_json::to_string(obj)
+        .map_err(|e| crate::error::AppError::generic(format!("序列化 JSON 请求体失败：{e}")))?;
+    Ok(escape_non_ascii(&raw))
 }
 
 /// 把已序列化的 JSON 字符串中的非 ASCII 字符转义为 \uXXXX。

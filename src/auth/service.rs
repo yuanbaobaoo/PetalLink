@@ -8,7 +8,6 @@
 //!   （authorization_code 含 `+ / =`，form-urlencoded 会把 `+` 当空格 → invalid code 1101）
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 
@@ -57,7 +56,7 @@ use crate::auth::models::TokenPair;
 use crate::auth::oauth_server::{OauthCallbackResult, OauthServer, OauthServerStopHandle};
 use crate::auth::pkce::{generate_pkce, generate_state};
 use crate::auth::token_refresher::TokenRefresher;
-use crate::auth::token_store::{global_store, TokenStore};
+use crate::auth::token_store::global_store;
 use crate::constants;
 use crate::error::{AppError, AppResult};
 
@@ -65,7 +64,6 @@ use crate::error::{AppError, AppResult};
 ///
 /// 对齐 dart `AuthService`。
 pub struct AuthService {
-    token_store: Arc<dyn TokenStore>,
     refresher: Arc<TokenRefresher>,
     /// 当前授权流程的 PKCE verifier（仅在 authorize() 期间有效）
     current_verifier: Mutex<Option<String>>,
@@ -97,25 +95,19 @@ fn restore_refresh_failure_action(error: &AppError) -> RestoreRefreshFailureActi
 impl AuthService {
     /// 使用全局 token store 构造单例。
     pub fn new() -> Self {
-        let token_store: Arc<dyn TokenStore> = Arc::new(GlobalStoreWrapper);
-        let refresher = Arc::new(TokenRefresher::new(token_store.clone()));
         Self {
-            token_store,
-            refresher,
+            refresher: Arc::new(TokenRefresher::new()),
             current_verifier: Mutex::new(None),
             cancelled: Mutex::new(false),
             current_oauth_stop: Mutex::new(None),
-            http: reqwest::Client::builder()
-                .timeout(Duration::from_secs(30))
-                .build()
-                .expect("构建 reqwest client 失败"),
+            http: super::http_client(),
         }
     }
 
     /// 启动时恢复登录态：加载 token，若将过期则刷新。
     /// 对齐 dart `restore()`。返回是否已登录。
     pub async fn restore(&self) -> AppResult<bool> {
-        match self.token_store.load()? {
+        match global_store().load()? {
             Some(token) => {
                 self.refresher.set_current(token.clone());
                 if token.will_expire_within(constants::TOKEN_EXPIRY_BUFFER_SECS) {
@@ -193,7 +185,7 @@ impl AuthService {
             .await?;
 
         // 7. 持久化
-        self.token_store.save(&token)?;
+        global_store().save(&token)?;
         self.refresher.set_current(token.clone());
         tracing::info!("OAuth 授权流程完成 ✓");
         Ok(token)
@@ -210,7 +202,7 @@ impl AuthService {
 
     /// 退出登录：清空存储 + 内存（F-AUTH-05）。对齐 dart `logout()`。
     pub async fn logout(&self) -> AppResult<()> {
-        self.token_store.clear()?;
+        global_store().clear()?;
         self.refresher.clear_current();
         tracing::info!("已退出登录");
         Ok(())
@@ -383,23 +375,4 @@ pub fn build_authorize_url(
 /// 使用桌面环境的默认浏览器打开授权 URL。
 fn open_browser(url: &str) -> bool {
     crate::platform::opener::open(url).is_ok()
-}
-
-/// 包装全局加密 token 存储为 Arc<dyn TokenStore>。
-/// global_store 返回 &'static，但 trait object 需要 Arc；此处每次调用转发。
-struct GlobalStoreWrapper;
-
-impl TokenStore for GlobalStoreWrapper {
-    /// 从全局加密 store 读取 token。
-    fn load(&self) -> AppResult<Option<TokenPair>> {
-        global_store().load()
-    }
-    /// 将 token 写入全局加密 store。
-    fn save(&self, token: &TokenPair) -> AppResult<()> {
-        global_store().save(token)
-    }
-    /// 清除全局加密 store 中的 token。
-    fn clear(&self) -> AppResult<()> {
-        global_store().clear()
-    }
 }

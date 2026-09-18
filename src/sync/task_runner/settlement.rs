@@ -58,7 +58,7 @@ impl TaskRunner {
             RecoveryDecision::VerifyRemote => (
                 TransferState::VerifyingRemote,
                 Some(TaskDisposition::VerifyingRemote),
-                Some((self.now_ms)().saturating_add(3_000)),
+                Some((self.now_ms)().saturating_add(super::contracts::VERIFY_FIRST_RECHECK_MS)),
             ),
             // DriveClient 负责唯一一次带认证重放；到达此边界的首次 401 不由 runner 盲目重放。
             RecoveryDecision::RefreshAuth | RecoveryDecision::Fail => {
@@ -181,7 +181,9 @@ impl TaskRunner {
                 error_kind: ColumnPatch::Set(kind),
                 error_message: ColumnPatch::Set(user_message.to_string()),
                 next_retry_at: if output.disposition == TaskDisposition::VerifyingRemote {
-                    ColumnPatch::Set((self.now_ms)().saturating_add(3_000))
+                    ColumnPatch::Set(
+                        (self.now_ms)().saturating_add(super::contracts::VERIFY_FIRST_RECHECK_MS),
+                    )
                 } else {
                     ColumnPatch::Clear
                 },

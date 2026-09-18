@@ -95,17 +95,11 @@ impl TaskRunner {
                 if !metadata.is_file() {
                     return Err(PreflightFailure::validation("本地上传源不是普通文件"));
                 }
-                let actual_mtime = metadata
-                    .modified()
-                    .ok()
-                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|duration| duration.as_millis() as i64)
-                    .ok_or_else(|| PreflightFailure::validation("无法读取本地源修改时间"))?;
-                let actual_size = metadata.len() as i64;
-                if task.source_mtime != Some(actual_mtime)
-                    || task.source_size != Some(actual_size)
-                    || task.total_size != actual_size
-                {
+                // mtime 不可读说明源处于异常状态，按静态校验失败而非任务变化处理。
+                if crate::core::fs_meta::metadata_mtime_ms(&metadata).is_none() {
+                    return Err(PreflightFailure::validation("无法读取本地源修改时间"));
+                }
+                if !task.matches_source_metadata(&metadata) {
                     return Err(PreflightFailure::local_changed(
                         "本地上传源已变化，需要重新规划",
                     ));

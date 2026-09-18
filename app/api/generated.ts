@@ -175,8 +175,8 @@ export const TRANSFER_OPERATION = {"CREATE":0,"CREATE_FOLDER":7,"DELETE":4,"DOWN
 export const TRANSFER_STATE = {"BACKING_OFF":3,"CANCELED":8,"COMPLETED":6,"FAILED":7,"PENDING":0,"RESTART_REQUIRED":5,"RUNNING":1,"VERIFYING_REMOTE":4,"WAITING_FOR_NETWORK":2} as const;
 
 // 类型
-// 应用配置（不可变值对象，修改通过 [`AppConfig::with`] 链式构造）。
-// 默认值对齐 dart：concurrency=6, pollIntervalSec=10, debounceSec=3。
+// 应用配置。
+// 默认值：concurrency=6, pollIntervalSec=60（0=关闭自动刷新）, debounceSec=3。
 export type AppConfig = {
 	// OAuth 回调 URI（必须与 AGC 后台一致）
 	oauth_redirect_uri?: string,

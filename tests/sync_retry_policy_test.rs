@@ -44,24 +44,14 @@ fn policy_consumes_and_produces_persistent_transfer_enums() {
 fn classifies_immediate_recovery_and_permanent_failures() {
     let cases = [
         (
-            AppError::drive_transport(
-                DriveTransportKind::Connect,
-                RequestSemantics::Write,
-                false,
-                Some("connect"),
-            ),
+            AppError::drive_transport(DriveTransportKind::Connect, RequestSemantics::Write, false),
             context(TransferOperation::Create),
             TransferErrorKind::Network,
             RecoveryDecision::WaitForNetwork,
             false,
         ),
         (
-            AppError::drive_transport(
-                DriveTransportKind::Timeout,
-                RequestSemantics::Read,
-                false,
-                Some("timeout"),
-            ),
+            AppError::drive_transport(DriveTransportKind::Timeout, RequestSemantics::Read, false),
             context(TransferOperation::Download),
             TransferErrorKind::Timeout,
             RecoveryDecision::WaitForNetwork,
@@ -161,12 +151,8 @@ fn token_errors_are_permanent_auth_failures() {
 /// 验证不确定写超时要求远端核验，且消耗重试预算（防止核验-重放环路绕过预算上限）。
 #[test]
 fn ambiguous_write_timeout_requires_remote_verification() {
-    let error = AppError::drive_transport(
-        DriveTransportKind::Timeout,
-        RequestSemantics::Write,
-        false,
-        Some("timeout after submit"),
-    );
+    let error =
+        AppError::drive_transport(DriveTransportKind::Timeout, RequestSemantics::Write, false);
 
     assert_eq!(
         classify_transfer_error(&error, context(TransferOperation::Update)),
@@ -181,12 +167,8 @@ fn ambiguous_write_timeout_requires_remote_verification() {
 /// 验证预算耗尽的不确定写直接终态失败，不再转核验（核验-重放环路已由预算兜底）。
 #[test]
 fn budget_exhausted_ambiguous_write_fails_instead_of_verifying() {
-    let error = AppError::drive_transport(
-        DriveTransportKind::Timeout,
-        RequestSemantics::Write,
-        false,
-        Some("timeout after submit"),
-    );
+    let error =
+        AppError::drive_transport(DriveTransportKind::Timeout, RequestSemantics::Write, false);
     let mut exhausted = context(TransferOperation::Update);
     exhausted.attempt_count = exhausted.max_attempts;
 
@@ -203,12 +185,8 @@ fn budget_exhausted_ambiguous_write_fails_instead_of_verifying() {
 /// 验证已提交的旧式网络写错误要求远端核验，且消耗重试预算。
 #[test]
 fn submitted_legacy_network_write_requires_remote_verification() {
-    let error = AppError::drive_transport(
-        DriveTransportKind::Network,
-        RequestSemantics::Write,
-        false,
-        Some("connection lost after submit"),
-    );
+    let error =
+        AppError::drive_transport(DriveTransportKind::Network, RequestSemantics::Write, false);
 
     assert_eq!(
         classify_transfer_error(&error, context(TransferOperation::Update)),
@@ -223,12 +201,8 @@ fn submitted_legacy_network_write_requires_remote_verification() {
 /// 验证明确未提交的写超时等待网络恢复。
 #[test]
 fn write_timeout_known_pre_submit_waits_for_network() {
-    let error = AppError::drive_transport_with_submission(
-        DriveTransportKind::Timeout,
-        false,
-        false,
-        Some("timeout before submit"),
-    );
+    let error =
+        AppError::drive_transport_with_submission(DriveTransportKind::Timeout, false, false);
 
     assert_eq!(
         classify_transfer_error(&error, context(TransferOperation::Update)),
@@ -243,12 +217,8 @@ fn write_timeout_known_pre_submit_waits_for_network() {
 /// 验证不确定写响应解码失败要求远端核验，且消耗重试预算。
 #[test]
 fn ambiguous_write_decode_requires_remote_verification() {
-    let error = AppError::drive_transport(
-        DriveTransportKind::Decode,
-        RequestSemantics::Write,
-        false,
-        Some("response decode failed"),
-    );
+    let error =
+        AppError::drive_transport(DriveTransportKind::Decode, RequestSemantics::Write, false);
 
     assert_eq!(
         classify_transfer_error(&error, context(TransferOperation::CreateFolder)),
@@ -263,12 +233,8 @@ fn ambiguous_write_decode_requires_remote_verification() {
 /// 验证读响应解码失败使用有预算的服务端退避。
 #[test]
 fn read_decode_uses_budgeted_server_backoff_instead_of_waiting_for_network() {
-    let error = AppError::drive_transport(
-        DriveTransportKind::Decode,
-        RequestSemantics::Read,
-        false,
-        Some("malformed 2xx"),
-    );
+    let error =
+        AppError::drive_transport(DriveTransportKind::Decode, RequestSemantics::Read, false);
     let mut recovery_context = context(TransferOperation::Download);
     recovery_context.attempt_count = 2;
 
@@ -297,17 +263,12 @@ fn read_decode_uses_budgeted_server_backoff_instead_of_waiting_for_network() {
 /// 验证读请求错误与响应体错误采用不同恢复决策。
 #[test]
 fn read_request_error_fails_unknown_but_response_body_waits_for_network() {
-    let request = AppError::drive_transport(
-        DriveTransportKind::Request,
-        RequestSemantics::Read,
-        false,
-        Some("request construction"),
-    );
+    let request =
+        AppError::drive_transport(DriveTransportKind::Request, RequestSemantics::Read, false);
     let response_body = AppError::drive_transport(
         DriveTransportKind::ResponseBody,
         RequestSemantics::Read,
         false,
-        Some("stream interrupted"),
     );
 
     assert_eq!(

@@ -44,9 +44,9 @@ pub const DEFAULT_MOUNT_DIR: &str = "~/hwcloud-drive";
 /// 默认跳过文件列表（通配符，名称匹配）
 pub const DEFAULT_SKIP_PATTERNS: &[&str] = &[".DS_Store", ".tmp", "~$*", ".Trash"];
 
-/// 应用配置（不可变值对象，修改通过 [`AppConfig::with`] 链式构造）。
+/// 应用配置。
 ///
-/// 默认值对齐 dart：concurrency=6, pollIntervalSec=10, debounceSec=3。
+/// 默认值：concurrency=6, pollIntervalSec=60（0=关闭自动刷新）, debounceSec=3。
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(default)]
 pub struct AppConfig {
@@ -191,40 +191,14 @@ impl AppConfig {
         expand_home_path(&self.virtual_mount_dir)
     }
 
-    /// 链式构造：返回带修改的新配置（不可变值对象）。
-    #[allow(clippy::too_many_arguments)]
-    pub fn with(
-        &self,
-        oauth_redirect_uri: Option<String>,
-        oauth_callback_port: Option<u16>,
-        mount_dir: Option<String>,
-        mount_configured: Option<bool>,
-        virtual_drive_enabled: Option<bool>,
-        virtual_mount_dir: Option<String>,
-        concurrency: Option<u32>,
-        poll_interval_sec: Option<u32>,
-        debounce_sec: Option<u32>,
-        skip_patterns: Option<Vec<String>>,
-        sort_field: Option<SortField>,
-        sort_order: Option<SortOrder>,
-        show_tray_icon: Option<bool>,
-    ) -> Self {
-        Self {
-            oauth_redirect_uri: oauth_redirect_uri
-                .unwrap_or_else(|| self.oauth_redirect_uri.clone()),
-            oauth_callback_port: oauth_callback_port.unwrap_or(self.oauth_callback_port),
-            mount_dir: mount_dir.unwrap_or_else(|| self.mount_dir.clone()),
-            mount_configured: mount_configured.unwrap_or(self.mount_configured),
-            virtual_drive_enabled: virtual_drive_enabled.unwrap_or(self.virtual_drive_enabled),
-            virtual_mount_dir: virtual_mount_dir.unwrap_or_else(|| self.virtual_mount_dir.clone()),
-            concurrency: concurrency.unwrap_or(self.concurrency),
-            poll_interval_sec: poll_interval_sec.unwrap_or(self.poll_interval_sec),
-            debounce_sec: debounce_sec.unwrap_or(self.debounce_sec),
-            skip_patterns: skip_patterns.unwrap_or_else(|| self.skip_patterns.clone()),
-            sort_field: sort_field.unwrap_or(self.sort_field),
-            sort_order: sort_order.unwrap_or(self.sort_order),
-            show_tray_icon: show_tray_icon.unwrap_or(self.show_tray_icon),
-        }
+    /// 返回清除挂载目录配置后的新配置（其余设置保留）。
+    pub fn cleared_mount_configuration(&self) -> Self {
+        let mut config = self.clone();
+        config.mount_dir = String::new();
+        config.mount_configured = false;
+        config.virtual_drive_enabled = false;
+        config.virtual_mount_dir = String::new();
+        config
     }
 }
 
@@ -387,27 +361,23 @@ mod tests {
     }
 
     #[test]
-    fn with_can_update_virtual_drive_fields_without_mutating_source() {
-        let source = AppConfig::default();
-        let updated = source.with(
-            None,
-            None,
-            Some("/tmp/petallink-backing".to_string()),
-            Some(true),
-            Some(true),
-            Some("/tmp/PetalLinkDrive".to_string()),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
+    fn cleared_mount_configuration_keeps_other_fields() {
+        let source = AppConfig {
+            mount_dir: "/tmp/petallink-backing".to_string(),
+            mount_configured: true,
+            virtual_drive_enabled: true,
+            virtual_mount_dir: "/tmp/PetalLinkDrive".to_string(),
+            concurrency: 9,
+            ..Default::default()
+        };
+        let cleared = source.cleared_mount_configuration();
 
-        assert!(updated.virtual_drive_enabled);
-        assert_eq!(updated.virtual_mount_dir, "/tmp/PetalLinkDrive");
-        assert!(!source.virtual_drive_enabled);
-        assert!(source.virtual_mount_dir.is_empty());
+        assert!(cleared.mount_dir.is_empty());
+        assert!(!cleared.mount_configured);
+        assert!(!cleared.virtual_drive_enabled);
+        assert!(cleared.virtual_mount_dir.is_empty());
+        assert_eq!(cleared.concurrency, 9);
+        // 源对象不被修改
+        assert!(source.virtual_drive_enabled);
     }
 }

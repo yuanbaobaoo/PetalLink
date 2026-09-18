@@ -11,7 +11,7 @@ import { commands } from "@/api/generated";
 // 应用更新状态。
 const updater = useUpdaterStore();
 
-// 当前内容是否可见或可参与后续处理。
+// 更新对话框是否可见。
 const visible = computed(() => {
   return updater.dialogOpen && (
     updater.phase === "available" ||
@@ -74,7 +74,7 @@ async function runUpdateFlow(): Promise<void> {
 }
 
 /**
- * 重新执行上一次失败的初始化动作。
+ * 重新执行更新流程。
  */
 async function handleRetry(): Promise<void> {
   await runUpdateFlow();

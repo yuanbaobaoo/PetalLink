@@ -207,7 +207,10 @@ impl TaskRunner {
                             failure.message
                         )),
                         next_retry_at: if failure.target == TransferState::VerifyingRemote {
-                            ColumnPatch::Set((self.now_ms)().saturating_add(60_000))
+                            ColumnPatch::Set(
+                                (self.now_ms)()
+                                    .saturating_add(super::contracts::VERIFY_RETRY_BACKOFF_MS),
+                            )
                         } else {
                             ColumnPatch::Clear
                         },
@@ -357,7 +360,10 @@ impl TaskRunner {
                             // 保留会话过期标记，直至确定远端不存在结果，才能丢弃旧会话标识。
                             error_kind: ColumnPatch::Set(error_kind),
                             error_message: ColumnPatch::Set(message),
-                            next_retry_at: ColumnPatch::Set((self.now_ms)().saturating_add(60_000)),
+                            next_retry_at: ColumnPatch::Set(
+                                (self.now_ms)()
+                                    .saturating_add(super::contracts::VERIFY_RETRY_BACKOFF_MS),
+                            ),
                             verify_attempt_count: Some(attempts),
                             ..Default::default()
                         },
@@ -392,7 +398,11 @@ impl TaskRunner {
                         TransferState::VerifyingRemote,
                         TransferPatch {
                             error_message: ColumnPatch::Set(format!("远端核验暂不可用：{error}")),
-                            next_retry_at: ColumnPatch::Set((self.now_ms)().saturating_add(15_000)),
+                            next_retry_at: ColumnPatch::Set(
+                                (self.now_ms)().saturating_add(
+                                    super::contracts::VERIFY_UNAVAILABLE_BACKOFF_MS,
+                                ),
+                            ),
                             verify_attempt_count: Some(attempts),
                             ..Default::default()
                         },

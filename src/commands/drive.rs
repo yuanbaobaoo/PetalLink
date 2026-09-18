@@ -65,35 +65,20 @@ fn ensure_no_active_transfer_for_identity(
         .any(|task| {
             (file_id.is_some_and(|id| task.file_id.as_deref() == Some(id))
                 || relative_path.is_some_and(|path| {
-                    task.relative_path.as_deref().is_some_and(|task_path| {
-                        task_path == path
-                            || task_path
-                                .strip_prefix(path)
-                                .is_some_and(|suffix| suffix.starts_with('/'))
-                            || path
-                                .strip_prefix(task_path)
-                                .is_some_and(|suffix| suffix.starts_with('/'))
-                    })
+                    task.relative_path
+                        .as_deref()
+                        .is_some_and(|task_path| crate::core::paths::paths_overlap(task_path, path))
                 }))
-                && task.state_kind().is_ok_and(|state| {
-                    !matches!(
-                        state,
-                        TransferState::Completed | TransferState::Failed | TransferState::Canceled
-                    )
-                })
+                // 删除类判定用保守的非终态口径；状态损坏按活动处理（fail-closed）。
+                && task
+                    .state_kind()
+                    .map(|state| !state.is_terminal())
+                    .unwrap_or(true)
         });
     if active {
         return Err(AppError::generic("该文件存在活动或待恢复任务，请稍后重试"));
     }
     Ok(())
-}
-
-/// 判断相对路径是否等于根路径或位于其子树内。
-fn is_path_in_subtree(path: &str, root: &str) -> bool {
-    path == root
-        || path
-            .strip_prefix(root)
-            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 /// 校验路径迁移不会进入自身子树或覆盖其他同步基线。
@@ -103,12 +88,12 @@ fn ensure_no_db_path_collision(old_root: &str, new_root: &str) -> AppResult<()> 
     if old_root == new_root {
         return Ok(());
     }
-    if is_path_in_subtree(new_root, old_root) {
+    if crate::core::paths::is_same_or_in_subtree(new_root, old_root) {
         return Err(AppError::generic("拒绝把目录移动到自身子树"));
     }
     let collision = repository::load_all(&DB.lock())?.into_iter().any(|record| {
-        !is_path_in_subtree(&record.local_path, old_root)
-            && is_path_in_subtree(&record.local_path, new_root)
+        !crate::core::paths::is_same_or_in_subtree(&record.local_path, old_root)
+            && crate::core::paths::is_same_or_in_subtree(&record.local_path, new_root)
     });
     if collision {
         return Err(AppError::generic("目标同步基线已被其他文件或目录占用"));
@@ -152,23 +137,9 @@ pub async fn drive_delete_file(app: AppHandle, id: String, name: Option<String>)
 
     tracing::info!(file_id = %id, "删除云端文件已核验");
     if let Some(engine) = try_sync_engine() {
-        let roots = {
-            let cloud = engine.cloud_tree_lock();
-            cloud
-                .iter()
-                .filter(|(_, file)| file.id == id)
-                .map(|(path, file)| (path.clone(), file.is_folder()))
-                .collect::<Vec<_>>()
-        };
-        for (root, is_folder) in roots {
+        for (root, is_folder) in engine.find_cloud_entries_by_file_id(&id) {
             if is_folder {
-                let prefix = format!("{root}/");
-                engine
-                    .cloud_tree_lock()
-                    .retain(|path, _| path != &root && !path.starts_with(&prefix));
-                engine
-                    .path_to_id_lock()
-                    .retain(|path, _| path != &root && !path.starts_with(&prefix));
+                engine.remove_cloud_subtree(&root);
             } else {
                 engine.cloud_tree_remove(&root);
                 engine.path_to_id_remove(&root);
@@ -278,33 +249,21 @@ fn record_completed_delete(
         .or_else(|| fallback_name.map(str::to_string))
         .unwrap_or_else(|| file_id.to_string());
     let task = TransferTask {
-        id: 0,
         direction: transfer_direction::DELETE,
         file_id: Some(file_id.to_string()),
         local_path: None,
         name,
         total_size: 0,
-        transferred: 0,
         state: i32::from(TransferState::Completed),
-        error_message: None,
         created_at: now,
         finished_at: Some(now),
-        server_id: None,
-        upload_id: None,
-        resume_offset: 0,
-        session_url: None,
         relative_path,
         parent_file_id: None,
         operation: Some(i32::from(TransferOperation::Delete)),
         source_mtime: None,
         source_size: None,
         expected_cloud_edited_time: None,
-        attempt_count: 0,
-        verify_attempt_count: 0,
-        next_retry_at: None,
-        error_kind: None,
-        remote_result_file_id: None,
-        state_revision: 0,
+        ..TransferTask::fresh_intent()
     };
     if let Err(error) = repository::insert_transfer(conn, &task) {
         return Err(AppError::generic(format!(
@@ -413,33 +372,12 @@ async fn settle_verified_remote_path_change(
 
     // 数据库提交后同步更新内存索引，下一轮不会再次规划旧路径。
     if let Some(engine) = try_sync_engine() {
-        let prefix = format!("{old_relative_path}/");
-        let mut cloud = engine.cloud_tree_lock();
-        let mut path_to_id = engine.path_to_id_lock();
-        let stale_paths: Vec<String> = cloud
-            .keys()
-            .filter(|path| *path == &old_relative_path || path.starts_with(&prefix))
-            .cloned()
-            .collect();
-        let mut moved = Vec::with_capacity(stale_paths.len());
-        for old_path in stale_paths {
-            if let Some(file) = cloud.remove(&old_path) {
-                path_to_id.remove(&old_path);
-                let suffix = old_path
-                    .strip_prefix(&old_relative_path)
-                    .unwrap_or_default();
-                moved.push((format!("{new_relative_path}{suffix}"), file));
-            }
-        }
-        for (path, mut file) in moved {
-            if file.id == file_id {
-                file = verified.clone();
-            }
-            path_to_id.insert(path.clone(), file.id.clone());
-            cloud.insert(path, file);
-        }
-        drop(path_to_id);
-        drop(cloud);
+        engine.rekey_cloud_subtree_after_remote_move(
+            &old_relative_path,
+            new_relative_path,
+            file_id,
+            verified,
+        );
         engine.add_recently_deleted(&old_relative_path);
     }
     Ok(())
@@ -586,9 +524,7 @@ pub async fn drive_move_file(id: String, new_parent_folder: String) -> AppResult
             {
                 resolved = Some(String::new());
             } else {
-                resolved = engine.path_to_id_lock().iter().find_map(|(path, file_id)| {
-                    (file_id == &new_parent_folder).then_some(path.clone())
-                });
+                resolved = engine.find_cloud_path_by_file_id(&new_parent_folder);
             }
         }
         if resolved.is_none() && new_parent_folder != "root" {
@@ -738,7 +674,6 @@ pub async fn drive_download_file(file_id: String, dest_path: String) -> AppResul
     let result = engine
         .task_runner()?
         .enqueue_and_run(repository::TransferTask {
-            id: 0,
             direction: if is_update {
                 repository::transfer_direction::DOWNLOAD_UPDATE
             } else {
@@ -748,15 +683,7 @@ pub async fn drive_download_file(file_id: String, dest_path: String) -> AppResul
             local_path: Some(dest.to_string_lossy().into_owned()),
             name: cloud.name,
             total_size: cloud.size,
-            transferred: 0,
-            state: i32::from(crate::sync::transfer_state::TransferState::Pending),
-            error_message: None,
             created_at: chrono::Utc::now().timestamp_millis(),
-            finished_at: None,
-            server_id: None,
-            upload_id: None,
-            resume_offset: 0,
-            session_url: None,
             relative_path: Some(rel),
             parent_file_id: cloud
                 .parent_folder
@@ -766,12 +693,7 @@ pub async fn drive_download_file(file_id: String, dest_path: String) -> AppResul
             source_mtime: None,
             source_size: None,
             expected_cloud_edited_time: cloud.edited_time.map(|time| time.timestamp_millis()),
-            attempt_count: 0,
-            verify_attempt_count: 0,
-            next_retry_at: None,
-            error_kind: None,
-            remote_result_file_id: None,
-            state_revision: 0,
+            ..TransferTask::fresh_intent()
         })
         .await?;
     if result.outcome.disposition == crate::sync::task_runner::TaskDisposition::Completed {
@@ -805,30 +727,17 @@ pub async fn drive_upload_file(
     // 大小与修改时间共同组成执行前二次核验的源快照。
     let metadata = std::fs::metadata(&path)
         .map_err(|error| AppError::generic(format!("读取上传源失败：{error}")))?;
-    let source_mtime = metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|duration| duration.as_millis() as i64);
+    let source_mtime = crate::core::fs_meta::metadata_mtime_ms(&metadata);
     // 入队后由 runner 统一处理去重、重试、进度和结算。
     let result = engine
         .task_runner()?
         .enqueue_and_run(repository::TransferTask {
-            id: 0,
             direction: repository::transfer_direction::UPLOAD,
             file_id: None,
             local_path: Some(path.to_string_lossy().into_owned()),
             name: rel.rsplit('/').next().unwrap_or(&rel).to_string(),
             total_size: metadata.len() as i64,
-            transferred: 0,
-            state: i32::from(crate::sync::transfer_state::TransferState::Pending),
-            error_message: None,
             created_at: chrono::Utc::now().timestamp_millis(),
-            finished_at: None,
-            server_id: None,
-            upload_id: None,
-            resume_offset: 0,
-            session_url: None,
             relative_path: Some(rel),
             parent_file_id: parent_id,
             operation: Some(i32::from(
@@ -837,12 +746,7 @@ pub async fn drive_upload_file(
             source_mtime,
             source_size: Some(metadata.len() as i64),
             expected_cloud_edited_time: None,
-            attempt_count: 0,
-            verify_attempt_count: 0,
-            next_retry_at: None,
-            error_kind: None,
-            remote_result_file_id: None,
-            state_revision: 0,
+            ..TransferTask::fresh_intent()
         })
         .await?;
     if result.outcome.disposition != crate::sync::task_runner::TaskDisposition::Completed {
@@ -884,7 +788,7 @@ mod tests {
     /// 用正式迁移建表的内存数据库，确保 transfer_queue schema 与生产一致。
     fn open_test_db() -> rusqlite::Connection {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
-        crate::data::migrations::run(&conn).unwrap();
+        crate::data::migrations::run_with_mount(&conn, None).unwrap();
         conn
     }
 

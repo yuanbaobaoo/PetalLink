@@ -70,8 +70,15 @@ impl SyncEngine {
             return Err(AppError::generic("云端检查点不可信，拒绝发布恢复任务结果"));
         }
 
-        let mut tree = self.cloud_tree.lock().clone();
-        let mut path_to_id = self.path_to_id.lock().clone();
+        let (mut tree, mut path_to_id, root_folder_id, cursor) = {
+            let cloud = self.cloud.lock();
+            (
+                cloud.tree.clone(),
+                cloud.path_to_id.clone(),
+                cloud.root_folder_id.clone(),
+                cloud.cursor.clone(),
+            )
+        };
         for recovered_file in recovered {
             let existing_paths = tree
                 .iter()
@@ -127,18 +134,11 @@ impl SyncEngine {
             );
         }
 
-        let cursor = self
-            .cloud_cursor
-            .lock()
-            .clone()
+        let cursor = cursor
             .filter(|cursor| !cursor.trim().is_empty())
             .ok_or_else(|| AppError::generic("可信云端检查点缺少 cursor"))?;
-        let checkpoint = cloud_tree::CloudTreeCache::new_trusted(
-            self.root_folder_id.lock().clone(),
-            tree,
-            path_to_id,
-            cursor,
-        )?;
+        let checkpoint =
+            cloud_tree::CloudTreeCache::new_trusted(root_folder_id, tree, path_to_id, cursor)?;
         let mount_dir = self
             .mount_dir
             .lock()
@@ -161,22 +161,105 @@ impl SyncEngine {
 
     /// 向云树插入条目。
     pub fn cloud_tree_insert(&self, rel: String, file: DriveFile) {
-        self.cloud_tree.lock().insert(rel, file);
+        self.cloud.lock().tree.insert(rel, file);
     }
 
     /// 向路径索引插入条目。
     pub fn path_to_id_insert(&self, rel: String, id: String) {
-        self.path_to_id.lock().insert(rel, id);
+        self.cloud.lock().path_to_id.insert(rel, id);
+    }
+
+    /// 原子写入一条云端条目及其路径索引（上传/建目录成功后的增量合并）。
+    pub fn cloud_entry_insert(&self, rel: String, file: DriveFile) {
+        let mut cloud = self.cloud.lock();
+        cloud.path_to_id.insert(rel.clone(), file.id.clone());
+        cloud.tree.insert(rel, file);
     }
 
     /// 从云树移除条目。
     pub fn cloud_tree_remove(&self, rel: &str) {
-        self.cloud_tree.lock().remove(rel);
+        self.cloud.lock().tree.remove(rel);
     }
 
     /// 从路径索引移除条目。
     pub fn path_to_id_remove(&self, rel: &str) {
-        self.path_to_id.lock().remove(rel);
+        self.cloud.lock().path_to_id.remove(rel);
+    }
+
+    /// 按相对路径读取云端 fileId（rename 身份核验等命令侧点查）。
+    pub fn cloud_path_to_id_get(&self, rel: &str) -> Option<String> {
+        self.cloud.lock().path_to_id.get(rel).cloned()
+    }
+
+    /// 按 fileId 反查云端相对路径（命令侧目录解析）。
+    pub fn find_cloud_path_by_file_id(&self, file_id: &str) -> Option<String> {
+        self.cloud
+            .lock()
+            .path_to_id
+            .iter()
+            .find_map(|(path, id)| (id == file_id).then(|| path.clone()))
+    }
+
+    /// 读取云端相对路径处的完整条目（命令侧只读点查）。
+    pub fn cloud_file_at(&self, rel: &str) -> Option<DriveFile> {
+        self.cloud.lock().tree.get(rel).cloned()
+    }
+
+    /// 按 fileId 列出云端全部 (路径, 是否目录)（命令侧删除前的身份核验）。
+    pub fn find_cloud_entries_by_file_id(&self, file_id: &str) -> Vec<(String, bool)> {
+        self.cloud
+            .lock()
+            .tree
+            .iter()
+            .filter(|(_, file)| file.id == file_id)
+            .map(|(path, file)| (path.clone(), file.is_folder()))
+            .collect()
+    }
+
+    /// 从云树与路径索引中同时移除一棵子树（云端删除核验后的内存收敛）。
+    pub fn remove_cloud_subtree(&self, root: &str) {
+        let mut cloud = self.cloud.lock();
+        let prefix = format!("{root}/");
+        cloud
+            .tree
+            .retain(|path, _| path != root && !path.starts_with(&prefix));
+        cloud
+            .path_to_id
+            .retain(|path, _| path != root && !path.starts_with(&prefix));
+    }
+
+    /// 命令侧远端移动/改名结算后，在一次锁获取内重键云端子树，
+    /// 并把根条目替换为已核验的远端版本。
+    pub fn rekey_cloud_subtree_after_remote_move(
+        &self,
+        old_root: &str,
+        new_root: &str,
+        root_file_id: &str,
+        verified: &DriveFile,
+    ) {
+        let mut cloud = self.cloud.lock();
+        let prefix = format!("{old_root}/");
+        let stale_paths: Vec<String> = cloud
+            .tree
+            .keys()
+            .filter(|path| path.as_str() == old_root || path.starts_with(&prefix))
+            .cloned()
+            .collect();
+        let mut moved = Vec::with_capacity(stale_paths.len());
+        for old_path in stale_paths {
+            if let Some(file) = cloud.tree.remove(&old_path) {
+                cloud.path_to_id.remove(&old_path);
+                let suffix = old_path.strip_prefix(old_root).unwrap_or_default();
+                moved.push((format!("{new_root}{suffix}"), file));
+            }
+        }
+        for (path, mut file) in moved {
+            if file.id == root_file_id {
+                file = verified.clone();
+            }
+            cloud.path_to_id.insert(path.clone(), file.id.clone());
+            cloud.tree.insert(path, file);
+        }
     }
 
     /// 记录近期删除路径，抑制监听器振荡。
@@ -186,39 +269,29 @@ impl SyncEngine {
             .insert(rel.to_string(), chrono::Utc::now().timestamp_millis());
     }
 
-    /// 获取云树写锁。
-    pub fn cloud_tree_lock(&self) -> parking_lot::MutexGuard<'_, HashMap<String, DriveFile>> {
-        self.cloud_tree.lock()
-    }
-
     /// 返回云树 checkpoint 是否可信。
     pub(crate) fn cloud_tree_is_trusted(&self) -> bool {
-        self.cloud_tree_trusted.load(Ordering::Acquire)
+        self.cloud.lock().trusted
     }
 
     /// 更新云树 checkpoint 信任状态。
     fn set_cloud_tree_trusted(&self, trusted: bool) {
-        self.cloud_tree_trusted.store(trusted, Ordering::Release);
+        self.cloud.lock().trusted = trusted;
     }
 
-    /// 按固定顺序安装完整 checkpoint。
+    /// 在一次锁获取内原子安装完整 checkpoint。
     fn install_cloud_checkpoint(&self, checkpoint: cloud_tree::CloudTreeCache) {
-        self.set_cloud_tree_trusted(false);
-        *self.cloud_tree.lock() = checkpoint.tree;
-        *self.path_to_id.lock() = checkpoint.path_to_id;
-        *self.root_folder_id.lock() = checkpoint.root_folder_id;
-        *self.cloud_cursor.lock() = checkpoint.cursor;
-        self.set_cloud_tree_trusted(true);
-    }
-
-    /// 获取路径索引写锁。
-    pub fn path_to_id_lock(&self) -> parking_lot::MutexGuard<'_, HashMap<String, String>> {
-        self.path_to_id.lock()
+        let mut cloud = self.cloud.lock();
+        cloud.tree = checkpoint.tree;
+        cloud.path_to_id = checkpoint.path_to_id;
+        cloud.root_folder_id = checkpoint.root_folder_id;
+        cloud.cursor = checkpoint.cursor;
+        cloud.trusted = true;
     }
 
     /// 返回云盘根目录 ID。
     pub(crate) fn root_folder_id(&self) -> Option<String> {
-        self.root_folder_id.lock().clone()
+        self.cloud.lock().root_folder_id.clone()
     }
 
     /// 加载 checkpoint：返回 true 表示仍需增量 catch-up；返回 false 表示已构建、重放并提交全量 checkpoint。
@@ -262,7 +335,7 @@ impl SyncEngine {
             return Err(AppError::generic("云端树尚未 catch-up，拒绝清理墓碑"));
         }
         let conn = self.db.lock();
-        let cloud = self.cloud_tree.lock();
+        let cloud = self.cloud.lock();
         let to_purge: Vec<String> = {
             let mut statement = conn
                 .prepare("SELECT local_path, file_id FROM sync_items WHERE status=?1")
@@ -278,7 +351,7 @@ impl SyncEngine {
                 .filter(|(path, file_id)| {
                     !is_blocked_path_identity(Some(path), Some(file_id), blocked_changes)
                 })
-                .filter(|(path, _)| !cloud.contains_key(path))
+                .filter(|(path, _)| !cloud.tree.contains_key(path))
                 .map(|(path, _)| path)
                 .collect()
         };
@@ -379,7 +452,6 @@ impl SyncEngine {
     /// 运行容错的自动云树刷新。
     pub(super) async fn run_auto_cloud_refresh(self: &Arc<Self>) {
         let result = self.run_sync_cycle("auto-cloud-refresh").await;
-        (self.cycle_observer)("auto-cycle-returned");
         if let Err(e) = result {
             tracing::warn!(error = %e, "自动云端刷新失败（忽略，下次定时重试）");
         }
@@ -429,7 +501,7 @@ impl SyncEngine {
     /// 优先增量刷新，必要时 fail-closed 回退全量刷新。
     /// 返回是否确有云端变更被应用（增量按 changes 计数，全量保守视为有变更）。
     async fn try_incremental_or_full_refresh(&self, abs_dir: &str) -> AppResult<bool> {
-        let saved_cursor = self.cloud_cursor.lock().clone();
+        let saved_cursor = self.cloud.lock().cursor.clone();
         let consecutive = self.incremental_since_full.load(Ordering::Relaxed);
         let force_full = consecutive >= INCREMENTAL_FORCED_FULL_THRESHOLD;
         if force_full {
@@ -450,9 +522,14 @@ impl SyncEngine {
                     self.ensure_cycle_active()?;
                     // 变更计数需在 moves 前取，用于判断是否通知前端刷新
                     let changed = !changes.is_empty();
-                    let mut tree = self.cloud_tree.lock().clone();
-                    let mut path_to_id = self.path_to_id.lock().clone();
-                    let root_folder_id = self.root_folder_id.lock().clone();
+                    let (mut tree, mut path_to_id, root_folder_id) = {
+                        let cloud = self.cloud.lock();
+                        (
+                            cloud.tree.clone(),
+                            cloud.path_to_id.clone(),
+                            cloud.root_folder_id.clone(),
+                        )
+                    };
                     Self::apply_changes_to_candidate(
                         &mut tree,
                         &mut path_to_id,

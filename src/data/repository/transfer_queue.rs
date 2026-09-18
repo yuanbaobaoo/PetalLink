@@ -49,6 +49,22 @@ impl TransferTask {
         TransferState::try_from(self.state)
     }
 
+    /// 任务当前是否占用其路径（规划期路径保护的唯一判定入口）。
+    /// 状态损坏时按占用处理（fail-closed）。
+    pub fn occupies_path(&self) -> bool {
+        self.state_kind()
+            .map(|state| state.occupies_path(self.remote_result_file_id.as_deref()))
+            .unwrap_or(true)
+    }
+
+    /// 持久化的源快照（mtime/size/total_size）是否仍与本地元数据一致。
+    /// mtime 不可读时仅在任务侧同样缺失的情况下视为一致。
+    pub fn matches_source_metadata(&self, metadata: &std::fs::Metadata) -> bool {
+        self.source_mtime == crate::core::fs_meta::metadata_mtime_ms(metadata)
+            && self.source_size == Some(metadata.len() as i64)
+            && self.total_size == metadata.len() as i64
+    }
+
     /// 将可选持久化数值解析为传输操作，并拒绝未知值。
     pub fn operation_kind(&self) -> Result<Option<TransferOperation>, TransitionError> {
         self.operation.map(TransferOperation::try_from).transpose()
@@ -57,6 +73,40 @@ impl TransferTask {
     /// 将可选持久化数值解析为结构化错误类型，并拒绝未知值。
     pub fn error_kind_typed(&self) -> Result<Option<TransferErrorKind>, TransitionError> {
         self.error_kind.map(TransferErrorKind::try_from).transpose()
+    }
+
+    /// 新传输意图的零值模板：id=0、revision=0、Pending，断点/会话/计数字段全部清零，
+    /// 与 `enqueue_and_run` 的准入合同一致。业务字段由调用方以结构体更新语法覆盖。
+    pub fn fresh_intent() -> Self {
+        Self {
+            id: 0,
+            direction: 0,
+            file_id: None,
+            local_path: None,
+            name: String::new(),
+            total_size: 0,
+            transferred: 0,
+            state: i32::from(TransferState::Pending),
+            error_message: None,
+            created_at: 0,
+            finished_at: None,
+            server_id: None,
+            upload_id: None,
+            resume_offset: 0,
+            session_url: None,
+            relative_path: None,
+            parent_file_id: None,
+            operation: None,
+            source_mtime: None,
+            source_size: None,
+            expected_cloud_edited_time: None,
+            attempt_count: 0,
+            verify_attempt_count: 0,
+            next_retry_at: None,
+            error_kind: None,
+            remote_result_file_id: None,
+            state_revision: 0,
+        }
     }
 }
 
@@ -118,7 +168,6 @@ pub fn get_transfer_by_id(conn: &Connection, id: i64) -> AppResult<Option<Transf
 }
 
 /// 将可空列三态补丁编码为 SQL 更新模式与可选值。
-#[allow(dead_code)]
 fn nullable_patch<T>(patch: ColumnPatch<T>) -> (i32, Option<T>) {
     match patch {
         ColumnPatch::Keep => (0, None),
@@ -129,7 +178,6 @@ fn nullable_patch<T>(patch: ColumnPatch<T>) -> (i32, Option<T>) {
 
 /// 按任务 ID 与预期状态版本原子转换任务。
 /// 状态不匹配或版本陈旧时拒绝写入。
-#[allow(dead_code)]
 pub fn transition_transfer(
     conn: &Connection,
     task_id: i64,
@@ -486,6 +534,23 @@ pub fn list_all_transfers(conn: &Connection) -> AppResult<Vec<TransferTask>> {
         conn.prepare("SELECT * FROM transfer_queue ORDER BY created_at DESC")
     );
     collect_tasks(stmt.query_map([], TransferTask::from_row))
+}
+
+/// 查询进行中的传输任务（Pending/Running，created_at 升序，托盘菜单展示用）。
+pub fn list_active_transfers(conn: &Connection) -> AppResult<Vec<TransferTask>> {
+    let mut stmt = db_err!(
+        "查询",
+        conn.prepare(
+            "SELECT * FROM transfer_queue WHERE state IN (?1, ?2) ORDER BY created_at ASC"
+        )
+    );
+    collect_tasks(stmt.query_map(
+        rusqlite::params![
+            i32::from(TransferState::Pending),
+            i32::from(TransferState::Running)
+        ],
+        TransferTask::from_row,
+    ))
 }
 
 /// 清空传输队列表。

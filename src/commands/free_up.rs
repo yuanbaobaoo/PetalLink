@@ -263,11 +263,7 @@ async fn free_up_one(
     if !metadata_snapshot.file_type().is_file() || crate::mount::manager::is_placeholder_file(&lp) {
         return Err(AppError::generic("待释放目标不是已下载的普通文件"));
     }
-    let source_mtime = metadata_snapshot
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|duration| duration.as_millis() as i64)
+    let source_mtime = crate::core::fs_meta::metadata_mtime_ms(&metadata_snapshot)
         .ok_or_else(|| AppError::generic("无法读取待释放文件修改时间"))?;
     let source_size = metadata_snapshot.len() as i64;
     if source_size != size {
@@ -311,8 +307,11 @@ async fn free_up_one(
         ));
     }
     {
-        let cloud = engine.cloud_tree_lock();
-        if cloud.get(&rel_path).map(|file| file.id.as_str()) != Some(file_id.as_str()) {
+        if engine
+            .cloud_file_at(&rel_path)
+            .map(|file| file.id.as_str() != file_id.as_str())
+            .unwrap_or(true)
+        {
             return Err(free_up_rejection(
                 &file_id,
                 &rel_path,
@@ -341,11 +340,7 @@ async fn free_up_one(
 
     let current_metadata = std::fs::symlink_metadata(&lp)
         .map_err(|error| AppError::generic(format!("释放前复核本地文件失败：{error}")))?;
-    let current_mtime = current_metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|duration| duration.as_millis() as i64);
+    let current_mtime = crate::core::fs_meta::metadata_mtime_ms(&current_metadata);
     if !current_metadata.file_type().is_file()
         || current_metadata.len() as i64 != source_size
         || current_mtime != Some(source_mtime)

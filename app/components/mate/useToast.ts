@@ -26,7 +26,7 @@ let _seq = 0;
  * @param id - Toast ID
  */
 function dismiss(id: number): void {
-  // 目标项索引或格式化单位索引。
+  // 目标 toast 在列表中的下标。
   const i = toasts.findIndex((t) => t.id === id);
   if (i >= 0) toasts.splice(i, 1);
 }

@@ -10,7 +10,6 @@
 //! 合并优先级：oidc < info < phone（phone 最优先，覆盖 info 的脱敏手机号）。
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use serde_json::Value;
 
@@ -29,13 +28,12 @@ pub struct UserInfoApi {
 }
 
 impl UserInfoApi {
-    /// 使用授权服务构造带固定请求超时的账号信息客户端。
+    /// 使用授权服务构造账号信息客户端。
     pub fn new(auth: Arc<AuthService>) -> Self {
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .expect("构建 reqwest client 失败");
-        Self { auth, http }
+        Self {
+            auth,
+            http: super::http_client(),
+        }
     }
 
     /// 拉取完整账号信息（合并三端点）。任一端点失败不影响其他。

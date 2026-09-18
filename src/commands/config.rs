@@ -71,9 +71,9 @@ pub async fn config_save(app: AppHandle, config: AppConfig) -> AppResult<()> {
             || mount_requires_validation);
 
     if virtual_requires_validation {
-        crate::core::config_store::validate_virtual_drive_capabilities(&config)?;
+        crate::platform::linux_mount::validate_virtual_drive_capabilities(&config)?;
     } else if mount_requires_validation {
-        crate::core::config_store::validate_configured_mount_dir_access(&config)?;
+        crate::platform::linux_mount::validate_configured_mount_dir_access(&config)?;
     }
     #[cfg(target_os = "linux")]
     if config.mount_configured {

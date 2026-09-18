@@ -85,50 +85,29 @@ fn test_expanded_mount_dir_absolute() {
     assert_eq!(c.expanded_mount_dir(), PathBuf::from("/Users/test/mydrive"));
 }
 
-/// 验证链式构造返回新配置且不修改原对象。
+/// 验证结构体更新语法返回新配置且不修改原对象。
 #[test]
-fn test_with_chain() {
+fn test_struct_update_keeps_source() {
     let c = AppConfig::default();
-    let c2 = c.with(
-        None,
-        None,
-        None,
-        Some(true),
-        None,
-        None,
-        Some(10),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    );
+    let c2 = AppConfig {
+        mount_configured: true,
+        concurrency: 10,
+        ..c.clone()
+    };
     assert!(c2.mount_configured);
     assert_eq!(c2.concurrency, 10);
     assert!(!c.mount_configured);
 }
 
-/// 托盘图标开关：默认显示；with 链 None 保留原值、Some 覆盖。
+/// 托盘图标开关：默认显示；显式覆盖为关闭生效。
 #[test]
-fn test_show_tray_icon_default_and_with() {
+fn test_show_tray_icon_default_and_override() {
     let c = AppConfig::default();
     assert!(c.show_tray_icon);
-    let hidden = c.with(
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        Some(false),
-    );
+    let hidden = AppConfig {
+        show_tray_icon: false,
+        ..c.clone()
+    };
     assert!(!hidden.show_tray_icon);
     assert!(c.show_tray_icon);
 }

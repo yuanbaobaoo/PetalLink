@@ -58,6 +58,11 @@ export const dialogState = reactive<DialogState>({
  * 打开自定义对话框（不返回值，由调用方通过 closeDialog 关闭）
  */
 export function openDialog(opts: DialogOptions): void {
+  // 已有未完成的 confirm 被覆盖时按取消收尾，避免调用方永久悬挂。
+  if (dialogState.resolver) {
+    console.warn("[useDialog] 上一个确认框未完成就被覆盖，按取消处理");
+    dialogState.resolver(false);
+  }
   Object.assign(dialogState, {
     open: true,
     title: opts.title ?? "",
@@ -73,8 +78,15 @@ export function openDialog(opts: DialogOptions): void {
 
 /**
  * 确认对话框，返回用户是否点击确认。
+ * 已有未完成的 confirm 被覆盖时，旧 Promise 以 false 收尾（等同取消），避免调用方永久悬挂。
  */
 export function confirmDialog(opts: ConfirmOptions): Promise<boolean> {
+  // 上一个未完成 confirm 的 Promise resolver。
+  const orphan = dialogState.resolver;
+  if (orphan) {
+    console.warn("[useDialog] 上一个确认框未完成就被覆盖，按取消处理");
+    orphan(false);
+  }
   return new Promise<boolean>((resolve) => {
     Object.assign(dialogState, {
       open: true,

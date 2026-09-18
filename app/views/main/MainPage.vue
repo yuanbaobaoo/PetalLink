@@ -46,7 +46,9 @@ onMounted(async () => {
 /**
  * 通知根组件打开设置页。
  */
-function handleOpenSettings(): void { emit("open-settings"); }
+function handleOpenSettings(): void {
+  emit("open-settings");
+}
 
 /**
  * 按当前关键词查询并展示云端文件。
@@ -63,7 +65,10 @@ async function handleSearch(): Promise<void> {
 /**
  * 清空关键词和当前搜索结果。
  */
-function handleClearSearch(): void { searchKeyword.value = ""; searchResults.value = []; }
+function handleClearSearch(): void {
+  searchKeyword.value = "";
+  searchResults.value = [];
+}
 
 /**
  * 在系统文件管理器中打开用户可见的云盘/同步目录。

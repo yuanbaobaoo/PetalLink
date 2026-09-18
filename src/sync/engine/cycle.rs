@@ -47,16 +47,16 @@ fn planning_phase_for_trigger(triggered_by: &str) -> &'static str {
 
 /// 根据动作集合区分本地物化与通用同步执行。
 fn execution_phase_for_actions(actions: &[SyncAction]) -> &'static str {
-    let executable_actions = actions
+    let is_local_materialize = |action: &SyncAction| {
+        action.action_type == SyncActionType::CreatePlaceholder
+            || (action.action_type == SyncActionType::CreateFolder && action.cloud_file.is_some())
+    };
+    let mut executable = actions
         .iter()
         .filter(|action| action.action_type != SyncActionType::Skip);
-    let materializes_only_local_tree = executable_actions.clone().next().is_some_and(|_| {
-        executable_actions.clone().all(|action| {
-            action.action_type == SyncActionType::CreatePlaceholder
-                || (action.action_type == SyncActionType::CreateFolder
-                    && action.cloud_file.is_some())
-        })
-    });
+    // 空集合不算本地物化（进入通用执行阶段）。
+    let materializes_only_local_tree = executable.next().is_some_and(&is_local_materialize)
+        && executable.all(is_local_materialize);
     if materializes_only_local_tree {
         SYNC_PHASE_MATERIALIZING_LOCAL
     } else {
@@ -161,9 +161,6 @@ impl SyncEngine {
         let sequence = self
             .cycle
             .request(Self::cycle_request_for_trigger(triggered_by));
-        if triggered_by == "manual-refresh" {
-            (self.cycle_observer)("request-manual");
-        }
         self.drain_cycle_requests_for(Some(sequence)).await?;
         self.cycle
             .result_if_completed(sequence)
@@ -309,7 +306,6 @@ impl SyncEngine {
             }
             self.ensure_cycle_active()?;
             if request.contains(CycleRequest::CLOUD_FULL) {
-                (self.cycle_observer)("cloud-refresh");
                 if let Err(error) = self.refresh_cloud_full_for_cycle().await {
                     self.cycle.restore(request);
                     return Err(error);
@@ -326,7 +322,6 @@ impl SyncEngine {
                     }
                     return Ok(());
                 } else {
-                    (self.cycle_observer)("cloud-refresh");
                     if let Err(error) = self.refresh_cloud_incremental_for_cycle().await {
                         tracing::warn!(%error, "云端刷新失败，完整保留当前周期意图等待补跑");
                         self.cycle.restore(request);
@@ -367,7 +362,7 @@ impl SyncEngine {
                 let mount_root = std::path::PathBuf::from(crate::core::paths::expand_tilde(
                     &mount_dir,
                 ));
-                let cloud = self.cloud_tree.lock().clone();
+                let cloud = self.cloud.lock().tree.clone();
                 let conn = self.db.lock();
                 crate::sync::path_recovery::recover_verified_remote_path_changes(
                     &mount_root,
@@ -423,17 +418,14 @@ impl SyncEngine {
                 }
                 self.ensure_cycle_active()?;
                 if let Some(task_runner) = &self.task_runner {
-                    (self.cycle_observer)("verify-remote");
                     let verifying = task_runner.resume_verifying().await?;
                     completed_recoveries += verifying.completed;
                     self.commit_recovery_checkpoint(&verifying.recovered_cloud_files)?;
                     self.ensure_cycle_active()?;
-                    (self.cycle_observer)("resume-waiting");
                     let waiting = task_runner.resume_waiting().await?;
                     completed_recoveries += waiting.completed;
                     self.commit_recovery_checkpoint(&waiting.recovered_cloud_files)?;
                     self.ensure_cycle_active()?;
-                    (self.cycle_observer)("resume-due");
                     let backing_off = task_runner.resume_due_backoff().await?;
                     completed_recoveries += backing_off.completed;
                     self.commit_recovery_checkpoint(&backing_off.recovered_cloud_files)?;
@@ -491,7 +483,6 @@ impl SyncEngine {
                 self.recompute_and_broadcast_state()?;
             }
             self.ensure_cycle_active()?;
-            (self.cycle_observer)("local-rescan");
             self.run_sync_cycle_inner(triggered_by, &blocked_path_changes)
                 .await
         }
@@ -537,10 +528,9 @@ impl SyncEngine {
         blocked_path_changes: &[crate::sync::path_recovery::BlockedPathChange],
     ) -> AppResult<()> {
         let local = self.scan_local().await?;
-        (self.cycle_observer)("local-scan-complete");
         self.ensure_cycle_active()?;
         let planning_activity = self.begin_external_activity()?;
-        let cloud = self.cloud_tree.lock().clone();
+        let cloud = self.cloud.lock().tree.clone();
         let mut db = self.load_db_snapshot()?;
 
         // 统计本地、云端与数据库差异。
@@ -555,10 +545,16 @@ impl SyncEngine {
             .map(|s| s.as_str())
             .collect();
         if !local_in_cloud_not_db.is_empty() {
-            tracing::debug!(count = local_in_cloud_not_db.len(), paths = ?local_in_cloud_not_db, "本地+云端有但DB无（reconcile 将补）");
+            tracing::debug!(
+                count = local_in_cloud_not_db.len(),
+                "本地+云端有但DB无（reconcile 将补）"
+            );
         }
         if !in_cloud_db_not_local.is_empty() {
-            tracing::info!(count = in_cloud_db_not_local.len(), paths = ?in_cloud_db_not_local, "云端+DB有但本地无（应生成 DeleteFromCloud）");
+            tracing::info!(
+                count = in_cloud_db_not_local.len(),
+                "云端+DB有但本地无（应生成 DeleteFromCloud）"
+            );
         }
 
         let cloud_tree_trusted = self.cloud_tree_is_trusted();
@@ -624,7 +620,7 @@ impl SyncEngine {
         let transfer_tasks = repository::list_all_transfers(&self.db.lock())?;
         filter_active_transfer_actions(&mut actions, &snapshot.db, &transfer_tasks);
         filter_anti_oscillation(&mut actions, &self.recently_deleted_paths.lock());
-        fill_parent_file_ids(&mut actions, &self.path_to_id.lock());
+        fill_parent_file_ids(&mut actions, &self.cloud.lock().path_to_id);
         // 为云端已删但仍需救援内容的路径补建目录链。
         add_rescue_folder_recreations(&mut actions, &snapshot, &self.recently_deleted_paths.lock());
         filter_blocked_path_changes(&mut actions, blocked_path_changes);
@@ -634,7 +630,7 @@ impl SyncEngine {
         // DeleteFromLocal 由 executor 在 unlink 前复核远端删除事实与本地版本。
 
         // 目录云端删除会级联子树，仅保留祖先动作以维持回收站层级。
-        dedupe_directory_deletes(&mut actions, &self.cloud_tree.lock());
+        dedupe_directory_deletes(&mut actions, &self.cloud.lock().tree);
 
         // 本地目录删除同样仅保留祖先动作，避免并发重复删除。
         dedupe_local_descendants(&mut actions);
@@ -702,12 +698,7 @@ impl SyncEngine {
         let results = if settlement_activities.is_none() {
             actions
                 .iter()
-                .map(|_| ActionResult {
-                    success: false,
-                    error_message: Some("用户正在修改目标路径，等待文件关闭后重试".into()),
-                    deferred: true,
-                    cloud_file: None,
-                })
+                .map(|_| ActionResult::fail("用户正在修改目标路径，等待文件关闭后重试", true))
                 .collect()
         } else if let Some(ref exec) = self.executor {
             self.execute_actions_ordered(exec, &mut actions).await?
@@ -778,7 +769,6 @@ impl SyncEngine {
     /// 触发手动全量刷新周期。
     pub async fn trigger_manual_sync(&self) -> AppResult<()> {
         let result = self.run_sync_cycle("manual-refresh").await;
-        (self.cycle_observer)("manual-cycle-returned");
         if result.is_ok() {
             self.update_runtime_and_broadcast(|runtime| runtime.content_changed = true)?;
         }
@@ -952,20 +942,13 @@ fn structural_settlement_paths(
     for path in paths {
         if roots
             .iter()
-            .any(|ancestor| path_is_same_or_descendant(&path, ancestor))
+            .any(|ancestor| crate::core::paths::is_same_or_in_subtree(&path, ancestor))
         {
             continue;
         }
         roots.push(path);
     }
     Ok(roots)
-}
-
-fn path_is_same_or_descendant(path: &str, ancestor: &str) -> bool {
-    path == ancestor
-        || path
-            .strip_prefix(ancestor)
-            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 #[cfg(test)]

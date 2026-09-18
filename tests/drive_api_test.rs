@@ -12,7 +12,7 @@ async fn test_create_folder_body_escaped_for_chinese() {
     use serde_json::Value;
 
     let body = build_create_folder_body("我的文件夹", Some("parent-1"));
-    let encoded = ascii_json_encode(&body);
+    let encoded = ascii_json_encode(&body).unwrap();
 
     // 编码后不应含原始中文
     assert!(!encoded.contains("我的文件夹"));
@@ -62,8 +62,7 @@ fn test_urlencoding() {
 /// 验证 list 响应解析（含 category/mimeType 怪癖）。
 #[test]
 fn test_list_response_parses_folder_by_mime() {
-    use petal_link_lib::drive::models::FileCategory;
-    use petal_link_lib::drive::models::FileListResult;
+    use petal_link_lib::drive::models::{DriveFile, FileCategory};
 
     let json = json!({
         "files": [
@@ -82,13 +81,19 @@ fn test_list_response_parses_folder_by_mime() {
             }
         ]
     });
-    let result = FileListResult::from_json(&json);
-    assert_eq!(result.files.len(), 2);
+    let files: Vec<DriveFile> = json
+        .get("files")
+        .and_then(|v| v.as_array())
+        .unwrap()
+        .iter()
+        .map(|entry| DriveFile::from_json(entry).expect("条目应可解析"))
+        .collect();
+    assert_eq!(files.len(), 2);
     // 文件夹检测靠 mimeType（category 恒为 drive#file，无类型信息）
-    assert!(result.files[0].is_folder());
-    assert_eq!(result.files[0].category, FileCategory::Folder);
-    assert!(!result.files[1].is_folder());
-    assert_eq!(result.files[1].category, FileCategory::Document);
+    assert!(files[0].is_folder());
+    assert_eq!(files[0].category, FileCategory::Folder);
+    assert!(!files[1].is_folder());
+    assert_eq!(files[1].category, FileCategory::Document);
 }
 
 /// 验证 about 配额字段容忍 String 类型（华为怪癖）。

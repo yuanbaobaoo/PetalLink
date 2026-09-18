@@ -162,7 +162,6 @@ impl Drop for ProbeGenerationGuard {
 }
 
 /// 查询当前是否在线（零开销，供同步引擎各入口快速判断）。
-#[allow(dead_code)]
 pub fn is_online() -> bool {
     ONLINE.load(Ordering::SeqCst)
 }
@@ -218,7 +217,6 @@ fn publish_request_network_failure(
 
 /// 启动后台探测任务（幂等，重复调用安全）。
 /// 在 tokio 运行时中周期性 TCP 探测目标主机，更新全局 ONLINE 状态。
-#[allow(dead_code)]
 pub fn start_probe_task() {
     let generation = {
         let mut runtime = PROBE_RUNTIME.lock();
@@ -247,7 +245,6 @@ pub fn start_probe_task() {
 }
 
 /// 通知探测任务退出（应用关闭时调用）。
-#[allow(dead_code)]
 pub fn shutdown_probe() {
     let stopped = PROBE_RUNTIME.lock().lifecycle.shutdown();
     if stopped {
@@ -309,7 +306,6 @@ fn publish_probe_result(
 }
 
 /// 单次 TCP 探测：connect 到目标主机 443 端口。
-#[allow(dead_code)]
 async fn probe_once() -> bool {
     match tokio::time::timeout(PROBE_TIMEOUT, TcpStream::connect(PROBE_HOST)).await {
         Ok(Ok(_)) => true,
@@ -326,7 +322,6 @@ async fn probe_once() -> bool {
 
 /// 阻塞等待网络恢复（供定时器循环使用）。
 /// 接收 shutdown 闭包，引擎停止时立即返回。
-#[allow(dead_code)]
 pub async fn wait_until_online<F>(is_shutdown: F)
 where
     F: Fn() -> bool,
@@ -348,7 +343,6 @@ where
 ///
 /// 如需即时睡眠感知，可在此处注册 NSWorkspaceWillSleepNotification /
 /// NSWorkspaceDidWakeNotification 观察者（需 objc2 observer 回调）。
-#[allow(dead_code)]
 pub fn init_sleep_handling() {
     tracing::info!(
         "睡眠/唤醒监听：采用纯探测方案（无系统通知，依赖 {}s 周期探测）",

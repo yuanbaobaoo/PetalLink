@@ -2,6 +2,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 
+// 组件输入参数类型。
 interface Props {
   /**
    * 图标名（不带 i- 前缀），如 "cloud" / "folder" / "search"

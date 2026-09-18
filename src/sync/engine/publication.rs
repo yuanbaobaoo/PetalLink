@@ -176,11 +176,4 @@ impl SyncEngine {
         })?;
         Ok(())
     }
-
-    /// 保留当前运行态并重算完整聚合状态。
-    pub fn push_live_transfer_state(&self) {
-        if let Err(error) = self.recompute_and_broadcast_state() {
-            tracing::warn!(%error, "传输变化后重算全局状态失败");
-        }
-    }
 }

@@ -81,3 +81,17 @@ pub fn relative_path_from_mount(mount_dir: &Path, candidate: &Path) -> AppResult
     validate_relative_path(&rel, false)?;
     Ok(rel)
 }
+
+/// 相对路径是否等于或位于指定子树根下（'/' 分隔的相对路径）。
+/// 空根只匹配自身；调用方需要"挂载根下一切"语义时必须显式特判。
+pub fn is_same_or_in_subtree(path: &str, root: &str) -> bool {
+    path == root
+        || path
+            .strip_prefix(root)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+/// 两个相对路径是否相同或存在祖先/后代关系。
+pub fn paths_overlap(left: &str, right: &str) -> bool {
+    is_same_or_in_subtree(left, right) || is_same_or_in_subtree(right, left)
+}

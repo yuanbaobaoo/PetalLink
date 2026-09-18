@@ -1094,12 +1094,7 @@ async fn ambiguous_upload_error_settles_without_failure_notification() {
     let task_id = insert_task(&database.lock(), &pending_create_task(&local_path));
     // Decode + 写请求可能已到达服务端 → RemoteAmbiguous → VerifyingRemote。
     let operations = Arc::new(FailingOperations {
-        error: AppError::drive_transport_with_submission(
-            DriveTransportKind::Decode,
-            true,
-            false,
-            None,
-        ),
+        error: AppError::drive_transport_with_submission(DriveTransportKind::Decode, true, false),
     });
     let runner = TaskRunner::new_with_clock(
         database.clone(),

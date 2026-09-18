@@ -5,7 +5,6 @@ use std::path::{Component, Path, PathBuf};
 use tauri::AppHandle;
 use url::Url;
 
-use crate::auth::token_store::TokenStore;
 use crate::data::repository;
 use crate::error::{AppError, AppResult};
 use crate::ipc::VirtualDriveStatus;

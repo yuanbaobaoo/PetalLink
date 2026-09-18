@@ -73,17 +73,14 @@ impl SyncExecutor {
         self.mount = Some(mount);
     }
 
-    /// 设置冲突解决器。
     pub fn set_conflict(&mut self, conflict: Arc<std::sync::Mutex<ConflictResolver>>) {
         self.conflict = Some(conflict);
     }
 
-    /// 设置稳定性检查器。
     pub fn set_stability(&mut self, s: Arc<tokio::sync::Mutex<StabilityChecker>>) {
         self.stability = Some(s);
     }
 
-    /// 设置 DB 连接。
     pub fn set_db(&mut self, db: Arc<parking_lot::Mutex<rusqlite::Connection>>) {
         self.db = Some(db);
     }

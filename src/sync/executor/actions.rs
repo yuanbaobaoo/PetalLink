@@ -22,11 +22,7 @@ fn inspect_conflict_source(
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(AppError::generic("冲突源路径不是安全的普通文件"));
     }
-    let mtime_ms = metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+    let mtime_ms = crate::core::fs_meta::metadata_mtime_ms(&metadata)
         .ok_or_else(|| AppError::generic("无法读取冲突源文件修改时间"))?;
     let local_mtime = chrono::DateTime::from_timestamp_millis(mtime_ms)
         .ok_or_else(|| AppError::generic("冲突源文件修改时间超出支持范围"))?;
@@ -85,11 +81,7 @@ async fn copy_to_hidden_conflict_staging(
             if !source_metadata.is_file() {
                 return Err(AppError::generic("冲突源句柄不是普通文件"));
             }
-            let source_mtime_ms = source_metadata
-                .modified()
-                .ok()
-                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                .and_then(|duration| i64::try_from(duration.as_millis()).ok());
+            let source_mtime_ms = crate::core::fs_meta::metadata_mtime_ms(&source_metadata);
             if source_metadata.len() != expected.size || source_mtime_ms != Some(expected.mtime_ms)
             {
                 return Err(AppError::generic("复制前冲突源文件已变化"));
@@ -118,11 +110,7 @@ async fn copy_to_hidden_conflict_staging(
             let after = source_file
                 .metadata()
                 .map_err(|error| AppError::generic(format!("复核冲突源句柄失败：{error}")))?;
-            let after_mtime_ms = after
-                .modified()
-                .ok()
-                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                .and_then(|duration| i64::try_from(duration.as_millis()).ok());
+            let after_mtime_ms = crate::core::fs_meta::metadata_mtime_ms(&after);
             if after.len() != expected.size || after_mtime_ms != Some(expected.mtime_ms) {
                 return Err(AppError::generic("复制期间冲突源文件已变化"));
             }
@@ -377,25 +365,11 @@ impl SyncExecutor {
         // 占位符必须同时具备云端元数据和可定位的相对路径。
         let cloud = match &action.cloud_file {
             Some(c) => c,
-            None => {
-                return ActionResult {
-                    success: false,
-                    error_message: Some("缺少云端文件元数据".into()),
-                    deferred: false,
-                    cloud_file: None,
-                }
-            }
+            None => return ActionResult::fail("缺少云端文件元数据", false),
         };
         let rel_path = match &action.relative_path {
             Some(p) => p,
-            None => {
-                return ActionResult {
-                    success: false,
-                    error_message: Some("缺少相对路径".into()),
-                    deferred: false,
-                    cloud_file: None,
-                }
-            }
+            None => return ActionResult::fail("缺少相对路径", false),
         };
         // 先确保磁盘占位符，再写入 cloud-only 基线。
         if let Some(m) = &self.mount {
@@ -433,27 +407,12 @@ impl SyncExecutor {
                             );
                         }
                     }
-                    ActionResult {
-                        success: true,
-                        error_message: None,
-                        deferred: false,
-                        cloud_file: None,
-                    }
+                    ActionResult::ok(None)
                 }
-                Err(e) => ActionResult {
-                    success: false,
-                    error_message: Some(e.to_string()),
-                    deferred: false,
-                    cloud_file: None,
-                },
+                Err(e) => ActionResult::fail(e.to_string(), false),
             }
         } else {
-            ActionResult {
-                success: false,
-                error_message: Some("mount manager 未初始化".into()),
-                deferred: false,
-                cloud_file: None,
-            }
+            ActionResult::fail("mount manager 未初始化", false)
         }
     }
 
@@ -464,35 +423,15 @@ impl SyncExecutor {
         let result = if let Some(cloud_file) = &action.cloud_file {
             // 云端已有文件夹 → 本地 ensure
             if !cloud_file.is_folder() {
-                return ActionResult {
-                    success: false,
-                    error_message: Some("创建本地目录动作携带的云端资源不是文件夹".into()),
-                    deferred: false,
-                    cloud_file: None,
-                };
+                return ActionResult::fail("创建本地目录动作携带的云端资源不是文件夹", false);
             }
             if let Some(m) = &self.mount {
                 match m.ensure_folder_with_file_id(rel, &cloud_file.id) {
-                    Ok(_) => ActionResult {
-                        success: true,
-                        error_message: None,
-                        deferred: false,
-                        cloud_file: None,
-                    },
-                    Err(e) => ActionResult {
-                        success: false,
-                        error_message: Some(e.to_string()),
-                        deferred: false,
-                        cloud_file: None,
-                    },
+                    Ok(_) => ActionResult::ok(None),
+                    Err(e) => ActionResult::fail(e.to_string(), false),
                 }
             } else {
-                ActionResult {
-                    success: true,
-                    error_message: None,
-                    deferred: false,
-                    cloud_file: None,
-                }
+                ActionResult::ok(None)
             }
         } else {
             // 云端文件名只取相对路径最后一段，避免路径分隔符触发接口校验失败。
@@ -520,28 +459,13 @@ impl SyncExecutor {
                                 cloud_file: Some(f),
                             }
                         } else {
-                            ActionResult {
-                                success: true,
-                                error_message: None,
-                                deferred: false,
-                                cloud_file: Some(f),
-                            }
+                            ActionResult::ok(Some(f))
                         }
                     } else {
-                        ActionResult {
-                            success: true,
-                            error_message: None,
-                            deferred: false,
-                            cloud_file: Some(f),
-                        }
+                        ActionResult::ok(Some(f))
                     }
                 }
-                Err(e) => ActionResult {
-                    success: false,
-                    error_message: Some(e.to_string()),
-                    deferred: false,
-                    cloud_file: None,
-                },
+                Err(e) => ActionResult::fail(e.to_string(), false),
             }
         };
         Self::log_action_result(rel, "创建目录成功", "创建目录失败", &result);
@@ -558,12 +482,7 @@ impl SyncExecutor {
                 user_message = %user_message,
                 "云端路径变更等待重新检查"
             );
-            ActionResult {
-                success: false,
-                error_message: Some(user_message.into_owned()),
-                deferred: true,
-                cloud_file: None,
-            }
+            ActionResult::fail(user_message.into_owned(), true)
         };
         // 远端身份、目标父目录和本地路径缺一不可。
         let Some(file_id) = action.file_id.as_deref() else {
@@ -640,12 +559,7 @@ impl SyncExecutor {
                 if file.id == file_id
                     && file.is_folder() == planned_cloud_file.is_folder() =>
             {
-                ActionResult {
-                    success: true,
-                    error_message: None,
-                    deferred: false,
-                    cloud_file: Some(file),
-                }
+                ActionResult::ok(Some(file))
             }
             Ok(_) => deferred(
                 "云端路径变更响应的稳定身份或文件类型不一致，等待重新核验".to_string(),
@@ -666,12 +580,7 @@ impl SyncExecutor {
                         %error,
                         "路径变更响应不确定，但 fileId GET 已确认目标名称与父目录"
                     );
-                    ActionResult {
-                        success: true,
-                        error_message: None,
-                        deferred: false,
-                        cloud_file: Some(file),
-                    }
+                    ActionResult::ok(Some(file))
                 }
                 Ok(_) => deferred(format!(
                     "远端路径变更尚未生效，保留原基线等待重新规划：{error}"
@@ -694,23 +603,11 @@ impl SyncExecutor {
     async fn do_delete_from_cloud(&self, action: &SyncAction) -> ActionResult {
         let file_id = match &action.file_id {
             Some(id) => id.clone(),
-            None => {
-                return ActionResult {
-                    success: false,
-                    error_message: Some("缺少 fileId".into()),
-                    deferred: false,
-                    cloud_file: None,
-                }
-            }
+            None => return ActionResult::fail("缺少 fileId", false),
         };
         let rel = action.relative_path.as_deref().unwrap_or("?");
         let result = match self.files_api.delete(&file_id).await {
-            Ok(()) => ActionResult {
-                success: true,
-                error_message: None,
-                deferred: false,
-                cloud_file: None,
-            },
+            Ok(()) => ActionResult::ok(None),
             Err(e) => match self.files_api.verify_deleted(&file_id).await {
                 Ok(true) => {
                     tracing::info!(
@@ -718,12 +615,7 @@ impl SyncExecutor {
                         file_id,
                         "删除响应不确定，但 fileId 核验已确认回收/不存在"
                     );
-                    ActionResult {
-                        success: true,
-                        error_message: None,
-                        deferred: false,
-                        cloud_file: None,
-                    }
+                    ActionResult::ok(None)
                 }
                 Ok(false) => ActionResult {
                     success: false,
@@ -747,38 +639,17 @@ impl SyncExecutor {
     async fn do_conflict(&self, action: &SyncAction) -> ActionResult {
         let local_path = match &action.local_path {
             Some(p) => PathBuf::from(p),
-            None => {
-                return ActionResult {
-                    success: false,
-                    error_message: Some("冲突处理缺少本地路径".into()),
-                    deferred: false,
-                    cloud_file: None,
-                }
-            }
+            None => return ActionResult::fail("冲突处理缺少本地路径", false),
         };
         let cloud_file = match &action.cloud_file {
             Some(c) => c,
-            None => {
-                return ActionResult {
-                    success: false,
-                    error_message: Some("冲突处理缺少云端文件元数据".into()),
-                    deferred: false,
-                    cloud_file: None,
-                }
-            }
+            None => return ActionResult::fail("冲突处理缺少云端文件元数据", false),
         };
 
         // 冲突副本和下载替换都绑定同一份严格源快照，禁止用“当前时间”掩盖 stat 失败。
         let (local_mtime, local_snapshot) = match inspect_conflict_source(&local_path) {
             Ok(snapshot) => snapshot,
-            Err(error) => {
-                return ActionResult {
-                    success: false,
-                    error_message: Some(error.to_string()),
-                    deferred: false,
-                    cloud_file: None,
-                }
-            }
+            Err(error) => return ActionResult::fail(error.to_string(), false),
         };
 
         // 解析冲突
@@ -786,20 +657,10 @@ impl SyncExecutor {
             if let Ok(mut resolver) = conflict.lock() {
                 resolver.resolve(&local_path, cloud_file, &local_mtime)
             } else {
-                return ActionResult {
-                    success: false,
-                    error_message: Some("冲突解决器获取失败".into()),
-                    deferred: false,
-                    cloud_file: None,
-                };
+                return ActionResult::fail("冲突解决器获取失败", false);
             }
         } else {
-            return ActionResult {
-                success: false,
-                error_message: Some("冲突解决器未初始化".into()),
-                deferred: false,
-                cloud_file: None,
-            };
+            return ActionResult::fail("冲突解决器未初始化", false);
         };
 
         let rel = action.relative_path.as_deref().unwrap_or("?");
@@ -921,12 +782,7 @@ impl SyncExecutor {
                                                 }
                                                 .await;
                                                 match finalized {
-                                                    Ok(()) => ActionResult {
-                                                        success: true,
-                                                        error_message: None,
-                                                        deferred: false,
-                                                        cloud_file: None,
-                                                    },
+                                                    Ok(()) => ActionResult::ok(None),
                                                     Err(error) => ActionResult {
                                                         success: false,
                                                         error_message: Some(format!(
@@ -1133,24 +989,12 @@ impl SyncExecutor {
     async fn do_backup_before_cloud_delete(&self, action: &SyncAction) -> ActionResult {
         let path = match &action.local_path {
             Some(p) => PathBuf::from(p),
-            None => {
-                return ActionResult {
-                    success: true,
-                    error_message: None,
-                    deferred: false,
-                    cloud_file: None,
-                }
-            }
+            None => return ActionResult::ok(None),
         };
         match std::fs::symlink_metadata(&path) {
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return ActionResult {
-                    success: true,
-                    error_message: None,
-                    deferred: false,
-                    cloud_file: None,
-                }
+                return ActionResult::ok(None)
             }
             Err(error) => {
                 return ActionResult {
@@ -1163,25 +1007,11 @@ impl SyncExecutor {
         }
         let mount = match self.mount.as_ref() {
             Some(mount) => mount,
-            None => {
-                return ActionResult {
-                    success: false,
-                    error_message: Some("mount manager 未初始化，未改动本地原文件".into()),
-                    deferred: false,
-                    cloud_file: None,
-                }
-            }
+            None => return ActionResult::fail("mount manager 未初始化，未改动本地原文件", false),
         };
         let (local_mtime, local_snapshot) = match inspect_conflict_source(&path) {
             Ok(snapshot) => snapshot,
-            Err(error) => {
-                return ActionResult {
-                    success: false,
-                    error_message: Some(error.to_string()),
-                    deferred: false,
-                    cloud_file: None,
-                }
-            }
+            Err(error) => return ActionResult::fail(error.to_string(), false),
         };
         let staging_path = match Self::allocate_conflict_staging(&path) {
             Ok(staging_path) => staging_path,
@@ -1266,12 +1096,7 @@ impl SyncExecutor {
             backup = %copy_path.display(),
             "云端删除但本地有未上传修改，已备份普通副本并移除原云端身份路径"
         );
-        ActionResult {
-            success: true,
-            error_message: None,
-            deferred: false,
-            cloud_file: None,
-        }
+        ActionResult::ok(None)
     }
 }
 

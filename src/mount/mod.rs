@@ -2,7 +2,7 @@
 //!
 //! 对齐 `legacy/lib/mount/` 的模块划分。
 
-/// 带元数据缓存的文件哈希计算。
+/// 流式 sha256 文件哈希计算。
 pub mod file_hasher;
 /// 拖拽导入的递归复制（`.tmp` 原子落盘、拒绝覆盖）。
 pub mod import_copy;

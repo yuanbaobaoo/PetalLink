@@ -8,8 +8,8 @@ use super::request::{
 };
 use super::response::{
     parse_verified_written_drive_file, protocol_error, require_official_write_ok, single_parent,
-    verify_created_folder, verify_file_id, verify_parent, verify_written_file_id,
-    verify_written_parent, write_protocol_error,
+    verify_created_folder, verify_file_id, verify_written_file_id, verify_written_parent,
+    write_protocol_error,
 };
 use super::FilesApi;
 use crate::drive::ascii_json::ascii_json_encode;
@@ -80,7 +80,7 @@ impl FilesApi {
         expected_parent: &str,
     ) -> AppResult<DriveFile> {
         let body = build_create_folder_body(name, parent_id);
-        let encoded = ascii_json_encode(&body);
+        let encoded = ascii_json_encode(&body)?;
         let path = "/files?fields=*";
         let resp = self
             .send_post(path, encoded.into_bytes(), "application/json")
@@ -144,7 +144,7 @@ impl FilesApi {
         let path = delete_path(id);
         let mut body = serde_json::Map::new();
         body.insert("recycled".into(), Value::Bool(true));
-        let encoded = ascii_json_encode(&Value::Object(body));
+        let encoded = ascii_json_encode(&Value::Object(body))?;
         let resp = self
             .client
             .patch(&path, encoded.into_bytes(), "application/json")
@@ -231,33 +231,6 @@ impl FilesApi {
         self.update_verified(id, new_name, None, description).await
     }
 
-    /// 使用官方成对 parent query 参数移动文件，并核验响应仍是同一个 fileId 且目标父目录
-    /// 已生效。调用方已经持有可信旧 parent 时可直接使用，避免额外 GET。
-    pub async fn move_file(
-        &self,
-        id: &str,
-        old_parent_folder: &str,
-        new_parent_folder: &str,
-    ) -> AppResult<DriveFile> {
-        validate_file_id(id)?;
-        validate_file_id_value(old_parent_folder, "旧 parentFolder")?;
-        validate_file_id_value(new_parent_folder, "目标 parentFolder")?;
-        if old_parent_folder == new_parent_folder {
-            let current = self.get(id).await?;
-            verify_file_id(&current, id, "move", RequestSemantics::Read, false)?;
-            verify_parent(
-                &current,
-                new_parent_folder,
-                "move",
-                RequestSemantics::Read,
-                false,
-            )?;
-            return Ok(current);
-        }
-        self.update_verified(id, None, Some((old_parent_folder, new_parent_folder)), None)
-            .await
-    }
-
     /// 重命名并核验 Huawei 返回的 File 身份和最终名称。
     pub async fn rename_file(&self, id: &str, new_name: &str) -> AppResult<DriveFile> {
         self.update(id, Some(new_name), None, None).await
@@ -278,7 +251,7 @@ impl FilesApi {
         if let Some(desc) = description {
             body.insert("description".into(), Value::String(desc.to_string()));
         }
-        let encoded = ascii_json_encode(&Value::Object(body));
+        let encoded = ascii_json_encode(&Value::Object(body))?;
         let path = update_path(id, move_parents);
         let resp = self
             .send_patch(&path, encoded.into_bytes(), "application/json")

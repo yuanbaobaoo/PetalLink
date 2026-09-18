@@ -1,5 +1,6 @@
 <!-- 数值输入框，居中数字 + 可选单位后缀 -->
 <script setup lang="ts">
+// 组件输入参数类型。
 interface Props {
   modelValue: number;
   min?: number;
@@ -8,6 +9,7 @@ interface Props {
   suffix?: string;
   disabled?: boolean;
 }
+
 // 组件输入参数。
 const props = withDefaults(defineProps<Props>(), {
   min: 0,
@@ -36,7 +38,7 @@ function clamp(v: number): number {
 function handleInput(event: Event): void {
   // 输入框的原始文本值。
   const raw = (event.target as HTMLInputElement).value;
-  // 转换后的数值或本轮成功数量。
+  // 文本转换出的数值。
   const n = Number(raw);
   if (raw === "" || Number.isNaN(n)) return;
   emit("update:modelValue", clamp(n));

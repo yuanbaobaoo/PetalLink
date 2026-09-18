@@ -26,6 +26,32 @@ pub fn find_by_file_id(conn: &Connection, file_id: &str) -> AppResult<Option<Syn
     Ok(Some(first))
 }
 
+/// 按本地相对路径查询同步记录（0/1 条为正常，多条说明历史遗留歧义）。
+/// 与 `load_all` 一致排除 `.hwcloud_` 内部文件记录；rename 身份核验的点查入口。
+#[cfg(target_os = "linux")]
+pub fn find_by_local_path(conn: &Connection, local_path: &str) -> AppResult<Vec<SyncItem>> {
+    let mut stmt = db_err!(
+        "查询",
+        conn.prepare("SELECT * FROM sync_items WHERE local_path = ?1")
+    );
+    let rows = db_err!(
+        "查询",
+        stmt.query_map(params![local_path], SyncItem::from_row)
+    );
+    let mut items = Vec::new();
+    for item in rows {
+        let item = item.map_err(|error| AppError::generic(format!("读取同步记录失败：{error}")))?;
+        let basename = std::path::Path::new(&item.local_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        if !basename.starts_with(crate::constants::INTERNAL_FILE_PREFIX) {
+            items.push(item);
+        }
+    }
+    Ok(items)
+}
+
 /// 加载全部同步记录（按 local_path 索引）。对齐 dart `_loadDbRecords`。
 /// 过滤 basename 以 `.hwcloud_` 开头的内部文件记录。
 pub fn load_all(conn: &Connection) -> AppResult<Vec<SyncItem>> {

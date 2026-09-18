@@ -244,16 +244,7 @@ fn observable_hydration_disposition(task: &TransferTask) -> AppResult<Option<Tas
     let state = task
         .state_kind()
         .map_err(|error| AppError::generic(format!("按需下载任务状态无效：{error}")))?;
-    Ok(match state {
-        TransferState::Completed => Some(TaskDisposition::Completed),
-        TransferState::Pending => Some(TaskDisposition::Pending),
-        TransferState::Running => Some(TaskDisposition::Running),
-        TransferState::WaitingForNetwork => Some(TaskDisposition::WaitingForNetwork),
-        TransferState::BackingOff => Some(TaskDisposition::BackingOff),
-        TransferState::VerifyingRemote => Some(TaskDisposition::VerifyingRemote),
-        TransferState::RestartRequired => Some(TaskDisposition::RestartRequired),
-        TransferState::Failed | TransferState::Canceled => None,
-    })
+    Ok(TaskDisposition::from_observable_state(state))
 }
 
 /// 观察持久任务直到结算；只有状态、进度和 revision 均不变化才计入停滞时间。
@@ -662,11 +653,7 @@ fn inspect_destination(destination: &Path) -> AppResult<Option<DestinationSnapsh
             if metadata.len() == 0 && crate::mount::manager::is_placeholder_file(destination) {
                 return Ok(None);
             }
-            let mtime = metadata
-                .modified()
-                .ok()
-                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|duration| duration.as_millis() as i64)
+            let mtime = crate::core::fs_meta::metadata_mtime_ms(&metadata)
                 .ok_or_else(|| AppError::generic("无法读取按需下载目标修改时间"))?;
             Ok(Some(DestinationSnapshot {
                 mtime,
@@ -727,7 +714,6 @@ fn build_download_task(
         repository::transfer_direction::DOWNLOAD
     };
     TransferTask {
-        id: 0,
         direction,
         file_id: Some(file_id.to_string()),
         local_path: Some(destination.to_string_lossy().into_owned()),
@@ -736,27 +722,14 @@ fn build_download_task(
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default(),
         total_size: metadata.size,
-        transferred: 0,
-        state: i32::from(TransferState::Pending),
-        error_message: None,
         created_at,
-        finished_at: None,
-        server_id: None,
-        upload_id: None,
-        resume_offset: 0,
-        session_url: None,
         relative_path: Some(relative_path.to_string()),
         parent_file_id: metadata.parent_file_id,
         operation: Some(i32::from(operation)),
         source_mtime: destination_snapshot.map(|snapshot| snapshot.mtime),
         source_size: destination_snapshot.map(|snapshot| snapshot.size),
         expected_cloud_edited_time: Some(metadata.edited_time),
-        attempt_count: 0,
-        verify_attempt_count: 0,
-        next_retry_at: None,
-        error_kind: None,
-        remote_result_file_id: None,
-        state_revision: 0,
+        ..TransferTask::fresh_intent()
     }
 }
 
@@ -826,7 +799,8 @@ mod tests {
 
     fn test_database(root: &std::path::Path) -> Arc<Mutex<rusqlite::Connection>> {
         Arc::new(Mutex::new(
-            crate::data::open_at(&root.join("state.db")).expect("创建测试数据库失败"),
+            crate::data::open_at_with_mount(&root.join("state.db"), None)
+                .expect("创建测试数据库失败"),
         ))
     }
 
@@ -1139,11 +1113,7 @@ mod tests {
         let mut failed_upload = hydration_task(root.path());
         failed_upload.direction = repository::transfer_direction::UPLOAD;
         failed_upload.operation = Some(i32::from(TransferOperation::Update));
-        failed_upload.source_mtime = metadata
-            .modified()
-            .ok()
-            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|duration| duration.as_millis() as i64);
+        failed_upload.source_mtime = crate::core::fs_meta::metadata_mtime_ms(&metadata);
         failed_upload.source_size = Some(metadata.len() as i64);
         failed_upload.state = i32::from(TransferState::Failed);
         failed_upload.error_kind = Some(i32::from(TransferErrorKind::Network));
@@ -1302,7 +1272,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn fuse_error_mapping_distinguishes_network_retry_and_io_failure() {
-        let network = crate::error::AppError::drive_network(Some("offline"));
+        let network = crate::error::AppError::drive_network();
         assert_eq!(hydration_error_errno(&network), libc::EHOSTUNREACH);
 
         let throttled = crate::error::AppError::drive_from_status(429, "{}");

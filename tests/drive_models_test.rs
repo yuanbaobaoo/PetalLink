@@ -1,6 +1,6 @@
 //! Drive 文件、配额与分页领域模型测试。
 
-use petal_link_lib::drive::models::{DriveAbout, DriveFile, FileCategory, FileListResult};
+use petal_link_lib::drive::models::{DriveAbout, DriveFile, FileCategory};
 use serde_json::json;
 
 /// 验证配额容量判断覆盖充足与不足场景。
@@ -96,9 +96,9 @@ fn test_drive_file_content_hash_aliases() {
     }
 }
 
-/// 验证 Drive 文件 JSON 往返保留关键字段。
+/// 验证 Drive 文件 JSON 解析保留关键字段。
 #[test]
-fn test_drive_file_roundtrip_json() {
+fn test_drive_file_parses_key_fields() {
     let json = json!({
         "id": "f1",
         "fileName": "报告.docx",
@@ -107,11 +107,9 @@ fn test_drive_file_roundtrip_json() {
         "editedTime": "2026-06-18T10:30:00Z",
     });
     let file = DriveFile::from_json(&json).unwrap();
-    let reencoded = file.to_json();
-    let reparsed = DriveFile::from_json(&reencoded).unwrap();
-    assert_eq!(reparsed.id, "f1");
-    assert_eq!(reparsed.name, "报告.docx");
-    assert_eq!(reparsed.size, 2048);
+    assert_eq!(file.id, "f1");
+    assert_eq!(file.name, "报告.docx");
+    assert_eq!(file.size, 2048);
 }
 
 /// 验证非对象配额响应回退为默认值。
@@ -120,25 +118,6 @@ fn test_drive_about_default_on_non_object() {
     let about = DriveAbout::from_json(&json!("string"));
     assert_eq!(about.user_capacity, 0);
     assert_eq!(about.used_space, 0);
-}
-
-/// 验证文件列表分页 cursor 判定。
-#[test]
-fn test_file_list_result_pagination() {
-    let json = json!({
-        "files": [
-            { "id": "f1", "fileName": "a" },
-            { "id": "f2", "fileName": "b" },
-        ],
-        "nextCursor": "next-page-token",
-    });
-    let result = FileListResult::from_json(&json);
-    assert_eq!(result.files.len(), 2);
-    assert!(result.has_next());
-    assert_eq!(result.next_cursor.as_deref(), Some("next-page-token"));
-
-    let result = FileListResult::from_json(&json!({ "files": [] }));
-    assert!(!result.has_next());
 }
 
 /// 验证 size 容忍字符串形式（2026-09 华为响应 schema 漂移）。
@@ -162,13 +141,9 @@ fn test_drive_file_size_accepts_string() {
     assert_eq!(DriveFile::from_json(&json).unwrap().size, 42);
 }
 
-/// 验证 0 字节文件在 to_json 往返后仍保留 size=0（与未知大小区分）。
+/// 验证 0 字节文件的 size 解析为 0（与未知大小区分）。
 #[test]
-fn test_drive_file_zero_size_roundtrip() {
+fn test_drive_file_zero_size_parses() {
     let json = json!({ "id": "f0", "fileName": "空.txt", "size": 0 });
-    let file = DriveFile::from_json(&json).unwrap();
-    let reencoded = file.to_json();
-    assert_eq!(reencoded.get("size").and_then(|v| v.as_i64()), Some(0));
-    let reparsed = DriveFile::from_json(&reencoded).unwrap();
-    assert_eq!(reparsed.size, 0);
+    assert_eq!(DriveFile::from_json(&json).unwrap().size, 0);
 }

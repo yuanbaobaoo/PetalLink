@@ -14,6 +14,14 @@ use crate::sync::transfer_state::{TransferErrorKind, TransferState};
 pub type OnlineCheck = Arc<dyn Fn() -> bool + Send + Sync>;
 /// 返回当前 epoch 毫秒的可共享时钟。
 pub type NowMs = Arc<dyn Fn() -> i64 + Send + Sync>;
+
+/// 进入远端核验后的首次复核延迟（毫秒）。
+pub(super) const VERIFY_FIRST_RECHECK_MS: i64 = 3_000;
+/// 远端结果已确认但无法安全结算时的重试退避（毫秒）。
+pub(super) const VERIFY_RETRY_BACKOFF_MS: i64 = 60_000;
+/// 远端核验暂不可用（网络/限流）时的重试退避（毫秒）。
+pub(super) const VERIFY_UNAVAILABLE_BACKOFF_MS: i64 = 15_000;
+
 /// 上传任务结算为终态失败时的用户通知回调（任务快照 + 用户可读文案）。
 ///
 /// 只有永久 Failed 才触发；VerifyingRemote/退避/等待网络等可恢复结算不触发，
@@ -99,6 +107,28 @@ pub enum TaskDisposition {
 }
 
 impl TaskDisposition {
+    /// 活动持久状态对应的去向；终态（含 Completed）返回 None。
+    /// 这是 TransferState → TaskDisposition 的唯一映射表，新增状态时编译器会要求在此补齐。
+    pub fn from_active_state(state: TransferState) -> Option<Self> {
+        match state {
+            TransferState::Pending => Some(Self::Pending),
+            TransferState::Running => Some(Self::Running),
+            TransferState::WaitingForNetwork => Some(Self::WaitingForNetwork),
+            TransferState::BackingOff => Some(Self::BackingOff),
+            TransferState::VerifyingRemote => Some(Self::VerifyingRemote),
+            TransferState::RestartRequired => Some(Self::RestartRequired),
+            TransferState::Completed | TransferState::Failed | TransferState::Canceled => None,
+        }
+    }
+
+    /// 可观察去向：Completed 也是有效的观察结果；仅 Failed/Canceled 返回 None。
+    pub fn from_observable_state(state: TransferState) -> Option<Self> {
+        match state {
+            TransferState::Completed => Some(Self::Completed),
+            other => Self::from_active_state(other),
+        }
+    }
+
     /// 返回适合直接展示给用户的任务状态说明。
     pub fn user_message(self) -> &'static str {
         match self {

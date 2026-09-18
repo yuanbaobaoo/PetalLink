@@ -14,9 +14,36 @@ import {
 } from "@/api/transfer";
 import { useSyncStore } from "@/stores/sync";
 import { useTransferStore } from "@/stores/transfer";
+import type { SyncGlobalState } from "@/api/generated";
 import { MateDialog } from "@/components/mate";
 import SyncStatusBar from "@/views/main/SyncStatusBar.vue";
 import TransferPopover from "@/views/main/TransferPopover.vue";
+
+/**
+ * 构造可通过 isSyncGlobalState 校验的完整快照，按用例覆盖字段。
+ */
+function makeState(overrides: Partial<SyncGlobalState> = {}): SyncGlobalState {
+  return {
+    revision: 1,
+    total: 0,
+    completed: 0,
+    uploading: 0,
+    downloading: 0,
+    waiting_network: 0,
+    failed: 0,
+    transfer_failed: 0,
+    failed_items: [],
+    conflict: 0,
+    editing: 0,
+    is_running: false,
+    last_sync_time: null,
+    is_indexing: false,
+    indexing_scanned_folders: 0,
+    indexing_discovered_items: 0,
+    content_changed: false,
+    ...overrides,
+  };
+}
 
 /**
  * 构造满足当前测试合同的传输任务。
@@ -180,8 +207,7 @@ describe("SyncStatusBar 活动态与失败事实", () => {
   ] as const)("同步阶段 %s 显示精确文案", (phase, expectedText) => {
     // 当前同步状态。
     const sync = useSyncStore();
-    sync.syncPhase = phase;
-    sync.isRunning = true;
+    sync.applyState(makeState({ sync_phase: phase, is_running: true }));
 
     // 当前组件测试包装器。
     const wrapper = shallowMount(SyncStatusBar);
@@ -193,8 +219,7 @@ describe("SyncStatusBar 活动态与失败事实", () => {
   it("运行中缺少精确 phase 时仍不得显示同步完成", () => {
     // 当前同步状态。
     const sync = useSyncStore();
-    sync.syncPhase = null;
-    sync.isRunning = true;
+    sync.applyState(makeState({ is_running: true }));
 
     // 当前组件测试包装器。
     const wrapper = shallowMount(SyncStatusBar);
@@ -206,8 +231,7 @@ describe("SyncStatusBar 活动态与失败事实", () => {
   it("索引中缺少精确 phase 时仍不得显示同步完成", () => {
     // 当前同步状态。
     const sync = useSyncStore();
-    sync.syncPhase = null;
-    sync.isIndexing = true;
+    sync.applyState(makeState({ is_indexing: true }));
 
     // 当前组件测试包装器。
     const wrapper = shallowMount(SyncStatusBar);

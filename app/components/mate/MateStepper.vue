@@ -1,14 +1,15 @@
 <!-- 步进器（v2：灰底胶囊容器 + 白色悬浮按钮） [− | 值 | +] -->
 <script setup lang="ts">
 import { computed } from "vue";
-import MateIcon from "./MateIcon.vue";
 
+// 组件输入参数类型。
 interface Props {
   modelValue: number;
   min?: number;
   max?: number;
   step?: number;
 }
+
 // 组件输入参数。
 const props = withDefaults(defineProps<Props>(), { min: 0, max: 999999, step: 1 });
 
@@ -37,7 +38,7 @@ function inc(): void {
 <template>
   <div class="mate-stepper">
     <button class="mate-stepper__btn" :class="{ 'is-disabled': !canDec }" :disabled="!canDec" @click="dec">
-      <MateIcon name="x" :size="16" class="mate-stepper__minus" />
+      <span class="mate-stepper__minus">−</span>
     </button>
     <span class="mate-stepper__val">{{ modelValue }}</span>
     <button class="mate-stepper__btn" :class="{ 'is-disabled': !canInc }" :disabled="!canInc" @click="inc">
@@ -73,9 +74,7 @@ function inc(): void {
   box-shadow: var(--sh-sm);
 }
 .mate-stepper__btn.is-disabled { color: var(--ink-300); cursor: not-allowed; }
-/* 把 x 图标旋转成减号 */
-.mate-stepper__minus { transform: rotate(45deg); }
-.mate-stepper__plus { font-size: 15px; line-height: 1; }
+.mate-stepper__minus, .mate-stepper__plus { font-size: 15px; line-height: 1; }
 .mate-stepper__val {
   min-width: 44px;
   text-align: center;

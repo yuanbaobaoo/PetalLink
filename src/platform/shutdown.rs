@@ -79,7 +79,7 @@ pub fn flush_with_timeout(_handle: &AppHandle) {
         tracing::error!("退出清理超过 3.2 秒，执行 PetalLink FUSE 定向 detach 兜底");
         #[cfg(target_os = "linux")]
         if let Some(mountpoint) = fuse_mountpoint {
-            match crate::core::config_store::detach_owned_petallink_mount(&mountpoint) {
+            match crate::platform::linux_mount::detach_owned_petallink_mount(&mountpoint) {
                 Ok(true) => tracing::warn!(
                     mountpoint = %mountpoint.display(),
                     "退出超时后已 detach PetalLink FUSE"

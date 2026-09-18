@@ -17,3 +17,15 @@ pub mod user_info_api;
 
 /// 编排 OAuth 授权流程 + code 交换 + 用户信息获取。
 pub mod service;
+
+static AUTH_HTTP: once_cell::sync::Lazy<reqwest::Client> = once_cell::sync::Lazy::new(|| {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .expect("构建 reqwest client 失败")
+});
+
+/// 认证链路共享的 HTTP client（克隆廉价，连接池全局共享）。
+pub(crate) fn http_client() -> reqwest::Client {
+    AUTH_HTTP.clone()
+}

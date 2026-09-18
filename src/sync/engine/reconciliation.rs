@@ -26,7 +26,8 @@ impl SyncEngine {
     ) -> AppResult<()> {
         let conn = self.db.lock();
         let durable_records = repository::load_all(&conn)?;
-        let ct = self.cloud_tree.lock();
+        let cloud_guard = self.cloud.lock();
+        let ct = &cloud_guard.tree;
         let mount_dir =
             crate::core::paths::expand_tilde(&self.mount_dir.lock().clone().unwrap_or_default());
         for (rel, entry) in local {
@@ -498,9 +499,12 @@ impl SyncEngine {
         }
         drop(db);
 
-        let path_to_id = self.path_to_id.lock().clone();
-        let root_folder_id = self.root_folder_id.lock().clone();
-        let ct = self.cloud_tree.lock();
+        let (path_to_id, root_folder_id) = {
+            let cloud = self.cloud.lock();
+            (cloud.path_to_id.clone(), cloud.root_folder_id.clone())
+        };
+        let cloud_guard = self.cloud.lock();
+        let ct = &cloud_guard.tree;
         let mount_dir =
             crate::core::paths::expand_tilde(&self.mount_dir.lock().clone().unwrap_or_default());
         let mut renamed_sources = std::collections::HashSet::new();
@@ -717,7 +721,7 @@ impl SyncEngine {
             renamed_sources.insert((old_record.local_path.clone(), fid));
             tracing::info!(reason = action.reason.as_deref(), "检测到本地路径变化");
         }
-        drop(ct);
+        drop(cloud_guard);
 
         // fileId 证明为同一文件后，移除旧路径及其删除祖先，避免与移动并发回收目标文件。
         // 目录移动只保留最外层根 MoveInCloud：旧/新两棵子树上的上传、建目录、删除、
@@ -821,23 +825,20 @@ impl SyncEngine {
         if !self.cloud_tree_is_trusted() {
             return FreeUpCheckResult::NotSynced;
         }
-        let tree = self.cloud_tree.lock();
-        if tree.get(rel_path).map(|file| file.id.as_str()) != Some(file_id) {
+        let cloud = self.cloud.lock();
+        if cloud.tree.get(rel_path).map(|file| file.id.as_str()) != Some(file_id) {
             return FreeUpCheckResult::NotInCloud;
         }
-        drop(tree);
+        drop(cloud);
         let conn = self.db.lock();
         if repository::list_all_transfers(&conn).is_ok_and(|tasks| {
             tasks.into_iter().any(|task| {
                 task.relative_path.as_deref() == Some(rel_path)
-                    && task.state_kind().is_ok_and(|state| {
-                        !matches!(
-                            state,
-                            TransferState::Completed
-                                | TransferState::Failed
-                                | TransferState::Canceled
-                        )
-                    })
+                    // 删除类判定用保守的非终态口径；状态损坏按活动处理（fail-closed）。
+                    && task
+                        .state_kind()
+                        .map(|state| !state.is_terminal())
+                        .unwrap_or(true)
             })
         }) {
             return FreeUpCheckResult::NotSynced;
@@ -854,11 +855,7 @@ impl SyncEngine {
             let Ok(meta) = std::fs::metadata(path) else {
                 return FreeUpCheckResult::NotSynced;
             };
-            let mtime = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_millis() as i64);
+            let mtime = crate::core::fs_meta::metadata_mtime_ms(&meta);
             if record.local_mtime != mtime || record.local_size != Some(meta.len() as i64) {
                 FreeUpCheckResult::NotSynced
             } else {

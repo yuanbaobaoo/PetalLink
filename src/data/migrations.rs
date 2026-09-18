@@ -1,4 +1,4 @@
-//! 数据库迁移 —— schemaVersion=5。
+//! 数据库迁移 —— schemaVersion=6。
 //!
 //! 对齐 dart `MigrationStrategy`：
 //! - v1 onCreate: 建全部表
@@ -6,6 +6,7 @@
 //! - v3 onUpgrade from<3: SyncItems 加 localSize（本地变更检测）
 //! - v4 onUpgrade from<4: TransferQueue 加 session_url（华为 resume 上传 Location 头会话 URL）
 //! - v5 onUpgrade from<5: TransferQueue 加任务状态机上下文、revision 与重试索引
+//! - v6 onUpgrade from<6: TransferQueue 加 verify_attempt_count（远端核验专用计数）
 //! - beforeOpen: PRAGMA foreign_keys = ON（已在 open 中处理）
 
 use std::path::Path;
@@ -18,12 +19,6 @@ use crate::sync::transfer_state::{TransferErrorKind, TransferState};
 
 /// 用户版本 PRAGMA key
 const USER_VERSION_PRAGMA: &str = "PRAGMA user_version";
-
-/// 运行迁移。读取当前 user_version，按需建表/升级。
-#[allow(dead_code)]
-pub fn run(conn: &Connection) -> AppResult<()> {
-    run_with_mount(conn, None)
-}
 
 /// 使用可选的可信挂载根运行迁移，并据此安全恢复旧任务路径。
 pub fn run_with_mount(conn: &Connection, mount_root: Option<&Path>) -> AppResult<()> {
@@ -41,7 +36,7 @@ pub fn run_with_mount(conn: &Connection, mount_root: Option<&Path>) -> AppResult
         .map_err(|e| AppError::generic(format!("开始数据库迁移事务失败：{e}")))?;
 
     if current == 0 {
-        // 全新数据库：直接建 v5 终态，避免先建旧结构再 ALTER。
+        // 全新数据库：直接建最新（v6）结构，避免先建旧结构再 ALTER。
         create_all(&transaction)?;
     } else {
         // 旧数据库逐步升级，全部步骤与 user_version 写入同属一个事务。
@@ -69,7 +64,7 @@ pub fn run_with_mount(conn: &Connection, mount_root: Option<&Path>) -> AppResult
     Ok(())
 }
 
-/// 新库直接创建为 v5 终态结构。
+/// 新库直接创建为最新（v6）结构。
 fn create_all(conn: &Connection) -> AppResult<()> {
     conn.execute_batch(
         "

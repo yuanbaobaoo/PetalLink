@@ -8,6 +8,7 @@ import MateIcon from "./MateIcon.vue";
  */
 export type ButtonVariant = "primary" | "soft" | "text" | "icon" | "icon-text";
 
+// 组件输入参数类型。
 interface Props {
   variant?: ButtonVariant;
   /**
@@ -35,10 +36,6 @@ interface Props {
    */
   icon?: string;
   /**
-   * 角标计数（>0 才显示，仅 icon / icon-text 变体；对齐 MateIconButtonWithText.badge）
-   */
-  badge?: number;
-  /**
    * 自定义高度（px）
    */
   height?: number;
@@ -56,7 +53,6 @@ const props = withDefaults(defineProps<Props>(), {
   fullWidth: false,
   tooltip: "",
   icon: "",
-  badge: 0,
   height: 0,
 });
 
@@ -74,11 +70,6 @@ const iconSize = computed(() => {
       return 18;
   }
 });
-
-// 是否显示角标（仅图标类变体）
-const showBadge = computed(
-  () => props.badge > 0 && (props.variant === "icon" || props.variant === "icon-text")
-);
 
 // 动态样式（避免在模板内用模板字符串，防止 SFC 解析器误判）
 const heightStyle = computed(() =>
@@ -122,7 +113,6 @@ function handleClick(event: MouseEvent): void {
     <span v-if="loading && variant === 'primary'" class="mate-btn__spinner" />
     <span v-else-if="icon" class="mate-btn__icon-wrap">
       <MateIcon :name="icon" :size="iconSize" :spin="loading" class="mate-btn__icon" />
-      <span v-if="showBadge" class="mate-btn__badge">{{ badge > 99 ? "99+" : badge }}</span>
     </span>
     <span v-if="$slots.default" class="mate-btn__label"><slot /></span>
   </button>
@@ -272,22 +262,5 @@ function handleClick(event: MouseEvent): void {
 }
 .mate-btn__icon {
   display: inline-block;
-}
-
-/* 角标：18×18 全圆，brand 底白字 */
-.mate-btn__badge {
-  position: absolute;
-  top: -6px;
-  right: -8px;
-  min-width: 18px;
-  height: 18px;
-  padding: 0 5px;
-  border-radius: 9px;
-  background-color: var(--color-brand);
-  color: #fff;
-  font-size: var(--font-caption);
-  font-weight: var(--fw-semibold);
-  line-height: 18px;
-  text-align: center;
 }
 </style>

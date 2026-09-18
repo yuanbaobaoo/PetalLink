@@ -140,6 +140,29 @@ pub struct ActionResult {
     pub cloud_file: Option<crate::drive::models::DriveFile>,
 }
 
+impl ActionResult {
+    /// 执行成功；上传/建目录成功时携带云端文件。
+    pub fn ok(cloud_file: Option<crate::drive::models::DriveFile>) -> Self {
+        Self {
+            success: true,
+            error_message: None,
+            deferred: false,
+            cloud_file,
+        }
+    }
+
+    /// 执行失败。deferred=true 表示仅为暂时性延迟（稳定性未过/用户编辑中），
+    /// 结算时不计为真失败。
+    pub fn fail(error_message: impl Into<String>, deferred: bool) -> Self {
+        Self {
+            success: false,
+            error_message: Some(error_message.into()),
+            deferred,
+            cloud_file: None,
+        }
+    }
+}
+
 /// 释放空间安全校验结果
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "snake_case")]

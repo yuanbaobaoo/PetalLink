@@ -86,15 +86,21 @@ onUnmounted(() => {
 /**
  * 显示设置页（全局事件，MainPage 通过 emit 触发）
  */
-function openSettings(): void { currentPage.value = "settings"; }
+function openSettings(): void {
+  currentPage.value = "settings";
+}
 /**
  * 返回主界面
  */
-function openMain(): void { currentPage.value = "main"; }
+function openMain(): void {
+  currentPage.value = "main";
+}
 /**
  * 显示日志页（设置页触发）
  */
-function openLogs(): void { currentPage.value = "logs"; }
+function openLogs(): void {
+  currentPage.value = "logs";
+}
 </script>
 
 <template>

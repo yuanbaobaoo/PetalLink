@@ -80,17 +80,6 @@ pub trait MutationCoordinator: Send + Sync + 'static {
         destination: PathBuf,
         is_directory: bool,
     ) -> io::Result<()>;
-
-    /// backing rename 成功后的通知钩子，可更新易失路径提示/触发同步。
-    ///
-    /// 不得在这里把云端对齐的持久基线直接重键到新路径；远端 move 尚未提交，旧路径
-    /// 基线仍需保留给 planner 的 rename 检测。
-    async fn rename_observed(
-        &self,
-        source: PathBuf,
-        destination: PathBuf,
-        is_directory: bool,
-    ) -> io::Result<()>;
 }
 
 /// 路径修改租约；析构即释放。
@@ -584,6 +573,23 @@ impl std::fmt::Debug for VirtualDriveFs {
     }
 }
 
+/// 离开作用域时摘除不再被等待的水合锁条目，避免 map 随会话无界增长。
+/// 无并发等待者时引用计数恰为 3（map 条目 + 调用方局部变量 + 本句柄）；
+/// 计数更大说明有等待者持有克隆，留给其退出时的修剪做最终清理。
+struct HydrationLockPrune {
+    locks: Arc<Mutex<HashMap<PathBuf, Arc<AsyncMutex<()>>>>>,
+    path: PathBuf,
+    lock: Arc<AsyncMutex<()>>,
+}
+
+impl Drop for HydrationLockPrune {
+    fn drop(&mut self) {
+        if Arc::strong_count(&self.lock) == 3 {
+            self.locks.lock().remove(&self.path);
+        }
+    }
+}
+
 impl VirtualDriveFs {
     fn new(
         backing_root: PathBuf,
@@ -788,7 +794,7 @@ impl VirtualDriveFs {
         flags: OpenFlags,
         hydration_caller: Option<(u32, &ProcessIdentity)>,
     ) -> io::Result<FileHandle> {
-        let _namespace_guard = self.namespace_read().await?;
+        let mut namespace_guard = self.namespace_read().await?;
         let relative_path = self.relative_for_inode(inode)?;
         let path = self.backing_path(&relative_path);
         let readable = flags.acc_mode() != OpenAccMode::O_WRONLY;
@@ -833,7 +839,17 @@ impl VirtualDriveFs {
             }
         }
         if initial_placeholder && writable && !truncate {
+            // 下载期间释放命名空间读锁：慢速下载不得冻结全挂载点的建/删/改名。
+            // 完成后重新取锁并复核 backing 身份与 inode→路径映射，防止下载期间
+            // 的 rename 把本次打开指向另一文件。
+            let expected_identity = path_identity_beneath(&self.backing_root, &relative_path)?;
+            drop(namespace_guard);
             self.ensure_hydrated(&relative_path, &path).await?;
+            namespace_guard = self.namespace_read().await?;
+            verify_path_identity(&self.backing_root, &relative_path, expected_identity)?;
+            if self.relative_for_inode(inode)? != relative_path {
+                return Err(os_error(libc::EBUSY));
+            }
         }
         let path_lease = if writable {
             let expected_identity = path_identity_beneath(&self.backing_root, &relative_path)?;
@@ -1008,7 +1024,7 @@ impl VirtualDriveFs {
         };
         debug_assert!(pending);
 
-        let _namespace_guard = self.namespace_read().await?;
+        let mut namespace_guard = self.namespace_read().await?;
         // 另一请求可能已在等待 namespace lock 时完成 hydration。
         {
             let handles = self.open_handles.lock();
@@ -1036,8 +1052,29 @@ impl VirtualDriveFs {
                     return Err(os_error(libc::EOPNOTSUPP));
                 }
             }
+            // 下载期间释放命名空间读锁：慢速下载不得冻结全挂载点的建/删/改名。
+            // 完成后重新取锁并复核 backing 身份、inode→路径映射与句柄有效性。
+            let expected_identity = path_identity_beneath(&self.backing_root, &relative_path)?;
+            drop(namespace_guard);
+            self.ensure_hydrated(&relative_path, &path).await?;
+            namespace_guard = self.namespace_read().await?;
+            verify_path_identity(&self.backing_root, &relative_path, expected_identity)?;
+            if self.relative_for_inode(inode)? != relative_path {
+                return Err(os_error(libc::EBUSY));
+            }
+            // 并发打开者可能已在放锁窗口内完成 promote；直接复用其结果。
+            {
+                let handles = self.open_handles.lock();
+                match handles.get(&handle) {
+                    Some(OpenHandle::File(opened)) if opened.inode == inode => {
+                        if let Some(file) = &opened.file {
+                            return Ok(Arc::clone(file));
+                        }
+                    }
+                    _ => return Err(os_error(libc::EBADF)),
+                }
+            }
         }
-        self.ensure_hydrated(&relative_path, &path).await?;
         let file = Arc::new(open_read_only_no_follow(&path)?);
         let metadata = file.metadata()?;
         ensure_supported_type(&metadata)?;
@@ -1115,6 +1152,11 @@ impl VirtualDriveFs {
             .entry(relative_path.to_path_buf())
             .or_insert_with(|| Arc::new(AsyncMutex::new(())))
             .clone();
+        let _prune = HydrationLockPrune {
+            locks: Arc::clone(&self.hydration_locks),
+            path: relative_path.to_path_buf(),
+            lock: Arc::clone(&hydration_lock),
+        };
         let _guard = tokio::select! {
             biased;
             _ = self.cancellation.cancelled() => return Err(os_error(libc::EINTR)),
@@ -1438,24 +1480,6 @@ impl VirtualDriveFs {
         rename_beneath(&source_path, &destination_path, no_replace)?;
         self.inodes.rename_subtree(&source, &destination);
         drop(mutation_lease);
-
-        if let Err(error) = coordinator
-            .rename_observed(
-                source.clone(),
-                destination.clone(),
-                source_metadata.is_dir(),
-            )
-            .await
-        {
-            // backing rename 已原子提交；通知失败不能用第二次 rename 伪造回滚，
-            // 否则崩溃窗口会破坏 POSIX 原子性。watcher/下次扫描仍会收敛。
-            tracing::warn!(
-                source = %source.display(),
-                destination = %destination.display(),
-                %error,
-                "FUSE rename 后同步通知失败"
-            );
-        }
         Ok(())
     }
 
@@ -2624,15 +2648,6 @@ mod tests {
         ) -> io::Result<()> {
             Ok(())
         }
-
-        async fn rename_observed(
-            &self,
-            _source: PathBuf,
-            _destination: PathBuf,
-            _is_directory: bool,
-        ) -> io::Result<()> {
-            Ok(())
-        }
     }
 
     impl RecordingCoordinator {
@@ -3402,7 +3417,7 @@ mod tests {
         ))
         .expect("可写 FUSE 挂载失败");
         assert!(
-            crate::core::config_store::is_active_petallink_mount(mountpoint.path())
+            crate::platform::linux_mount::is_active_petallink_mount(mountpoint.path())
                 .expect("读取挂载状态失败"),
             "运行状态查询必须识别真实 PetalLink FUSE 挂载"
         );
@@ -3480,7 +3495,7 @@ mod tests {
         std::fs::remove_dir(&moved_cloud).unwrap();
         session.unmount().expect("可写 FUSE 卸载失败");
         assert!(
-            !crate::core::config_store::is_active_petallink_mount(mountpoint.path())
+            !crate::platform::linux_mount::is_active_petallink_mount(mountpoint.path())
                 .expect("读取卸载状态失败"),
             "卸载后不能继续报告按需云盘可用"
         );
@@ -3685,5 +3700,77 @@ mod tests {
         assert!(backing.path().join("cloud-directory-b").is_dir());
 
         session.unmount().expect("压力测试 FUSE 卸载失败");
+    }
+    #[derive(Debug)]
+    struct BlockingHydrator {
+        data: Vec<u8>,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl Hydrator for BlockingHydrator {
+        async fn hydrate(&self, request: HydrationRequest) -> io::Result<()> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            let temporary = request.backing_path.with_extension("hydrating-test");
+            std::fs::write(&temporary, &self.data)?;
+            crate::platform::xattr::set(&temporary, XATTR_FILE_ID, request.file_id.as_bytes())?;
+            crate::platform::xattr::set(&temporary, XATTR_STATE, b"downloaded")?;
+            std::fs::rename(temporary, request.backing_path)?;
+            Ok(())
+        }
+    }
+
+    /// 下载期间命名空间读锁必须释放：rename 不被下载阻塞，且完成下载后
+    /// 身份复核必须让打开失败（EBUSY），不得返回改名后另一文件的内容。
+    #[test]
+    fn rename_during_placeholder_hydration_fails_open_instead_of_serving_wrong_file() {
+        let backing = tempfile::tempdir().unwrap();
+        write_placeholder(&backing.path().join("placeholder.txt"), "file-1", 7);
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let hydrator = Arc::new(BlockingHydrator {
+            data: b"content".to_vec(),
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        });
+        let runtime = tokio::runtime::Runtime::new().expect("创建 Tokio runtime 失败");
+        // 无协调器：把租约互斥排除在外，单独验证命名空间锁行为。
+        let filesystem = VirtualDriveFs::new(
+            backing.path().to_path_buf(),
+            runtime.handle().clone(),
+            hydrator,
+            None,
+            false,
+            Arc::new(MountCancellation::default()),
+        );
+
+        // 只读打开占位文件：得到挂起的 pending 句柄，不触发下载。
+        let attr = filesystem
+            .entry_for_relative(Path::new("placeholder.txt"))
+            .unwrap();
+        let handle = runtime
+            .block_on(filesystem.open_inode(attr.ino, OpenFlags(libc::O_RDONLY)))
+            .unwrap();
+
+        let fs_for_read = filesystem.clone();
+        let read_task =
+            runtime.spawn(async move { fs_for_read.read_inode(attr.ino, handle, 0, 7).await });
+        // 等 hydrator 进入（证明下载已开始且命名空间锁已释放）。
+        runtime.block_on(entered.notified());
+        runtime
+            .block_on(filesystem.rename_entry(
+                INodeNo::ROOT,
+                OsStr::new("placeholder.txt"),
+                INodeNo::ROOT,
+                OsStr::new("renamed.txt"),
+                RenameFlags::empty(),
+            ))
+            .expect("下载期间 rename 必须能完成（命名空间锁已释放）");
+
+        release.notify_waiters();
+        let outcome = runtime.block_on(read_task).expect("read 任务不应 panic");
+        assert_eq!(outcome.unwrap_err().raw_os_error(), Some(libc::EBUSY));
     }
 }

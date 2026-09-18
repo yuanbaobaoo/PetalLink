@@ -18,6 +18,34 @@ pub enum TransferState {
     Canceled = 8,
 }
 
+impl TransferState {
+    /// 终态：任务已结束，不再占用任何资源。
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            TransferState::Completed | TransferState::Failed | TransferState::Canceled
+        )
+    }
+
+    /// 该状态下的任务是否占用其路径：进行中、退避中、等待核验远端结果的任务
+    /// 都可能仍在改写两端数据，路径争议处理与动作过滤以此为据。
+    /// RestartRequired 仅在已知远端结果（remote_result_file_id 非空）时占用路径——
+    /// 没有远端结果的滞留记录可由用户清除或直接重试，不阻塞路径。
+    /// 注意与数据安全场景的区分：释放本地空间等删除类判定应使用更保守的
+    /// `!is_terminal()`，滞留的 RestartRequired 也不能放行。
+    pub fn occupies_path(self, remote_result_file_id: Option<&str>) -> bool {
+        matches!(
+            self,
+            TransferState::Pending
+                | TransferState::Running
+                | TransferState::WaitingForNetwork
+                | TransferState::BackingOff
+                | TransferState::VerifyingRemote
+        ) || (self == TransferState::RestartRequired
+            && remote_result_file_id.is_some_and(|file_id| !file_id.trim().is_empty()))
+    }
+}
+
 /// 持久传输任务代表的文件操作。
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -86,14 +114,12 @@ impl From<rusqlite::Error> for TransitionError {
 macro_rules! impl_persistent_enum {
     ($enum:ty, $field:literal, [$($value:literal => $variant:path),+ $(,)?]) => {
         impl From<$enum> for i32 {
-            /// 将持久枚举转为数据库整数值。
             fn from(value: $enum) -> Self {
                 value as i32
             }
         }
 
         impl TryFrom<i32> for $enum {
-            /// 持久枚举整数转换失败时返回的错误。
             type Error = TransitionError;
 
             /// 严格将数据库整数值解析为枚举。

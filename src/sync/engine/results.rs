@@ -19,7 +19,8 @@ impl SyncEngine {
 
         // 修改缓存前先捕获显式目录子树并结算数据库记录；仅从内存移除结算成功的根路径。
         let delete_subtrees: std::collections::HashMap<String, (bool, Vec<String>)> = {
-            let cloud = self.cloud_tree.lock();
+            let cloud_guard = self.cloud.lock();
+            let cloud = &cloud_guard.tree;
             actions
                 .iter()
                 .zip(results.iter())
@@ -288,11 +289,7 @@ impl SyncEngine {
                                     "成功动作结算时本地目标类型不一致：{rel}"
                                 )));
                             }
-                            let modified = metadata
-                                .modified()
-                                .ok()
-                                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                                .map(|duration| duration.as_millis() as i64)
+                            let modified = crate::core::fs_meta::metadata_mtime_ms(&metadata)
                                 .ok_or_else(|| {
                                     AppError::generic(format!(
                                         "成功动作结算时无法读取本地修改时间：{rel}"
@@ -403,8 +400,10 @@ impl SyncEngine {
         // 只有持久化基线写入成功后，才发布缓存增量。
         {
             let mut recently_deleted = self.recently_deleted_paths.lock();
-            let mut cloud = self.cloud_tree.lock();
-            let mut path_to_id = self.path_to_id.lock();
+            let mut cloud_guard = self.cloud.lock();
+            let state = &mut *cloud_guard;
+            let cloud = &mut state.tree;
+            let path_to_id = &mut state.path_to_id;
             for (action, result) in actions.iter().zip(results.iter()) {
                 let Some(relative_path) = &action.relative_path else {
                     continue;
@@ -447,8 +446,8 @@ impl SyncEngine {
                             if let Some(existing_path) = existing_path {
                                 if existing_path != *relative_path {
                                     crate::sync::cloud_tree::rekey_folder_subtree(
-                                        &mut cloud,
-                                        &mut path_to_id,
+                                        cloud,
+                                        path_to_id,
                                         &existing_path,
                                         relative_path,
                                     )?;
@@ -509,18 +508,13 @@ impl SyncEngine {
             self.ensure_cycle_active()?;
             let _activity = self.begin_external_activity()?;
             // 父目录可能刚完成结算，执行前重新填充 parent。
-            fill_parent_file_ids(&mut actions[i..=i], &self.path_to_id.lock());
+            fill_parent_file_ids(&mut actions[i..=i], &self.cloud.lock().path_to_id);
             let mut res = exec
                 .execute_all(&[actions[i].clone()])
                 .await
                 .into_iter()
                 .next()
-                .unwrap_or_else(|| ActionResult {
-                    success: false,
-                    error_message: Some("目录创建未返回结果".into()),
-                    deferred: false,
-                    cloud_file: None,
-                });
+                .unwrap_or_else(|| ActionResult::fail("目录创建未返回结果", false));
             self.ensure_cycle_active()?;
             if res.success {
                 // 发布 parent ID 前先提交持久化基线，避免缓存与数据库分裂。
@@ -551,7 +545,7 @@ impl SyncEngine {
         }
 
         // 用最新路径索引回填其余动作，再并发执行。
-        fill_parent_file_ids(actions, &self.path_to_id.lock());
+        fill_parent_file_ids(actions, &self.cloud.lock().path_to_id);
         let other_idxs: Vec<usize> = (0..n).filter(|&i| results[i].is_none()).collect();
         let other_actions: Vec<crate::sync::state::SyncAction> =
             other_idxs.iter().map(|&i| actions[i].clone()).collect();
@@ -569,14 +563,7 @@ impl SyncEngine {
 
         Ok(results
             .into_iter()
-            .map(|r| {
-                r.unwrap_or_else(|| ActionResult {
-                    success: false,
-                    error_message: Some("动作未执行".into()),
-                    deferred: false,
-                    cloud_file: None,
-                })
-            })
+            .map(|r| r.unwrap_or_else(|| ActionResult::fail("动作未执行", false)))
             .collect())
     }
 }

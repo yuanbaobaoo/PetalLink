@@ -8,6 +8,8 @@ pub mod cache_paths;
 pub mod config;
 /// 配置文件持久化。
 pub mod config_store;
+/// 文件系统元数据读取工具。
+pub mod fs_meta;
 /// 日志收集与文件保留。
 pub mod logging;
 /// 网络状态探测与发布。

@@ -1,4 +1,4 @@
-//! 本地文件监听 —— FSEvents / inotify + 3 段式 debounce。
+//! 本地文件监听 —— FSEvents / inotify + debounce 合并。
 //!
 //! 对齐 `legacy/lib/mount/local_watcher.dart`。
 //!
@@ -13,9 +13,10 @@
 //! debounce 触发 sync cycle，planner 会把它们误判为「本地新建 → 重复上传」。
 //! （dart 的 DirectoryWatcher 不回放历史，故 legacy 无此问题。）
 //!
-//! 防护：注册后设 `warming_up=true`，丢弃整个 warmup 窗口（> 1 个 debounce 周期）
+//! 防护：注册后设 `warming_up=true`，丢弃整个 warmup 窗口（WARMUP_SECS）
 //! 内的事件。窗口到期后转 `false`，开始正常监听用户改动。
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -43,13 +44,12 @@ pub struct LocalWatcher {
     /// debounce 定时器（tokio timer handle）
     debounce_secs: u32,
     /// 当前待冲刷的路径集合
-    pending: Arc<Mutex<Vec<String>>>,
+    pending: Arc<Mutex<HashSet<String>>>,
     /// 定时器取消句柄
     timer_cancel: Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
     /// 变更通知发送端（每次 flushed 发送一批相对路径）
     change_tx: tokio::sync::broadcast::Sender<ChangeSet>,
     /// notify watcher 句柄
-    #[allow(dead_code)]
     watcher: Mutex<Option<RecommendedWatcher>>,
     /// 是否正在运行
     running: Arc<Mutex<bool>>,
@@ -78,7 +78,7 @@ impl LocalWatcher {
             mount_dir: mount_dir.to_path_buf(),
             skip_matcher,
             debounce_secs,
-            pending: Arc::new(Mutex::new(Vec::new())),
+            pending: Arc::new(Mutex::new(HashSet::new())),
             timer_cancel: Arc::new(Mutex::new(None)),
             change_tx,
             watcher: Mutex::new(None),
@@ -237,9 +237,7 @@ impl LocalWatcher {
                             break;
                         }
                         for path in paths {
-                            if !guard.contains(&path) {
-                                guard.push(path);
-                            }
+                            guard.insert(path);
                         }
                         drop(guard);
 
@@ -270,7 +268,9 @@ impl LocalWatcher {
                                     }
                                     let mut guard = pending.lock().await;
                                     if !guard.is_empty() {
-                                        let paths = guard.drain(..).collect();
+                                        // 排序后发布，保证事件集合的输出顺序确定。
+                                        let mut paths: Vec<String> = guard.drain().collect();
+                                        paths.sort_unstable();
                                         drop(guard);
                                         let _ = change_tx.send(paths);
                                     }

@@ -9,7 +9,7 @@
   - 授权中：替换为 spinner 条 + 取消按钮
 -->
 <script setup lang="ts">
-import { computed, onMounted } from "vue";
+import { computed } from "vue";
 import { useAuthStore } from "@/stores/auth";
 import { MateButton, MateAppLogo, MateInfoBanner, MateCircularProgress } from "@/components/mate";
 
@@ -32,13 +32,6 @@ const canLogin = computed(
 const showAuthorizing = computed(
   () => auth.loading && auth.status === "authorizing"
 );
-
-/**
- * 启动时恢复登录态 + 检查 secret
- */
-onMounted(() => {
-  auth.restore();
-});
 
 /**
  * 开始 OAuth 登录流程。

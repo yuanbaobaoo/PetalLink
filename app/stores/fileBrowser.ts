@@ -82,6 +82,14 @@ export const useFileBrowserStore = defineStore("fileBrowser", () => {
   }
 
   /**
+   * 跳转到任意已解析路径（侧边目录树专用：树提供的路径不是当前栈的前缀）。
+   */
+  async function navigateTo(path: FolderLocation[]): Promise<void> {
+    pathStack.value = [...path];
+    await loadCurrent();
+  }
+
+  /**
    * 返回上级
    */
   async function goUp(): Promise<void> {
@@ -107,6 +115,7 @@ export const useFileBrowserStore = defineStore("fileBrowser", () => {
     loadCurrent,
     enterFolder,
     jumpTo,
+    navigateTo,
     goUp,
     refresh,
   };

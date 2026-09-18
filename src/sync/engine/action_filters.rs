@@ -7,7 +7,8 @@ use crate::mount::skip::SkipMatcher;
 use crate::sync::path_recovery::BlockedPathChange;
 use crate::sync::planner::DbSnapshotEntry;
 use crate::sync::state::{SyncAction, SyncActionType};
-use crate::sync::transfer_state::TransferState;
+
+use crate::core::paths::{is_same_or_in_subtree as is_in_subtree, paths_overlap};
 
 /// 移除命中统一 skip 规则的动作，保证本地扫描与双向规划口径一致。
 pub(super) fn filter_skipped_paths(actions: &mut Vec<SyncAction>, skip_matcher: &SkipMatcher) {
@@ -32,22 +33,7 @@ pub(super) fn filter_active_transfer_actions(
 ) {
     let active_tasks = tasks
         .iter()
-        .filter(|task| {
-            task.state_kind().is_ok_and(|state| {
-                matches!(
-                    state,
-                    TransferState::Pending
-                        | TransferState::Running
-                        | TransferState::WaitingForNetwork
-                        | TransferState::BackingOff
-                        | TransferState::VerifyingRemote
-                ) || (state == TransferState::RestartRequired
-                    && task
-                        .remote_result_file_id
-                        .as_deref()
-                        .is_some_and(|file_id| !file_id.trim().is_empty()))
-            })
-        })
+        .filter(|task| task.occupies_path())
         .collect::<Vec<_>>();
     if active_tasks.is_empty() {
         return;
@@ -141,19 +127,6 @@ pub(super) fn is_blocked_path_identity(
         })
     });
     file_id_blocked || path_blocked
-}
-
-/// 判断两个路径是否相同或存在祖先与后代关系。
-fn paths_overlap(left: &str, right: &str) -> bool {
-    is_in_subtree(left, right) || is_in_subtree(right, left)
-}
-
-/// 判断路径是否等于或位于指定子树根下。
-fn is_in_subtree(path: &str, root: &str) -> bool {
-    path == root
-        || path
-            .strip_prefix(root)
-            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 /// 丢弃近期远端删除路径上的回摆动作，但保留继续确认云端删除的动作。
@@ -396,7 +369,7 @@ pub(super) fn dedupe_local_descendants(actions: &mut Vec<SyncAction>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sync::transfer_state::TransferOperation;
+    use crate::sync::transfer_state::{TransferOperation, TransferState};
 
     /// 命中 skipPatterns 的历史云端删除动作必须被移除，避免每轮转成 Skip 后重复出现。
     #[test]

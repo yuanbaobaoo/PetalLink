@@ -81,18 +81,19 @@ where
     for (candidate, new_path, cloud_file) in candidates {
         // 目录根成功重键时已原子覆盖全部后代；跳过失效候选，避免大目录反复全表读取。
         if rekeyed_subtrees.iter().any(|(old_root, new_root)| {
-            is_in_subtree(&candidate.local_path, old_root) || is_in_subtree(&new_path, new_root)
+            crate::core::paths::is_same_or_in_subtree(&candidate.local_path, old_root)
+                || crate::core::paths::is_same_or_in_subtree(&new_path, new_root)
         }) {
             continue;
         }
         // 目录根被活动传输阻止后，其后代必须随根一起隔离，禁止拆散子树逐项重键。
         if let Some(blocked) = summary.blocked_changes.iter().find(|blocked| {
-            is_in_subtree(&candidate.local_path, &blocked.old_path)
-                || is_in_subtree(&new_path, &blocked.new_path)
+            crate::core::paths::is_same_or_in_subtree(&candidate.local_path, &blocked.old_path)
+                || crate::core::paths::is_same_or_in_subtree(&new_path, &blocked.new_path)
         }) {
             // 后代又跨出被隔离的新子树时，必须把外部端点继续加入隔离闭包。
-            if !is_in_subtree(&candidate.local_path, &blocked.old_path)
-                || !is_in_subtree(&new_path, &blocked.new_path)
+            if !crate::core::paths::is_same_or_in_subtree(&candidate.local_path, &blocked.old_path)
+                || !crate::core::paths::is_same_or_in_subtree(&new_path, &blocked.new_path)
             {
                 push_blocked_change(
                     &mut summary.blocked_changes,
@@ -234,7 +235,7 @@ fn recover_one(
             root.file_id
         )));
     }
-    if root.is_folder && is_in_subtree(new_root, &root.local_path) {
+    if root.is_folder && crate::core::paths::is_same_or_in_subtree(new_root, &root.local_path) {
         return Err(AppError::generic(format!(
             "远端路径恢复拒绝把目录移入自身：{} -> {new_root}",
             root.local_path
@@ -317,7 +318,9 @@ fn recover_one(
     // 整棵基线子树必须与可信云树映射一致，不能只移动根记录。
     let subtree = records
         .iter()
-        .filter(|record| is_in_subtree(&record.local_path, &root.local_path))
+        .filter(|record| {
+            crate::core::paths::is_same_or_in_subtree(&record.local_path, &root.local_path)
+        })
         .cloned()
         .collect::<Vec<_>>();
     for record in &subtree {
@@ -332,8 +335,8 @@ fn recover_one(
         }
     }
     if records.iter().any(|record| {
-        !is_in_subtree(&record.local_path, &root.local_path)
-            && is_in_subtree(&record.local_path, new_root)
+        !crate::core::paths::is_same_or_in_subtree(&record.local_path, &root.local_path)
+            && crate::core::paths::is_same_or_in_subtree(&record.local_path, new_root)
     }) {
         return Err(AppError::generic(format!(
             "目标 DB 子树已被其他记录占用，拒绝覆盖：{new_root}"
@@ -380,24 +383,11 @@ fn has_active_transfer(
     let active = repository::list_all_transfers(conn)?
         .into_iter()
         .any(|task| {
-            let state_is_active = task.state_kind().is_ok_and(|state| {
-                matches!(
-                    state,
-                    TransferState::Pending
-                        | TransferState::Running
-                        | TransferState::WaitingForNetwork
-                        | TransferState::BackingOff
-                        | TransferState::VerifyingRemote
-                ) || (state == TransferState::RestartRequired
-                    && task
-                        .remote_result_file_id
-                        .as_deref()
-                        .is_some_and(|file_id| !file_id.trim().is_empty()))
-            });
-            state_is_active
+            task.occupies_path()
                 && (task.file_id.as_deref() == Some(file_id)
                     || task.relative_path.as_deref().is_some_and(|path| {
-                        is_in_subtree(path, old_root) || is_in_subtree(path, new_root)
+                        crate::core::paths::is_same_or_in_subtree(path, old_root)
+                            || crate::core::paths::is_same_or_in_subtree(path, new_root)
                     }))
         });
     Ok(active)
@@ -521,7 +511,7 @@ pub(crate) fn rekey_sync_items_subtree_in_transaction(
     if old_root == new_root {
         return Err(AppError::generic("同步基线子树重键的源和目标相同"));
     }
-    if is_in_subtree(new_root, old_root) {
+    if crate::core::paths::is_same_or_in_subtree(new_root, old_root) {
         return Err(AppError::generic(format!(
             "拒绝把同步基线目录移动到自身子树：{old_root} -> {new_root}"
         )));
@@ -545,7 +535,7 @@ pub(crate) fn rekey_sync_items_subtree_in_transaction(
 
     let subtree = records
         .iter()
-        .filter(|record| is_in_subtree(&record.local_path, old_root))
+        .filter(|record| crate::core::paths::is_same_or_in_subtree(&record.local_path, old_root))
         .collect::<Vec<_>>();
     if subtree.is_empty() {
         return Err(AppError::generic(format!(
@@ -553,7 +543,8 @@ pub(crate) fn rekey_sync_items_subtree_in_transaction(
         )));
     }
     if records.iter().any(|record| {
-        !is_in_subtree(&record.local_path, old_root) && is_in_subtree(&record.local_path, new_root)
+        !crate::core::paths::is_same_or_in_subtree(&record.local_path, old_root)
+            && crate::core::paths::is_same_or_in_subtree(&record.local_path, new_root)
     }) {
         return Err(AppError::generic(format!(
             "目标同步基线路径已被其他记录占用，拒绝覆盖：{new_root}"
@@ -597,14 +588,6 @@ fn rekey_path(path: &str, old_root: &str, new_root: &str) -> AppResult<String> {
         .filter(|suffix| suffix.starts_with('/'))
         .ok_or_else(|| AppError::generic(format!("路径不属于待重键子树：{path}")))?;
     Ok(format!("{new_root}{suffix}"))
-}
-
-/// 判断路径是否等于或位于指定子树根下。
-fn is_in_subtree(path: &str, root: &str) -> bool {
-    path == root
-        || path
-            .strip_prefix(root)
-            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 /// 读取不跟随符号链接的元数据，路径不存在时返回 `None`。

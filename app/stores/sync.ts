@@ -6,6 +6,7 @@ import { ref, computed } from "vue";
 import { commands } from "@/api/generated";
 import * as syncApi from "@/api/sync";
 import type { FailedItem } from "@/api/sync";
+import type { SyncGlobalState } from "@/api/generated";
 import * as configApi from "@/api/config";
 import { isLinuxPlatform } from "@/utils/platform";
 
@@ -16,42 +17,44 @@ export type { FailedItem };
 export const useSyncStore = defineStore("sync", () => {
   // Linux 发行版只有 FUSE 云盘模式；其他平台保留传统同步目录。
   const isLinux = isLinuxPlatform();
+  // 后端权威快照的唯一持有处；各字段经同名 computed 暴露，杜绝逐字段赋值漂移。
+  const state = ref<SyncGlobalState | null>(null);
   // 全局同步状态
-  const revision = ref(0);
+  const revision = computed(() => state.value?.revision ?? 0);
   // 本轮总任务数。
-  const total = ref(0);
+  const total = computed(() => state.value?.total ?? 0);
   // 本轮已完成任务数。
-  const completed = ref(0);
+  const completed = computed(() => state.value?.completed ?? 0);
   // 正在上传的任务数。
-  const uploading = ref(0);
+  const uploading = computed(() => state.value?.uploading ?? 0);
   // 正在下载的任务数。
-  const downloading = ref(0);
+  const downloading = computed(() => state.value?.downloading ?? 0);
   // 等待网络的任务数。
-  const waitingNetwork = ref(0);
+  const waitingNetwork = computed(() => state.value?.waiting_network ?? 0);
   // 当前同步失败数。
-  const failed = ref(0);
+  const failed = computed(() => state.value?.failed ?? 0);
   // 传输队列永久失败历史；与 sync_items 的当前失败 failed 分开保存
-  const transferFailed = ref(0);
+  const transferFailed = computed(() => state.value?.transfer_failed ?? 0);
   // 当前失败项明细。
-  const failedItems = ref<FailedItem[]>([]);
+  const failedItems = computed<FailedItem[]>(() => state.value?.failed_items ?? []);
   // 冲突项数量。
-  const conflict = ref(0);
+  const conflict = computed(() => state.value?.conflict ?? 0);
   // 编辑中项目数量。
-  const editing = ref(0);
+  const editing = computed(() => state.value?.editing ?? 0);
   // 同步引擎是否运行。
-  const isRunning = ref(false);
+  const isRunning = computed(() => state.value?.is_running ?? false);
   // 云端索引是否重建中。
-  const isIndexing = ref(false);
+  const isIndexing = computed(() => state.value?.is_indexing ?? false);
   // 已扫描目录数。
-  const indexingScannedFolders = ref(0);
+  const indexingScannedFolders = computed(() => state.value?.indexing_scanned_folders ?? 0);
   // 已发现项目数。
-  const indexingDiscoveredItems = ref(0);
+  const indexingDiscoveredItems = computed(() => state.value?.indexing_discovered_items ?? 0);
   // 当前同步阶段（精确显示：indexing-startup / querying-changes / syncing-local 等）
-  const syncPhase = ref<string | null>(null);
+  const syncPhase = computed(() => state.value?.sync_phase ?? null);
   // 最近同步完成时间。
-  const lastSyncTime = ref<number | null>(null);
+  const lastSyncTime = computed(() => state.value?.last_sync_time ?? null);
   // 本次快照是否包含目录变化。
-  const contentChanged = ref(false);
+  const contentChanged = computed(() => state.value?.content_changed ?? false);
   // 侧边栏刷新计数器（folder_content_changed 事件每触一次 +1，布尔值无法重复触发 watch）
   const sidebarRefresh = ref(0);
   // 是否已配置同步目录
@@ -73,10 +76,7 @@ export const useSyncStore = defineStore("sync", () => {
   // 用户应在文件管理器中访问的目录。Linux 永不回退暴露 hidden backing：
   // FUSE 未真实挂载时返回空字符串，让所有“打开云盘”入口保持禁用。
   const userVisibleRoot = computed(() => {
-    if (isLinux) {
-      return virtualDriveMounted.value ? mountedVirtualDir.value : "";
-    }
-    if (virtualDriveEnabled.value) {
+    if (usesVirtualDrive.value) {
       return virtualDriveMounted.value ? mountedVirtualDir.value : "";
     }
     return mountDir.value;
@@ -113,31 +113,10 @@ export const useSyncStore = defineStore("sync", () => {
 
     // 仅新 revision 可以触发一次性副作用。
     const isNewRevision = s.revision > revision.value;
-    // 同步赋值保持 UI 看到同一 revision 下的一组字段。
-    revision.value = s.revision;
-    total.value = s.total;
-    completed.value = s.completed;
-    uploading.value = s.uploading;
-    downloading.value = s.downloading;
-    waitingNetwork.value = s.waiting_network;
-    failed.value = s.failed;
-    transferFailed.value = s.transfer_failed;
-    failedItems.value = [...s.failed_items];
-    conflict.value = s.conflict;
-    editing.value = s.editing;
-    isRunning.value = s.is_running;
-    lastSyncTime.value = s.last_sync_time;
-    isIndexing.value = s.is_indexing;
-    indexingScannedFolders.value = s.indexing_scanned_folders;
-    indexingDiscoveredItems.value = s.indexing_discovered_items;
-    syncPhase.value = s.sync_phase ?? null;
-    if (s.content_changed) {
-      contentChanged.value = true;
-      // 同一 revision 重复投递只允许幂等赋值，不能重复触发目录刷新。
-      if (isNewRevision) sidebarRefresh.value++;
-    } else {
-      contentChanged.value = false;
-    }
+    // 整快照一次替换，UI 天然看到同一 revision 下的一组字段。
+    state.value = s;
+    // 同一 revision 重复投递只允许幂等赋值，不能重复触发目录刷新。
+    if (s.content_changed && isNewRevision) sidebarRefresh.value++;
     return true;
   }
 

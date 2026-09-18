@@ -25,6 +25,8 @@ pub mod ipc;
 pub mod mount;
 /// 桌面平台集成。
 pub mod platform;
+/// 应用全局运行时（服务单例、引擎与 FUSE 会话生命周期）。
+pub mod runtime;
 /// 双向同步引擎。
 pub mod sync;
 /// Linux 按需云盘的 FUSE 用户态文件系统。
@@ -223,7 +225,7 @@ pub fn run() {
             // ★ 最优先：token 丢失但旧配置/缓存仍在 → 先清空再走后续流程。
             // 首次安装 config 默认 mount_configured=false → 跳过清理。
             {
-                use crate::auth::token_store::{global_store, TokenStore};
+                use crate::auth::token_store::global_store;
                 let logged_in = global_store()
                     .load()
                     .ok()

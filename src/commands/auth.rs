@@ -5,7 +5,6 @@ use specta::Type;
 use tauri::AppHandle;
 
 use crate::auth::models::{TokenPair, UserInfo};
-use crate::auth::token_store::TokenStore;
 use crate::auth::user_info_api::UserInfoApi;
 use crate::core::config_store::ConfigStore;
 use crate::data::repository;
@@ -76,22 +75,7 @@ fn reset_account_config() -> AppResult<()> {
     {
         return Ok(()); // 已是初始态，无需重置
     }
-    let reset = config.with(
-        None,
-        None,
-        Some(String::new()),
-        Some(false),
-        Some(false),
-        Some(String::new()),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    );
-    ConfigStore::save(&reset)
+    ConfigStore::save(&config.cleared_mount_configuration())
 }
 
 /// 取消正在等待本地回调的 OAuth 授权流程。

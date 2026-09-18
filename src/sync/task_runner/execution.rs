@@ -1,6 +1,6 @@
 //! 提供传输任务执行主链。
 
-use super::admission::{active_task_disposition, RunningGateOutcome};
+use super::admission::RunningGateOutcome;
 use super::contracts::{TaskDisposition, TaskExecutionError, TaskExecutionOutcome};
 use super::persistence::transition_error;
 use super::preflight::PreflightFailure;
@@ -44,7 +44,7 @@ impl TaskRunner {
                 }
             }
         }
-        let disposition = active_task_disposition(state)
+        let disposition = TaskDisposition::from_active_state(state)
             .ok_or_else(|| AppError::generic("自动周期发现的任务已不再活动"))?;
         Ok(TaskExecutionOutcome {
             cloud_file: None,
@@ -64,7 +64,7 @@ impl TaskRunner {
                 disposition: TaskDisposition::Completed,
             });
         }
-        if let Some(disposition) = active_task_disposition(state) {
+        if let Some(disposition) = TaskDisposition::from_active_state(state) {
             return Ok(TaskExecutionOutcome {
                 cloud_file: None,
                 disposition,

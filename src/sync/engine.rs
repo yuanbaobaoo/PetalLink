@@ -70,8 +70,10 @@ const RECOVERABLE_CYCLE_RETRY_MAX_SECS: u64 = 32;
 
 /// 按连续失败次数计算有上限的指数退避。
 fn recoverable_cycle_retry_delay(consecutive_failures: u32) -> Duration {
-    let exponent = consecutive_failures.saturating_sub(1).min(5);
-    Duration::from_secs((1_u64 << exponent).min(RECOVERABLE_CYCLE_RETRY_MAX_SECS))
+    Duration::from_secs(crate::sync::retry_policy::capped_backoff_secs(
+        consecutive_failures.saturating_sub(1),
+        RECOVERABLE_CYCLE_RETRY_MAX_SECS,
+    ))
 }
 
 /// 在所有退出路径上复位生命周期门禁。
@@ -87,7 +89,6 @@ impl<'a> ResetFlag<'a> {
 }
 
 impl Drop for ResetFlag<'_> {
-    /// 无论作用域如何退出都释放生命周期门禁。
     fn drop(&mut self) {
         *self.flag.lock() = false;
     }
@@ -108,6 +109,19 @@ struct FailedRecordReconciliation {
     stale_transfer_blocked: usize,
 }
 
+/// 云端 checkpoint 的全部易变状态：四项内容与可信标记同属一个持久事实，
+/// 必须整体加锁读写，任何安装/合并都是一次锁获取内的原子替换。
+#[derive(Default)]
+pub(crate) struct CloudCheckpointState {
+    pub tree: HashMap<String, DriveFile>,
+    pub path_to_id: HashMap<String, String>,
+    pub root_folder_id: Option<String>,
+    pub cursor: Option<String>,
+    /// 仅当当前云树来自完整、崩溃一致的 checkpoint 时为 true。
+    /// 失败或局部刷新可保留旧树展示，但会撤销破坏性操作信任。
+    pub trusted: bool,
+}
+
 /// 持有同步依赖、缓存与生命周期状态的核心引擎。
 pub struct SyncEngine {
     files_api: Arc<FilesApi>,
@@ -125,13 +139,7 @@ pub struct SyncEngine {
     /// （启动 scan 可能耗时几十秒，不该挡住用户点目录同步）；run_sync_cycle 会检查本锁跳过，
     /// 避免 watcher cycle 与 folder sync 并发竞争本地文件/DB。
     folder_syncing: Mutex<bool>,
-    cloud_tree: Mutex<HashMap<String, DriveFile>>,
-    path_to_id: Mutex<HashMap<String, String>>,
-    root_folder_id: Mutex<Option<String>>,
-    cloud_cursor: Mutex<Option<String>>,
-    /// 仅当当前云树来自完整、崩溃一致的 checkpoint 时为 `true`。
-    /// 失败或局部刷新可保留旧树展示，但会撤销破坏性操作信任。
-    cloud_tree_trusted: AtomicBool,
+    cloud: Mutex<CloudCheckpointState>,
     recently_deleted_paths: Mutex<HashMap<String, i64>>,
     state: Mutex<SyncGlobalState>,
     status_aggregator: Arc<StatusAggregator>,
@@ -154,7 +162,6 @@ pub struct SyncEngine {
     online_check: Arc<dyn Fn() -> bool + Send + Sync>,
     request_network_failure_reporter: Arc<dyn Fn() -> bool + Send + Sync>,
     known_waiting_count: Mutex<Option<(u64, u64)>>,
-    cycle_observer: Arc<dyn Fn(&'static str) + Send + Sync>,
     activity: Arc<ActivityTracker>,
     background_scheduled: AtomicBool,
     /// 连续增量刷新计数。达 INCREMENTAL_FORCED_FULL_THRESHOLD 后强制一次全量 BFS，

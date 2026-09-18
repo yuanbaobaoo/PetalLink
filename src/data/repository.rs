@@ -17,10 +17,10 @@ macro_rules! db_err {
     };
 }
 
-/// 同步基线记录的查询与写入实现。
-// 同步基线仓储实现。
 /// 同步基线记录的 SQLite 实现。
 mod sync_items;
+#[cfg(target_os = "linux")]
+pub use sync_items::find_by_local_path;
 #[allow(unused_imports)]
 pub use sync_items::{delete_all, find_by_file_id, load_all, reset_stale_statuses, upsert};
 
@@ -31,9 +31,6 @@ pub mod sync_status {
     pub const SYNCED: i32 = 0;
     /// 仅云端存在。
     pub const CLOUD_ONLY: i32 = 1;
-    /// 仅本地存在。
-    #[allow(dead_code)]
-    pub const LOCAL_ONLY: i32 = 2;
     /// 正在同步。
     pub const SYNCING: i32 = 3;
     /// 最近同步失败。
@@ -74,16 +71,12 @@ pub mod transfer_state {
     /// 正在传输。
     pub const RUNNING: i32 = TransferState::Running as i32;
     /// 等待网络恢复。
-    #[allow(dead_code)]
     pub const WAITING_FOR_NETWORK: i32 = TransferState::WaitingForNetwork as i32;
     /// 等待退避到期。
-    #[allow(dead_code)]
     pub const BACKING_OFF: i32 = TransferState::BackingOff as i32;
     /// 正在复核远端结果。
-    #[allow(dead_code)]
     pub const VERIFYING_REMOTE: i32 = TransferState::VerifyingRemote as i32;
     /// 必须从头重启传输。
-    #[allow(dead_code)]
     pub const RESTART_REQUIRED: i32 = TransferState::RestartRequired as i32;
     /// 传输完成。
     pub const COMPLETED: i32 = TransferState::Completed as i32;
@@ -187,7 +180,6 @@ pub struct TransferTask {
 }
 
 /// 为可空传输列表达不改、设值或清空。
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ColumnPatch<T> {
     /// 保留当前数据库值。
@@ -200,7 +192,6 @@ pub enum ColumnPatch<T> {
 }
 
 /// 汇总一次状态转换附带的可变字段更新。
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TransferPatch {
     pub error_kind: ColumnPatch<TransferErrorKind>,
@@ -263,6 +254,6 @@ pub(crate) use transfer_queue::transition_transfer_in_transaction;
 #[allow(unused_imports)]
 pub use transfer_queue::{
     delete_all_transfers, get_transfer_by_id, has_transfer_in_state, insert_transfer,
-    list_all_transfers, patch_transfer_in_state, prune_transfer_history, transition_transfer,
-    transition_transfer_clearing_upload_session, update_running_transfer,
+    list_active_transfers, list_all_transfers, patch_transfer_in_state, prune_transfer_history,
+    transition_transfer, transition_transfer_clearing_upload_session, update_running_transfer,
 };

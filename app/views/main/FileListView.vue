@@ -16,6 +16,7 @@ import { confirmDialog, showToast } from "@/components/mate";
 import { useAsyncAction } from "@/composables/useAsyncAction";
 import { useFileOperation } from "@/composables/useFileOperation";
 import { runDragImportFromDrop } from "@/composables/useDragUpload";
+import { useThumbnails } from "@/composables/useThumbnails";
 import { formatFileSize, formatDateTime } from "@/utils/format";
 import { extractErrorMessage } from "@/utils/error";
 
@@ -27,8 +28,6 @@ const SYNC_STATUS_SYNCED_LOCAL = "已同步到本地";
 const SYNC_STATUS_PLACEHOLDER = "仅云端（尚未下载）";
 // 同步状态文案：文件夹
 const SYNC_STATUS_FOLDER = "文件夹";
-// 单批并发缩略图请求数，避免目录内图片较多时串行阻塞或瞬时打满接口
-const THUMBNAIL_BATCH_SIZE = 6;
 
 // 文件浏览器 store
 const browser = useFileBrowserStore();
@@ -102,8 +101,12 @@ const headerCheck = computed<boolean | null>(() => {
   return null;
 });
 
-// 缩略图缓存（文件 ID → 图片 URL）
-const thumbUrls = ref<Record<string, string>>({});
+// 缩略图缓存与分批加载（composable 管理缓存、代次守卫与限流）。
+const thumbs = useThumbnails(sortedFiles);
+// 判断文件是否为缩略图类型（图片/视频）。
+const isThumbnailType = thumbs.isThumbnailType;
+// 获取文件的缩略图 URL。
+const thumbUrl = thumbs.thumbUrl;
 
 // 拖拽列宽状态
 let dragStartX = 0;
@@ -181,10 +184,19 @@ onUnmounted(() => {
 });
 
 /**
- * 监听排序文件变化，自动加载缩略图和批量同步状态
+ * 目录切换时清空缩略图与状态缓存，避免跨目录累积。
  */
-watch(sortedFiles, () => {
-  void loadThumbs();
+watch(() => browser.pathStack.length, () => {
+  thumbs.clear();
+  fileStatuses.value = {};
+});
+
+/**
+ * 文件集合变化时加载缩略图和批量同步状态。
+ * 监听 files 而非 sortedFiles：仅切换排序方式不重新拉取。
+ */
+watch(files, () => {
+  void thumbs.loadThumbs();
   void refreshBatchStatus();
 });
 
@@ -216,42 +228,6 @@ function getFileStatus(f: DriveFile): string {
  *
  * @param f - 文件对象
  */
-function isThumbnailType(f: DriveFile): boolean {
-  // 空 MIME 按不支持缩略图处理。
-  const mime = f.mime_type ?? "";
-  return mime.startsWith("image/") || mime.startsWith("video/");
-}
-
-function thumbUrl(f: DriveFile): string {
-  return thumbUrls.value[f.id] ?? "";
-}
-
-/**
- * 预加载当前列表中所有文件的缩略图
- */
-async function loadThumbs(): Promise<void> {
-  // 当前目录内尚未缓存的图片和视频文件
-  const targets = sortedFiles.value.filter(
-    (file) => isThumbnailType(file) && !thumbUrls.value[file.id],
-  );
-  // 当前批次起始下标
-  for (let index = 0; index < targets.length; index += THUMBNAIL_BATCH_SIZE) {
-    // 当前限流批次
-    const batch = targets.slice(index, index + THUMBNAIL_BATCH_SIZE);
-    // 当前批次的缩略图结果
-    const loaded = await Promise.all(batch.map(async (file) => ({
-      fileId: file.id,
-      url: await driveApi.getThumbnail(file.id),
-    })));
-    // 合并后的缩略图缓存
-    const nextUrls = { ...thumbUrls.value };
-    for (const item of loaded) {
-      if (item.url) nextUrls[item.fileId] = item.url;
-    }
-    thumbUrls.value = nextUrls;
-  }
-}
-
 /**
  * 开始拖拽调整列宽
  *
@@ -278,7 +254,9 @@ function onDrag(e: MouseEvent): void {
 /**
  * 结束拖拽
  */
-function endDrag(): void { dragging.value = null; }
+function endDrag(): void {
+  dragging.value = null;
+}
 
 /**
  * 全选/取消全选
@@ -327,35 +305,21 @@ function relPathOf(f: DriveFile): string {
   return segs.join("/");
 }
 
-function syncStatusIcon(f: DriveFile): string {
-  // 当前文件的批量状态缓存。
-  const status = getFileStatus(f);
-  if (status === "synced") return "local";
-  if (status === "folder") return "folder";
-  return "cloud";
-}
-
-function syncStatusText(f: DriveFile): string {
-  // 当前文件的批量状态缓存。
-  const status = getFileStatus(f);
-  if (status === "synced") return SYNC_STATUS_SYNCED_LOCAL;
-  if (status === "placeholder") return SYNC_STATUS_PLACEHOLDER;
-  if (status === "folder") return SYNC_STATUS_FOLDER;
-  return SYNC_STATUS_CLOUD_ONLY;
-}
+// 状态到展示三元组的唯一映射：图标 / 文案 / 配色类名。
+const SYNC_STATUS_VIEW: Record<string, { icon: string; text: string; className: string }> = {
+  synced: { icon: "local", text: SYNC_STATUS_SYNCED_LOCAL, className: "is-synced-local" },
+  placeholder: { icon: "cloud", text: SYNC_STATUS_PLACEHOLDER, className: "is-placeholder" },
+  folder: { icon: "folder", text: SYNC_STATUS_FOLDER, className: "is-folder-status" },
+  not_synced: { icon: "cloud", text: SYNC_STATUS_CLOUD_ONLY, className: "is-cloud-only" },
+};
 
 /**
- * 同步状态 CSS 类名
+ * 获取文件的同步状态展示三元组（图标 / 文案 / 配色类名）。
  *
  * @param f - 文件对象
  */
-function syncStatusClass(f: DriveFile): string {
-  // 当前文件的批量状态缓存。
-  const status = getFileStatus(f);
-  if (status === "synced") return "is-synced-local";
-  if (status === "placeholder") return "is-placeholder";
-  if (status === "folder") return "is-folder-status";
-  return "is-cloud-only";
+function syncStatusView(f: DriveFile): { icon: string; text: string; className: string } {
+  return SYNC_STATUS_VIEW[getFileStatus(f)] ?? SYNC_STATUS_VIEW.not_synced;
 }
 
 /**
@@ -538,7 +502,9 @@ async function handleShowActionMenu(e: MouseEvent, f: DriveFile): Promise<void> 
 /**
  * 关闭右键菜单
  */
-function closeMenu(): void { contextMenu.value.show = false; }
+function closeMenu(): void {
+  contextMenu.value.show = false;
+}
 
 /**
  * 菜单定位钳制：右/下溢出视口时翻转方向（向左/向上展开），保证完整可见。
@@ -712,15 +678,12 @@ async function handleBulkDelete(): Promise<void> {
   await runBulkDelete(async () => {
     if (checked.value.size === 0) return;
     if (!fileOp.guard()) return;
-    // ★ 检查选中项中是否有本地已同步的文件
+    // ★ 检查选中项中是否有本地已同步的文件：复用列表已批量拉取的状态缓存，
+    // 与逐条 syncCheckFileLocalStatus 调用同一后端状态枚举，避免 N 次串行 IPC。
     let syncedCount = 0;
     if (sync.mountConfigured) {
       for (const id of checked.value) {
-        try {
-          // 当前文件的本地同步状态。
-          const status = await commands.syncCheckFileLocalStatus(id);
-          if (status === "synced") syncedCount++;
-        } catch { /* ignore */ }
+        if (fileStatuses.value[id] === "synced") syncedCount++;
       }
     }
     // 根据已同步项目数量补充双端删除风险。
@@ -936,8 +899,8 @@ function handleSort(field: "name" | "size" | "modifiedTime"): void {
           <div class="file-col file-col--time">
             {{ formatTime(f.edited_time) }}
           </div>
-          <div class="file-col file-col--status" :title="syncStatusText(f)">
-            <MateIcon :name="syncStatusIcon(f)" :size="16" :class="syncStatusClass(f)" />
+          <div class="file-col file-col--status" :title="syncStatusView(f).text">
+            <MateIcon :name="syncStatusView(f).icon" :size="16" :class="syncStatusView(f).className" />
           </div>
           <div class="file-col file-col--actions">
             <MateButton variant="icon" icon="list" tooltip="操作" @click.stop="handleShowActionMenu($event, f)" />
