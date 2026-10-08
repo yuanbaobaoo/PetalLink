@@ -55,7 +55,7 @@ fn execution_phase_for_actions(actions: &[SyncAction]) -> &'static str {
         .iter()
         .filter(|action| action.action_type != SyncActionType::Skip);
     // 空集合不算本地物化（进入通用执行阶段）。
-    let materializes_only_local_tree = executable.next().is_some_and(&is_local_materialize)
+    let materializes_only_local_tree = executable.next().is_some_and(is_local_materialize)
         && executable.all(is_local_materialize);
     if materializes_only_local_tree {
         SYNC_PHASE_MATERIALIZING_LOCAL
