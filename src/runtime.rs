@@ -675,10 +675,56 @@ pub(crate) fn install_runtime_with_mount(
 /// 收束状态后通过 Tauri 的平台安全路径重启。
 ///
 /// Tauri 会在 Linux 解析 AppImage 原始路径，并在 macOS 按 `Info.plist`
-/// 解析 bundle 内的真实可执行文件；统一走核心实现可保持更新前后的平台语义。
+/// 解析 bundle 内的真实可执行文件。但 macOS 上更新刚替换 `.app` 后，内置
+/// 实现对新二进制的直接 spawn 可能静默失败（错误只进 stderr，进程仍退出），
+/// 表现为「更新后应用关闭却没有重新拉起」。因此 macOS 先调度分离的延迟
+/// 拉起器：待旧进程退出后经 LaunchServices `open` 启动 bundle（与用户手动
+/// 打开等价），再走 Tauri 退出路径形成双保险；`open` 对已运行实例幂等。
 pub fn relaunch(app: &AppHandle) {
     crate::platform::activation::mark_restarting();
+    #[cfg(target_os = "macos")]
+    schedule_delayed_bring_up();
     app.request_restart();
+}
+
+/// 推导当前进程所属 `.app` bundle 路径；非 bundle 运行（如 dev 构建）返回 None。
+#[cfg(target_os = "macos")]
+fn current_app_bundle_path() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    // <bundle>/Contents/MacOS/<binary> → 上溯三级。
+    let bundle = exe.ancestors().nth(3)?;
+    if bundle.extension()?.to_str() == Some("app") {
+        Some(bundle.to_path_buf())
+    } else {
+        None
+    }
+}
+
+/// 调度旧进程退出后的延迟拉起器（分离进程，父进程随即退出，由系统收养）。
+#[cfg(target_os = "macos")]
+fn schedule_delayed_bring_up() {
+    let Some(bundle) = current_app_bundle_path() else {
+        tracing::info!("非 bundle 运行，跳过更新后延迟拉起器");
+        return;
+    };
+    // POSIX 单引号转义：路径内单引号按 '"'"' 拼接。
+    let quoted = format!("'{}'", bundle.to_string_lossy().replace('\'', "'\\''"));
+    let spawn_result = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(format!("sleep 1.5 && open -a {quoted}"))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    match spawn_result {
+        Ok(_) => tracing::info!(
+            bundle = %bundle.display(),
+            "已调度更新后延迟拉起器：1.5s 后经 open 启动"
+        ),
+        Err(error) => {
+            tracing::warn!(%error, "调度更新后延迟拉起器失败，仅依赖 Tauri 内置重启");
+        }
+    }
 }
 
 /// 若已配置同步目录且引擎未启动，则构造并启动 SyncEngine + 状态桥接。

@@ -823,6 +823,89 @@ impl SyncEngine {
         }
     }
 
+    /// 收敛已实际解决的冲突基线：冲突处理成功结算后状态停在 CONFLICT；若云端
+    /// 权威身份与编辑时间均未再变、本地文件与基线快照一致且无未终态传输，
+    /// 说明冲突两端内容已对齐，恢复 synced，避免冲突提示在解决后永久残留。
+    pub(super) fn reconcile_resolved_conflicts(
+        &self,
+        local: &HashMap<String, LocalFileEntry>,
+        db: &HashMap<String, DbSnapshotEntry>,
+        cloud: &HashMap<String, DriveFile>,
+    ) -> AppResult<usize> {
+        let candidates: Vec<(String, String)> = db
+            .iter()
+            .filter(|(_, entry)| entry.status == repository::sync_status::CONFLICT)
+            .filter_map(|(rel, entry)| {
+                let cloud_file = cloud.get(rel)?;
+                // 云端权威身份与基线一致，且云端版本自冲突结算后未再变化。
+                if cloud_file.id != entry.file_id
+                    || cloud_file.edited_time.map(|time| time.timestamp_millis())
+                        != entry.cloud_edited_time
+                {
+                    return None;
+                }
+                // 本地文件存在且与基线快照一致（冲突处理后无新修改）。
+                let local_file = local.get(rel)?;
+                if local_file.is_placeholder || local_file.is_folder != entry.is_folder {
+                    return None;
+                }
+                if Some(local_file.mtime) != entry.local_mtime
+                    || Some(local_file.size as i64) != entry.local_size
+                {
+                    return None;
+                }
+                Some((rel.clone(), entry.file_id.clone()))
+            })
+            .collect();
+        if candidates.is_empty() {
+            return Ok(0);
+        }
+        let conn = self.db.lock();
+        // 有未终态传输的路径不收敛，等传输结算后下一周期再判。
+        let active_paths: std::collections::HashSet<String> =
+            repository::list_all_transfers(&conn)?
+                .into_iter()
+                .filter(|task| {
+                    task.state_kind()
+                        .map(|state| !state.is_terminal())
+                        .unwrap_or(true)
+                })
+                .filter_map(|task| task.relative_path)
+                .collect();
+        let transaction = conn
+            .unchecked_transaction()
+            .map_err(|error| AppError::generic(format!("开始冲突收敛事务失败：{error}")))?;
+        let mut resolved = 0;
+        for (rel, file_id) in &candidates {
+            if active_paths.contains(rel) {
+                continue;
+            }
+            // 事务内复核仍是 CONFLICT 再收敛，防止与并发结算竞争。
+            let updated = transaction
+                .execute(
+                    "UPDATE sync_items SET status=?1, error_message=NULL
+                     WHERE file_id=?2 AND local_path=?3 AND status=?4",
+                    rusqlite::params![
+                        repository::sync_status::SYNCED,
+                        file_id,
+                        rel,
+                        repository::sync_status::CONFLICT
+                    ],
+                )
+                .map_err(|error| {
+                    AppError::generic(format!("冲突收敛更新失败（{rel}）：{error}"))
+                })?;
+            if updated > 0 {
+                resolved += updated;
+                tracing::info!(rel = %rel, file_id = %file_id, "冲突已解决：基线状态收敛为已同步");
+            }
+        }
+        transaction
+            .commit()
+            .map_err(|error| AppError::generic(format!("提交冲突收敛事务失败：{error}")))?;
+        Ok(resolved)
+    }
+
     /// 加载并校验按本地路径唯一的数据库基线快照。
     ///
     /// 同路径出现多行基线（如服务器对覆盖上传换发新 fileId 后旧行残留）会锁死全部
@@ -1455,5 +1538,159 @@ mod tests {
                 .is_none(),
             "被新身份取代的墓碑必须清除"
         );
+    }
+
+    /// 为冲突收敛测试建 transfer_queue 空表（test_engine 只建 sync_items）。
+    fn ensure_transfer_queue_table(db: &Arc<Mutex<Connection>>) {
+        db.lock()
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS transfer_queue (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    direction INTEGER NOT NULL,
+                    file_id TEXT,
+                    local_path TEXT,
+                    name TEXT NOT NULL,
+                    total_size INTEGER NOT NULL DEFAULT 0,
+                    transferred INTEGER NOT NULL DEFAULT 0,
+                    state INTEGER NOT NULL DEFAULT 0,
+                    error_message TEXT,
+                    created_at INTEGER NOT NULL,
+                    finished_at INTEGER,
+                    server_id TEXT,
+                    upload_id TEXT,
+                    resume_offset INTEGER NOT NULL DEFAULT 0,
+                    session_url TEXT,
+                    relative_path TEXT,
+                    parent_file_id TEXT,
+                    operation INTEGER,
+                    source_mtime INTEGER,
+                    source_size INTEGER,
+                    expected_cloud_edited_time INTEGER,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    verify_attempt_count INTEGER NOT NULL DEFAULT 0,
+                    next_retry_at INTEGER,
+                    error_kind INTEGER,
+                    remote_result_file_id TEXT,
+                    state_revision INTEGER NOT NULL DEFAULT 0
+                );",
+            )
+            .unwrap();
+    }
+
+    /// 冲突已实际解决（云端权威身份与版本未变、本地与基线一致）时，
+    /// 过期的 CONFLICT 状态必须收敛回已同步，冲突提示不得永久残留。
+    #[test]
+    fn reconcile_resolved_conflicts_recovers_synced_status() {
+        let temp = tempfile::tempdir().unwrap();
+        let (engine, db) = test_engine(temp.path());
+        ensure_transfer_queue_table(&db);
+        let rel = "docs/manual.pdf";
+        let mut conflicted = sync_item("conflict-id", rel, false);
+        conflicted.status = sync_status::CONFLICT;
+        repository::upsert(&db.lock(), &conflicted).unwrap();
+
+        let mut cloud = cloud_file("conflict-id", "manual.pdf", "docs-id", false);
+        cloud.edited_time = chrono::DateTime::from_timestamp_millis(22);
+        let cloud = HashMap::from([(rel.to_string(), cloud)]);
+        let local = HashMap::from([(
+            rel.to_string(),
+            LocalFileEntry {
+                absolute_path: temp.path().join(rel),
+                relative_path: rel.to_string(),
+                size: 7,
+                mtime: 11,
+                is_folder: false,
+                is_placeholder: false,
+            },
+        )]);
+        let db_snapshot = engine.load_db_snapshot().unwrap();
+
+        let resolved = engine
+            .reconcile_resolved_conflicts(&local, &db_snapshot, &cloud)
+            .unwrap();
+
+        assert_eq!(resolved, 1);
+        assert_eq!(
+            repository::find_by_file_id(&db.lock(), "conflict-id")
+                .unwrap()
+                .unwrap()
+                .status,
+            sync_status::SYNCED
+        );
+    }
+
+    /// 云端版本已再变化（edited_time 与基线不一致）时不得收敛，留给规划器处理。
+    #[test]
+    fn reconcile_resolved_conflicts_skips_when_cloud_changed() {
+        let temp = tempfile::tempdir().unwrap();
+        let (engine, db) = test_engine(temp.path());
+        ensure_transfer_queue_table(&db);
+        let rel = "docs/manual.pdf";
+        let mut conflicted = sync_item("conflict-id", rel, false);
+        conflicted.status = sync_status::CONFLICT;
+        repository::upsert(&db.lock(), &conflicted).unwrap();
+
+        let mut cloud = cloud_file("conflict-id", "manual.pdf", "docs-id", false);
+        cloud.edited_time = chrono::DateTime::from_timestamp_millis(99);
+        let cloud = HashMap::from([(rel.to_string(), cloud)]);
+        let local = HashMap::from([(
+            rel.to_string(),
+            LocalFileEntry {
+                absolute_path: temp.path().join(rel),
+                relative_path: rel.to_string(),
+                size: 7,
+                mtime: 11,
+                is_folder: false,
+                is_placeholder: false,
+            },
+        )]);
+        let db_snapshot = engine.load_db_snapshot().unwrap();
+
+        let resolved = engine
+            .reconcile_resolved_conflicts(&local, &db_snapshot, &cloud)
+            .unwrap();
+
+        assert_eq!(resolved, 0);
+        assert_eq!(
+            repository::find_by_file_id(&db.lock(), "conflict-id")
+                .unwrap()
+                .unwrap()
+                .status,
+            sync_status::CONFLICT
+        );
+    }
+
+    /// 本地文件在冲突结算后又被修改（mtime 与基线不一致）时不得收敛。
+    #[test]
+    fn reconcile_resolved_conflicts_skips_when_local_edited() {
+        let temp = tempfile::tempdir().unwrap();
+        let (engine, db) = test_engine(temp.path());
+        ensure_transfer_queue_table(&db);
+        let rel = "docs/manual.pdf";
+        let mut conflicted = sync_item("conflict-id", rel, false);
+        conflicted.status = sync_status::CONFLICT;
+        repository::upsert(&db.lock(), &conflicted).unwrap();
+
+        let mut cloud = cloud_file("conflict-id", "manual.pdf", "docs-id", false);
+        cloud.edited_time = chrono::DateTime::from_timestamp_millis(22);
+        let cloud = HashMap::from([(rel.to_string(), cloud)]);
+        let local = HashMap::from([(
+            rel.to_string(),
+            LocalFileEntry {
+                absolute_path: temp.path().join(rel),
+                relative_path: rel.to_string(),
+                size: 7,
+                mtime: 99,
+                is_folder: false,
+                is_placeholder: false,
+            },
+        )]);
+        let db_snapshot = engine.load_db_snapshot().unwrap();
+
+        let resolved = engine
+            .reconcile_resolved_conflicts(&local, &db_snapshot, &cloud)
+            .unwrap();
+
+        assert_eq!(resolved, 0);
     }
 }

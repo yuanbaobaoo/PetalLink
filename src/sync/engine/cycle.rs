@@ -55,8 +55,8 @@ fn execution_phase_for_actions(actions: &[SyncAction]) -> &'static str {
         .iter()
         .filter(|action| action.action_type != SyncActionType::Skip);
     // 空集合不算本地物化（进入通用执行阶段）。
-    let materializes_only_local_tree = executable.next().is_some_and(is_local_materialize)
-        && executable.all(is_local_materialize);
+    let materializes_only_local_tree =
+        executable.next().is_some_and(is_local_materialize) && executable.all(is_local_materialize);
     if materializes_only_local_tree {
         SYNC_PHASE_MATERIALIZING_LOCAL
     } else {
@@ -562,6 +562,7 @@ impl SyncEngine {
         // 只有可信云端快照才能制造成功基线。
         if cloud_tree_trusted {
             self.reconcile_db_records(&local, &db, blocked_path_changes)?;
+            let resolved_conflicts = self.reconcile_resolved_conflicts(&local, &db, &cloud)?;
             let reconciliation = self.reconcile_failed_and_purge_stale_records(
                 &local,
                 &cloud,
@@ -579,6 +580,7 @@ impl SyncEngine {
                 healed = reconciliation.healed,
                 purged = reconciliation.purged,
                 stale_cancelled,
+                resolved_conflicts,
                 remaining_failed = reconciliation.remaining_failed,
                 blocked = blocked_path_changes.len(),
                 "可信同步周期已完成失败状态复核与残余清理"
