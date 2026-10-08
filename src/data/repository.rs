@@ -253,7 +253,8 @@ mod transfer_queue;
 pub(crate) use transfer_queue::transition_transfer_in_transaction;
 #[allow(unused_imports)]
 pub use transfer_queue::{
-    delete_all_transfers, get_transfer_by_id, has_transfer_in_state, insert_transfer,
-    list_active_transfers, list_all_transfers, patch_transfer_in_state, prune_transfer_history,
-    transition_transfer, transition_transfer_clearing_upload_session, update_running_transfer,
+    clear_terminal_transfers, delete_all_transfers, get_transfer_by_id, has_transfer_in_state,
+    insert_transfer, list_active_transfers, list_all_transfers, patch_transfer_in_state,
+    prune_transfer_history, transition_transfer, transition_transfer_clearing_upload_session,
+    update_running_transfer,
 };

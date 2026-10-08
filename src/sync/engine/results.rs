@@ -361,6 +361,17 @@ impl SyncEngine {
                         ],
                     )
                     .map_err(|error| AppError::generic(format!("清理待确认基线失败：{error}")))?;
+                // 服务器对覆盖上传/冲突覆盖可能在同路径换发新 fileId（旧 fileId 随之失效），
+                // 成功结果即该路径唯一权威身份；清掉同路径旧身份残留行，防止重复基线
+                // 在下一周期锁死全部规划。墓碑行有独立防重建语义，不在清理之列。
+                transaction
+                    .execute(
+                        "DELETE FROM sync_items WHERE local_path=?1 AND file_id<>?2 AND status<>?3",
+                        rusqlite::params![rel, file_id.as_str(), repository::sync_status::DELETED],
+                    )
+                    .map_err(|error| {
+                        AppError::generic(format!("清理同路径旧身份基线失败：{error}"))
+                    })?;
             }
 
             // upsert（对齐 dart insertOnConflictUpdate）

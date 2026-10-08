@@ -49,11 +49,11 @@ const stateMeta: Record<number, StateMeta> = {
   [TRANSFER_STATE.CANCELED]: { icon: "x", label: "已取消", color: "var(--ink-400)" },
 };
 
-// 清除菜单选项（已完成 / 失败历史 / 完成+失败历史）
+// 清除菜单选项（已完成 / 失败与取消 / 全部已结束）
 const clearItems: PopupItem[] = [
   { value: "completed", label: "清除已完成", icon: "check" },
-  { value: "failed", label: "清除失败历史", icon: "x", danger: true },
-  { value: "finished", label: "清除完成+失败历史", icon: "transfer" },
+  { value: "failed", label: "清除失败与取消", icon: "x", danger: true },
+  { value: "finished", label: "清除全部已结束", icon: "transfer" },
 ];
 
 // 关闭弹窗事件

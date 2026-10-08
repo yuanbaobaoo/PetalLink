@@ -275,7 +275,7 @@ impl SyncEngine {
     }
 
     /// 更新云树 checkpoint 信任状态。
-    fn set_cloud_tree_trusted(&self, trusted: bool) {
+    pub(super) fn set_cloud_tree_trusted(&self, trusted: bool) {
         self.cloud.lock().trusted = trusted;
     }
 

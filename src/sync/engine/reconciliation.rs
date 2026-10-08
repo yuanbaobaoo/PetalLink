@@ -15,6 +15,32 @@ use super::coordination::CycleRequest;
 use super::{FailedRecordReconciliation, SyncEngine};
 use crate::sync::path_recovery::BlockedPathChange;
 
+/// 同路径重复基线分组（路径 → 该路径全部基线行）。
+type DuplicateBaselines = HashMap<String, Vec<repository::SyncItem>>;
+
+/// 从同路径重复基线中选择保留行：云端权威 fileId 命中优先；否则取最近成功结算的
+/// 非墓碑行；全为墓碑行时取最近结算的一行。
+fn select_baseline_to_keep<'a>(
+    group: &'a [repository::SyncItem],
+    authority_file_id: Option<&str>,
+) -> &'a repository::SyncItem {
+    if let Some(authority) = authority_file_id {
+        if let Some(matched) = group.iter().find(|record| record.file_id == authority) {
+            return matched;
+        }
+    }
+    group
+        .iter()
+        .filter(|record| record.status != repository::sync_status::DELETED)
+        .max_by_key(|record| record.last_sync_time.unwrap_or(0))
+        .or_else(|| {
+            group
+                .iter()
+                .max_by_key(|record| record.last_sync_time.unwrap_or(0))
+        })
+        .expect("重复基线分组非空")
+}
+
 impl SyncEngine {
     /// 用可信云树和本地身份补齐缺失的数据库基线。
     /// 仅在路径、类型与 fileId 可证明一致时创建或迁移记录。
@@ -798,11 +824,50 @@ impl SyncEngine {
     }
 
     /// 加载并校验按本地路径唯一的数据库基线快照。
+    ///
+    /// 同路径出现多行基线（如服务器对覆盖上传换发新 fileId 后旧行残留）会锁死全部
+    /// 规划，因此在加载时自愈收敛而不是拒绝启动；收敛失败才维持 fail-fast。
     pub(super) fn load_db_snapshot(&self) -> AppResult<HashMap<String, DbSnapshotEntry>> {
+        let (snapshot, duplicates) = {
+            let conn = self.db.lock();
+            let records = repository::load_all(&conn)?;
+            Self::build_path_unique_snapshot(records)?
+        };
+        if duplicates.is_empty() {
+            return Ok(snapshot);
+        }
+        self.heal_duplicate_path_baselines(&duplicates)?;
         let conn = self.db.lock();
+        let (snapshot, remaining) = Self::build_path_unique_snapshot(repository::load_all(&conn)?)?;
+        if let Some(relative_path) = remaining.keys().next() {
+            return Err(AppError::generic(format!(
+                "同步基线自愈后仍存在重复本地路径，拒绝继续规划：{relative_path}"
+            )));
+        }
+        Ok(snapshot)
+    }
+
+    /// 构建路径唯一的快照；返回快照与按路径分组的重复基线（组内 ≥2 行）。
+    fn build_path_unique_snapshot(
+        records: Vec<repository::SyncItem>,
+    ) -> AppResult<(HashMap<String, DbSnapshotEntry>, DuplicateBaselines)> {
+        let mut by_path: HashMap<String, Vec<repository::SyncItem>> = HashMap::new();
+        for record in records {
+            by_path
+                .entry(record.local_path.clone())
+                .or_default()
+                .push(record);
+        }
         let mut snapshot = HashMap::new();
-        for record in repository::load_all(&conn)? {
-            let relative_path = record.local_path.clone();
+        let mut duplicates = HashMap::new();
+        for (relative_path, mut group) in by_path {
+            if group.len() > 1 {
+                // 全表扫描行序不稳定，按 fileId 排序保证裁决与日志输出确定。
+                group.sort_by(|a, b| a.file_id.cmp(&b.file_id));
+                duplicates.insert(relative_path, group);
+                continue;
+            }
+            let record = group.into_iter().next().expect("分组非空");
             let entry = DbSnapshotEntry {
                 file_id: record.file_id,
                 local_mtime: record.local_mtime,
@@ -811,13 +876,63 @@ impl SyncEngine {
                 status: record.status,
                 is_folder: record.is_folder,
             };
-            if snapshot.insert(relative_path.clone(), entry).is_some() {
-                return Err(AppError::generic(format!(
-                    "同步基线存在重复本地路径，拒绝继续规划：{relative_path}"
-                )));
-            }
+            snapshot.insert(relative_path, entry);
         }
-        Ok(snapshot)
+        Ok((snapshot, duplicates))
+    }
+
+    /// 收敛同路径重复基线：可信云树命中该路径身份的行保留；否则保留最近成功结算
+    /// 的非墓碑行；全为墓碑行时保留最近结算的墓碑行。其余行（含被新身份取代的
+    /// 墓碑行）在同一事务内删除。孤行墓碑不经过此处，防重建语义不受影响。
+    fn heal_duplicate_path_baselines(&self, duplicates: &DuplicateBaselines) -> AppResult<()> {
+        let conn = self.db.lock();
+        let authority_ids: HashMap<String, Option<String>> = {
+            let cloud = self.cloud.lock();
+            let trusted = cloud.trusted;
+            duplicates
+                .keys()
+                .map(|path| {
+                    let authority = trusted
+                        .then(|| cloud.tree.get(path).map(|file| file.id.clone()))
+                        .flatten();
+                    (path.clone(), authority)
+                })
+                .collect()
+        };
+        let transaction = conn
+            .unchecked_transaction()
+            .map_err(|error| AppError::generic(format!("开始基线自愈事务失败：{error}")))?;
+        for (relative_path, group) in duplicates {
+            let authority = authority_ids.get(relative_path).cloned().flatten();
+            let keep = select_baseline_to_keep(group, authority.as_deref());
+            let removed: Vec<&str> = group
+                .iter()
+                .filter(|record| record.file_id != keep.file_id)
+                .map(|record| record.file_id.as_str())
+                .collect();
+            for file_id in &removed {
+                transaction
+                    .execute(
+                        "DELETE FROM sync_items WHERE file_id=?1 AND local_path=?2",
+                        rusqlite::params![file_id, relative_path],
+                    )
+                    .map_err(|error| {
+                        AppError::generic(format!(
+                            "基线自愈清理旧身份行失败（{relative_path}）：{error}"
+                        ))
+                    })?;
+            }
+            tracing::warn!(
+                rel = %relative_path,
+                kept = %keep.file_id,
+                removed = ?removed,
+                authority = authority.as_deref().unwrap_or("<latest>"),
+                "基线自愈：同路径重复基线已收敛"
+            );
+        }
+        transaction
+            .commit()
+            .map_err(|error| AppError::generic(format!("提交基线自愈事务失败：{error}")))
     }
 
     /// 确认云端副本、本地文件与成功基线一致后允许释放空间。
@@ -987,6 +1102,16 @@ mod tests {
             status: sync_status::SYNCED,
             error_message: None,
         }
+    }
+
+    fn count_rows_by_local_path(db: &Arc<Mutex<Connection>>, path: &str) -> i64 {
+        db.lock()
+            .query_row(
+                "SELECT COUNT(*) FROM sync_items WHERE local_path=?1",
+                rusqlite::params![path],
+                |row| row.get(0),
+            )
+            .unwrap()
     }
 
     fn cloud_file(file_id: &str, name: &str, parent_id: &str, is_folder: bool) -> DriveFile {
@@ -1232,6 +1357,103 @@ mod tests {
                 .as_deref(),
             Some(b"source-folder-id".as_slice()),
             "reconcile 不得覆盖不同目录身份"
+        );
+    }
+
+    /// 同路径重复基线（服务器对覆盖上传换发新 fileId 后旧行残留）必须在加载时自愈
+    /// 收敛，不能拒绝规划导致整个引擎瘫痪。
+    #[test]
+    fn load_db_snapshot_heals_duplicate_path_baselines() {
+        let temp = tempfile::tempdir().unwrap();
+        let (engine, db) = test_engine(temp.path());
+        let mut stale = sync_item("old-cloud-id", "docs/manual.pdf", false);
+        stale.status = sync_status::CLOUD_ONLY;
+        stale.last_sync_time = Some(10);
+        let mut fresh = sync_item("new-cloud-id", "docs/manual.pdf", false);
+        fresh.status = sync_status::CONFLICT;
+        fresh.last_sync_time = Some(20);
+        repository::upsert(&db.lock(), &stale).unwrap();
+        repository::upsert(&db.lock(), &fresh).unwrap();
+
+        let snapshot = engine.load_db_snapshot().unwrap();
+
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot["docs/manual.pdf"].file_id, "new-cloud-id");
+        assert!(
+            repository::find_by_file_id(&db.lock(), "old-cloud-id")
+                .unwrap()
+                .is_none(),
+            "旧身份残留行必须被自愈清除"
+        );
+        assert_eq!(
+            count_rows_by_local_path(&db, "docs/manual.pdf"),
+            1,
+            "自愈后该路径只剩一行基线"
+        );
+    }
+
+    /// 云树可信且命中该路径身份时，自愈必须保留云端权威行，即使它不是最近结算的。
+    #[test]
+    fn load_db_snapshot_heal_prefers_cloud_authority() {
+        let temp = tempfile::tempdir().unwrap();
+        let (engine, db) = test_engine(temp.path());
+        let mut authoritative = sync_item("authoritative-id", "docs/manual.pdf", false);
+        authoritative.last_sync_time = Some(10);
+        let mut newer = sync_item("newer-orphan-id", "docs/manual.pdf", false);
+        newer.last_sync_time = Some(20);
+        repository::upsert(&db.lock(), &authoritative).unwrap();
+        repository::upsert(&db.lock(), &newer).unwrap();
+        engine.cloud_tree_insert(
+            "docs/manual.pdf".into(),
+            cloud_file("authoritative-id", "manual.pdf", "docs-id", false),
+        );
+        engine.set_cloud_tree_trusted(true);
+
+        let snapshot = engine.load_db_snapshot().unwrap();
+
+        assert_eq!(snapshot["docs/manual.pdf"].file_id, "authoritative-id");
+        assert!(repository::find_by_file_id(&db.lock(), "newer-orphan-id")
+            .unwrap()
+            .is_none());
+    }
+
+    /// 墓碑行是该路径唯一基线时必须原样保留（用户主动删除的防重建语义）。
+    #[test]
+    fn load_db_snapshot_keeps_sole_tombstone_untouched() {
+        let temp = tempfile::tempdir().unwrap();
+        let (engine, db) = test_engine(temp.path());
+        let mut tombstone = sync_item("deleted-id", "docs/manual.pdf", false);
+        tombstone.status = sync_status::DELETED;
+        repository::upsert(&db.lock(), &tombstone).unwrap();
+
+        let snapshot = engine.load_db_snapshot().unwrap();
+
+        assert_eq!(snapshot["docs/manual.pdf"].status, sync_status::DELETED);
+        assert_eq!(count_rows_by_local_path(&db, "docs/manual.pdf"), 1);
+    }
+
+    /// 墓碑行与新身份基线并存时（同路径已被新文件取代），自愈保留正常基线并清除
+    /// 过期墓碑，避免"合法并存"永远锁死规划。
+    #[test]
+    fn load_db_snapshot_heal_supersedes_stale_tombstone() {
+        let temp = tempfile::tempdir().unwrap();
+        let (engine, db) = test_engine(temp.path());
+        let mut tombstone = sync_item("deleted-id", "docs/manual.pdf", false);
+        tombstone.status = sync_status::DELETED;
+        tombstone.last_sync_time = Some(99);
+        let mut active = sync_item("active-id", "docs/manual.pdf", false);
+        active.last_sync_time = Some(20);
+        repository::upsert(&db.lock(), &tombstone).unwrap();
+        repository::upsert(&db.lock(), &active).unwrap();
+
+        let snapshot = engine.load_db_snapshot().unwrap();
+
+        assert_eq!(snapshot["docs/manual.pdf"].file_id, "active-id");
+        assert!(
+            repository::find_by_file_id(&db.lock(), "deleted-id")
+                .unwrap()
+                .is_none(),
+            "被新身份取代的墓碑必须清除"
         );
     }
 }

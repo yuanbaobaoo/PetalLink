@@ -3,7 +3,7 @@
 use tauri::AppHandle;
 
 use crate::data::repository;
-use crate::error::{AppError, AppResult};
+use crate::error::AppResult;
 use crate::sync::state::SyncGlobalState;
 use crate::sync::status_aggregator::{RuntimeStatus, StatusAggregator};
 
@@ -31,17 +31,7 @@ fn clear_transfer_history_and_snapshot(
     include_completed: bool,
     include_failed: bool,
 ) -> AppResult<SyncGlobalState> {
-    conn.execute(
-        "DELETE FROM transfer_queue
-         WHERE (?1=1 AND state=?2) OR (?3=1 AND state=?4)",
-        rusqlite::params![
-            include_completed as i32,
-            i32::from(crate::sync::transfer_state::TransferState::Completed),
-            include_failed as i32,
-            i32::from(crate::sync::transfer_state::TransferState::Failed),
-        ],
-    )
-    .map_err(|error| AppError::generic(format!("清除传输历史失败：{error}")))?;
+    repository::clear_terminal_transfers(conn, include_completed, include_failed)?;
     aggregator.snapshot(conn, RuntimeStatus::default())
 }
 

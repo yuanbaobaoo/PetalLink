@@ -82,3 +82,4 @@ app/node_modules/
 app/dist/
 .zcode
 .vite
+/.zcodeignore

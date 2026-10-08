@@ -582,3 +582,144 @@ pub fn prune_transfer_history(conn: &Connection, keep: usize) -> AppResult<()> {
     );
     Ok(())
 }
+
+/// 删除指定终态的传输历史：失败组同时涵盖已取消（同为非成功的结束），
+/// 两个开关全开即覆盖全部终态。不触碰任何非终态任务。
+pub fn clear_terminal_transfers(
+    conn: &Connection,
+    include_completed: bool,
+    include_failed: bool,
+) -> AppResult<usize> {
+    let removed = db_err!(
+        "清除终态历史",
+        conn.execute(
+            "DELETE FROM transfer_queue
+             WHERE (?1=1 AND state=?2) OR (?3=1 AND state IN (?4, ?5))",
+            params![
+                include_completed as i32,
+                transfer_state::COMPLETED,
+                include_failed as i32,
+                transfer_state::FAILED,
+                transfer_state::CANCELED,
+            ],
+        )
+    );
+    Ok(removed)
+}
+
+#[cfg(test)]
+mod clear_terminal_transfers_tests {
+    use super::*;
+
+    fn test_connection() -> Connection {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute(
+                "CREATE TABLE transfer_queue (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    direction INTEGER NOT NULL,
+                    file_id TEXT,
+                    local_path TEXT,
+                    name TEXT NOT NULL,
+                    total_size INTEGER NOT NULL DEFAULT 0,
+                    transferred INTEGER NOT NULL DEFAULT 0,
+                    state INTEGER NOT NULL DEFAULT 0,
+                    error_message TEXT,
+                    created_at INTEGER NOT NULL,
+                    finished_at INTEGER,
+                    server_id TEXT,
+                    upload_id TEXT,
+                    resume_offset INTEGER NOT NULL DEFAULT 0,
+                    session_url TEXT,
+                    relative_path TEXT,
+                    parent_file_id TEXT,
+                    operation INTEGER,
+                    source_mtime INTEGER,
+                    source_size INTEGER,
+                    expected_cloud_edited_time INTEGER,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    verify_attempt_count INTEGER NOT NULL DEFAULT 0,
+                    next_retry_at INTEGER,
+                    error_kind INTEGER,
+                    remote_result_file_id TEXT,
+                    state_revision INTEGER NOT NULL DEFAULT 0
+                );",
+                [],
+            )
+            .unwrap();
+        connection
+    }
+
+    fn insert_task(connection: &Connection, name: &str, state: TransferState) {
+        connection
+            .execute(
+                "INSERT INTO transfer_queue (direction, name, state, created_at, relative_path)
+                 VALUES (0, ?1, ?2, 1, ?1)",
+                params![name, i32::from(state)],
+            )
+            .unwrap();
+    }
+
+    fn remaining(connection: &Connection) -> Vec<String> {
+        let mut statement = connection
+            .prepare("SELECT name FROM transfer_queue ORDER BY name")
+            .unwrap();
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap();
+        rows.collect::<Result<Vec<_>, _>>().unwrap()
+    }
+
+    /// 「清除已完成」只删 Completed，失败/取消/进行中全部保留。
+    #[test]
+    fn clear_completed_only_removes_completed_rows() {
+        let connection = test_connection();
+        insert_task(&connection, "done", TransferState::Completed);
+        insert_task(&connection, "failed", TransferState::Failed);
+        insert_task(&connection, "canceled", TransferState::Canceled);
+        insert_task(&connection, "running", TransferState::Running);
+
+        let removed = clear_terminal_transfers(&connection, true, false).unwrap();
+
+        assert_eq!(removed, 1);
+        assert_eq!(
+            remaining(&connection),
+            vec!["canceled", "failed", "running"]
+        );
+    }
+
+    /// 「清除失败与取消」删 Failed 与 Canceled，完成/进行中保留。
+    #[test]
+    fn clear_failed_also_removes_canceled_rows() {
+        let connection = test_connection();
+        insert_task(&connection, "done", TransferState::Completed);
+        insert_task(&connection, "failed", TransferState::Failed);
+        insert_task(&connection, "canceled", TransferState::Canceled);
+        insert_task(&connection, "running", TransferState::Running);
+
+        let removed = clear_terminal_transfers(&connection, false, true).unwrap();
+
+        assert_eq!(removed, 2);
+        assert_eq!(remaining(&connection), vec!["done", "running"]);
+    }
+
+    /// 「清除全部已结束」覆盖全部三种终态，绝不触碰非终态任务。
+    #[test]
+    fn clear_finished_removes_all_terminal_states() {
+        let connection = test_connection();
+        insert_task(&connection, "done", TransferState::Completed);
+        insert_task(&connection, "failed", TransferState::Failed);
+        insert_task(&connection, "canceled", TransferState::Canceled);
+        insert_task(&connection, "running", TransferState::Running);
+        insert_task(&connection, "pending", TransferState::Pending);
+        insert_task(&connection, "restart", TransferState::RestartRequired);
+
+        let removed = clear_terminal_transfers(&connection, true, true).unwrap();
+
+        assert_eq!(removed, 3);
+        assert_eq!(
+            remaining(&connection),
+            vec!["pending", "restart", "running"]
+        );
+    }
+}

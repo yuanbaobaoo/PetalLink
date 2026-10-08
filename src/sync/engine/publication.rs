@@ -3,7 +3,6 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use rusqlite::params;
 use tokio::sync::broadcast;
 
 use crate::data::repository;
@@ -150,17 +149,7 @@ impl SyncEngine {
     ) -> AppResult<SyncGlobalState> {
         {
             let conn = self.db.lock();
-            conn.execute(
-                "DELETE FROM transfer_queue
-                 WHERE (?1=1 AND state=?2) OR (?3=1 AND state=?4)",
-                params![
-                    include_completed as i32,
-                    i32::from(TransferState::Completed),
-                    include_failed as i32,
-                    i32::from(TransferState::Failed),
-                ],
-            )
-            .map_err(|error| AppError::generic(format!("清除传输历史失败：{error}")))?;
+            repository::clear_terminal_transfers(&conn, include_completed, include_failed)?;
         }
         self.recompute_and_broadcast_state()
     }

@@ -435,6 +435,21 @@ impl TaskRunner {
                             AppError::generic(format!("清理改名/移动旧基线路径失败：{error}"))
                         })?;
                 }
+                // 覆盖上传（服务器可能换发新 fileId）成功后，任务结果是该路径唯一权威
+                // 身份；清理同路径旧 fileId 残留行，防止重复基线在下一周期锁死规划。
+                // 墓碑行有独立防重建语义，不在清理之列。
+                transaction
+                    .execute(
+                        "DELETE FROM sync_items WHERE local_path=?1 AND file_id<>?2 AND status<>?3",
+                        rusqlite::params![
+                            relative_path,
+                            file_id.as_str(),
+                            repository::sync_status::DELETED
+                        ],
+                    )
+                    .map_err(|error| {
+                        AppError::generic(format!("清理同路径旧身份基线失败：{error}"))
+                    })?;
                 // 最后写入已同步基线，提交后再对外发布状态。
                 repository::upsert(
                     &transaction,
