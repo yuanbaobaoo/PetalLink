@@ -13,6 +13,9 @@ use crate::sync::state::FreeUpCheckResult;
 
 use super::{mount, sync_engine, try_sync_engine, DB, FILES_API};
 
+/// 批量释放的并发上限。
+const FREE_UP_BATCH_CONCURRENCY: usize = 4;
+
 /// 可释放空间候选项（基于 DB 基线枚举，实际释放前再逐项安全核验）。
 /// 与前端 `FreeableItem` interface 的合同为 camelCase，序列化/反序列化必须保持一致。
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -544,54 +547,118 @@ pub fn sync_list_freeable_in_folder(folder_rel_path: String) -> AppResult<Vec<Fr
 #[tauri::command]
 #[specta::specta]
 pub async fn sync_free_up_batch(items: Vec<FreeableItem>) -> AppResult<FreeUpBatchResult> {
+    use futures::StreamExt;
     let engine = sync_engine()?;
     let m = mount()?;
+    // 并发上限：释放包含远端核验 + 本地截断，4 路已能吞满带宽又不会压垮服务端。
+    let concurrency = FREE_UP_BATCH_CONCURRENCY.min(items.len().max(1));
+    // 每项独立持有路径租约，并发之间互不阻塞；结果按到达顺序收集。
+    let outcomes = futures::stream::iter(items.into_iter().map(|item| {
+        let engine = engine.clone();
+        let mount = m.clone();
+        async move {
+            match free_up_one(&engine, &mount, &item.file_id, &item.rel_path, item.size).await {
+                Ok(bytes) => Ok((item.name, bytes)),
+                Err(error) => Err((item.name, error)),
+            }
+        }
+    }))
+    .buffer_unordered(concurrency)
+    .collect::<Vec<_>>()
+    .await;
+
+    // 汇总阶段保持顺序无关：只累加计数与可读原因。
     let mut result = FreeUpBatchResult {
         freed_count: 0,
         skipped_count: 0,
         freed_bytes: 0,
         errors: Vec::new(),
     };
-    for item in items {
-        match free_up_one(&engine, &m, &item.file_id, &item.rel_path, item.size).await {
-            Ok(bytes) => {
+    for outcome in outcomes {
+        match outcome {
+            Ok((_, bytes)) => {
                 result.freed_count += 1;
                 result.freed_bytes += bytes;
             }
-            Err(error) => {
+            Err((name, error)) => {
                 result.skipped_count += 1;
-                result.errors.push(format!("{}：{}", item.name, error));
+                result.errors.push(format!("{name}：{error}"));
             }
         }
     }
     Ok(result)
 }
 
-/// 按需下载占位文件。
+/// 按需下载的处理结果。
+///
+/// 「已加入传输队列」不是失败：文件会在队列里完成落盘，UI 必须给出可继续的提示，
+/// 而不是把成功入队渲染成红色的「同步失败」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum DownloadOnDemandOutcome {
+    /// 本次已下载完成，可以立即打开。
+    Completed,
+    /// 已加入传输队列，完成后自动落盘。
+    Queued,
+}
+
+/// 按需下载占位文件，并等待本次任务结算（「下载后立即打开」依赖这一点）。
 #[tauri::command]
 #[specta::specta]
 pub async fn sync_download_on_demand(
     _app: AppHandle,
     file_id: String,
     dest_path: String,
-) -> AppResult<bool> {
+) -> AppResult<DownloadOnDemandOutcome> {
+    download_on_demand(file_id, dest_path, true).await
+}
+
+/// 批量按需下载：只入队并立即返回，进度由传输队列呈现。
+///
+/// 批量场景逐个等待下载完成会让界面卡住数分钟，且失败难以汇总；
+/// 这里只投递任务，由后台按并发槽执行。
+#[tauri::command]
+#[specta::specta]
+pub async fn sync_download_enqueue(
+    _app: AppHandle,
+    file_id: String,
+    dest_path: String,
+) -> AppResult<DownloadOnDemandOutcome> {
+    download_on_demand(file_id, dest_path, false).await
+}
+
+/// 解析挂载内目标路径并投递按需下载任务。
+///
+/// `wait` 决定是否等待任务结算：单文件点击为真，批量投递为假。
+async fn download_on_demand(
+    file_id: String,
+    dest_path: String,
+    wait: bool,
+) -> AppResult<DownloadOnDemandOutcome> {
     let m = mount()?;
     let frontend_dest = PathBuf::from(&dest_path);
     let frontend_rel = crate::core::paths::relative_path_from_mount(m.mount_dir(), &frontend_dest)?;
     let service = HydrationService::new(sync_engine()?, m, DB.clone(), FILES_API.clone());
-    let result = service.ensure_local(&file_id, &frontend_rel).await?;
+    let result = service.ensure_local(&file_id, &frontend_rel, wait).await?;
     match result.disposition() {
-        crate::sync::task_runner::TaskDisposition::Completed => Ok(true),
-        disposition => {
-            let user_message = disposition.user_message();
+        crate::sync::task_runner::TaskDisposition::Completed => {
+            Ok(DownloadOnDemandOutcome::Completed)
+        }
+        // 排队/执行/退避/核验都属于「已在队列里推进」，不是失败。
+        disposition @ (crate::sync::task_runner::TaskDisposition::Pending
+        | crate::sync::task_runner::TaskDisposition::Running
+        | crate::sync::task_runner::TaskDisposition::WaitingForNetwork
+        | crate::sync::task_runner::TaskDisposition::BackingOff
+        | crate::sync::task_runner::TaskDisposition::VerifyingRemote) => {
             tracing::info!(
                 task_id = result.task_id(),
                 local_path = %result.local_path().display(),
                 disposition = ?disposition,
-                user_message,
-                "按需下载未立即完成，已保留在传输队列"
+                "按需下载已进入传输队列"
             );
-            Err(AppError::generic(user_message))
+            Ok(DownloadOnDemandOutcome::Queued)
         }
+        // 被其它意图占用或文件状态已变化，属于真正无法继续的情况。
+        disposition => Err(AppError::generic(disposition.user_message())),
     }
 }

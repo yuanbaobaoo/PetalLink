@@ -129,6 +129,10 @@ pub(super) fn update_compatibility_sync_status(
 }
 
 /// 标记旧同步条目的兼容失败状态。
+///
+/// 新文件首次上传失败时 `sync_items` 还没有对应基线行，只做 UPDATE 会让失败
+/// 在文件视图里彻底消失；因此 UPDATE 未命中时补写一条 FAILED 行。
+/// 已存在行（含冲突/已删除等状态）一律不覆盖，避免把更精确的状态降级成失败。
 pub(super) fn mark_compatibility_sync_failed(
     conn: &rusqlite::Connection,
     task: &TransferTask,
@@ -142,21 +146,159 @@ pub(super) fn mark_compatibility_sync_failed(
         .file_id
         .clone()
         .unwrap_or_else(|| format!("{}{}", repository::PENDING_FILE_ID_PREFIX, relative_path));
-    conn.execute(
-        "UPDATE sync_items SET status=?1, error_message=?2
+    let updated = conn
+        .execute(
+            "UPDATE sync_items SET status=?1, error_message=?2
          WHERE file_id=?3 AND local_path=?4
            AND status IN (?5, ?6, ?7, ?8)",
-        rusqlite::params![
-            repository::sync_status::FAILED,
-            error_message,
-            file_id,
-            relative_path,
-            repository::sync_status::SYNCED,
-            repository::sync_status::SYNCING,
-            repository::sync_status::CLOUD_ONLY,
-            repository::sync_status::FAILED,
-        ],
-    )
-    .map_err(|error| AppError::generic(format!("记录同步兼容失败状态失败：{error}")))?;
+            rusqlite::params![
+                repository::sync_status::FAILED,
+                error_message,
+                file_id,
+                relative_path,
+                repository::sync_status::SYNCED,
+                repository::sync_status::SYNCING,
+                repository::sync_status::CLOUD_ONLY,
+                repository::sync_status::FAILED,
+            ],
+        )
+        .map_err(|error| AppError::generic(format!("记录同步兼容失败状态失败：{error}")))?;
+    if updated == 0 {
+        // 没有可更新的基线行：补写失败记录，让文件视图能看见这次失败。
+        conn.execute(
+            "INSERT INTO sync_items (
+                file_id, local_path, parent_folder_id, name, is_folder, size, status, error_message
+             ) VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?7)
+             ON CONFLICT(file_id, local_path) DO NOTHING",
+            rusqlite::params![
+                file_id,
+                relative_path,
+                task.parent_file_id,
+                task.name,
+                task.total_size,
+                repository::sync_status::FAILED,
+                error_message,
+            ],
+        )
+        .map_err(|error| AppError::generic(format!("补写同步失败记录失败：{error}")))?;
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sync::transfer_state::TransferOperation;
+
+    /// 建立只含同步基线与任务表的最小数据库。
+    fn open_database() -> rusqlite::Connection {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE sync_items (
+                    file_id TEXT NOT NULL,
+                    local_path TEXT NOT NULL,
+                    parent_folder_id TEXT,
+                    name TEXT NOT NULL,
+                    is_folder INTEGER NOT NULL DEFAULT 0,
+                    size INTEGER NOT NULL DEFAULT 0,
+                    local_size INTEGER,
+                    sha256 TEXT,
+                    local_mtime INTEGER,
+                    cloud_edited_time INTEGER,
+                    last_sync_time INTEGER,
+                    status INTEGER NOT NULL DEFAULT 0,
+                    error_message TEXT,
+                    PRIMARY KEY (file_id, local_path)
+                );",
+            )
+            .unwrap();
+        connection
+    }
+
+    /// 构造一个失败的上传任务；file_id 为空表示新文件。
+    fn task(relative_path: &str, file_id: Option<&str>) -> TransferTask {
+        TransferTask {
+            id: 1,
+            direction: 0,
+            file_id: file_id.map(str::to_string),
+            local_path: Some(format!("/mount/{relative_path}")),
+            name: relative_path.rsplit('/').next().unwrap().to_string(),
+            total_size: 8,
+            transferred: 0,
+            state: i32::from(TransferState::Failed),
+            error_message: None,
+            created_at: 1,
+            finished_at: Some(2),
+            server_id: None,
+            upload_id: None,
+            resume_offset: 0,
+            session_url: None,
+            relative_path: Some(relative_path.to_string()),
+            parent_file_id: Some("parent-folder-id".to_string()),
+            operation: Some(i32::from(TransferOperation::Create)),
+            source_mtime: Some(1),
+            source_size: Some(8),
+            expected_cloud_edited_time: None,
+            attempt_count: 1,
+            verify_attempt_count: 0,
+            next_retry_at: None,
+            error_kind: Some(i32::from(TransferErrorKind::Network)),
+            remote_result_file_id: None,
+            state_revision: 1,
+        }
+    }
+
+    /// 新文件首次上传失败时没有基线行，必须补写一条 FAILED，否则文件视图里彻底消失。
+    #[test]
+    fn failed_first_upload_inserts_missing_baseline_row() {
+        let connection = open_database();
+        let upload = task("videos/new.mp4", None);
+
+        mark_compatibility_sync_failed(&connection, &upload, "网络连接失败").unwrap();
+
+        let row: (String, i32, Option<String>) = connection
+            .query_row(
+                "SELECT file_id, status, error_message FROM sync_items WHERE local_path=?1",
+                ["videos/new.mp4"],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            row.0,
+            format!("{}{}", repository::PENDING_FILE_ID_PREFIX, "videos/new.mp4")
+        );
+        assert_eq!(row.1, repository::sync_status::FAILED);
+        assert_eq!(row.2.as_deref(), Some("网络连接失败"));
+    }
+
+    /// 已有基线行只更新状态，不新增第二行。
+    #[test]
+    fn failed_upload_updates_existing_baseline_row() {
+        let connection = open_database();
+        connection
+            .execute(
+                "INSERT INTO sync_items (file_id, local_path, name, status)
+                 VALUES ('remote-id', 'videos/old.mp4', 'old.mp4', ?1)",
+                [repository::sync_status::SYNCING],
+            )
+            .unwrap();
+        let upload = task("videos/old.mp4", Some("remote-id"));
+
+        mark_compatibility_sync_failed(&connection, &upload, "服务器异常").unwrap();
+
+        let count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM sync_items", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "已有基线行不得再插入重复记录");
+        let row: (i32, Option<String>) = connection
+            .query_row(
+                "SELECT status, error_message FROM sync_items WHERE file_id='remote-id'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(row.0, repository::sync_status::FAILED);
+        assert_eq!(row.1.as_deref(), Some("服务器异常"));
+    }
 }

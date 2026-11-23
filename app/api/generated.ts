@@ -10,9 +10,32 @@ export const commands = {
 	// 从 token store 恢复登录状态，并返回当前认证配置快照。
 	authRestore: () => __TAURI_INVOKE<AuthState>("auth_restore"),
 	// 完成 OAuth 登录，并在切换账号后停止旧运行时、清理同步数据和重置目录配置。
-	authLogin: (port: number) => __TAURI_INVOKE<TokenPair>("auth_login", { port }),
+	authLogin: (port: number, sheetBounds: {
+	// 左边距。
+	x: number,
+	// 上边距。
+	y: number,
+	// 宽度。
+	width: number,
+	// 高度。
+	height: number,
+	// 整卡高度（含标题区），用于换算滑入行程。
+	// 前端整卡从「卡片高度」的下方滑入，原生视图必须走同样长的距离，
+	// 否则动画中登录页会短暂压住标题区。
+	sheetHeight: number,
+	// 窗口 CSS 视口高度（前端 `window.innerHeight`）。
+	// 原生子视图以外框顶边为原点定位，而 CSS 视口从内容区开始，两者相差一个标题栏。
+	// 这个偏移量只能由「平台报告的内容区高度 − 真实视口高度」求得：macOS 上平台把
+	// 标题栏算进了内容区（`inner_size` == 外框尺寸），单看平台数值无法区分。
+	viewportHeight: number,
+} | null) => __TAURI_INVOKE<TokenPair>("auth_login", { port, sheetBounds }),
 	// 取消正在等待本地回调的 OAuth 授权流程。
 	authCancelLogin: () => __TAURI_INVOKE<null>("auth_cancel_login"),
+	// 用系统浏览器继续当前授权流程（内嵌登录被拦截时的回退入口）。
+	// 只在有进行中的授权流程时有效；返回是否真的打开了浏览器。
+	authLoginInBrowser: () => __TAURI_INVOKE<boolean>("auth_login_in_browser"),
+	// 窗口尺寸变化时同步底部抽屉的位置与尺寸。
+	authLoginSheetBounds: (bounds: SheetBounds) => __TAURI_INVOKE<null>("auth_login_sheet_bounds", { bounds }),
 	// 停止同步运行时，清理当前账号的同步数据与目录配置，然后删除登录 token。
 	authLogout: () => __TAURI_INVOKE<null>("auth_logout"),
 	// 使用当前认证信息读取账号资料。
@@ -35,6 +58,13 @@ export const commands = {
 	driveMoveFile: (id: string, newParentFolder: string) => __TAURI_INVOKE<DriveFile>("drive_move_file", { id, newParentFolder }),
 	// 搜索云盘文件。
 	driveSearch: (keyword: string, parentId: string | null, pageSize: number | null) => __TAURI_INVOKE<FileListResult>("drive_search", { keyword, parentId, pageSize }),
+	// 搜索云盘文件并自动翻页，返回全部匹配项。
+	// 华为服务端的 `fileName contains` 只做**前缀**匹配（官方文档定义），且实测对
+	// 中文名可能直接返回空数组；因此这里以「本地/云树子串匹配」为主：
+	// 1. 目录内搜索：列出该目录全部子项后本地做子串匹配（精确、只发一次分页）；
+	// 2. 整盘搜索：优先在同步引擎的云树快照里匹配（整盘权威路径快照）；
+	// 3. 引擎未就绪或快照为空：退回服务端 DSL（前缀语义，结果可能少于预期）。
+	driveSearchAll: (keyword: string, parentId: string | null) => __TAURI_INVOKE<DriveFile[]>("drive_search_all", { keyword, parentId }),
 	// 获取云盘文件缩略图。
 	driveGetThumbnail: (fileId: string) => __TAURI_INVOKE<string>("drive_get_thumbnail", { fileId }),
 	// 获取云盘容量信息。
@@ -55,8 +85,10 @@ export const commands = {
 	// 返回 "folder" | "synced" | "placeholder" | "not_synced"
 	syncCheckFileLocalStatus: (fileId: string) => __TAURI_INVOKE<FileLocalStatus>("sync_check_file_local_status", { fileId }),
 	// 批量查询文件同步状态（供前端文件列表状态列展示用）。
-	// 接受文件 ID 列表，返回 fileId → "folder" | "synced" | "placeholder" | "not_synced" 映射。
 	// 未挂载同步目录时回退到仅 DB 状态判断。
+	// 数据库与文件系统严格分段：先在锁内读完基线与在途任务，再释放锁，
+	// 把 stat 与 xattr（`is_placeholder_file`）放到阻塞线程池批量执行。
+	// 旧实现整段持有全局 DB 锁做逐条文件 I/O，大目录会让引擎写库一起排队（D14）。
 	syncBatchFileStatus: (fileIds: string[]) => __TAURI_INVOKE<{ [key in string]: FileLocalStatus }>("sync_batch_file_status", { fileIds }),
 	// 将已同步文件替换为按需下载占位符。
 	syncFreeUpSpace: (fileId: string, relPath: string, localPath: string, name: string, size: number) => __TAURI_INVOKE<null>("sync_free_up_space", { fileId, relPath, localPath, name, size }),
@@ -71,12 +103,29 @@ export const commands = {
 	// 路径匹配用精确前缀加路径分隔符边界，避免 `docs` 误匹配 `docs-backup` 这类同级异名目录。
 	// - `folder_rel_path` 目录相对挂载根的路径，传空串表示从根枚举
 	syncListFreeableInFolder: (folderRelPath: string) => __TAURI_INVOKE<FreeableItem[]>("sync_list_freeable_in_folder", { folderRelPath }),
-	// 按需下载占位文件。
-	syncDownloadOnDemand: (fileId: string, destPath: string) => __TAURI_INVOKE<boolean>("sync_download_on_demand", { fileId, destPath }),
-	// 递归同步云端目录子树与本地目录。
-	syncFolderRecursive: (folderId: string, relPath: string) => __TAURI_INVOKE<number>("sync_folder_recursive", { folderId, relPath }),
-	// 重试失败的同步任务。
-	syncRetryFailed: () => __TAURI_INVOKE<null>("sync_retry_failed"),
+	// 按需下载占位文件，并等待本次任务结算（「下载后立即打开」依赖这一点）。
+	syncDownloadOnDemand: (fileId: string, destPath: string) => __TAURI_INVOKE<DownloadOnDemandOutcome>("sync_download_on_demand", { fileId, destPath }),
+	// 批量按需下载：只入队并立即返回，进度由传输队列呈现。
+	// 批量场景逐个等待下载完成会让界面卡住数分钟，且失败难以汇总；
+	// 这里只投递任务，由后台按并发槽执行。
+	syncDownloadEnqueue: (fileId: string, destPath: string) => __TAURI_INVOKE<DownloadOnDemandOutcome>("sync_download_enqueue", { fileId, destPath }),
+	// 入队一次目录双端对齐。
+	// 返回作业快照（含排队状态）；同一目录重复点击会复用活跃作业。
+	syncFolderEnqueue: (folderId: string, relPath: string) => __TAURI_INVOKE<FolderSyncJob>("sync_folder_enqueue", { folderId, relPath }),
+	// 列出目录同步作业（活跃在前，其后是最近的终态历史）。
+	syncFolderJobs: () => __TAURI_INVOKE<FolderSyncJob[]>("sync_folder_jobs"),
+	// 取消一个排队中或规划中的目录同步作业。
+	syncFolderCancel: (jobId: number) => __TAURI_INVOKE<boolean>("sync_folder_cancel", { jobId }),
+	// 重试全部失败任务：全部入队后立即返回汇总，不等待执行。
+	syncRetryFailed: () => __TAURI_INVOKE<RetryAllSummary>("sync_retry_failed"),
+	// 确认执行本轮被安全闸门拦下的大批量云端删除。
+	// 只有在状态里看到 `blocked_cloud_deletes > 0` 时才应该调用；确认后引擎会立刻
+	// 重新规划一次，这批删除才会真正下发。
+	syncApproveMassDelete: () => __TAURI_INVOKE<null>("sync_approve_mass_delete"),
+	// 清理一个已失效的本地占位文件。
+	// 只在「本地仍是 0 字节占位符、且云端确实没有该路径」时才会删除；
+	// 云端副本若已恢复，命令会拒绝并提示，避免把用户刚恢复的内容二次删掉。
+	syncCleanupPlaceholder: (relPath: string) => __TAURI_INVOKE<boolean>("sync_cleanup_placeholder", { relPath }),
 	// 获取完整同步状态快照。
 	syncState: () => __TAURI_INVOKE<SyncGlobalState_Serialize>("sync_state"),
 	// 查询目录下的同步项。
@@ -85,6 +134,10 @@ export const commands = {
 	configLoad: () => __TAURI_INVOKE<AppConfig>("config_load"),
 	// 保存配置；挂载目录变化时停止旧运行时、清理缓存并重启，运行参数变化时原位重建引擎。
 	configSave: (config: AppConfig) => __TAURI_INVOKE<null>("config_save", { config }),
+	// 保存列表排序偏好。
+	// 这是纯展示设置：只改排序字段，不触发引擎重建；单独成命令是为了避免
+	// 每次点击表头都整份读改写配置，与设置页保存互相踩踏。
+	configSaveSort: (field: SortField, order: SortOrder) => __TAURI_INVOKE<null>("config_save_sort", { field, order }),
 	// 切换托盘图标显示：持久化到配置并立即生效（对齐开机自启开关的即时生效模式）。
 	traySetVisible: (visible: boolean) => __TAURI_INVOKE<null>("tray_set_visible", { visible }),
 	// 将当前配置序列化为可导入的 JSON 文本。
@@ -102,13 +155,18 @@ export const commands = {
 	// 清除已结束传输。
 	transferClearFinished: () => __TAURI_INVOKE<null>("transfer_clear_finished"),
 	// 重试传输任务。
-	transferRetry: (taskId: number) => __TAURI_INVOKE<null>("transfer_retry", { taskId }),
+	// 只做幂等入队并立即返回，执行由后台调度；重复点击返回 `AlreadyQueued`。
+	transferRetry: (taskId: number) => __TAURI_INVOKE<RetryEnqueued>("transfer_retry", { taskId }),
 	// 同名冲突决策：覆盖远端（远端旧版自动改名为云端副本保留，不丢数据）。
 	transferOverwriteRemote: (taskId: number) => __TAURI_INVOKE<null>("transfer_overwrite_remote", { taskId }),
 	// 同名冲突决策：保留两者（本地文件改名为本地副本后作为新文件上传，云端原文件不动）。
 	transferKeepBoth: (taskId: number) => __TAURI_INVOKE<null>("transfer_keep_both", { taskId }),
 	// 取消「需要重新检查」或失败的传输任务。
 	transferCancel: (taskId: number) => __TAURI_INVOKE<null>("transfer_cancel", { taskId }),
+	// 批量取消全部失败任务，返回实际取消数量。
+	// 队列里几百条失败任务只有「重试全部」时，用户无法清走已知脏任务；
+	// 取消保留历史行但释放路径占用，让被隔离的同步动作继续执行。
+	transferCancelAllFailed: () => __TAURI_INVOKE<number>("transfer_cancel_all_failed"),
 	// 在系统文件管理器中打开路径。
 	openInFinder: () => __TAURI_INVOKE<boolean>("open_in_finder"),
 	// 使用系统默认应用打开同步目录内的本地文件或目录。
@@ -143,19 +201,27 @@ export const commands = {
 	// 读取最近日志。
 	logsList: () => __TAURI_INVOKE<LogRecord[]>("logs_list"),
 	// 导出完整日志。
+	// 逐文件流式写入（临时文件 + 原子替换），不再把全部日志拼成一个字符串进内存：
+	// 日志量大时旧实现会一次性占用与日志总量相等（甚至翻倍）的内存（D24）。
 	logsExport: (path: string) => __TAURI_INVOKE<null>("logs_export", { path }),
 	// 清空内存日志缓冲区；磁盘滚动日志由保留策略单独管理。
 	logsClear: () => __TAURI_INVOKE<null>("logs_clear"),
 	// 获取应用版本。
 	appGetVersion: () => __TAURI_INVOKE<string>("app_get_version"),
+	// 获取当前构建的展示名（dev 包带 `-Dev` 后缀）。
+	appDisplayName: () => __TAURI_INVOKE<string>("app_display_name"),
+	// 获取应用完整标题（窗口标题栏与登录页共用同一文案）。
+	appFullTitle: () => __TAURI_INVOKE<string>("app_full_title"),
 };
 
 // 事件
 export const events = {
+	authLoginLaunched: makeEvent<AuthLoginLaunchedEvent>("auth_login_launched"),
 	folderContentChanged: makeEvent<FolderContentChangedEvent>("folder_content_changed"),
-	folderSyncProgress: makeEvent<FolderSyncProgressEvent>("folder_sync_progress"),
+	folderSyncJobsChanged: makeEvent<FolderSyncJobsChangedEvent>("folder_sync_jobs_changed"),
 	navigateSettings: makeEvent<NavigateSettingsEvent>("navigate_settings"),
 	syncState: makeEvent<SyncStateEvent_Deserialize>("sync_state"),
+	transferSettled: makeEvent<TransferSettledEvent>("transfer_settled"),
 	transferUpdate: makeEvent<TransferUpdateEvent>("transfer_update"),
 	uploadFailed: makeEvent<UploadFailedEvent>("upload_failed"),
 	virtualDriveStatus: makeEvent<VirtualDriveStatusEvent>("virtual_drive_status"),
@@ -163,6 +229,8 @@ export const events = {
 
 // 常量
 export const DELETE_TRACE_ERROR_PREFIX = "TRACE_FAILED:" as const;
+
+export const FOLDER_SYNC_JOB_STATE = {"CANCELED":4,"COMPLETED":2,"FAILED":3,"PLANNING":1,"QUEUED":0} as const;
 
 export const SYNC_USER_MESSAGE_RULES = [{"message":"云端文件已更新。为避免覆盖，请同步索引后重试。","patterns":["远端文件已在规划后变化","云端文件版本已变化"]},{"message":"文件正在编辑，保存并关闭后会自动继续。","patterns":["用户正在编辑","文件正在编辑"]},{"message":"文件仍在变化，稳定后会自动继续。","patterns":["文件尚不稳定","文件仍在变化"]},{"message":"本地文件已发生变化，请重新检查并重试。","patterns":["本地上传源已变化","本地上传源在执行前发生变化","本地源已变化","下载目标已出现本地内容","更新下载目标已变化","更新下载目标已不存在"]},{"message":"文件同步信息不完整，请同步索引后重试。","patterns":["缺少 fileId","缺少真实 fileId","缺少 parentId","缺少 operation","operation 与 direction 不一致","缺少云端版本","缺少云端版本快照"]},{"message":"续传信息已失效，请重新开始上传。","patterns":["session_url","上传断点","安全重放"]},{"message":"没有找到可用于核对的同步记录，暂时无法释放空间。","patterns":["找不到与路径匹配的成功同步基线"]},{"message":"本地文件已更改，无法释放空间。","patterns":["本地内容与最后成功同步基线不一致"]},{"message":"云端文件信息已变化，请同步索引后重试。","patterns":["可信云树中不存在同一 fileId"]},{"message":"云端文件已变化，无法释放空间。","patterns":["远端副本不存在、已回收、大小或版本与成功基线不一致"]},{"message":"检查期间本地文件发生变化，无法释放空间。","patterns":["远端核验期间本地文件已变化"]},{"message":"云端文件仍在更新，请稍后再试。","patterns":["云端索引尚未追平"]},{"message":"文件状态已变化，请同步索引后重试。","patterns":["释放租约已失效"]},{"message":"文件状态已变化，请重新检查并重试。","patterns":["重新规划"]},{"message":"正在确认同步结果，请稍后查看。","patterns":["远端核验"]}] as const;
 
@@ -231,12 +299,29 @@ export type AppError = {
 	error_code: string | null,
 };
 
+// 登录界面已拉起，携带实际使用的形态。
+// 前端据此决定是否保留底部抽屉：后端可能因为 child webview 不可用而退回独立窗口
+// 或系统浏览器，这时抽屉必须收起来，否则会留下一块空白。
+export type AuthLoginLaunchedEvent = {
+	// 形态：`sheet` / `window` / `browser`。
+	mode: string,
+};
+
 // 前端恢复认证页面所需的登录、凭据与回调端口快照。
 export type AuthState = {
 	logged_in: boolean,
 	secret_configured: boolean,
 	callback_port: number,
 };
+
+// 按需下载的处理结果。
+// 「已加入传输队列」不是失败：文件会在队列里完成落盘，UI 必须给出可继续的提示，
+// 而不是把成功入队渲染成红色的「同步失败」。
+export type DownloadOnDemandOutcome =
+// 本次已下载完成，可以立即打开。
+"completed" |
+// 已加入传输队列，完成后自动落盘。
+"queued";
 
 // Drive 配额信息。对齐 dart `DriveAbout`。
 export type DriveAbout = {
@@ -269,6 +354,9 @@ export type FailedItem = {
 	relative_path: string,
 	// 错误信息
 	error_message: string | null,
+	// 该路径对应的传输任务 ID；没有对应任务（纯基线失败）时为 None。
+	// 前端据此提供「单条重试」，无需再去传输队列里翻。
+	task_id: number | null,
 };
 
 // 文件分类
@@ -281,6 +369,8 @@ export type FileListResult = {
 };
 
 // 文件在本地挂载目录中的可观察同步状态。
+// 前四个取值描述「本地事实」，后三个来自 `transfer_queue` 的在途事实：
+// 文件列表必须能直接回答「谁在传、谁在确认、谁失败了」，而不是让用户去传输队列里猜。
 export type FileLocalStatus =
 // 本地项是目录。
 "folder" |
@@ -289,18 +379,45 @@ export type FileLocalStatus =
 // 本地项是按需下载占位文件。
 "placeholder" |
 // 本地不存在可信同步文件。
-"not_synced";
+"not_synced" |
+// 该路径有排队/执行/退避中的传输任务。
+"syncing" |
+// 上传已完成，正在确认云端写入结果。
+"verifying" |
+// 该路径最近一次同步失败，等待重试。
+"failed";
 
 // 云盘目录内容已变化，前端应重新加载当前目录。
 export type FolderContentChangedEvent = null;
 
-// 目录递归同步进度事件。
-export type FolderSyncProgressEvent = {
-	// 已完成任务数。
-	done: number,
-	// 本轮任务总数。
-	total: number,
+// 一次「双端对齐」作业（对应 `folder_sync_jobs` 表一行）。
+export type FolderSyncJob = {
+	// 自增主键。
+	id: number,
+	// 云端目录 ID。
+	folder_id: string,
+	// 挂载根内的相对路径。
+	rel_path: string,
+	// 作业状态（见 `job_state`）。
+	state: number,
+	// 本轮需要处理的文件总数；规划完成前为 0。
+	planned_total: number,
+	// 已投递到传输队列的文件数。
+	enqueued: number,
+	// 失败原因。
+	error_message: string | null,
+	// 入队时间（毫秒）。
+	created_at: number,
+	// 开始规划时间（毫秒）。
+	started_at: number | null,
+	// 结束时间（毫秒）。
+	finished_at: number | null,
+	// 乐观并发版本。
+	state_revision: number,
 };
+
+// 目录同步作业发生变化，前端应重新加载作业列表。
+export type FolderSyncJobsChangedEvent = null;
 
 // 批量释放空间结果统计。
 // 与前端 `FreeUpBatchResult` interface 的合同为 camelCase，缺失时前端读不到计数。
@@ -355,6 +472,12 @@ export type ImportFilesResult = {
 	failures: ImportFailure[],
 };
 
+// 失效占位文件明细（前端提示用）。
+export type InvalidPlaceholder = {
+	// 相对挂载根的路径。
+	relative_path: string,
+};
+
 // `AppError` 暴露给前端的稳定扁平结构。
 export type IpcError = {
 	// 错误类别。
@@ -402,6 +525,55 @@ export type LogRecord = {
 // 原生菜单请求打开设置页。
 export type NavigateSettingsEvent = null;
 
+// 一键重试全部失败项的汇总。
+export type RetryAllSummary = {
+	// 本次新入队的任务数。
+	queued: number,
+	// 已在队列中而跳过的任务数。
+	already_queued: number,
+	// 不可重试而跳过（同名冲突、未知操作类型）。
+	skipped: number,
+	// 校验失败的任务数（源文件已变化等）。
+	rejected: number,
+};
+
+// 单个重试请求的入队结果。
+// `Queued`/`AlreadyQueued` 都属于成功：前者表示本次请求把任务推进到 Pending，
+// 后者表示任务本来就在队列里（幂等重复点击），前端无需区分即可继续。
+export type RetryEnqueued =
+// 本次请求已把任务推进到 Pending。
+({ Queued: {
+	// 被接受的任务 ID。
+	task_id: number,
+} }) & { AlreadyQueued?: never } |
+// 任务本来就在队列中（幂等），不视为错误。
+({ AlreadyQueued: {
+	// 已处于队列中的任务 ID。
+	task_id: number,
+} }) & { Queued?: never };
+
+// 底部抽屉在主窗口内的矩形（整数逻辑像素，原点为窗口内容区左上角）。
+// 前端已经按 CSS 像素取整，这里用整数避免浮点边界误差，也让生成的 TS 类型是 `number`。
+export type SheetBounds = {
+	// 左边距。
+	x: number,
+	// 上边距。
+	y: number,
+	// 宽度。
+	width: number,
+	// 高度。
+	height: number,
+	// 整卡高度（含标题区），用于换算滑入行程。
+	// 前端整卡从「卡片高度」的下方滑入，原生视图必须走同样长的距离，
+	// 否则动画中登录页会短暂压住标题区。
+	sheetHeight: number,
+	// 窗口 CSS 视口高度（前端 `window.innerHeight`）。
+	// 原生子视图以外框顶边为原点定位，而 CSS 视口从内容区开始，两者相差一个标题栏。
+	// 这个偏移量只能由「平台报告的内容区高度 − 真实视口高度」求得：macOS 上平台把
+	// 标题栏算进了内容区（`inner_size` == 外框尺寸），单看平台数值无法区分。
+	viewportHeight: number,
+};
+
 // 同步状态展示排序字段
 export type SortField = "name" | "size" | "modifiedTime";
 
@@ -441,6 +613,19 @@ export type SyncGlobalState_Deserialize = {
 	indexing_discovered_items: number,
 	// 是否有目录结构变更（触发前端目录重拉）
 	content_changed: boolean,
+	// 本地已失效的占位文件（云端副本已不存在）。
+	// 这些路径本地只剩 0 字节占位符，云端内容已被删除：既不能上传成空文件，
+	// 也不应静默清理。UI 展示出来让用户决定「恢复云端副本」还是「清理本地残留」。
+	invalid_placeholders: InvalidPlaceholder[],
+	// 本轮被安全闸门拦下的云端删除条目数。
+	// 大于 0 表示存在「疑似误删」的批量删除（例如挂载目录被清空、卷未挂载、
+	// 或一次要删掉超过阈值的文件），引擎已拒绝执行，必须由用户显式确认。
+	blocked_cloud_deletes: number,
+	// 本轮因同路径仍有活动任务而被暂缓的**结构性**同步动作数。
+	// 只统计删除/建目录/移动/占位等结构动作（文件传输的暂缓由传输队列自身展示）。
+	// 这些动作不是失败：等占用路径的传输任务结算（或被取消）后，下一轮会自动重试。
+	// 大于 0 时 UI 必须提示「N 项同步等待任务结束」，避免用户把暂缓当成按钮失灵。
+	deferred_actions: number,
 	// 当前同步阶段（供前端状态条精确显示）。None = 空闲。
 	// 值由本模块 `SYNC_PHASE_*` 常量定义；运行中不得为空。
 	sync_phase?: string | null,
@@ -476,6 +661,19 @@ export type SyncGlobalState_Serialize = {
 	indexing_discovered_items: number,
 	// 是否有目录结构变更（触发前端目录重拉）
 	content_changed: boolean,
+	// 本地已失效的占位文件（云端副本已不存在）。
+	// 这些路径本地只剩 0 字节占位符，云端内容已被删除：既不能上传成空文件，
+	// 也不应静默清理。UI 展示出来让用户决定「恢复云端副本」还是「清理本地残留」。
+	invalid_placeholders: InvalidPlaceholder[],
+	// 本轮被安全闸门拦下的云端删除条目数。
+	// 大于 0 表示存在「疑似误删」的批量删除（例如挂载目录被清空、卷未挂载、
+	// 或一次要删掉超过阈值的文件），引擎已拒绝执行，必须由用户显式确认。
+	blocked_cloud_deletes: number,
+	// 本轮因同路径仍有活动任务而被暂缓的**结构性**同步动作数。
+	// 只统计删除/建目录/移动/占位等结构动作（文件传输的暂缓由传输队列自身展示）。
+	// 这些动作不是失败：等占用路径的传输任务结算（或被取消）后，下一轮会自动重试。
+	// 大于 0 时 UI 必须提示「N 项同步等待任务结束」，避免用户把暂缓当成按钮失灵。
+	deferred_actions: number,
 	// 当前同步阶段（供前端状态条精确显示）。None = 空闲。
 	// 值由本模块 `SYNC_PHASE_*` 常量定义；运行中不得为空。
 	sync_phase?: string | null,
@@ -534,6 +732,13 @@ export type TokenPair = {
 	expires_at: number,
 	token_type?: string,
 	scope: string | null,
+};
+
+// 单个传输任务成功结算事件。
+// 前端据此主动重载当前目录，不必再等云轮询周期（默认 60 秒）才发现新上传的文件。
+export type TransferSettledEvent = {
+	// 相对挂载目录的路径。
+	relative_path: string,
 };
 
 // 传输任务实体（对应 transfer_queue 表一行）。

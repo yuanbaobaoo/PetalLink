@@ -6,14 +6,17 @@ import MateAppLogo from "./MateAppLogo.vue";
 // Logo 图片是否加载失败。
 const imgError = ref(false);
 
-// 组件输入参数。
-const props = withDefaults(defineProps<{ height?: number }>(), { height: 32 });
+// 组件输入参数：高度与回退文字。
+const props = withDefaults(defineProps<{ height?: number; text?: string }>(), {
+  height: 32,
+  text: "PetalLink",
+});
 </script>
 
 <template>
-  <MateAppLogo v-if="!imgError" :size="props.height" @error="imgError = true" />
+  <MateAppLogo v-if="!imgError" :size="props.height" :text="props.text" @error="imgError = true" />
   <div v-else class="mate-logo-with-text mate-logo-with-text--fallback" :style="{ height: `${props.height}px` }">
-    <span class="mate-logo-with-text__text" :style="{ fontSize: `${Math.round(props.height * 0.36)}px` }">PetalLink</span>
+    <span class="mate-logo-with-text__text" :style="{ fontSize: `${Math.round(props.height * 0.36)}px` }">{{ props.text }}</span>
   </div>
 </template>
 

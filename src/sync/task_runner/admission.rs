@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use super::contracts::{
-    EnqueuedTaskOutcome, TaskActivityGate, TaskDisposition, TaskExecutionOutcome,
+    EnqueuedTask, EnqueuedTaskOutcome, RetryAllPlan, RetryEnqueued, TaskActivityGate,
+    TaskDisposition, TaskExecutionOutcome,
 };
 use super::persistence::{transition_error, update_compatibility_sync_status};
 use super::preflight::PreflightFailure;
@@ -18,6 +19,14 @@ pub(super) enum ExistingOrInsertedTask {
     Replanned(Box<TransferTask>),
     Blocked(i64),
     Inserted(i64),
+}
+
+/// 准入仲裁结果：可直接执行的任务行，或被同路径活动意图阻塞的任务 ID。
+pub(super) enum Admitted {
+    /// 已落库且可直接执行的任务行。
+    Runnable(Box<TransferTask>),
+    /// 被同路径活动意图阻塞；只返回已有任务 ID，不重复执行。
+    Blocked(i64),
 }
 
 /// 任务尝试进入 Running 时的门禁结果。
@@ -68,6 +77,22 @@ pub(super) fn same_transfer_intent(left: &TransferTask, right: &TransferTask) ->
     }
 }
 
+/// 判断任务是否属于可重放的传输操作。
+///
+/// 与前端 `canRetryTransferTask` 保持同一集合：只有上传（Create/Update）与
+/// 下载（Download/DownloadUpdate）有可重放的传输后端，结构动作没有。
+pub(super) fn is_retryable_transfer_operation(task: &TransferTask) -> bool {
+    matches!(
+        task.operation_kind().ok().flatten(),
+        Some(
+            TransferOperation::Create
+                | TransferOperation::Update
+                | TransferOperation::Download
+                | TransferOperation::DownloadUpdate
+        )
+    )
+}
+
 /// 判断写任务是否已持久可能提交的远程结果。
 pub(super) fn has_ambiguous_remote_write_result(task: &TransferTask) -> bool {
     matches!(
@@ -98,8 +123,47 @@ impl TaskRunner {
             .transpose()
     }
 
-    /// 持久化 Pending 意图后执行对应任务行。
+    /// 持久化 Pending 意图后执行对应任务行（自动同步周期入口，等待执行结果）。
     pub async fn enqueue_and_run(&self, task: TransferTask) -> AppResult<EnqueuedTaskOutcome> {
+        match self.admit(&task)? {
+            Admitted::Runnable(existing) => {
+                let task_id = existing.id;
+                let outcome = self.run_existing_or_observe(*existing).await?;
+                Ok(EnqueuedTaskOutcome { task_id, outcome })
+            }
+            Admitted::Blocked(task_id) => Ok(EnqueuedTaskOutcome {
+                task_id,
+                outcome: TaskExecutionOutcome {
+                    cloud_file: None,
+                    disposition: TaskDisposition::BlockedByActiveIntent,
+                },
+            }),
+        }
+    }
+
+    /// 只做准入与落库，把执行留给调用方在后台调度。
+    ///
+    /// 目录同步等批量入口用它把「投递任务」与「等待传输」解耦：投递是毫秒级的
+    /// 数据库仲裁，传输进度由传输队列独立呈现。
+    pub fn enqueue(&self, task: TransferTask) -> AppResult<EnqueuedTask> {
+        match self.admit(&task)? {
+            Admitted::Runnable(existing) => {
+                let state = existing.state_kind().map_err(transition_error)?;
+                Ok(EnqueuedTask {
+                    task_id: existing.id,
+                    disposition: TaskDisposition::from_active_state(state)
+                        .unwrap_or(TaskDisposition::Pending),
+                })
+            }
+            Admitted::Blocked(task_id) => Ok(EnqueuedTask {
+                task_id,
+                disposition: TaskDisposition::BlockedByActiveIntent,
+            }),
+        }
+    }
+
+    /// 校验新意图并完成同路径仲裁，返回可直接执行的任务行或被阻塞的任务 ID。
+    fn admit(&self, task: &TransferTask) -> AppResult<Admitted> {
         // 新意图必须从未持久化的初始状态进入，防止调用方伪造任务修订。
         if task.id != 0
             || task.state_revision != 0
@@ -111,15 +175,13 @@ impl TaskRunner {
             ));
         }
         // 在持久化入队前完成准入，避免独占路径许可释放后立即执行的 Pending 行绕过限制。
-        let _enqueue_activity = self.begin_activity(&task)?;
+        let _enqueue_activity = self.begin_activity(task)?;
         // 同一路径只允许一个阻塞意图，重复请求复用已有任务。
         let existing_or_task_id = {
             let conn = self.db.lock();
+            // 同路径任务按索引点查：入队是高频路径，整表扫描会退化成 O(n²)（D30）。
             let path_tasks = match task.relative_path.as_deref() {
-                Some(relative_path) => repository::list_all_transfers(&conn)?
-                    .into_iter()
-                    .filter(|candidate| candidate.relative_path.as_deref() == Some(relative_path))
-                    .collect::<Vec<_>>(),
+                Some(relative_path) => repository::list_by_relative_path(&conn, relative_path)?,
                 None => Vec::new(),
             };
             let blocking = path_tasks
@@ -135,7 +197,7 @@ impl TaskRunner {
                     )
                 })
             }) {
-                if same_transfer_intent(inflight, &task) {
+                if same_transfer_intent(inflight, task) {
                     Ok(ExistingOrInsertedTask::Existing(Box::new(
                         (*inflight).clone(),
                     )))
@@ -150,20 +212,20 @@ impl TaskRunner {
                     .map(|task| ExistingOrInsertedTask::Existing(Box::new(task)))
             } else if let Some(existing) = blocking
                 .iter()
-                .find(|candidate| same_transfer_intent(candidate, &task))
+                .find(|candidate| same_transfer_intent(candidate, task))
             {
                 Ok(ExistingOrInsertedTask::Existing(Box::new(
                     (*existing).clone(),
                 )))
             // 可恢复任务保留原 ID 并原子替换意图，便于审计历史连续。
             } else if let Some(replannable) = blocking.first() {
-                self.replan_task(&conn, replannable, &task)
+                self.replan_task(&conn, replannable, task)
                     .map(|task| ExistingOrInsertedTask::Replanned(Box::new(task)))
             } else if let Some(restart) = path_tasks
                 .iter()
                 .find(|candidate| candidate.state_kind() == Ok(TransferState::RestartRequired))
             {
-                self.replan_task(&conn, restart, &task)
+                self.replan_task(&conn, restart, task)
                     .map(|task| ExistingOrInsertedTask::Replanned(Box::new(task)))
             } else if let Some(failed) = path_tasks
                 .iter()
@@ -172,7 +234,7 @@ impl TaskRunner {
                 // Failed 是自动任务的终态；保留任务行及可见错误作为路径屏障，显式重试复用该 ID。
                 Ok(ExistingOrInsertedTask::Blocked(failed.id))
             } else {
-                repository::insert_transfer(&conn, &task).map(ExistingOrInsertedTask::Inserted)
+                repository::insert_transfer(&conn, task).map(ExistingOrInsertedTask::Inserted)
             }
         };
         let existing_or_task_id = match existing_or_task_id {
@@ -182,30 +244,16 @@ impl TaskRunner {
                 return Err(error);
             }
         };
-        // 先广播持久化结果，再按实际准入结果执行或返回阻塞态。
+        // 先广播持久化结果，再按实际准入结果返回可执行行或阻塞态。
         self.notify_best_effort();
-        let (task_id, outcome) = match existing_or_task_id {
+        match existing_or_task_id {
             ExistingOrInsertedTask::Inserted(task_id) => {
-                let inserted = self.load(task_id)?;
-                (task_id, self.run_existing_or_observe(inserted).await?)
+                Ok(Admitted::Runnable(Box::new(self.load(task_id)?)))
             }
-            ExistingOrInsertedTask::Existing(existing) => {
-                let task_id = existing.id;
-                (task_id, self.run_existing_or_observe(*existing).await?)
-            }
-            ExistingOrInsertedTask::Replanned(replanned) => {
-                let task_id = replanned.id;
-                (task_id, self.run_existing_or_observe(*replanned).await?)
-            }
-            ExistingOrInsertedTask::Blocked(task_id) => (
-                task_id,
-                TaskExecutionOutcome {
-                    cloud_file: None,
-                    disposition: TaskDisposition::BlockedByActiveIntent,
-                },
-            ),
-        };
-        Ok(EnqueuedTaskOutcome { task_id, outcome })
+            ExistingOrInsertedTask::Existing(existing)
+            | ExistingOrInsertedTask::Replanned(existing) => Ok(Admitted::Runnable(existing)),
+            ExistingOrInsertedTask::Blocked(task_id) => Ok(Admitted::Blocked(task_id)),
+        }
     }
 
     /// 校验并接受失败/待重启任务的手动重试。
@@ -213,6 +261,8 @@ impl TaskRunner {
     /// RestartRequired 也直接接受并重跑：它的「等重规划」不能依赖 planner 重新产生意图——
     /// 同名碰撞场景下 planner 看到「本地有+云端有+无基线」只会 Skip，任务会永久滞留。
     /// 直接重跑让 execute 的同名碰撞检查基于远端实时状态收敛（采纳或进入 NameConflict）。
+    ///
+    /// 本入口保留同步后端前置校验，供自动恢复周期使用；用户点击走 `enqueue_retry`。
     pub async fn prepare_retry(&self, task_id: i64) -> AppResult<TransferTask> {
         let current = self.load(task_id)?;
         // 重试校验可能持久化拒绝结果，因此关闭准入必须先于校验并持续到 Pending 迁移完成。
@@ -234,6 +284,76 @@ impl TaskRunner {
             return Err(AppError::generic(failure.message));
         }
         self.accept_retry_after_preflight(task_id, current.state_revision)
+    }
+
+    /// 把失败任务推进到 Pending（幂等），供用户重试入口使用。
+    ///
+    /// 只做静态校验与行级 CAS，**不做后端前置校验**：稳定性窗口（最长十余秒）
+    /// 必须在后台执行链里跑，否则用户连续点击会互相阻塞。任务是否真的在跑，
+    /// 一律以传输队列的权威状态为准。
+    pub async fn enqueue_retry(&self, task_id: i64) -> AppResult<RetryEnqueued> {
+        let current = self.load(task_id)?;
+        let state = current.state_kind().map_err(transition_error)?;
+        match state {
+            // 已经在队列里：幂等返回，前端不必区分，也不重复执行。
+            TransferState::Pending
+            | TransferState::Running
+            | TransferState::VerifyingRemote
+            | TransferState::WaitingForNetwork
+            | TransferState::BackingOff => {
+                return Ok(RetryEnqueued::AlreadyQueued { task_id });
+            }
+            TransferState::Failed | TransferState::RestartRequired => {}
+            _ => {
+                self.notify_rejection();
+                return Err(AppError::generic("任务已结束，不可重试"));
+            }
+        }
+        // 静态校验只读本地元数据，微秒级；失败要持久化原因以便 UI 显示真实错误。
+        if let Err(failure) = self.validate_static(&current) {
+            self.persist_preflight_rejection(&current, failure.clone())?;
+            return Err(AppError::generic(failure.message));
+        }
+        // 人工重试开启新一轮预算：accept_retry_after_preflight 内部会复校静态合同，
+        // 并把 attempt_count / verify_attempt_count 归零。
+        let pending = self.accept_retry_after_preflight(task_id, current.state_revision)?;
+        Ok(RetryEnqueued::Queued {
+            task_id: pending.id,
+        })
+    }
+
+    /// 把全部失败项加入队列并立即返回汇总，不等待任何任务执行。
+    pub async fn enqueue_all_failed(&self) -> AppResult<RetryAllPlan> {
+        let mut plan = RetryAllPlan::default();
+        let mut tasks =
+            self.list_states(&[TransferState::Failed, TransferState::RestartRequired])?;
+        // 按创建时间升序入队，保证队列顺序与用户认知的历史顺序一致。
+        tasks.sort_by_key(|task| task.created_at);
+        for task in tasks {
+            // 同名冲突必须由用户选择处理方式（覆盖/保留两者），不能自动重放。
+            let is_name_conflict = task
+                .error_kind_typed()
+                .ok()
+                .flatten()
+                .is_some_and(|kind| kind == TransferErrorKind::NameConflict);
+            // 删除/改名/建目录等结构动作没有可重放的传输后端，跳过。
+            if is_name_conflict || !is_retryable_transfer_operation(&task) {
+                plan.summary.skipped += 1;
+                continue;
+            }
+            match self.enqueue_retry(task.id).await {
+                Ok(RetryEnqueued::Queued { task_id }) => {
+                    plan.summary.queued += 1;
+                    plan.queued_task_ids.push(task_id);
+                }
+                Ok(RetryEnqueued::AlreadyQueued { .. }) => plan.summary.already_queued += 1,
+                Err(error) => {
+                    tracing::warn!(task_id = task.id, %error, "一键重试时单个任务未能入队");
+                    plan.summary.rejected += 1;
+                }
+            }
+        }
+        Ok(plan)
     }
 
     /// 接受前置校验通过的重试并迁移为 Pending。
@@ -304,6 +424,12 @@ impl TaskRunner {
         current: &TransferTask,
         replacement: &TransferTask,
     ) -> AppResult<TransferTask> {
+        // 重规划是自动行为，不构成「人工重试」：两个计数器都只能前进不能归零，
+        // 否则熔断会被每一轮重规划反复重置（D9）。
+        let preserved_attempt_count = current.attempt_count.max(replacement.attempt_count);
+        let preserved_verify_count = current
+            .verify_attempt_count
+            .max(replacement.verify_attempt_count);
         // 旧任务失效、转回 Pending 和替换意图字段必须在同一事务完成。
         let transaction = conn
             .unchecked_transaction()
@@ -352,8 +478,8 @@ impl TaskRunner {
                     .unwrap_or(ColumnPatch::Clear),
                 transferred: Some(replacement.transferred),
                 resume_offset: Some(replacement.resume_offset),
-                attempt_count: Some(replacement.attempt_count),
-                verify_attempt_count: Some(replacement.verify_attempt_count),
+                attempt_count: Some(preserved_attempt_count),
+                verify_attempt_count: Some(preserved_verify_count),
             },
         )
         .map_err(transition_error)?;
@@ -398,7 +524,8 @@ impl TaskRunner {
                     replacement.source_mtime,
                     replacement.source_size,
                     replacement.expected_cloud_edited_time,
-                    replacement.attempt_count,
+                    // 与上面的状态迁移保持一致：重规划不重置重试预算。
+                    preserved_attempt_count,
                     pending.id,
                     i32::from(TransferState::Pending),
                     pending.state_revision,
@@ -470,12 +597,10 @@ impl TaskRunner {
                 .as_deref()
                 .ok_or_else(|| AppError::generic("Running 仲裁缺少 relative_path"))?;
             let mut blocked = false;
-            for candidate in repository::list_all_transfers(&transaction)?
+            // 同路径点查，避免每次进入 Running 都整表扫描（D30）。
+            for candidate in repository::list_by_relative_path(&transaction, relative_path)?
                 .into_iter()
-                .filter(|candidate| {
-                    candidate.id != current.id
-                        && candidate.relative_path.as_deref() == Some(relative_path)
-                })
+                .filter(|candidate| candidate.id != current.id)
             {
                 match candidate.state_kind().map_err(transition_error)? {
                     TransferState::Running | TransferState::VerifyingRemote => {

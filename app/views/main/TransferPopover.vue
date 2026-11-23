@@ -1,20 +1,26 @@
 <!-- 传输队列弹窗（v2：440×580，stat-pill 统计条 + 方向 tile 任务行），单列表含上传/下载/删除 -->
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref } from "vue";
 import { useTransferStore } from "@/stores/transfer";
+import { useFolderSyncStore } from "@/stores/folderSync";
+import { FOLDER_SYNC_JOB_STATE } from "@/api/folderSync";
+import type { FolderSyncJob } from "@/api/folderSync";
 import {
   TRANSFER_DIR,
+  TRANSFER_ERROR_KIND,
   TRANSFER_STATE,
   DIR_LABEL,
   canRetryTransferTask,
   canCancelTransferTask,
   isNameConflictTask,
+  isNewlyQueued,
   capTransferHistory,
 } from "@/api/transfer";
 import type { TransferTask } from "@/api/transfer";
 import {
   MateIcon,
   MateButton,
+  MateInfoBanner,
   MateLinearProgress,
   MateEmpty,
   MatePopupMenu,
@@ -27,11 +33,67 @@ import { extractErrorMessage, formatUserMessage } from "@/utils/error";
 
 // 传输 store
 const transfer = useTransferStore();
+// 目录同步作业 store
+const folderSync = useFolderSyncStore();
 
 // 当前传输队列的渲染范围：非终态全量 + 终态历史限量（大批量同步时全量渲染会卡死 UI）
 const cappedItems = computed(() => capTransferHistory(transfer.tasks));
-// 实际渲染的任务行
-const allItems = computed(() => cappedItems.value.items);
+// 队列筛选：全部 / 进行中 / 需要处理 / 已结束
+type TransferFilter = "all" | "active" | "failed" | "done";
+// 当前筛选条件
+const transferFilter = ref<TransferFilter>("all");
+// 筛选条选项
+const FILTER_OPTIONS: { value: TransferFilter; label: string; match: (state: number) => boolean }[] = [
+  { value: "all", label: "全部", match: () => true },
+  {
+    value: "active",
+    label: "进行中",
+    match: (state) => state === TRANSFER_STATE.RUNNING
+      || state === TRANSFER_STATE.PENDING
+      || state === TRANSFER_STATE.WAITING_FOR_NETWORK
+      || state === TRANSFER_STATE.BACKING_OFF
+      || state === TRANSFER_STATE.VERIFYING_REMOTE,
+  },
+  {
+    value: "failed",
+    label: "需要处理",
+    match: (state) => state === TRANSFER_STATE.FAILED
+      || state === TRANSFER_STATE.RESTART_REQUIRED,
+  },
+  {
+    value: "done",
+    label: "已结束",
+    match: (state) => state === TRANSFER_STATE.COMPLETED
+      || state === TRANSFER_STATE.CANCELED,
+  },
+];
+// 实际渲染的任务行（先按筛选条件过滤，再应用终态折叠）
+const allItems = computed(() => {
+  // 当前筛选条件的匹配函数。
+  const option = FILTER_OPTIONS.find((item) => item.value === transferFilter.value);
+  if (!option || option.value === "all") return cappedItems.value.items;
+  return cappedItems.value.items.filter((task) => option.match(task.state));
+});
+
+// 每个筛选条件下的可见条数（用于筛选条上的计数）
+const filterCounts = computed(() => {
+  // 各筛选项的数量快照。
+  const counts: Record<TransferFilter, number> = { all: 0, active: 0, failed: 0, done: 0 };
+  for (const task of cappedItems.value.items) {
+    counts.all += 1;
+    for (const option of FILTER_OPTIONS) {
+      if (option.value !== "all" && option.match(task.state)) counts[option.value] += 1;
+    }
+  }
+  return counts;
+});
+
+// 上一次进度采样：任务 ID → 已传字节与采样时间
+const progressSamples = new Map<number, { transferred: number; at: number }>();
+// 当前估算速率：任务 ID → 字节/秒
+const speeds = ref<Record<number, number>>({});
+// 展开「详情」的任务 ID 集合
+const expandedIds = ref<Set<number>>(new Set());
 // 被折叠的终态历史条数
 const hiddenTerminalCount = computed(() => cappedItems.value.hiddenTerminalCount);
 
@@ -49,6 +111,15 @@ const stateMeta: Record<number, StateMeta> = {
   [TRANSFER_STATE.CANCELED]: { icon: "x", label: "已取消", color: "var(--ink-400)" },
 };
 
+// 目录同步作业状态的展示元信息（排队 / 规划 / 完成 / 失败）
+const folderJobMeta: Record<number, { icon: string; label: string; color: string }> = {
+  [FOLDER_SYNC_JOB_STATE.QUEUED]: { icon: "clock", label: "排队中", color: "var(--ink-400)" },
+  [FOLDER_SYNC_JOB_STATE.PLANNING]: { icon: "sync", label: "正在规划", color: "var(--brand-500)" },
+  [FOLDER_SYNC_JOB_STATE.COMPLETED]: { icon: "check", label: "已投递", color: "var(--ok)" },
+  [FOLDER_SYNC_JOB_STATE.FAILED]: { icon: "x", label: "失败", color: "var(--err)" },
+  [FOLDER_SYNC_JOB_STATE.CANCELED]: { icon: "x", label: "已取消", color: "var(--ink-400)" },
+};
+
 // 清除菜单选项（已完成 / 失败与取消 / 全部已结束）
 const clearItems: PopupItem[] = [
   { value: "completed", label: "清除已完成", icon: "check" },
@@ -59,13 +130,45 @@ const clearItems: PopupItem[] = [
 // 关闭弹窗事件
 const emit = defineEmits<{ (e: "close"): void }>();
 
-// 正在重试的任务 id（防抖：重试中禁用该按钮，避免连点）
-const retryingId = ref<number | null>(null);
-// 正在执行冲突决策/取消的任务 id（防抖）
-const actingId = ref<number | null>(null);
+// 正在提交重试的任务 id 集合：只影响各自那一行，不阻塞其它行
+const retryingIds = ref<Set<number>>(new Set());
+// 正在执行冲突决策/取消的任务 id 集合：同样只影响各自那一行
+const actingIds = ref<Set<number>>(new Set());
+// 一键重试全部是否正在提交（毫秒级，仅用于按钮 loading）
+const retryingAll = ref(false);
+// 批量取消失败任务是否正在提交（毫秒级，仅用于按钮 loading）
+const cancelingAll = ref(false);
+// 正在取消的目录同步作业 id 集合
+const cancelingJobIds = ref<Set<number>>(new Set());
+// 每秒刷新的当前时间，用于「等待重试确认」的倒计时文案
+const nowTick = ref(Date.now());
+// 倒计时定时器句柄（弹层关闭时释放）
+let tickTimer: number | null = null;
+// 当前可重试的失败项数量，用于决定是否展示「重试全部」汇总条
+const retryableCount = computed(
+  () => transfer.tasks.filter((item) => canRetryTransferTask(item) && !isNameConflictTask(item)).length,
+);
+// 当前可取消的失败项数量（失败 / 需要重新检查）：决定是否展示失败汇总条与「取消全部」
+const cancelableCount = computed(
+  () => transfer.tasks.filter((item) => canCancelTransferTask(item)).length,
+);
 
 onMounted(() => {
   transfer.loadAll();
+  folderSync.loadAll();
+  // 倒计时只影响文案，1 秒一次足够；弹层关闭即释放。
+  tickTimer = window.setInterval(() => {
+    nowTick.value = Date.now();
+    sampleProgress();
+  }, 1000);
+});
+
+/**
+ * 卸载时释放倒计时定时器。
+ */
+onUnmounted(() => {
+  if (tickTimer !== null) window.clearInterval(tickTimer);
+  tickTimer = null;
 });
 
 /**
@@ -127,6 +230,208 @@ function pct(t: { total_size: number; transferred: number }): number {
 }
 
 /**
+ * 采样一次运行中任务的进度，估算每秒速率。
+ *
+ * 速率只做展示，不参与任何调度判断；只对 RUNNING 任务采样，
+ * 其余状态清掉样本，避免恢复后算出跨越暂停的虚假速率。
+ */
+function sampleProgress(): void {
+  // 本次采样到的速率快照。
+  const next: Record<number, number> = {};
+  for (const task of transfer.tasks) {
+    if (task.state !== TRANSFER_STATE.RUNNING) {
+      progressSamples.delete(task.id);
+      continue;
+    }
+    // 上一次采样点。
+    const previous = progressSamples.get(task.id);
+    if (previous) {
+      // 两次采样之间新增的字节数与时间差。
+      const deltaBytes = task.transferred - previous.transferred;
+      const deltaMs = nowTick.value - previous.at;
+      if (deltaMs >= 500 && deltaBytes > 0) {
+        next[task.id] = Math.round((deltaBytes * 1000) / deltaMs);
+      }
+    }
+    progressSamples.set(task.id, { transferred: task.transferred, at: nowTick.value });
+  }
+  speeds.value = next;
+}
+
+/**
+ * 返回任务当前的估算速率文案。
+ *
+ * @param task - 传输任务
+ */
+function speedText(task: TransferTask): string {
+  // 当前任务的估算速率（字节/秒）。
+  const bytesPerSecond = speeds.value[task.id];
+  if (!bytesPerSecond || bytesPerSecond <= 0) return "";
+  return `${fmtSize(bytesPerSecond)}/s`;
+}
+
+/**
+ * 返回任务剩余时间的估算文案。
+ *
+ * @param task - 传输任务
+ */
+function etaText(task: TransferTask): string {
+  // 当前任务的估算速率（字节/秒）。
+  const bytesPerSecond = speeds.value[task.id];
+  if (!bytesPerSecond || bytesPerSecond <= 0) return "";
+  // 剩余字节数。
+  const remaining = Math.max(0, task.total_size - task.transferred);
+  if (remaining === 0) return "";
+  // 剩余秒数。
+  const seconds = Math.ceil(remaining / bytesPerSecond);
+  if (seconds >= 3600) return `剩余 ${Math.floor(seconds / 3600)} 小时`;
+  if (seconds >= 60) return `剩余 ${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`;
+  return `剩余 ${seconds} 秒`;
+}
+
+/**
+ * 错误分类的中文标签。
+ *
+ * @param kind - 持久化错误分类值
+ */
+function errorKindLabel(kind: number | null): string {
+  if (kind === null) return "未知";
+  switch (kind) {
+    case TRANSFER_ERROR_KIND.NETWORK: return "网络不可用";
+    case TRANSFER_ERROR_KIND.TIMEOUT: return "请求超时";
+    case TRANSFER_ERROR_KIND.AUTH: return "登录状态失效";
+    case TRANSFER_ERROR_KIND.RATE_LIMIT: return "服务端限流";
+    case TRANSFER_ERROR_KIND.SERVER: return "服务端异常";
+    case TRANSFER_ERROR_KIND.QUOTA: return "空间或配额不足";
+    case TRANSFER_ERROR_KIND.PERMISSION: return "权限不足";
+    case TRANSFER_ERROR_KIND.VALIDATION: return "请求参数被拒绝";
+    case TRANSFER_ERROR_KIND.SESSION_EXPIRED: return "续传会话失效";
+    case TRANSFER_ERROR_KIND.REMOTE_AMBIGUOUS: return "云端结果不确定";
+    case TRANSFER_ERROR_KIND.LOCAL_CHANGED: return "本地文件已变化";
+    case TRANSFER_ERROR_KIND.NAME_CONFLICT: return "同名冲突待处理";
+    default: return "未知";
+  }
+}
+
+/**
+ * 返回任务下一次自动重试的时间文案。
+ *
+ * @param task - 传输任务
+ */
+function nextRetryText(task: TransferTask): string {
+  if (task.next_retry_at === null) return "—";
+  // 距离下次重试的秒数。
+  const seconds = Math.max(0, Math.ceil((task.next_retry_at - nowTick.value) / 1000));
+  return seconds === 0 ? "即将重试" : `${seconds} 秒后`;
+}
+
+/**
+ * 切换某条任务的详情展开状态。
+ *
+ * @param taskId - 传输任务 ID
+ */
+function toggleDetails(taskId: number): void {
+  if (expandedIds.value.has(taskId)) expandedIds.value.delete(taskId);
+  else expandedIds.value.add(taskId);
+}
+
+/**
+ * 复制一条任务的诊断信息到剪贴板。
+ *
+ * @param task - 传输任务
+ */
+async function copyDiagnostics(task: TransferTask): Promise<void> {
+  // 可直接贴进问题反馈的诊断文本。
+  const lines = [
+    `任务 ID：${task.id}`,
+    `名称：${task.name}`,
+    `相对路径：${task.relative_path ?? "—"}`,
+    `方向：${DIR_LABEL[task.direction] ?? task.direction}`,
+    `状态：${stateLabel(task)}`,
+    `错误分类：${errorKindLabel(task.error_kind)}`,
+    `错误信息：${task.error_message ?? "—"}`,
+    `已传/总量：${task.transferred}/${task.total_size}`,
+    `尝试次数：${task.attempt_count}，核验次数：${task.verify_attempt_count}`,
+    `下次重试：${task.next_retry_at ?? "—"}`,
+  ];
+  try {
+    await navigator.clipboard.writeText(lines.join("\n"));
+    showToast("诊断信息已复制");
+  } catch {
+    showToast("复制失败，请手动选择文本", { variant: "warning" });
+  }
+}
+
+/**
+ * 返回任务状态的展示文案。
+ *
+ * 「正在确认结果」需要再分成「在跑」与「在等」两种，否则用户无法判断是否卡住：
+ * 有计划重试时间时显示倒计时，否则显示已经确认过几轮。
+ *
+ * @param item - 传输任务
+ */
+function stateLabel(item: TransferTask): string {
+  if (item.state !== TRANSFER_STATE.VERIFYING_REMOTE) {
+    return stateMeta[item.state]?.label ?? "";
+  }
+  // 计划中的下一次核验时间。
+  const nextRetryAt = item.next_retry_at;
+  if (nextRetryAt !== null && nextRetryAt > nowTick.value) {
+    // 距离下次核验的秒数，向上取整避免显示 0s。
+    const seconds = Math.ceil((nextRetryAt - nowTick.value) / 1000);
+    return `等待重试确认（${seconds}s）`;
+  }
+  // 已确认轮次：0 表示还没跑过，>0 表示反复确认中。
+  if (item.verify_attempt_count > 0) {
+    return `正在确认结果（第 ${item.verify_attempt_count + 1} 次）`;
+  }
+  return "正在确认结果";
+}
+
+/**
+ * 返回目录同步作业的展示元信息。
+ *
+ * @param job - 目录同步作业
+ */
+function folderJobMetaOf(job: FolderSyncJob): { icon: string; label: string; color: string } {
+  return folderJobMeta[job.state] ?? { icon: "clock", label: "未知", color: "var(--ink-400)" };
+}
+
+/**
+ * 目录同步作业的进度文案：规划中显示待处理总数，完成后显示已投递数量。
+ *
+ * @param job - 目录同步作业
+ */
+function folderJobDetail(job: FolderSyncJob): string {
+  if (job.state === FOLDER_SYNC_JOB_STATE.QUEUED) return "等待开始";
+  if (job.state === FOLDER_SYNC_JOB_STATE.PLANNING) {
+    return job.planned_total > 0
+      ? `已投递 ${job.enqueued}/${job.planned_total} 项`
+      : "正在读取云端目录";
+  }
+  if (job.state === FOLDER_SYNC_JOB_STATE.COMPLETED) return `已投递 ${job.enqueued} 项，在下方传输队列执行`;
+  return job.error_message ? formatUserMessage(job.error_message) : "未能完成";
+}
+
+/**
+ * 取消一个排队中或规划中的目录同步作业。
+ *
+ * @param job - 目录同步作业
+ */
+async function onCancelFolderJob(job: FolderSyncJob): Promise<void> {
+  if (cancelingJobIds.value.has(job.id)) return;
+  cancelingJobIds.value.add(job.id);
+  try {
+    await folderSync.cancel(job.id);
+    showToast("目录同步作业已取消");
+  } catch (e) {
+    showToast("取消失败：" + extractErrorMessage(e), { variant: "error" });
+  } finally {
+    cancelingJobIds.value.delete(job.id);
+  }
+}
+
+/**
  * 按菜单选项清理对应范围的传输记录。
  */
 async function onClear(value: string | number): Promise<void> {
@@ -136,19 +441,27 @@ async function onClear(value: string | number): Promise<void> {
 }
 
 /**
- * 重试失败任务
+ * 重试单条失败任务。
+ *
+ * 只在这一条请求提交期间显示 loading（毫秒级），任何其它行的按钮保持可用；
+ * 任务是否真的在跑，一律以传输队列的权威状态为准。
  *
  * @param item - 传输任务
  */
 async function onRetry(item: TransferTask): Promise<void> {
-  if (retryingId.value !== null) return; // 防抖：已有重试进行中
-  retryingId.value = item.id;
+  if (retryingIds.value.has(item.id)) return;
+  retryingIds.value.add(item.id);
   try {
-    await transfer.retry(item.id);
+    // 后端返回值区分「本次新入队」与「本来就在队列中」，两者都是成功。
+    const result = await transfer.retry(item.id);
+    if (!isNewlyQueued(result)) {
+      showToast("该任务已在队列中");
+      return;
+    }
     showToast(
       item.state === TRANSFER_STATE.RESTART_REQUIRED
         ? "已开始重新检查"
-        : "已重新加入传输队列",
+        : "已加入传输队列",
       { variant: "success" },
     );
   } catch (e) {
@@ -156,21 +469,74 @@ async function onRetry(item: TransferTask): Promise<void> {
     const msg = extractErrorMessage(e);
     showToast("重试失败：" + msg, { variant: "error" });
   } finally {
-    retryingId.value = null;
+    retryingIds.value.delete(item.id);
   }
 }
 
 /**
- * 是否显示行级更多操作菜单：同名冲突三项决策；普通「需要重新检查」附带取消出口；
- * 不可重试的失败任务（如删除）也提供取消。
+ * 一键重试全部失败项。
+ *
+ * 命令只入队并立即返回汇总，不等待任何任务执行完成。
+ */
+async function onRetryAll(): Promise<void> {
+  if (retryingAll.value) return;
+  retryingAll.value = true;
+  try {
+    // 后端返回入队/跳过/拒绝的数量汇总。
+    const summary = await transfer.retryAll();
+    const parts = [`已加入队列 ${summary.queued} 项`];
+    if (summary.already_queued > 0) parts.push(`${summary.already_queued} 项已在队列中`);
+    if (summary.skipped > 0) parts.push(`跳过 ${summary.skipped} 项`);
+    if (summary.rejected > 0) parts.push(`${summary.rejected} 项校验未通过`);
+    showToast(parts.join("，"), { variant: summary.rejected > 0 ? "warning" : "success" });
+  } catch (e) {
+    const msg = extractErrorMessage(e);
+    showToast("批量重试失败：" + msg, { variant: "error" });
+  } finally {
+    retryingAll.value = false;
+  }
+}
+
+/**
+ * 批量取消全部失败任务。
+ *
+ * 保留历史行（可在「清除失败与取消」里删除），但释放路径占用，
+ * 让被隔离的同步动作（例如目录删除）在下一轮继续执行。
+ */
+async function onCancelAll(): Promise<void> {
+  if (cancelingAll.value) return;
+  if (cancelableCount.value === 0) return;
+  // 取消是显式动作：先确认，避免误点把待重试的失败项一起清走。
+  const ok = await confirmDialog({
+    title: "取消全部失败任务",
+    titleIcon: "x",
+    danger: true,
+    confirmText: "全部取消",
+    content: `将取消 ${cancelableCount.value} 项失败任务，保留历史记录但不自动重试。\n\n取消后这些路径不再被任务占用，相关同步动作（如删除云端文件）会重新参与规划。`,
+  });
+  if (!ok) return;
+  cancelingAll.value = true;
+  try {
+    // 后端逐条 CAS 取消并返回数量。
+    const canceled = await transfer.cancelAllFailed();
+    showToast(canceled > 0 ? `已取消 ${canceled} 项失败任务` : "没有可取消的失败任务");
+  } catch (e) {
+    const msg = extractErrorMessage(e);
+    showToast("批量取消失败：" + msg, { variant: "error" });
+  } finally {
+    cancelingAll.value = false;
+  }
+}
+
+/**
+ * 是否显示行级更多操作菜单：同名冲突三项决策；普通失败/需要重新检查任务也提供取消出口。
  *
  * @param item - 传输任务
  */
 function showRowMenu(item: TransferTask): boolean {
-  if (!canCancelTransferTask(item)) return false;
-  if (isNameConflictTask(item)) return true;
-  if (item.state === TRANSFER_STATE.RESTART_REQUIRED) return true;
-  return !canRetryTransferTask(item);
+  // 所有可取消状态都给出「取消」：失败行既是重试锚点，也长期占用路径身份，
+  // 用户必须能主动清走，否则目录删除等同步动作会被永久隔离（D12/D4）。
+  return canCancelTransferTask(item);
 }
 
 /**
@@ -196,7 +562,7 @@ function rowActionItems(item: TransferTask): PopupItem[] {
  * @param item - 传输任务
  */
 async function onRowAction(value: string | number, item: TransferTask): Promise<void> {
-  if (actingId.value !== null) return; // 防抖
+  if (actingIds.value.has(item.id)) return;
   if (value === "overwrite") {
     const ok = await confirmDialog({
       title: "覆盖远端", titleIcon: "transfer", danger: true, confirmText: "覆盖上传",
@@ -219,7 +585,7 @@ async function onRowAction(value: string | number, item: TransferTask): Promise<
     return;
   }
 
-  actingId.value = item.id;
+  actingIds.value.add(item.id);
   try {
     if (value === "overwrite") {
       await transfer.overwriteRemote(item.id);
@@ -235,7 +601,7 @@ async function onRowAction(value: string | number, item: TransferTask): Promise<
     const msg = extractErrorMessage(e);
     showToast("操作失败：" + msg, { variant: "error" });
   } finally {
-    actingId.value = null;
+    actingIds.value.delete(item.id);
   }
 }
 </script>
@@ -272,6 +638,69 @@ async function onRowAction(value: string | number, item: TransferTask): Promise<
       </MatePopupMenu>
     </div>
 
+    <!-- 队列筛选：上百条历史时按状态收敛视图 -->
+    <div class="tp-filters">
+      <button
+        v-for="option in FILTER_OPTIONS"
+        :key="option.value"
+        :class="['tp-filter', { 'is-active': transferFilter === option.value }]"
+        @click="transferFilter = option.value"
+      >
+        {{ option.label }}
+        <span class="tp-filter__count">{{ filterCounts[option.value] }}</span>
+      </button>
+    </div>
+
+    <!-- 目录同步作业：用户点击「双端对齐」后先在这里出现，投递完成后进入下方传输队列 -->
+    <div v-if="folderSync.visibleJobs.length > 0" class="tp-jobs">
+      <div class="tp-jobs__title">目录同步</div>
+      <div v-for="job in folderSync.visibleJobs" :key="`job-${job.id}`" class="tp-job">
+        <span class="tp-job__dir">
+          <MateIcon :name="folderJobMetaOf(job).icon" :size="16" />
+        </span>
+        <div class="tp-job__info">
+          <span class="tp-job__name">{{ job.rel_path || '云端根目录' }}</span>
+          <span class="tp-job__detail">{{ folderJobDetail(job) }}</span>
+        </div>
+        <span class="tp-job__state" :style="{ color: folderJobMetaOf(job).color }">
+          {{ folderJobMetaOf(job).label }}
+        </span>
+        <MateButton
+          v-if="job.state === FOLDER_SYNC_JOB_STATE.QUEUED || job.state === FOLDER_SYNC_JOB_STATE.PLANNING"
+          variant="icon"
+          icon="x"
+          tooltip="取消该目录同步"
+          :loading="cancelingJobIds.has(job.id)"
+          :disabled="cancelingJobIds.has(job.id)"
+          @click="onCancelFolderJob(job)"
+        />
+      </div>
+    </div>
+
+    <!-- 失败汇总条：一条提示 + 重试/取消两个出口，避免用户逐条点击 -->
+    <MateInfoBanner v-if="cancelableCount > 0" variant="error" class="tp-failed-banner">
+      <span>有 {{ cancelableCount }} 项需要处理</span>
+      <template #action>
+        <MateButton
+          v-if="retryableCount > 0"
+          variant="text"
+          :loading="retryingAll"
+          :disabled="retryingAll"
+          @click="onRetryAll"
+        >
+          重试全部
+        </MateButton>
+        <MateButton
+          variant="text"
+          :loading="cancelingAll"
+          :disabled="cancelingAll"
+          @click="onCancelAll"
+        >
+          取消全部
+        </MateButton>
+      </template>
+    </MateInfoBanner>
+
     <!-- 单列表 -->
     <div class="tp-body">
       <MateEmpty v-if="allItems.length === 0" icon="cloud" title="暂无传输任务" />
@@ -304,6 +733,10 @@ async function onRowAction(value: string | number, item: TransferTask): Promise<
             <span class="tp-item__pct">
               {{ pct(item) }}% · {{ fmtSize(item.transferred) }}/{{ fmtSize(item.total_size) }}
             </span>
+            <!-- 速率与剩余时间只用于展示，由 1 秒采样的差值推算 -->
+            <span v-if="speedText(item)" class="tp-item__rate">
+              {{ speedText(item) }}<template v-if="etaText(item)"> · {{ etaText(item) }}</template>
+            </span>
           </div>
           <div v-else class="tp-item__progress tp-item__progress--delete">删除操作</div>
         </div>
@@ -313,16 +746,27 @@ async function onRowAction(value: string | number, item: TransferTask): Promise<
             :size="12"
             :spin="stateMeta[item.state]?.spin"
           />
-          {{ stateMeta[item.state]?.label ?? "" }}
+          {{ stateLabel(item) }}
         </div>
-        <!-- 只展示后端真正支持的上传、下载重试或重新检查入口。 -->
+        <!-- 详情：失败与需要处理的条目给出可复制的诊断信息 -->
+        <MateButton
+          v-if="item.state === TRANSFER_STATE.FAILED
+            || item.state === TRANSFER_STATE.RESTART_REQUIRED
+            || item.state === TRANSFER_STATE.VERIFYING_REMOTE"
+          variant="icon"
+          icon="info"
+          :tooltip="expandedIds.has(item.id) ? '收起详情' : '查看详情'"
+          class="tp-item__detail-btn"
+          @click="toggleDetails(item.id)"
+        />
+        <!-- 只展示后端真正支持的上传、下载重试或重新检查入口；loading 只影响本行。 -->
         <MateButton
           v-if="canRetryTransferTask(item) && !isNameConflictTask(item)"
           variant="icon"
           icon="refresh"
           :tooltip="item.state === TRANSFER_STATE.RESTART_REQUIRED ? '重新检查并重试' : '重试'"
-          :loading="retryingId === item.id"
-          :disabled="retryingId !== null"
+          :loading="retryingIds.has(item.id)"
+          :disabled="retryingIds.has(item.id)"
           class="tp-item__retry"
           @click="onRetry(item)"
         />
@@ -337,10 +781,23 @@ async function onRowAction(value: string | number, item: TransferTask): Promise<
             variant="icon"
             icon="list"
             :tooltip="isNameConflictTask(item) ? '处理同名冲突' : '更多操作'"
-            :loading="actingId === item.id"
-            :disabled="actingId !== null"
+            :loading="actingIds.has(item.id)"
+            :disabled="actingIds.has(item.id)"
           />
         </MatePopupMenu>
+        <!-- 展开的诊断信息 -->
+        <div v-if="expandedIds.has(item.id)" class="tp-item__details">
+          <div class="tp-detail"><span>错误分类</span><b>{{ errorKindLabel(item.error_kind) }}</b></div>
+          <div class="tp-detail"><span>尝试次数</span><b>{{ item.attempt_count }}</b></div>
+          <div class="tp-detail"><span>核验次数</span><b>{{ item.verify_attempt_count }}</b></div>
+          <div class="tp-detail" v-if="item.state === TRANSFER_STATE.VERIFYING_REMOTE || item.state === TRANSFER_STATE.BACKING_OFF">
+            <span>下次重试</span><b>{{ nextRetryText(item) }}</b>
+          </div>
+          <div class="tp-detail tp-detail--wide" v-if="item.error_message">
+            <span>原始信息</span><b>{{ item.error_message }}</b>
+          </div>
+          <MateButton variant="text" @click="copyDiagnostics(item)">复制诊断信息</MateButton>
+        </div>
       </div>
       <!-- 终态历史超上限时的折叠提示 -->
       <div v-if="hiddenTerminalCount > 0" class="tp-truncated">
@@ -385,11 +842,55 @@ async function onRowAction(value: string | number, item: TransferTask): Promise<
 .stat-pill--err .stat-pill__num { color: var(--err); }
 .tp-stats__clear { flex-shrink: 0; }
 
+/* 队列筛选条 */
+.tp-filters {
+  display: flex; gap: 6px; padding: 0 20px 12px; flex-shrink: 0;
+}
+.tp-filter {
+  display: inline-flex; align-items: center; gap: 5px;
+  border: none; cursor: pointer; font-family: var(--font-family);
+  font-size: var(--font-caption); font-weight: var(--fw-medium);
+  color: var(--ink-600); background: var(--bg-fill);
+  padding: 5px 10px; border-radius: var(--radius-sm);
+}
+.tp-filter.is-active { background: var(--brand-50); color: var(--brand-500); }
+.tp-filter__count { font-variant-numeric: tabular-nums; color: var(--ink-400); }
+.tp-filter.is-active .tp-filter__count { color: var(--brand-500); }
+
+/* 目录同步作业分区 */
+.tp-jobs {
+  padding: 0 20px 12px; flex-shrink: 0;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.tp-jobs__title {
+  font-size: var(--font-caption); color: var(--ink-400); font-weight: var(--fw-medium);
+}
+.tp-job {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--bg-fill); border-radius: var(--radius-md); padding: 8px 10px;
+}
+.tp-job__dir {
+  width: 28px; height: 28px; border-radius: var(--radius-sm); flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--brand-50); color: var(--brand-500);
+}
+.tp-job__info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.tp-job__name {
+  font-size: 13px; font-weight: var(--fw-medium); color: var(--ink-900);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tp-job__detail { font-size: var(--font-caption); color: var(--ink-400); }
+.tp-job__state { font-size: var(--font-caption); font-weight: var(--fw-medium); white-space: nowrap; }
+
+/* 失败汇总条：与统计条保持同一水平留白 */
+.tp-failed-banner { margin: 0 20px 12px; flex-shrink: 0; }
+
 .tp-body { flex: 1; overflow-y: auto; border-top: 1px solid var(--line); }
 
 /* 任务行（v2：方向 tile + 迷你 chip + 进度条/错误文案） */
 .tp-item {
-  min-height: 68px; display: flex; align-items: center; padding: 10px 20px; gap: 12px;
+  min-height: 68px; display: flex; align-items: center; flex-wrap: wrap;
+  padding: 10px 20px; gap: 12px;
   border-bottom: 1px solid var(--line);
 }
 .tp-item__dir {
@@ -423,6 +924,21 @@ async function onRowAction(value: string | number, item: TransferTask): Promise<
   flex-shrink: 0; display: inline-flex; align-items: center; gap: 5px;
 }
 .tp-item__retry { flex-shrink: 0; }
+.tp-item__rate {
+  font-size: 11px; color: var(--ink-400); white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.tp-item__detail-btn { flex-shrink: 0; }
+
+/* 诊断详情面板：占满整行，挂在任务行内部 */
+.tp-item__details {
+  flex-basis: 100%; margin-top: 8px; padding: 10px 12px;
+  background: var(--bg-fill); border-radius: var(--radius-md);
+  display: flex; flex-wrap: wrap; gap: 6px 18px;
+}
+.tp-detail { display: flex; gap: 6px; font-size: var(--font-caption); color: var(--ink-400); }
+.tp-detail b { font-weight: var(--fw-medium); color: var(--ink-700); word-break: break-all; }
+.tp-detail--wide { flex-basis: 100%; }
 .tp-item__menu { flex-shrink: 0; }
 
 /* 终态历史折叠提示 */

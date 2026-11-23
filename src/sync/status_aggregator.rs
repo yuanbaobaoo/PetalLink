@@ -21,6 +21,12 @@ pub struct RuntimeStatus {
     pub indexing_discovered_items: u64,
     pub content_changed: bool,
     pub sync_phase: Option<String>,
+    /// 被安全闸门拦下的云端删除条目数（0 表示没有阻断）。
+    pub blocked_cloud_deletes: u64,
+    /// 因同路径仍有活动任务而暂缓的同步动作数。
+    pub deferred_actions: u64,
+    /// 本地已失效的占位文件（云端副本不存在）。
+    pub invalid_placeholders: Vec<crate::sync::state::InvalidPlaceholder>,
 }
 
 impl From<&SyncGlobalState> for RuntimeStatus {
@@ -35,6 +41,9 @@ impl From<&SyncGlobalState> for RuntimeStatus {
             indexing_discovered_items: state.indexing_discovered_items,
             content_changed: state.content_changed,
             sync_phase: state.sync_phase.clone(),
+            blocked_cloud_deletes: state.blocked_cloud_deletes,
+            deferred_actions: state.deferred_actions,
+            invalid_placeholders: state.invalid_placeholders.clone(),
         }
     }
 }
@@ -50,6 +59,11 @@ impl RuntimeStatus {
         state.indexing_discovered_items = self.indexing_discovered_items;
         state.content_changed = self.content_changed;
         state.sync_phase.clone_from(&self.sync_phase);
+        state.blocked_cloud_deletes = self.blocked_cloud_deletes;
+        state.deferred_actions = self.deferred_actions;
+        state
+            .invalid_placeholders
+            .clone_from(&self.invalid_placeholders);
     }
 }
 
@@ -131,24 +145,35 @@ impl StatusAggregator {
             .map_err(|error| AppError::generic(format!("聚合同步状态失败：{error}")))?;
 
         // 失败明细限制为 20 条，避免高频状态事件携带无界数据。
+        // 同时左连失败任务，让「单条重试」不必再去传输队列里翻 ID。
         let failed_items = {
             let mut statement = conn
                 .prepare(
-                    "SELECT local_path, error_message
-                     FROM sync_items
-                     WHERE status=?1
-                     ORDER BY local_path
+                    "SELECT item.local_path, item.error_message,
+                            (SELECT task.id FROM transfer_queue AS task
+                             WHERE task.relative_path = item.local_path AND task.state = ?2
+                             ORDER BY task.created_at DESC LIMIT 1)
+                     FROM sync_items AS item
+                     WHERE item.status=?1
+                     ORDER BY item.local_path
                      LIMIT 20",
                 )
                 .map_err(|error| AppError::generic(format!("查询失败项失败：{error}")))?;
             // 查询阶段与逐行读取阶段分别映射为可诊断错误。
             let rows = statement
-                .query_map(params![sync_status::FAILED], |row| {
-                    Ok(FailedItem {
-                        relative_path: row.get(0)?,
-                        error_message: row.get(1)?,
-                    })
-                })
+                .query_map(
+                    params![
+                        sync_status::FAILED,
+                        crate::sync::transfer_state::TransferState::Failed as i32
+                    ],
+                    |row| {
+                        Ok(FailedItem {
+                            relative_path: row.get(0)?,
+                            error_message: row.get(1)?,
+                            task_id: row.get(2)?,
+                        })
+                    },
+                )
                 .map_err(|error| AppError::generic(format!("查询失败项失败：{error}")))?;
             let mut items = Vec::new();
             for row in rows {
@@ -185,6 +210,9 @@ impl StatusAggregator {
             indexing_discovered_items: runtime.indexing_discovered_items,
             content_changed: runtime.content_changed,
             sync_phase: runtime.sync_phase,
+            blocked_cloud_deletes: runtime.blocked_cloud_deletes,
+            deferred_actions: runtime.deferred_actions,
+            invalid_placeholders: runtime.invalid_placeholders,
         })
     }
 }

@@ -51,22 +51,60 @@ pub enum StabilityResult {
 }
 
 /// 稳定性检查器
+///
+/// 只有「持续编辑追踪表」是共享可变状态；3 秒窗口与 lsof 双重检查都不需要它。
+/// 因此内部用短临界区锁住追踪表，`check` 本身取 `&self` 并可并发执行——
+/// 否则一次 3 秒的稳定性窗口会把 `concurrency=6` 的上传前置校验串行化。
 pub struct StabilityChecker {
-    /// 追踪持续编辑的文件（rel_path → 首次发现时间）
-    tracking: std::collections::HashMap<String, i64>,
+    /// 追踪持续编辑的文件（rel_path → 首次发现时间），只在读写时短暂加锁。
+    tracking: parking_lot::Mutex<std::collections::HashMap<String, i64>>,
 }
 
 impl StabilityChecker {
     /// 创建一个无持续编辑记录的稳定性检查器。
     pub fn new() -> Self {
         Self {
-            tracking: std::collections::HashMap::new(),
+            tracking: parking_lot::Mutex::new(std::collections::HashMap::new()),
         }
+    }
+
+    /// 记录一次「仍在变化」的观察，并在超过编辑阈值时升级为 Editing。
+    ///
+    /// 锁只覆盖追踪表的一次读写，绝不跨 `await`。
+    fn note_unstable(&self, path: &Path) -> StabilityResult {
+        // 追踪键使用完整路径，与调用方传入的挂载内路径一一对应。
+        let path_key = path.to_string_lossy().to_string();
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut tracking = self.tracking.lock();
+        let first_seen = *tracking.entry(path_key).or_insert(now);
+        let elapsed = (now - first_seen) / 1000;
+        if elapsed as u64 > EDITING_THRESHOLD_SECS {
+            return StabilityResult::Editing;
+        }
+        StabilityResult::Unstable
+    }
+
+    /// 清除某个路径的持续编辑追踪。
+    fn clear_tracking(&self, path: &Path) {
+        let path_key = path.to_string_lossy().to_string();
+        self.tracking.lock().remove(&path_key);
+    }
+
+    /// 返回距离满足最低 mtime 年龄还需等待的时间。
+    ///
+    /// 新写入文件的 mtime 年龄不足 `MIN_MTIME_AGE_SECS` 时，调用方若能精确等待，
+    /// 就不必用固定阶梯反复空睡；批量上传时每个文件因此少付最多 5 秒。
+    pub fn mtime_wait(&self, path: &Path) -> Option<Duration> {
+        let age = mtime_age_secs(path).ok()?;
+        if age >= MIN_MTIME_AGE_SECS {
+            return None;
+        }
+        Some(Duration::from_secs(MIN_MTIME_AGE_SECS - age))
     }
 
     /// 检查文件是否稳定（可传输）。
     /// 对齐 dart `_checkStability`。
-    pub async fn check(&mut self, path: &Path) -> StabilityResult {
+    pub async fn check(&self, path: &Path) -> StabilityResult {
         // 1. mtime 年龄检查
         let mtime_age = match mtime_age_secs(path) {
             Ok(age) => age,
@@ -82,14 +120,7 @@ impl StabilityChecker {
         let size2 = file_size(path);
         if size1 != size2 {
             // 对齐 dart：size 不稳定时也检查编辑阈值（>5min 升级为 Editing）
-            let path_key = path.to_string_lossy().to_string();
-            let now = chrono::Utc::now().timestamp_millis();
-            let first_seen = self.tracking.entry(path_key).or_insert(now);
-            let elapsed = (now - *first_seen) / 1000;
-            if elapsed as u64 > EDITING_THRESHOLD_SECS {
-                return StabilityResult::Editing;
-            }
-            return StabilityResult::Unstable;
+            return self.note_unstable(path);
         }
 
         // 3. lsof 检查
@@ -98,20 +129,12 @@ impl StabilityChecker {
             sleep(Duration::from_secs(1)).await;
             if is_file_busy(path).await {
                 // 检查是否已持续编辑超过 5min
-                let path_key = path.to_string_lossy().to_string();
-                let now = chrono::Utc::now().timestamp_millis();
-                let first_seen = self.tracking.entry(path_key).or_insert(now);
-                let elapsed = (now - *first_seen) / 1000;
-                if elapsed as u64 > EDITING_THRESHOLD_SECS {
-                    return StabilityResult::Editing;
-                }
-                return StabilityResult::Unstable;
+                return self.note_unstable(path);
             }
         }
 
         // 之前可能在 tracking 中（现在已稳定，移除追踪）
-        let path_key = path.to_string_lossy().to_string();
-        self.tracking.remove(&path_key);
+        self.clear_tracking(path);
         StabilityResult::Stable
     }
 }

@@ -40,6 +40,11 @@ pub struct DbSnapshotEntry {
 /// 比较本地、云端与数据库基线，生成有序同步动作。
 pub struct SyncPlanner;
 
+/// 「云端副本不存在、本地仅剩占位文件」的稳定原因标记。
+///
+/// engine 依据这个原因把路径汇总进 `invalid_placeholders`，让用户知道本地那次恢复无效。
+pub const STALE_PLACEHOLDER_REASON: &str = "本地占位文件已失效：云端副本不存在";
+
 impl SyncPlanner {
     /// 执行 diff，返回动作列表（跳过 null/skip 类型）。
     /// 对齐 dart `plan(SyncSnapshot)`。
@@ -217,6 +222,17 @@ impl SyncPlanner {
 
         // === 本地有 + 云端无 ===
         if local_exists && !cloud_exists {
+            // ★ 占位文件没有内容：云端副本不存在时它已经失效。
+            // 既不能当成 0 字节新文件上传（会伪造云端内容），也不能静默删掉
+            // （用户可能是刚从废纸篓恢复、正指望它回来）。这里不产生任何同步动作，
+            // 由 engine 汇总进 `invalid_placeholders`，让用户决定恢复还是清理。
+            if local.map(|entry| entry.is_placeholder).unwrap_or(false) {
+                tracing::debug!(
+                    rel = %rel_path,
+                    "本地占位文件已失效（云端副本不存在），等待用户决定恢复或清理"
+                );
+                return None;
+            }
             if db_exists {
                 // ★ pending: 占位项（新增上传失败 / retry 后仍未成功）→ 重新计划上传。
                 // 绝不能走下面的 BackupBeforeCloudDelete / DeleteFromLocal，否则会删本地文件（数据丢失）。
@@ -468,6 +484,48 @@ mod tests {
             content_hash: None,
             thumbnail_link: None,
         }
+    }
+
+    /// 占位文件在任何缺云端的情况下都不能变成"上传空文件"，也不能被静默删除。
+    #[test]
+    fn placeholder_with_missing_cloud_is_never_uploaded_or_deleted() {
+        // 本地占位符（0 字节 + placeholder 标记）。
+        let relative_path = "MEMORY.md".to_string();
+        let placeholder = LocalFileEntry {
+            relative_path: relative_path.clone(),
+            absolute_path: PathBuf::from("/mount/MEMORY.md"),
+            size: 0,
+            mtime: 2_000,
+            is_folder: false,
+            is_placeholder: true,
+        };
+        // 云端已不存在：只有基线（真实 fileId）。
+        let db = DbSnapshotEntry {
+            file_id: "cloud-file".to_string(),
+            local_mtime: Some(2_000),
+            local_size: Some(0),
+            cloud_edited_time: Some(3_000),
+            status: repository::sync_status::SYNCED,
+            is_folder: false,
+        };
+        let snapshot = SyncSnapshot {
+            local: HashMap::from([(relative_path.clone(), placeholder)]),
+            cloud: HashMap::new(),
+            db: HashMap::from([(relative_path.clone(), db)]),
+            cloud_tree_trusted: true,
+            is_startup_resume: false,
+        };
+
+        let actions = SyncPlanner.plan(&snapshot);
+
+        // 既不自动上传空文件，也不自动删本地：完全交给用户在状态里决策。
+        assert!(actions.is_empty(), "失效占位符不应产生任何同步动作");
+        assert!(actions
+            .iter()
+            .all(|action| action.action_type != SyncActionType::Upload));
+        assert!(actions
+            .iter()
+            .all(|action| action.action_type != SyncActionType::DeleteFromLocal));
     }
 
     /// 本地单边修改生成的 Update 必须携带规划时远端版本快照。

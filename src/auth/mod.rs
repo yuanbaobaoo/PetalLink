@@ -2,6 +2,8 @@
 //!
 //! 对齐 `legacy/lib/auth/` 的模块划分。
 
+/// 内嵌 OAuth 登录窗口。
+pub mod login_window;
 /// OAuth token 与用户信息模型。
 pub mod models;
 /// 本机 OAuth 回调服务。

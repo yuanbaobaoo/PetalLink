@@ -8,13 +8,20 @@ use super::preflight::PreflightFailure;
 use super::TaskRunner;
 use crate::data::repository::{self, ColumnPatch, TransferPatch, TransferTask};
 use crate::error::{AppError, AppResult};
-use crate::sync::retry_policy::{classify_transfer_error, RecoveryContext, RecoveryDecision};
+use crate::sync::retry_policy::{
+    classify_transfer_error, retry_jitter_ms, RecoveryContext, RecoveryDecision,
+};
 use crate::sync::transfer_state::{TransferErrorKind, TransferOperation, TransferState};
 use crate::sync::user_messages::simplify_sync_error;
 use rusqlite::OptionalExtension;
 
 /// 单个持久任务允许的最大自动重试次数。
 const MAX_AUTOMATIC_ATTEMPTS: u32 = 5;
+/// 等待网络任务重新检查的间隔（毫秒）。
+///
+/// 网络边沿只是「可能已恢复」的提示，恢复确认必须有一条兜底时间线；
+/// 取 60 秒与自动刷新周期一致，避免离线任务永久停在 WaitingForNetwork。
+const NETWORK_WAIT_RECHECK_MS: i64 = 60_000;
 
 impl TaskRunner {
     /// 根据错误分类持久化失败或恢复状态。
@@ -28,13 +35,16 @@ impl TaskRunner {
             .operation_kind()
             .map_err(transition_error)?
             .ok_or_else(|| AppError::generic("任务缺少 operation"))?;
+        // 本轮消耗的尝试次数（用于抖动与预算判定，尚未加一）。
+        let attempt_before = running.attempt_count.max(0) as u32;
         let classified = classify_transfer_error(
             &error,
             RecoveryContext {
                 operation,
-                attempt_count: running.attempt_count.max(0) as u32,
+                attempt_count: attempt_before,
                 now_ms: (self.now_ms)(),
-                jitter_ms: 0,
+                // 抖动按任务 ID 与轮次确定性生成，避免一批任务同秒重试。
+                jitter_ms: retry_jitter_ms(attempt_before, running.id),
                 auth_already_replayed: false,
                 max_attempts: MAX_AUTOMATIC_ATTEMPTS,
             },
@@ -45,10 +55,12 @@ impl TaskRunner {
             .saturating_add(i64::from(classified.consumes_retry_budget));
         // 恢复决策同时确定持久状态、对外结果和下一次唤醒时间。
         let (state, disposition, next_retry_at) = match classified.decision {
+            // 等待网络同样要留下恢复截止时间：否则离线任务只能等下一次
+            // ONLINE_RECOVERY 周期，网络早已恢复也可能长时间停滞（D5）。
             RecoveryDecision::WaitForNetwork => (
                 TransferState::WaitingForNetwork,
                 Some(TaskDisposition::WaitingForNetwork),
-                None,
+                Some((self.now_ms)().saturating_add(NETWORK_WAIT_RECHECK_MS)),
             ),
             RecoveryDecision::Backoff { next_retry_at } => (
                 TransferState::BackingOff,
@@ -475,6 +487,8 @@ impl TaskRunner {
                 .map_err(|error| AppError::generic(format!("提交传输结算事务失败：{error}")))?;
             completed
         };
+        // 结算即通知前端刷新当前目录：文件列表不再等一个云轮询周期（默认 60 秒）。
+        self.notify_transfer_settled(relative_path);
         self.notify_best_effort();
         Ok(completed)
     }

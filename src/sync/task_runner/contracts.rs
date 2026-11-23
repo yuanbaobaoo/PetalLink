@@ -3,6 +3,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use serde::Serialize;
+use specta::Type;
 
 use super::progress::TaskProgressReporter;
 use crate::data::repository::TransferTask;
@@ -27,6 +29,12 @@ pub(super) const VERIFY_UNAVAILABLE_BACKOFF_MS: i64 = 15_000;
 /// 只有永久 Failed 才触发；VerifyingRemote/退避/等待网络等可恢复结算不触发，
 /// 避免状态机随后的自动恢复被误报成“上传失败”。
 pub type UploadFailedNotifier = Arc<dyn Fn(&TransferTask, &str) + Send + Sync>;
+
+/// 传输任务成功结算后的通知回调（相对路径）。
+///
+/// 文件列表只在云端轮询周期里刷新时，上传完成后最长要等一个轮询间隔（默认 60 秒）
+/// 才看得到新文件；结算成功即通知前端重载当前目录。
+pub type TransferSettledNotifier = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// 为传输任务提供引擎关闭与路径冲突准入门。
 pub trait TaskActivityGate: Send + Sync {
@@ -74,6 +82,11 @@ pub struct TaskRecoverySummary {
     pub completed: usize,
     /// 需同步发布到云树检查点的远端写入结果。
     pub recovered_cloud_files: Vec<RecoveredCloudFile>,
+    /// 已到期、应交给后台执行通道的任务 ID。
+    ///
+    /// 恢复入口只负责「判定可运行」并返回 ID，由调度方投递到并发执行通道；
+    /// 恢复循环内联执行会让一条大文件堵住整轮恢复（2026-11-23 压测：1 个/5.8s）。
+    pub runnable_task_ids: Vec<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -211,6 +224,11 @@ pub struct StartupRecoverySummary {
     pub failed: usize,
     /// 启动期已确认的远端写入结果。
     pub recovered_cloud_files: Vec<RecoveredCloudFile>,
+    /// 保持 Pending、应交给后台执行通道的任务 ID。
+    ///
+    /// 启动恢复只是「准入 + 去重」：把待执行任务交给统一并发通道，
+    /// 而不是在恢复循环里逐条上传（否则 1000 条待传任务按 5 秒/条串行）。
+    pub runnable_task_ids: Vec<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -218,4 +236,78 @@ pub struct StartupRecoverySummary {
 pub struct EnqueuedTaskOutcome {
     pub task_id: i64,
     pub outcome: TaskExecutionOutcome,
+}
+
+/// 单个重试请求的入队结果。
+///
+/// `Queued`/`AlreadyQueued` 都属于成功：前者表示本次请求把任务推进到 Pending，
+/// 后者表示任务本来就在队列里（幂等重复点击），前端无需区分即可继续。
+#[derive(Debug, Clone, Serialize, Type)]
+pub enum RetryEnqueued {
+    /// 本次请求已把任务推进到 Pending。
+    Queued {
+        /// 被接受的任务 ID。
+        task_id: i64,
+    },
+    /// 任务本来就在队列中（幂等），不视为错误。
+    AlreadyQueued {
+        /// 已处于队列中的任务 ID。
+        task_id: i64,
+    },
+}
+
+impl RetryEnqueued {
+    /// 返回被接受或已在队列中的任务 ID。
+    pub fn task_id(&self) -> i64 {
+        match self {
+            RetryEnqueued::Queued { task_id } | RetryEnqueued::AlreadyQueued { task_id } => {
+                *task_id
+            }
+        }
+    }
+
+    /// 本次请求是否真的把任务推进到了 Pending。
+    pub fn is_newly_queued(&self) -> bool {
+        matches!(self, RetryEnqueued::Queued { .. })
+    }
+}
+
+/// 一键重试全部失败项的汇总。
+#[derive(Debug, Clone, Default, Serialize, Type)]
+pub struct RetryAllSummary {
+    /// 本次新入队的任务数。
+    pub queued: u32,
+    /// 已在队列中而跳过的任务数。
+    pub already_queued: u32,
+    /// 不可重试而跳过（同名冲突、未知操作类型）。
+    pub skipped: u32,
+    /// 校验失败的任务数（源文件已变化等）。
+    pub rejected: u32,
+}
+
+/// 一键重试的内部执行计划：对外汇总 + 需要在后台执行的任务 ID。
+#[derive(Debug, Clone, Default)]
+pub struct RetryAllPlan {
+    /// 可直接返回给前端的汇总计数。
+    pub summary: RetryAllSummary,
+    /// 本次新入队、需要在后台启动执行的任务 ID。
+    pub queued_task_ids: Vec<i64>,
+}
+
+/// 把已入队的任务交给执行通道在后台运行的回调。
+///
+/// 核验通道（探针）判定「未提交」时只投递重放意图，绝不同步等待整次上传，
+/// 否则一个 GB 级文件就会把唯一的同步周期占住数十分钟。
+pub type BackgroundTaskDispatcher = Arc<dyn Fn(i64) + Send + Sync>;
+
+/// 只入队不执行的结果。
+///
+/// `disposition` 为 `Pending` 等可执行去向时，调用方需要自行在后台启动执行；
+/// 为 `BlockedByActiveIntent` 时说明同路径已有活动意图，本次不重复调度。
+#[derive(Debug, Clone)]
+pub struct EnqueuedTask {
+    /// 已落库（或已存在）的任务 ID。
+    pub task_id: i64,
+    /// 准入后的去向。
+    pub disposition: TaskDisposition,
 }

@@ -29,6 +29,8 @@ export const useFileBrowserStore = defineStore("fileBrowser", () => {
   const loading = ref(false);
   // 错误信息
   const errorMessage = ref<string | null>(null);
+  // 目录加载请求代次：只有最新一次请求的结果才能落到 files 上
+  let loadRequestSeq = 0;
 
   // 当前文件夹位置
   const current = computed(() => pathStack.value[pathStack.value.length - 1]);
@@ -44,15 +46,23 @@ export const useFileBrowserStore = defineStore("fileBrowser", () => {
    *   目录切换/首次加载传 false 走完整 loading 流程
    */
   async function loadCurrent(silent = false): Promise<void> {
+    // 本次请求代次：目录切换后旧响应必须被丢弃，否则会覆盖新目录列表。
+    const requestSeq = ++loadRequestSeq;
     if (!silent) loading.value = true;
     errorMessage.value = null;
     try {
-      files.value = await driveApi.listFiles(current.value.id || undefined);
+      // 目录内容按当前 folderId 拉取。
+      const loaded = await driveApi.listFiles(current.value.id || undefined);
+      if (requestSeq !== loadRequestSeq) return;
+      files.value = loaded;
     } catch (e) {
+      if (requestSeq !== loadRequestSeq) return;
       errorMessage.value = extractErrorMessage(e);
       if (!silent) files.value = [];
     } finally {
-      if (!silent) loading.value = false;
+      // 最新一次请求结束时必须清掉 loading，即使它是静默刷新：
+      // 否则「非静默加载被静默刷新超越」会把遮罩永久卡在列表上。
+      if (requestSeq === loadRequestSeq) loading.value = false;
     }
   }
 

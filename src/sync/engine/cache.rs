@@ -205,6 +205,38 @@ impl SyncEngine {
         self.cloud.lock().tree.get(rel).cloned()
     }
 
+    /// 在云树快照里按文件名做大小写不敏感的子串匹配，可选限定相对路径子树。
+    ///
+    /// 服务端 `fileName contains` 只做**前缀**匹配（华为官方定义），无法满足用户对
+    /// 「包含」的预期；云树是已同步范围的权威路径快照，用它兜住真正的子串搜索。
+    /// 结果按「目录优先 + 名称」排序，与文件列表口径一致。
+    pub fn search_cloud_tree(&self, keyword: &str, scope: Option<&str>) -> Vec<DriveFile> {
+        let needle = keyword.trim().to_lowercase();
+        if needle.is_empty() {
+            return Vec::new();
+        }
+        let cloud = self.cloud.lock();
+        let mut matches: Vec<DriveFile> = cloud
+            .tree
+            .iter()
+            .filter(|(path, file)| {
+                // 空 scope 表示整盘；否则只接受该目录及其后代。
+                scope
+                    .filter(|scope| !scope.is_empty())
+                    .is_none_or(|scope| crate::core::paths::is_same_or_in_subtree(path, scope))
+                    && file.name.to_lowercase().contains(&needle)
+            })
+            .map(|(_, file)| file.clone())
+            .collect();
+        matches.sort_by(|left, right| {
+            right
+                .is_folder()
+                .cmp(&left.is_folder())
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        matches
+    }
+
     /// 按 fileId 列出云端全部 (路径, 是否目录)（命令侧删除前的身份核验）。
     pub fn find_cloud_entries_by_file_id(&self, file_id: &str) -> Vec<(String, bool)> {
         self.cloud

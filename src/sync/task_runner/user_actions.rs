@@ -45,6 +45,25 @@ impl TaskRunner {
         Ok(pending)
     }
 
+    /// 取消全部失败任务，返回实际取消数量。
+    ///
+    /// 失败行既是人工重试锚点，也继续占用路径身份：几百条脏任务会让同路径的
+    /// 同步动作（尤其是目录删除）长期被隔离。这里逐条 CAS，失败即跳过，
+    /// 只作用于 `Failed`，绝不覆盖并发状态。
+    pub fn cancel_all_failed(&self) -> AppResult<u32> {
+        let tasks = self.list_states(&[TransferState::Failed])?;
+        let mut canceled = 0_u32;
+        for task in tasks {
+            match self.cancel_user_task(task.id, "用户已批量取消失败任务") {
+                Ok(_) => canceled += 1,
+                Err(error) => {
+                    tracing::warn!(task_id = task.id, %error, "批量取消失败任务时单条失败");
+                }
+            }
+        }
+        Ok(canceled)
+    }
+
     /// 用户显式取消任务。仅允许不再自动推进的状态，活动任务必须先等其收敛。
     pub fn cancel_user_task(&self, task_id: i64, message: &str) -> AppResult<TransferTask> {
         let task = self.load(task_id)?;

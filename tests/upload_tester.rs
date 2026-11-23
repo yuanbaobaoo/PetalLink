@@ -30,7 +30,7 @@ async fn get_token() -> Result<String> {
     eprintln!();
 
     let auth = AuthService::new();
-    match auth.authorize(9999).await {
+    match auth.authorize(None, 9999, None).await {
         Ok(token_pair) => {
             eprintln!();
             eprintln!("✓ OAuth 授权成功！");

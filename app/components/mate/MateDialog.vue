@@ -49,7 +49,15 @@ function onOverlay(): void {
 <template>
   <Teleport to="body">
     <div v-if="open" class="mate-dialog-overlay" @click.self="onOverlay">
-      <div class="mate-dialog" :class="{ 'is-danger': danger }" :style="{ maxWidth: `${width}px` }">
+      <!-- 语义化对话框：屏幕阅读器与辅助技术据此把交互限制在弹层内。 -->
+      <div
+        class="mate-dialog"
+        :class="{ 'is-danger': danger }"
+        :style="{ maxWidth: `${width}px` }"
+        role="dialog"
+        aria-modal="true"
+        :aria-label="title || '对话框'"
+      >
         <div v-if="title || titleIcon || $slots.header" class="mate-dialog__header">
           <slot name="header">
             <MateIcon v-if="titleIcon" :name="titleIcon" :size="20" class="mate-dialog__title-icon" />

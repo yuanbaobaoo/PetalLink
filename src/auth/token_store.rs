@@ -110,10 +110,20 @@ fn file_path() -> AppResult<PathBuf> {
 
 // ===== 机器码 + 密钥派生 =====
 
+/// 进程内缓存的机器标识。
+///
+/// `machine_identifier` 会 fork 子进程（macOS 的 ioreg / Linux 读文件），
+/// 而每次 token 加解密都会调用它；缓存后整个进程只解析一次（D29）。
+static MACHINE_IDENTIFIER: once_cell::sync::OnceCell<String> = once_cell::sync::OnceCell::new();
+
 /// 取本机 IOPlatformUUID（via ioreg，无需 root，无需 IOKit 依赖）。
 /// 失败返回 Err（极少见：严格沙盒环境；本应用非沙盒）。
 #[cfg(target_os = "macos")]
 fn machine_identifier() -> AppResult<String> {
+    // 命中缓存时直接返回，不再起子进程。
+    if let Some(cached) = MACHINE_IDENTIFIER.get() {
+        return Ok(cached.clone());
+    }
     let output = Command::new("ioreg")
         .args(["-d2", "-c", "IOPlatformExpertDevice"])
         .output()
@@ -134,18 +144,24 @@ fn machine_identifier() -> AppResult<String> {
     if uuid.is_empty() {
         return Err(AppError::generic("IOPlatformUUID 为空"));
     }
-    Ok(uuid)
+    // 只缓存成功结果：失败（沙盒/异常）下一轮仍会重试。
+    Ok(MACHINE_IDENTIFIER.get_or_init(|| uuid).clone())
 }
 
 /// 读取 Linux machine-id，并加入应用与平台域分隔后用于密钥派生。
 #[cfg(target_os = "linux")]
 fn machine_identifier() -> AppResult<String> {
+    // 命中缓存时直接返回，不再重复读 machine-id。
+    if let Some(cached) = MACHINE_IDENTIFIER.get() {
+        return Ok(cached.clone());
+    }
     const MACHINE_ID_PATHS: &[&str] = &["/etc/machine-id", "/var/lib/dbus/machine-id"];
     let mut errors = Vec::new();
     for path in MACHINE_ID_PATHS {
         match fs::read_to_string(path) {
             Ok(raw) => match normalize_linux_machine_id(&raw) {
-                Ok(machine_id) => return Ok(machine_id),
+                // 只缓存成功结果，失败下一轮仍会重试。
+                Ok(machine_id) => return Ok(MACHINE_IDENTIFIER.get_or_init(|| machine_id).clone()),
                 Err(error) => errors.push(format!("{path}: {error}")),
             },
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}

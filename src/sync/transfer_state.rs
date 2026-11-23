@@ -29,8 +29,9 @@ impl TransferState {
 
     /// 该状态下的任务是否占用其路径：进行中、退避中、等待核验远端结果的任务
     /// 都可能仍在改写两端数据，路径争议处理与动作过滤以此为据。
-    /// RestartRequired 仅在已知远端结果（remote_result_file_id 非空）时占用路径——
-    /// 没有远端结果的滞留记录可由用户清除或直接重试，不阻塞路径。
+    /// RestartRequired 与 Failed 仅在已知远端结果（remote_result_file_id 非空）时占用路径——
+    /// 没有远端结果的滞留记录可由用户清除或直接重试，不阻塞路径；而「已确认云端写入、
+    /// 只是本地没结算完」的失败行必须继续占住路径，否则同路径的破坏性动作会绕过它（D10）。
     /// 注意与数据安全场景的区分：释放本地空间等删除类判定应使用更保守的
     /// `!is_terminal()`，滞留的 RestartRequired 也不能放行。
     pub fn occupies_path(self, remote_result_file_id: Option<&str>) -> bool {
@@ -41,7 +42,7 @@ impl TransferState {
                 | TransferState::WaitingForNetwork
                 | TransferState::BackingOff
                 | TransferState::VerifyingRemote
-        ) || (self == TransferState::RestartRequired
+        ) || (matches!(self, TransferState::RestartRequired | TransferState::Failed)
             && remote_result_file_id.is_some_and(|file_id| !file_id.trim().is_empty()))
     }
 }
@@ -223,4 +224,21 @@ pub const fn can_transition(from: TransferState, to: TransferState) -> bool {
             )
             | (Failed, Pending | RestartRequired | Canceled)
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 已确认云端写入的失败行必须继续占用路径，否则同路径的破坏性动作会绕过它。
+    #[test]
+    fn failed_task_with_remote_result_occupies_path() {
+        assert!(TransferState::Failed.occupies_path(Some("remote-id")));
+        // 没有远端结果的失败行可被清除或直接重试，不阻塞路径。
+        assert!(!TransferState::Failed.occupies_path(None));
+        assert!(!TransferState::Failed.occupies_path(Some("   ")));
+        // 普通活动状态与远端结果无关。
+        assert!(TransferState::Running.occupies_path(None));
+        assert!(!TransferState::Completed.occupies_path(Some("remote-id")));
+    }
 }

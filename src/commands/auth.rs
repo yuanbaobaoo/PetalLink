@@ -53,15 +53,20 @@ pub async fn auth_restore() -> AppResult<AuthState> {
 /// 完成 OAuth 登录，并在切换账号后停止旧运行时、清理同步数据和重置目录配置。
 #[tauri::command]
 #[specta::specta]
-pub async fn auth_login(app: AppHandle, port: u16) -> AppResult<TokenPair> {
-    let token = AUTH_SERVICE.authorize(port).await?;
+pub async fn auth_login(
+    app: AppHandle,
+    port: u16,
+    sheet_bounds: Option<crate::auth::login_window::SheetBounds>,
+) -> AppResult<TokenPair> {
+    // 优先在应用内的底部抽屉里完成登录；抽屉/窗口都创建失败时回退系统浏览器。
+    let token = AUTH_SERVICE
+        .authorize(Some(&app), port, sheet_bounds)
+        .await?;
     // 清空旧账号同步状态
     drop_runtime_async().await;
     clear_account_caches();
     let _ = reset_account_config();
     tracing::info!("登录成功，已彻底清空上一账号同步缓存与目录配置，等待用户重新配置");
-    // 保留 AppHandle 以兼容命令签名
-    let _ = &app;
     Ok(token)
 }
 
@@ -81,9 +86,35 @@ fn reset_account_config() -> AppResult<()> {
 /// 取消正在等待本地回调的 OAuth 授权流程。
 #[tauri::command]
 #[specta::specta]
-pub async fn auth_cancel_login() -> AppResult<()> {
+pub async fn auth_cancel_login(app: AppHandle) -> AppResult<()> {
     AUTH_SERVICE.cancel_authorize().await;
+    // 取消后立刻收掉内嵌登录窗口，避免留下一个孤立的登录页。
+    crate::auth::login_window::close(&app);
     Ok(())
+}
+
+/// 窗口尺寸变化时同步底部抽屉的位置与尺寸。
+#[tauri::command]
+#[specta::specta]
+pub async fn auth_login_sheet_bounds(
+    app: AppHandle,
+    bounds: crate::auth::login_window::SheetBounds,
+) -> AppResult<()> {
+    crate::auth::login_window::update_sheet_bounds(&app, bounds);
+    Ok(())
+}
+
+/// 用系统浏览器继续当前授权流程（内嵌登录被拦截时的回退入口）。
+///
+/// 只在有进行中的授权流程时有效；返回是否真的打开了浏览器。
+#[tauri::command]
+#[specta::specta]
+pub async fn auth_login_in_browser() -> AppResult<bool> {
+    let opened = AUTH_SERVICE.reopen_in_browser().await;
+    if !opened {
+        return Err(AppError::generic("当前没有进行中的登录流程"));
+    }
+    Ok(true)
 }
 
 /// 停止同步运行时，清理当前账号的同步数据与目录配置，然后删除登录 token。

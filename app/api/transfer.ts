@@ -8,13 +8,36 @@ import {
   TRANSFER_OPERATION,
   TRANSFER_STATE,
 } from "./generated";
-import type { TransferTask as GeneratedTransferTask } from "./generated";
+import type {
+  RetryAllSummary as GeneratedRetryAllSummary,
+  RetryEnqueued as GeneratedRetryEnqueued,
+  TransferTask as GeneratedTransferTask,
+} from "./generated";
 export {
   TRANSFER_DIR,
   TRANSFER_ERROR_KIND,
   TRANSFER_OPERATION,
   TRANSFER_STATE,
 } from "./generated";
+
+/**
+ * 单个重试请求的入队结果：两个分支都表示成功，只是「本次新入队」与「本来就在队列中」的区别。
+ */
+export type RetryEnqueued = GeneratedRetryEnqueued;
+
+/**
+ * 一键重试的汇总计数。
+ */
+export type RetryAllSummary = GeneratedRetryAllSummary;
+
+/**
+ * 判断入队结果是否代表本次真的把任务推进到了「等待开始」。
+ *
+ * @param result - 后端返回的入队结果
+ */
+export function isNewlyQueued(result: RetryEnqueued): boolean {
+  return "Queued" in result;
+}
 
 /**
  * 传输方向常量
@@ -101,6 +124,15 @@ export function canCancelTransferTask(task: TransferTask): boolean {
  */
 export async function listAllTransfers(): Promise<TransferTask[]> {
   return await commands.transferListAll() as TransferTask[];
+}
+
+/**
+ * 重试全部失败项：后端只入队并立即返回汇总，执行在后台按并发槽推进。
+ *
+ * @returns 入队/跳过/拒绝的数量汇总
+ */
+export async function retryAllFailedTransfers(): Promise<RetryAllSummary> {
+  return await commands.syncRetryFailed();
 }
 
 // 终态（已完成/失败/取消）历史在列表中的最大渲染条数。

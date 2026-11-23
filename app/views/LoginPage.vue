@@ -9,15 +9,32 @@
   - 授权中：替换为 spinner 条 + 取消按钮
 -->
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
+import { events } from "@/api/generated";
 import { useAuthStore } from "@/stores/auth";
-import { MateButton, MateAppLogo, MateInfoBanner, MateCircularProgress } from "@/components/mate";
+import {
+  MateButton,
+  MateAppLogo,
+  MateIcon,
+  MateInfoBanner,
+  MateCircularProgress,
+  showToast,
+} from "@/components/mate";
+import { useAppIdentity } from "@/composables/useAppIdentity";
+import { commands } from "@/api/generated";
+import { extractErrorMessage } from "@/utils/error";
+import {
+  computeSheetRect,
+  sheetContentRect,
+  SHEET_HEADER_HEIGHT,
+  SHEET_RADIUS,
+} from "@/utils/sheet";
 
 // 当前认证状态。
 const auth = useAuthStore();
 
-// 应用完整标题
-const appTitle = "PetalLink - 华为云盘客户端开源版";
+// 应用完整标题（dev 包自带 -Dev 后缀）。
+const { fullTitle: appTitle } = useAppIdentity();
 
 // client_secret 未配置时的提示文案
 const secretWarning =
@@ -33,17 +50,94 @@ const showAuthorizing = computed(
   () => auth.loading && auth.status === "authorizing"
 );
 
+// 标题区右上角按钮文案（内嵌被拦截时改用系统浏览器）。
+const OPEN_IN_BROWSER_LABEL = "改用系统浏览器";
+// 标题区右上角关闭按钮文案。
+const CLOSE_LABEL = "关闭";
+// 底部抽屉是否已展开（原生登录 webview 由后端嵌进内容区）。
+const sheetOpen = ref(false);
+// 窗口内容区尺寸，随 resize 更新（驱动抽屉几何与原生视图重新定位）。
+const viewport = ref({ width: window.innerWidth, height: window.innerHeight });
+// 抽屉外框（含标题栏）。
+const sheetRect = computed(() => computeSheetRect(viewport.value));
+// 抽屉内容区（原生 webview 的实际位置）。
+// sheetHeight 决定滑入行程；viewportHeight 让后端算出标题栏偏移，原生子视图才能对齐 CSS。
+const sheetContent = computed(() => ({
+  ...sheetContentRect(sheetRect.value),
+  sheetHeight: Math.round(sheetRect.value.height),
+  viewportHeight: Math.round(viewport.value.height),
+}));
+// 抽屉外框的内联样式。
+const sheetStyle = computed(() => ({
+  left: `${sheetRect.value.x}px`,
+  top: `${sheetRect.value.y}px`,
+  width: `${sheetRect.value.width}px`,
+  height: `${sheetRect.value.height}px`,
+  // 只圆上面两角：浮层贴底，下角保持直角。
+  borderRadius: `${SHEET_RADIUS}px ${SHEET_RADIUS}px 0 0`,
+}));
+
 /**
- * 开始 OAuth 登录流程。
+ * 记录最新窗口尺寸；抽屉打开时同步原生视图位置。
  */
-function handleLogin(): void {
-  auth.login();
+function handleViewportResize(): void {
+  viewport.value = { width: window.innerWidth, height: window.innerHeight };
+  if (!sheetOpen.value) return;
+  // 原生视图不会跟着 CSS 走，必须显式通知后端重新定位。
+  void commands.authLoginSheetBounds(sheetContent.value).catch(() => {});
+}
+
+// 后端上报登录界面真实形态时取消订阅。
+let unlistenLoginLaunched: (() => void) | null = null;
+
+onMounted(async () => {
+  window.addEventListener("resize", handleViewportResize);
+  unlistenLoginLaunched = await events.authLoginLaunched.listen(({ payload }) => {
+    // 只有抽屉形态才需要保留外壳；退回独立窗口/浏览器时立刻收起，避免留下空白块。
+    if (payload.mode !== "sheet") {
+      sheetOpen.value = false;
+    }
+  });
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener("resize", handleViewportResize);
+  unlistenLoginLaunched?.();
+});
+
+/**
+ * 开始 OAuth 登录流程：先展开底部抽屉，等 Vue 完成布局后再把内容区矩形交给后端。
+ */
+async function handleLogin(): Promise<void> {
+  sheetOpen.value = true;
+  // 等抽屉 DOM 落地：几何必须与后端嵌入的 webview 完全一致。
+  await nextTick();
+  const started = await auth.login(sheetContent.value);
+  if (!started) {
+    sheetOpen.value = false;
+  }
+}
+
+/**
+ * 用系统浏览器继续当前授权流程。
+ *
+ * 内嵌登录窗口被华为拦截（或页面无法加载）时的回退入口：
+ * loopback 回调服务仍在等待，浏览器里完成的授权同样会回到本应用。
+ */
+async function handleOpenInBrowser(): Promise<void> {
+  try {
+    await commands.authLoginInBrowser();
+    showToast("已用系统浏览器打开登录页");
+  } catch (e) {
+    showToast("打开浏览器失败：" + extractErrorMessage(e), { variant: "error" });
+  }
 }
 
 /**
  * 取消当前 OAuth 授权流程。
  */
 function handleCancel(): void {
+  sheetOpen.value = false;
   auth.cancelLogin();
 }
 
@@ -56,7 +150,53 @@ function handleDismissError(): void {
 </script>
 
 <template>
-  <div class="login-page">
+  <!-- 登录浮层遮罩：点击空白处等效取消 -->
+  <div
+    v-if="sheetOpen"
+    class="login-scrim"
+    @click="handleCancel"
+  />
+
+  <!-- 登录浮层外壳：圆角与标题区由 Vue 绘制，原生 webview 填在内容区 -->
+  <section
+    v-if="sheetOpen"
+    class="login-sheet"
+    :style="sheetStyle"
+    role="dialog"
+    aria-modal="true"
+    aria-label="登录华为账号"
+  >
+    <header class="login-sheet__header" :style="{ height: `${SHEET_HEADER_HEIGHT}px` }">
+      <div class="login-sheet__heading">
+        <h2 class="login-sheet__title">登录华为账号</h2>
+      </div>
+      <div class="login-sheet__actions">
+        <!-- 内嵌被身份提供方拦截时，用系统浏览器继续同一次授权流程 -->
+        <button
+          class="login-sheet__icon-btn"
+          type="button"
+          :title="OPEN_IN_BROWSER_LABEL"
+          :aria-label="OPEN_IN_BROWSER_LABEL"
+          @click="handleOpenInBrowser"
+        >
+          <MateIcon name="external" :size="16" />
+        </button>
+        <button
+          class="login-sheet__icon-btn"
+          type="button"
+          :title="CLOSE_LABEL"
+          :aria-label="CLOSE_LABEL"
+          @click="handleCancel"
+        >
+          <MateIcon name="x" :size="16" />
+        </button>
+      </div>
+    </header>
+    <!-- 原生登录页会覆盖在这块区域上，这里只作占位 -->
+    <div class="login-sheet__content" />
+  </section>
+
+  <div class="login-page" :class="{ 'login-page--dimmed': sheetOpen }">
     <!-- 装饰圆（低透明度品牌色） -->
     <div class="decor-circle decor-circle--lg" />
     <div class="decor-circle decor-circle--md" />
@@ -100,8 +240,12 @@ function handleDismissError(): void {
         <div v-if="showAuthorizing" class="authorizing-pane">
           <div class="authorizing-pane__bar">
             <MateCircularProgress :size="16" :stroke-width="2" />
-            <span class="authorizing-pane__text">请在浏览器中完成授权...</span>
+            <span class="authorizing-pane__text">请在登录浮层中完成授权...</span>
           </div>
+          <!-- 内嵌窗口被身份提供方拦截时，用系统浏览器继续同一次流程 -->
+          <MateButton variant="text" icon="link" class="authorizing-pane__cancel" @click="handleOpenInBrowser">
+            改用系统浏览器
+          </MateButton>
           <MateButton variant="text" icon="x" class="authorizing-pane__cancel" @click="handleCancel">
             取消授权
           </MateButton>
@@ -123,7 +267,7 @@ function handleDismissError(): void {
       </div>
 
       <!-- 底部说明 -->
-      <p class="login-card__hint">点击后将打开浏览器，支持账号密码或手机扫码登录</p>
+      <p class="login-card__hint">在应用内完成授权，支持账号密码或手机扫码登录</p>
     </div>
   </div>
 </template>
@@ -221,9 +365,12 @@ function handleDismissError(): void {
   font-size: 15px;
 }
 
+/* 底部说明：与主按钮留出呼吸感，居中共两行 */
 .login-card__hint {
-  margin-top: 14px;
+  margin: 16px 0 0;
+  max-width: 340px;
   font-size: var(--font-caption);
+  line-height: 1.55;
   color: var(--ink-400);
   text-align: center;
 }
@@ -259,5 +406,118 @@ function handleDismissError(): void {
 }
 .authorizing-pane__cancel:hover {
   background-color: var(--bg-fill);
+}
+
+/* ===== 登录浮层（近满窗圆角卡片，从底部滑入） ===== */
+
+/* 遮罩：轻微压暗背景，点击空白处取消登录 */
+.login-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  background: rgba(16, 22, 38, 0.32);
+  animation: login-scrim-in 200ms ease-out;
+}
+
+@keyframes login-scrim-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* 浮层外壳：圆角、标题区由 Vue 画，原生登录页嵌在内容区 */
+.login-sheet {
+  position: fixed;
+  z-index: 21;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: #ffffff;
+  /* 贴底：下沿不留白，圆角只在上方两角（内联 style 里给具体值） */
+  box-shadow:
+    0 24px 64px rgba(16, 22, 38, 0.24),
+    0 2px 8px rgba(16, 22, 38, 0.08);
+  /* 与后端滑入动画同节奏：整卡从窗口底部滑入 */
+  animation: login-sheet-in 240ms cubic-bezier(0.33, 1, 0.68, 1);
+}
+
+@keyframes login-sheet-in {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+
+.login-sheet__header {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  padding: 0 96px 0 24px;
+  background: #ffffff;
+  border-bottom: 1px solid rgba(16, 22, 38, 0.06);
+}
+
+.login-sheet__heading {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.login-sheet__title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: var(--fw-semibold);
+  line-height: 1.35;
+  color: var(--ink-900, #161b26);
+}
+
+.login-sheet__actions {
+  position: absolute;
+  top: 50%;
+  right: 16px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  transform: translateY(-50%);
+}
+
+/* 右上角图标按钮：无描边，仅 hover 时给底色，两者视觉重量一致 */
+.login-sheet__icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink-500, #6b7280);
+  cursor: pointer;
+  transition: background-color 120ms ease-out, color 120ms ease-out;
+}
+
+.login-sheet__icon-btn:hover {
+  background: rgba(16, 22, 38, 0.06);
+  color: var(--ink-800, #1b2130);
+}
+
+.login-sheet__icon-btn:focus-visible {
+  outline: 2px solid var(--brand-300, #9dc0fb);
+  outline-offset: 1px;
+}
+
+.login-sheet__icon-btn:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* 内容区：原生 webview 会覆盖在这里，仅作占位（不留内边距，页面与标题区严丝合缝）。 */
+.login-sheet__content {
+  flex: 1;
+  min-height: 0;
+  background: #ffffff;
+}
+
+/* 浮层打开时把原登录卡片压暗并禁止交互 */
+.login-page--dimmed {
+  pointer-events: none;
 }
 </style>

@@ -7,6 +7,7 @@ use crate::mount::skip::SkipMatcher;
 use crate::sync::path_recovery::BlockedPathChange;
 use crate::sync::planner::DbSnapshotEntry;
 use crate::sync::state::{SyncAction, SyncActionType};
+use crate::sync::transfer_state::TransferState;
 
 use crate::core::paths::{is_same_or_in_subtree as is_in_subtree, paths_overlap};
 
@@ -26,30 +27,36 @@ pub(super) fn filter_skipped_paths(actions: &mut Vec<SyncAction>, skip_matcher: 
 }
 
 /// 隔离仍有持久活动任务的身份与路径，禁止结构动作抢先改写远端。
+///
+/// 返回被隔离的**结构性**动作数（删除/建目录/移动/占位等）：这些动作只是「本轮暂缓」，
+/// 调用方把数量发布到同步状态，让用户看得到「删除点了没反应」的真实原因。
+/// 上传/下载的暂缓由传输队列自身展示，不在这里重复计数。
 pub(super) fn filter_active_transfer_actions(
     actions: &mut Vec<SyncAction>,
     db: &HashMap<String, DbSnapshotEntry>,
     tasks: &[TransferTask],
-) {
+) -> usize {
     let active_tasks = tasks
         .iter()
         .filter(|task| task.occupies_path())
         .collect::<Vec<_>>();
     if active_tasks.is_empty() {
-        return;
+        return 0;
     }
 
     let db_path_by_file_id = db
         .iter()
         .map(|(path, entry)| (entry.file_id.as_str(), path.as_str()))
         .collect::<HashMap<_, _>>();
-    let before = actions.len();
-    actions.retain(|action| {
+    let mut retained = Vec::with_capacity(actions.len());
+    let mut deferred_structural = 0_usize;
+    let mut skipped = 0_usize;
+    for action in actions.drain(..) {
         let action_file_id = action.file_id.as_deref();
         let action_path = action.relative_path.as_deref();
         let source_path =
             action_file_id.and_then(|file_id| db_path_by_file_id.get(file_id).copied());
-        !active_tasks.iter().any(|task| {
+        let blocked = active_tasks.iter().any(|task| {
             let same_file_id =
                 action_file_id.is_some() && action_file_id == task.file_id.as_deref();
             let overlaps_path = task.relative_path.as_deref().is_some_and(|task_path| {
@@ -57,14 +64,110 @@ pub(super) fn filter_active_transfer_actions(
                     || source_path.is_some_and(|path| paths_overlap(path, task_path))
             });
             same_file_id || overlaps_path
-        })
+        });
+        if !blocked {
+            retained.push(action);
+            continue;
+        }
+        skipped += 1;
+        // 只统计结构性动作：文件传输的进度在传输队列里可见。
+        if !matches!(
+            action.action_type,
+            SyncActionType::Upload | SyncActionType::Download
+        ) {
+            deferred_structural += 1;
+        }
+    }
+    *actions = retained;
+    if skipped > 0 {
+        tracing::warn!(
+            skipped,
+            structural = deferred_structural,
+            active = active_tasks.len(),
+            "已隔离尚有持久活动任务的同步动作"
+        );
+    }
+    deferred_structural
+}
+
+/// 抑制「云端删除意图」子树下的本地物化动作。
+///
+/// 用户删除本地文件夹后，planner 会为云端目录提出 `DeleteFromCloud`；同一轮规划里
+/// 「云端仍有、本地没有、DB 也没有」的子项会被判成「云端新文件 → 创建占位」。
+/// 两者一起执行就会把刚删掉的目录“长回来”（2026-11-23 压测 D3）。
+///
+/// 安全方向：删除意图优先——包括被宽限期或批量闸门降级为 Skip 的路径，
+/// 子树里的占位/建目录动作一律丢弃；云端数据不受影响（删除本身仍受各道闸门约束）。
+pub(super) fn suppress_rehydration_under_delete_intents(
+    actions: &mut Vec<SyncAction>,
+    delete_intent_paths: &[String],
+) {
+    if delete_intent_paths.is_empty() {
+        return;
+    }
+    let before = actions.len();
+    actions.retain(|action| {
+        let is_cloud_materialization = action.action_type == SyncActionType::CreatePlaceholder
+            || (action.action_type == SyncActionType::CreateFolder && action.cloud_file.is_some());
+        if !is_cloud_materialization {
+            return true;
+        }
+        let Some(path) = action.relative_path.as_deref() else {
+            return true;
+        };
+        // 只按「路径是删除意图的后代」判断：兄弟目录不受影响。
+        !delete_intent_paths
+            .iter()
+            .any(|intent| is_in_subtree(path, intent))
+    });
+    let skipped = before.saturating_sub(actions.len());
+    if skipped > 0 {
+        tracing::info!(
+            skipped,
+            intents = delete_intent_paths.len(),
+            "已抑制删除意图子树下的本地物化动作"
+        );
+    }
+}
+
+/// 隔离已被终态失败任务占位的路径。
+///
+/// 失败行是显式的人工重试锚点：同一路径每分钟重新规划出来的动作都会被这条行
+/// 挡回成 `BlockedByActiveIntent`（历史每天上万条），除了刷日志没有任何进展。
+/// 因此这些动作直接跳过，只保留每周期一条汇总告警。
+///
+/// 只保护「失败路径本身及其后代」：**祖先**路径必须放行。用户删除整个本地目录时，
+/// 目录删除动作会与它下面每条失败行重叠；如果按对称重叠拦截，几百条
+/// 「本地上传源不存在」的失败行会把父目录删除永久挡在门外（2026-11-23 压测 D3/D4）。
+pub(super) fn filter_failed_transfer_actions(
+    actions: &mut Vec<SyncAction>,
+    tasks: &[TransferTask],
+) {
+    // 终态失败任务的相对路径；没有失败任务时不动动作列表。
+    let failed_paths = tasks
+        .iter()
+        .filter(|task| task.state_kind() == Ok(TransferState::Failed))
+        .filter_map(|task| task.relative_path.as_deref())
+        .collect::<Vec<_>>();
+    if failed_paths.is_empty() {
+        return;
+    }
+    let before = actions.len();
+    actions.retain(|action| {
+        let Some(action_path) = action.relative_path.as_deref() else {
+            return true;
+        };
+        // 失败锚点自身/后代：保留等待人工处理；祖先目录动作照常规划。
+        !failed_paths
+            .iter()
+            .any(|failed_path| is_in_subtree(action_path, failed_path))
     });
     let skipped = before.saturating_sub(actions.len());
     if skipped > 0 {
         tracing::warn!(
             skipped,
-            active = active_tasks.len(),
-            "已隔离尚有持久活动任务的同步动作"
+            failed_paths = failed_paths.len(),
+            "已跳过被失败任务占位的路径，等待人工重试或新的变更"
         );
     }
 }
@@ -504,5 +607,169 @@ mod tests {
 
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].relative_path.as_deref(), Some("unrelated.txt"));
+    }
+
+    /// 终态失败任务的路径必须跳过后再规划，避免每分钟被同一条失败行挡回。
+    #[test]
+    fn failed_transfer_paths_are_skipped_before_execution() {
+        // 与失败任务同路径、同子树以及无关的三条动作。
+        let mut actions = vec![
+            SyncAction {
+                action_type: SyncActionType::Upload,
+                relative_path: Some("contracts/failed-folder".to_string()),
+                file_id: None,
+                parent_file_id: Some("contracts-folder-id".to_string()),
+                local_path: None,
+                cloud_file: None,
+                reason: None,
+            },
+            SyncAction {
+                action_type: SyncActionType::DeleteFromCloud,
+                relative_path: Some("contracts/failed-folder/child.txt".to_string()),
+                file_id: Some("child-id".to_string()),
+                parent_file_id: None,
+                local_path: None,
+                cloud_file: None,
+                reason: None,
+            },
+            SyncAction {
+                action_type: SyncActionType::DeleteFromCloud,
+                relative_path: Some("unrelated.txt".to_string()),
+                file_id: Some("unrelated-id".to_string()),
+                parent_file_id: None,
+                local_path: None,
+                cloud_file: None,
+                reason: None,
+            },
+        ];
+        // 终态失败任务：占用该路径，但不再参与自动执行。
+        let mut failed = verifying_task("contracts/failed-folder", "failed-folder-id");
+        failed.state = i32::from(TransferState::Failed);
+        failed.remote_result_file_id = None;
+        let tasks = vec![failed];
+
+        filter_failed_transfer_actions(&mut actions, &tasks);
+
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].relative_path.as_deref(), Some("unrelated.txt"));
+    }
+
+    /// 失败子项不能挡住父目录删除：用户删除整个目录后，云端目录仍必须能收敛。
+    #[test]
+    fn failed_child_does_not_block_ancestor_delete() {
+        // 父目录删除动作。
+        let mut actions = vec![SyncAction {
+            action_type: SyncActionType::DeleteFromCloud,
+            relative_path: Some("bulk-test".to_string()),
+            file_id: Some("bulk-folder-id".to_string()),
+            parent_file_id: None,
+            local_path: None,
+            cloud_file: None,
+            reason: None,
+        }];
+        // 目录内一条终态失败的上传任务（本地源已删除，保留失败历史）。
+        let mut failed = verifying_task("bulk-test/child.dat", "child-id");
+        failed.state = i32::from(TransferState::Failed);
+        failed.remote_result_file_id = None;
+
+        filter_failed_transfer_actions(&mut actions, &[failed]);
+
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].relative_path.as_deref(), Some("bulk-test"));
+    }
+
+    /// 删除意图子树里的占位/建目录动作必须被抑制：
+    /// 否则「删本地文件夹」会被同一轮的「云端→本地占位」镜像撤销（D3）。
+    #[test]
+    fn rehydration_under_cloud_delete_intent_is_suppressed() {
+        // 被删除目录的云端条目。
+        let cloud_folder = crate::drive::models::DriveFile {
+            id: "bulk-folder-id".to_string(),
+            name: "bulk-test".to_string(),
+            category: crate::drive::models::FileCategory::Folder,
+            size: 0,
+            parent_folder: None,
+            description: None,
+            created_time: None,
+            edited_time: None,
+            mime_type: None,
+            content_hash: None,
+            thumbnail_link: None,
+        };
+        let mut actions = vec![
+            // 目录删除意图（可能随后被闸门降级为 Skip）。
+            SyncAction {
+                action_type: SyncActionType::DeleteFromCloud,
+                relative_path: Some("bulk-test".to_string()),
+                file_id: Some("bulk-folder-id".to_string()),
+                parent_file_id: None,
+                local_path: None,
+                cloud_file: None,
+                reason: None,
+            },
+            // 同子树里“云端新文件 → 创建占位”的镜像动作。
+            SyncAction {
+                action_type: SyncActionType::CreatePlaceholder,
+                relative_path: Some("bulk-test/child.dat".to_string()),
+                file_id: Some("child-id".to_string()),
+                parent_file_id: None,
+                local_path: None,
+                cloud_file: Some(crate::drive::models::DriveFile {
+                    id: "child-id".to_string(),
+                    name: "child.dat".to_string(),
+                    category: crate::drive::models::FileCategory::Video,
+                    size: 1,
+                    parent_folder: None,
+                    description: None,
+                    created_time: None,
+                    edited_time: None,
+                    mime_type: None,
+                    content_hash: None,
+                    thumbnail_link: None,
+                }),
+                reason: None,
+            },
+            // 同子树的“云端文件夹 → 本地创建”。
+            SyncAction {
+                action_type: SyncActionType::CreateFolder,
+                relative_path: Some("bulk-test/sub".to_string()),
+                file_id: Some("sub-folder-id".to_string()),
+                parent_file_id: None,
+                local_path: None,
+                cloud_file: Some(cloud_folder),
+                reason: None,
+            },
+            // 兄弟目录不受影响。
+            SyncAction {
+                action_type: SyncActionType::CreatePlaceholder,
+                relative_path: Some("bulk-test-2/keep.dat".to_string()),
+                file_id: Some("keep-id".to_string()),
+                parent_file_id: None,
+                local_path: None,
+                cloud_file: Some(crate::drive::models::DriveFile {
+                    id: "keep-id".to_string(),
+                    name: "keep.dat".to_string(),
+                    category: crate::drive::models::FileCategory::Video,
+                    size: 1,
+                    parent_folder: None,
+                    description: None,
+                    created_time: None,
+                    edited_time: None,
+                    mime_type: None,
+                    content_hash: None,
+                    thumbnail_link: None,
+                }),
+                reason: None,
+            },
+        ];
+
+        suppress_rehydration_under_delete_intents(&mut actions, &["bulk-test".to_string()]);
+
+        assert_eq!(actions.len(), 2);
+        assert_eq!(actions[0].action_type, SyncActionType::DeleteFromCloud);
+        assert_eq!(
+            actions[1].relative_path.as_deref(),
+            Some("bulk-test-2/keep.dat")
+        );
     }
 }

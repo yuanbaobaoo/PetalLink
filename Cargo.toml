@@ -21,8 +21,17 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+# 分片上传用 Bytes 承载已读缓冲区，避免为每个请求再复制一份整块数据。
+bytes = "1"
 # === Tauri 核心 ===
-tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
+# unstable：仅用于 child webview（Window::add_child / WebviewBuilder），
+# 登录页以「主窗口内底部抽屉」形态内嵌时需要；该 feature 只额外导出 API，不改变运行时行为。
+tauri = { version = "2", features = [
+    "tray-icon",
+    "image-png",
+    "macos-private-api",
+    "unstable",
+] }
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-single-instance = "2"

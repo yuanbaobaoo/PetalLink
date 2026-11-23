@@ -73,7 +73,10 @@ impl FilesApi {
     }
 
     /// 提交一次非幂等目录创建，并严格核验 200 File 响应。
-    async fn create_folder_once(
+    ///
+    /// 调用方必须自己持有「同名目录不存在」的证据（例如刚完成的目录遍历）。
+    /// 非幂等 POST 的通用入口仍应使用 `create_folder`，它自带前后双重复核。
+    pub(crate) async fn create_folder_once(
         &self,
         name: &str,
         parent_id: Option<&str>,

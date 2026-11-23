@@ -1,14 +1,29 @@
 //! 同步引擎的构造、依赖注入、启动、监听与关闭。
 
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::sync::state::SYNC_PHASE_SYNCING_STARTUP;
 
 use super::coordination::{network_listener_loop, watcher_listener_loop, TaskRunnerActivityGate};
 use super::*;
 
-/// 到期任务未推进时的兜底复查间隔，防止只等待状态通知而永久休眠。
-const BLOCKED_DEADLINE_RECHECK_INTERVAL: Duration = Duration::from_secs(1);
+/// 同一 deadline 连续未推进时的复查上限。
+///
+/// 旧实现固定 1 秒复查一次，一次卡住的 deadline 会让引擎每秒跑一个完整周期
+/// （空转 API + 日志 + CPU）；这里按 1→2→4→…→60 秒退避，仍有上限保证不会永久休眠。
+const BLOCKED_DEADLINE_MAX_RECHECK: Duration = Duration::from_secs(60);
+/// 独立核验通道的扫描间隔。
+///
+/// 核验是「读证明 + 行级 CAS」的短任务，与规划和传输没有共享临界区；
+/// 固定 10 秒节拍足以让 VerifyingRemote 在 1 分钟内收敛，又不会空转 API。
+const VERIFY_SCHEDULER_INTERVAL: Duration = Duration::from_secs(10);
+
+/// 按连续未推进次数计算复查间隔：1,2,4,…,60 秒。
+pub(super) fn blocked_deadline_recheck_interval(stale_rounds: u32) -> Duration {
+    // 指数退避到上限，溢出按最大值处理。
+    let secs = 1_u64.checked_shl(stale_rounds.min(63)).unwrap_or(u64::MAX);
+    Duration::from_secs(secs).min(BLOCKED_DEADLINE_MAX_RECHECK)
+}
 
 /// 等待调度状态变化或兜底复查时间；关闭时返回 `false`，其余情况返回 `true`。
 async fn wait_for_schedule_change_or_recheck(
@@ -16,8 +31,9 @@ async fn wait_for_schedule_change_or_recheck(
     backoff_changed: &tokio::sync::Notify,
     schedule_revision: &AtomicU64,
     observed_revision: u64,
+    fallback_interval: Duration,
 ) -> bool {
-    let fallback = tokio::time::sleep(BLOCKED_DEADLINE_RECHECK_INTERVAL);
+    let fallback = tokio::time::sleep(fallback_interval);
     tokio::pin!(fallback);
     loop {
         tokio::select! {
@@ -46,6 +62,7 @@ impl SyncEngine {
         poll_interval_secs: u32,
     ) -> Self {
         let (state_tx, _) = broadcast::channel(256);
+        let (folder_queue_tx, _) = broadcast::channel(64);
         let (shutdown_tx, _) = tokio::sync::watch::channel(false);
         let start_cursor_source = changes_api.clone();
         Self {
@@ -74,6 +91,11 @@ impl SyncEngine {
             shutdown: Mutex::new(false),
             shutdown_tx,
             backoff_changed: tokio::sync::Notify::new(),
+            folder_queue_changed: tokio::sync::Notify::new(),
+            folder_queue_tx,
+            verify_scheduler_running: AtomicBool::new(false),
+            pending_cloud_deletes: Mutex::new(HashMap::new()),
+            mass_delete_approved: AtomicBool::new(false),
             schedule_revision: AtomicU64::new(0),
             started: AtomicBool::new(false),
             online_check: Arc::new(crate::core::net_guard::is_online),
@@ -167,7 +189,7 @@ impl SyncEngine {
         *self.running.lock()
     }
 
-    /// 尝试获取 folder_syncing 锁（供 sync_folder_recursive 防并发用，独立于 syncing）。
+    /// 尝试获取 folder_syncing 锁（供目录同步作业的规划阶段防并发用，独立于 syncing）。
     /// 已有目录同步进行中 → false；否则置 true 并返回 true。调用方负责在 finally 调 end_folder_sync。
     pub fn try_begin_folder_sync(&self) -> bool {
         let mut g = self.folder_syncing.lock();
@@ -307,6 +329,10 @@ impl SyncEngine {
         // 启动云端定时刷新任务（poll_interval_secs=0 时内部不启动）
         self.start_cloud_refresh_timer().await;
         self.start_backoff_scheduler();
+        // 目录同步作业队列：用户点击的「双端对齐」在这里排队执行，永不因引擎忙报错。
+        self.start_folder_sync_worker();
+        // 核验通道：独立的 10 秒节拍，不再借道 ONLINE_RECOVERY 周期。
+        self.start_verify_scheduler();
 
         // 网络仍为 Online 时也可能发生短暂云端失败，因此不能依赖转换边沿唤醒。
         // 显式消费保留的 STARTUP 请求，由后台 worker 执行有界退避。
@@ -315,6 +341,32 @@ impl SyncEngine {
         }
 
         Ok(())
+    }
+
+    /// 把恢复判定出的可运行任务投递到后台执行通道。
+    ///
+    /// 恢复入口只做「准入 + 返回 ID」，这里逐条投递（入队 + spawn），不等待传输完成；
+    /// 并发由统一执行槽约束。这样上千条待传任务不会在恢复循环里按 5 秒/条串行。
+    pub(super) fn dispatch_recovered_tasks(&self, task_ids: &[i64]) {
+        if task_ids.is_empty() {
+            return;
+        }
+        let Some(executor) = &self.executor else {
+            tracing::warn!(
+                count = task_ids.len(),
+                "执行器未就绪，恢复任务保持 Pending 由下次启动接管"
+            );
+            return;
+        };
+        let mut dispatched = 0usize;
+        for task_id in task_ids {
+            if executor.dispatch_background(*task_id) {
+                dispatched += 1;
+            }
+        }
+        if dispatched > 0 {
+            tracing::info!(dispatched, "恢复任务已投递到后台执行通道");
+        }
     }
 
     /// 恢复/清理所有中断的传输任务（kill 后重启时调用）。
@@ -413,6 +465,71 @@ impl SyncEngine {
         });
     }
 
+    /// 启动独立核验通道。
+    ///
+    /// 核验过去只在携带 `ONLINE_RECOVERY` 的周期里执行（启动 / 网络恢复 / 退避到期），
+    /// 机会稀少且要和规划、传输抢同一个 owner；「正在确认结果」因此可能等上十几分钟。
+    /// 现在核验有自己的节拍：只读远端证明 + 行级 CAS，重放已在 Phase 1 改为投递到
+    /// 执行通道，所以这一路不会长时间占用线程。
+    fn start_verify_scheduler(self: &Arc<Self>) {
+        let Some(task_runner) = self.task_runner.clone() else {
+            return;
+        };
+        let engine = self.clone();
+        let mut shutdown = self.shutdown_tx.subscribe();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(VERIFY_SCHEDULER_INTERVAL);
+            // 上一轮跑得久时顺延，不在积压后连发多轮。
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    _ = ticker.tick() => {}
+                    _ = shutdown.changed() => {
+                        if *shutdown.borrow() {
+                            return;
+                        }
+                        continue;
+                    }
+                }
+                if *engine.shutdown.lock() || !engine.is_online() {
+                    continue;
+                }
+                // 同一时刻只允许一轮核验：同一任务被并发核验只会互相 CAS 报错。
+                if engine.verify_scheduler_running.swap(true, Ordering::AcqRel) {
+                    continue;
+                }
+                let result = task_runner.resume_verifying().await;
+                engine
+                    .verify_scheduler_running
+                    .store(false, Ordering::Release);
+                match result {
+                    Ok(summary) => {
+                        if summary.completed == 0 && summary.recovered_cloud_files.is_empty() {
+                            continue;
+                        }
+                        tracing::info!(
+                            completed = summary.completed,
+                            recovered = summary.recovered_cloud_files.len(),
+                            "独立核验通道本轮已结算任务"
+                        );
+                        // 恢复结果必须写回云端检查点，否则下一轮规划会用旧云树反向重键。
+                        if let Err(error) =
+                            engine.commit_recovery_checkpoint(&summary.recovered_cloud_files)
+                        {
+                            tracing::warn!(%error, "核验结果未能写回云端检查点，等待全量重建");
+                            continue;
+                        }
+                        // 本地出现了新的已同步文件：请求一次增量收敛。
+                        engine.request_cycle_background("network-recovery");
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "独立核验通道本轮失败，等待下一次扫描");
+                    }
+                }
+            }
+        });
+    }
+
     /// 启动持久传输退避 deadline 调度器。
     fn start_backoff_scheduler(self: &Arc<Self>) {
         let Some(task_runner) = self.task_runner.clone() else {
@@ -421,6 +538,10 @@ impl SyncEngine {
         let engine = self.clone();
         let mut shutdown = self.shutdown_tx.subscribe();
         tokio::spawn(async move {
+            // 同一 deadline 连续未推进的轮数；推进（或 deadline 前移）即清零。
+            let mut stale_rounds: u32 = 0;
+            // 上一轮观察到的 deadline，用于判断是否真的有进展。
+            let mut observed_deadline: Option<i64> = None;
             loop {
                 if *shutdown.borrow() {
                     break;
@@ -434,6 +555,11 @@ impl SyncEngine {
                 };
                 match deadline {
                     Some(deadline) => {
+                        // deadline 变化说明有任务推进或新增，本地退避重新计时。
+                        if observed_deadline != Some(deadline) {
+                            observed_deadline = Some(deadline);
+                            stale_rounds = 0;
+                        }
                         let remaining_ms = deadline
                             .saturating_sub(task_runner.current_time_ms())
                             .max(0) as u64;
@@ -459,11 +585,15 @@ impl SyncEngine {
                                 let observed = engine.schedule_revision.load(Ordering::Acquire);
                                 // 周期可能在任务 deadline 前开始、在 deadline 后结束；此时任务没有
                                 // 状态变化可供通知，必须用有界定时器复查，同时避免立即热循环。
+                                // 连续卡住时按 1→2→4→…→60 秒退避，不再每秒跑一个完整周期。
+                                let fallback = blocked_deadline_recheck_interval(stale_rounds);
+                                stale_rounds = stale_rounds.saturating_add(1);
                                 if !wait_for_schedule_change_or_recheck(
                                     &mut shutdown,
                                     &engine.backoff_changed,
                                     &engine.schedule_revision,
                                     observed,
+                                    fallback,
                                 )
                                 .await
                                 {
@@ -485,6 +615,9 @@ impl SyncEngine {
                         }
                     }
                     None => {
+                        // 没有到期任务：本地退避状态整体复位，下一次进入从头计时。
+                        stale_rounds = 0;
+                        observed_deadline = None;
                         tokio::select! {
                             changed = shutdown.changed() => {
                                 if changed.is_err() || *shutdown.borrow() { break; }
@@ -534,5 +667,28 @@ impl SyncEngine {
                 engine.run_auto_cloud_refresh().await;
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 同一 deadline 连续未推进时复查间隔必须指数退避到 60 秒上限。
+    #[test]
+    fn blocked_deadline_recheck_backs_off_up_to_cap() {
+        assert_eq!(blocked_deadline_recheck_interval(0), Duration::from_secs(1));
+        assert_eq!(blocked_deadline_recheck_interval(1), Duration::from_secs(2));
+        assert_eq!(blocked_deadline_recheck_interval(3), Duration::from_secs(8));
+        assert_eq!(
+            blocked_deadline_recheck_interval(6),
+            Duration::from_secs(60),
+            "达到上限后不再增长"
+        );
+        // 超大轮次不得溢出或超过上限。
+        assert_eq!(
+            blocked_deadline_recheck_interval(u32::MAX),
+            Duration::from_secs(60)
+        );
     }
 }

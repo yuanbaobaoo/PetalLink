@@ -101,4 +101,17 @@ impl SyncEngine {
         task_runner.cancel_user_task(task_id, "用户已取消该任务")?;
         Ok(())
     }
+
+    /// 批量取消全部失败任务，返回实际取消数量。
+    ///
+    /// 取消会释放失败行占用的路径身份，让被隔离的同步动作（如目录删除）
+    /// 在下一轮恢复执行；随后请求一次后台周期立即收敛。
+    pub async fn cancel_all_failed_tasks(self: &Arc<Self>) -> AppResult<u32> {
+        let task_runner = self.task_runner()?;
+        let canceled = task_runner.cancel_all_failed()?;
+        if canceled > 0 {
+            self.request_cycle_background("cancel-failed");
+        }
+        Ok(canceled)
+    }
 }

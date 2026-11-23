@@ -233,8 +233,10 @@ pub fn launch_at_login_is_enabled() -> bool {
 /// 设置开机自启。
 #[tauri::command]
 #[specta::specta]
-pub fn launch_at_login_set_enabled(enabled: bool) -> bool {
-    match crate::platform::launch_at_login::set_enabled(enabled) {
+pub fn launch_at_login_set_enabled(app: AppHandle, enabled: bool) -> bool {
+    // 登录项名称跟随展示名：dev 包不会覆盖/删除正式版的自启项。
+    let display_name = crate::constants::display_name(&app);
+    match crate::platform::launch_at_login::set_enabled(enabled, &display_name) {
         Ok(()) => true,
         Err(e) => {
             tracing::error!(error = %e, "设置开机自启失败");
@@ -467,10 +469,55 @@ pub fn logs_list() -> AppResult<Vec<crate::core::logging::LogRecord>> {
     Ok(crate::core::logging::snapshot())
 }
 
+/// 校验日志导出目标路径。
+///
+/// 导出命令会写文件，必须拒绝符号链接、设备节点与任意扩展名：
+/// 只接受 `.log` / `.txt` 的普通文件路径，父目录必须已存在（D24）。
+fn validate_log_export_destination(path: &str) -> AppResult<std::path::PathBuf> {
+    if path.trim().is_empty() {
+        return Err(AppError::generic("日志导出路径不能为空"));
+    }
+    // 目标必须是带文件名的路径。
+    let destination = std::path::PathBuf::from(path);
+    if destination.file_name().is_none() {
+        return Err(AppError::generic("日志导出必须是文件路径"));
+    }
+    // 扩展名白名单：与导出对话框一致，避免误覆盖任意文件。
+    let extension = destination
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !matches!(extension.as_str(), "log" | "txt") {
+        return Err(AppError::generic("日志只能导出为 .log 或 .txt 文件"));
+    }
+    // 父目录必须已存在，命令不替用户创建目录。
+    let parent = destination
+        .parent()
+        .ok_or_else(|| AppError::generic("日志导出路径缺少父目录"))?;
+    if !parent.is_dir() {
+        return Err(AppError::generic("日志导出目录不存在"));
+    }
+    // 目标已存在时必须是普通文件；符号链接/设备节点一律拒绝。
+    if let Ok(metadata) = std::fs::symlink_metadata(&destination) {
+        if !metadata.file_type().is_file() {
+            return Err(AppError::generic("日志导出目标不是普通文件"));
+        }
+    }
+    Ok(destination)
+}
+
 /// 导出完整日志。
+///
+/// 逐文件流式写入（临时文件 + 原子替换），不再把全部日志拼成一个字符串进内存：
+/// 日志量大时旧实现会一次性占用与日志总量相等（甚至翻倍）的内存（D24）。
 #[tauri::command]
 #[specta::specta]
 pub fn logs_export(path: String) -> AppResult<()> {
+    use std::io::{BufWriter, Write};
+
+    // 先校验目标，再读取任何日志内容。
+    let destination = validate_log_export_destination(&path)?;
     let dir = crate::core::logging::log_dir()?;
     let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
         .map(|rd| rd.flatten().map(|e| e.path()).collect())
@@ -482,43 +529,54 @@ pub fn logs_export(path: String) -> AppResult<()> {
             .unwrap_or(false)
     });
     files.sort(); // 按日期升序
-
-    // 记录导出文件
-    tracing::info!(
-        dir = %dir.display(),
-        count = files.len(),
-        files = ?files.iter()
-            .map(|f| f.file_name().unwrap_or_default().to_string_lossy().to_string())
-            .collect::<Vec<_>>(),
-        "logs_export 开始导出"
-    );
-
-    let mut out = String::new();
-    for f in &files {
-        // 容忍非 UTF-8 日志
-        let content = match std::fs::read(f) {
-            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-            Err(e) => {
-                tracing::warn!(file = %f.display(), error = %e, "日志文件读取失败，跳过");
-                continue;
-            }
-        };
-        use std::fmt::Write;
-        let _ = writeln!(out, "===== {} =====", f.display());
-        out.push_str(&content);
-        if !out.ends_with('\n') {
-            out.push('\n');
-        }
-    }
-    if out.is_empty() {
+    if files.is_empty() {
         return Err(AppError::generic("日志目录为空，无可导出内容"));
     }
+
+    // 先进临时文件，全部写完再原子替换，避免中途失败留下半个日志。
+    let temp_path = destination.with_extension(format!("{}.tmp", std::process::id()));
+    let write_result = (|| -> AppResult<()> {
+        let file = std::fs::File::create(&temp_path)
+            .map_err(|error| AppError::generic(format!("创建日志导出文件失败：{error}")))?;
+        let mut writer = BufWriter::new(file);
+        for source in &files {
+            // 分隔标题按文件路径写入，便于人工定位。
+            writeln!(writer, "===== {} =====", source.display())
+                .map_err(|error| AppError::generic(format!("写入日志分隔符失败：{error}")))?;
+            match std::fs::File::open(source) {
+                Ok(mut input) => {
+                    if let Err(error) = std::io::copy(&mut input, &mut writer) {
+                        tracing::warn!(file = %source.display(), %error, "日志文件读取失败，跳过");
+                        continue;
+                    }
+                    // 上一个文件可能没有以换行结尾，补一个保证分隔行独立成行。
+                    writeln!(writer)
+                        .map_err(|error| AppError::generic(format!("写入日志换行失败：{error}")))?;
+                }
+                Err(error) => {
+                    tracing::warn!(file = %source.display(), %error, "日志文件读取失败，跳过");
+                    continue;
+                }
+            }
+        }
+        writer
+            .flush()
+            .map_err(|error| AppError::generic(format!("刷新日志导出文件失败：{error}")))
+    })();
+    if let Err(error) = write_result {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error);
+    }
+    std::fs::rename(&temp_path, &destination).map_err(|error| {
+        let _ = std::fs::remove_file(&temp_path);
+        AppError::generic(format!("替换日志导出文件失败：{error}"))
+    })?;
+
     tracing::info!(
-        out_bytes = out.len(),
+        path = %destination.display(),
         file_count = files.len(),
         "logs_export 完成"
     );
-    std::fs::write(&path, out)?;
     Ok(())
 }
 
@@ -530,6 +588,23 @@ pub fn logs_clear() -> AppResult<()> {
     Ok(())
 }
 
+/// 获取当前构建的展示名（dev 包带 `-Dev` 后缀）。
+#[tauri::command]
+#[specta::specta]
+pub fn app_display_name(app: AppHandle) -> String {
+    crate::constants::display_name(&app)
+}
+
+/// 获取应用完整标题（窗口标题栏与登录页共用同一文案）。
+#[tauri::command]
+#[specta::specta]
+pub fn app_full_title(app: AppHandle) -> String {
+    format!(
+        "{} - 华为云盘客户端开源版",
+        crate::constants::display_name(&app)
+    )
+}
+
 /// 获取应用版本。
 #[tauri::command]
 #[specta::specta]
@@ -539,9 +614,31 @@ pub fn app_get_version() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_local_item_openable, resolve_existing_mount_path, validate_external_url};
+    use super::{
+        ensure_local_item_openable, resolve_existing_mount_path, validate_external_url,
+        validate_log_export_destination,
+    };
     #[cfg(target_os = "linux")]
     use super::{linux_appimage_runtime_shape_is_valid, linux_appimage_updater_is_supported};
+
+    /// 日志导出只接受 .log/.txt 普通文件路径，父目录必须存在（D24）。
+    #[test]
+    fn log_export_destination_is_restricted() {
+        let temp = tempfile::tempdir().unwrap();
+        let good = temp.path().join("logs.txt");
+        assert!(validate_log_export_destination(good.to_str().unwrap()).is_ok());
+
+        // 扩展名白名单拒绝任意文件覆盖。
+        let bad_ext = temp.path().join("keep.dylib");
+        assert!(validate_log_export_destination(bad_ext.to_str().unwrap()).is_err());
+        // 目录本身不能作为导出目标。
+        assert!(validate_log_export_destination(temp.path().to_str().unwrap()).is_err());
+        // 父目录不存在时拒绝。
+        let missing_parent = temp.path().join("nope").join("logs.log");
+        assert!(validate_log_export_destination(missing_parent.to_str().unwrap()).is_err());
+        // 空路径拒绝。
+        assert!(validate_log_export_destination("   ").is_err());
+    }
 
     #[test]
     fn external_url_accepts_valid_http_and_https_urls() {

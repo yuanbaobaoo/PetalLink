@@ -242,8 +242,9 @@ fn read_decode_uses_budgeted_server_backoff_instead_of_waiting_for_network() {
         classify_transfer_error(&error, recovery_context),
         ClassifiedRecovery {
             kind: TransferErrorKind::Server,
+            // 阶梯第三档 10 分钟；旧实现这里是 4 秒，秒级抖动就会打穿预算。
             decision: RecoveryDecision::Backoff {
-                next_retry_at: 14_000,
+                next_retry_at: 610_000,
             },
             consumes_retry_budget: true,
         }
@@ -312,9 +313,9 @@ fn rate_limit_honors_retry_after_and_consumes_retry_budget() {
     );
 }
 
-/// 验证服务端退避确定性指数增长且受上限约束。
+/// 验证服务端退避按 30s/2m/10m/30m/1h 阶梯推进，抖动叠加且末档不再截断。
 #[test]
-fn server_backoff_is_exponential_deterministic_and_capped() {
+fn server_backoff_follows_ladder_and_tolerates_jitter() {
     let error = AppError::drive_from_response(503, "{}", None, RequestSemantics::Read, false);
     let mut recovery_context = context(TransferOperation::Download);
     recovery_context.attempt_count = 3;
@@ -324,8 +325,9 @@ fn server_backoff_is_exponential_deterministic_and_capped() {
         classify_transfer_error(&error, recovery_context),
         ClassifiedRecovery {
             kind: TransferErrorKind::Server,
+            // 第四档 30 分钟 + 抖动 250ms。
             decision: RecoveryDecision::Backoff {
-                next_retry_at: 18_250,
+                next_retry_at: 1_810_250,
             },
             consumes_retry_budget: true,
         }
@@ -336,7 +338,8 @@ fn server_backoff_is_exponential_deterministic_and_capped() {
     assert_eq!(
         classify_transfer_error(&error, recovery_context).decision,
         RecoveryDecision::Backoff {
-            next_retry_at: 310_000,
+            // 超出阶梯长度取末档 1 小时，不再被 5 分钟上限截断。
+            next_retry_at: 3_610_250,
         }
     );
 }

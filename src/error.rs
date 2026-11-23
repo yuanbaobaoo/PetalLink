@@ -504,7 +504,7 @@ impl AppError {
 }
 
 /// 从华为错误响应的常见结构中提取错误码。
-fn parse_huawei_error_code(body: &str) -> Option<String> {
+pub(crate) fn parse_huawei_error_code(body: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(body).ok()?;
     let error_code = value
         .get("errorCode")

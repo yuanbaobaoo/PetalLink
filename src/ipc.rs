@@ -45,14 +45,30 @@ pub struct UploadFailedEvent {
     pub error: String,
 }
 
-/// 目录递归同步进度事件。
+/// 单个传输任务成功结算事件。
+///
+/// 前端据此主动重载当前目录，不必再等云轮询周期（默认 60 秒）才发现新上传的文件。
 #[derive(Clone, Serialize, Type, Event)]
-#[tauri_specta(event_name = "folder_sync_progress")]
-pub struct FolderSyncProgressEvent {
-    /// 已完成任务数。
-    pub done: usize,
-    /// 本轮任务总数。
-    pub total: usize,
+#[tauri_specta(event_name = "transfer_settled")]
+pub struct TransferSettledEvent {
+    /// 相对挂载目录的路径。
+    pub relative_path: String,
+}
+
+/// 目录同步作业发生变化，前端应重新加载作业列表。
+#[derive(Clone, Serialize, Type, Event)]
+#[tauri_specta(event_name = "folder_sync_jobs_changed")]
+pub struct FolderSyncJobsChangedEvent;
+
+/// 登录界面已拉起，携带实际使用的形态。
+///
+/// 前端据此决定是否保留底部抽屉：后端可能因为 child webview 不可用而退回独立窗口
+/// 或系统浏览器，这时抽屉必须收起来，否则会留下一块空白。
+#[derive(Clone, Debug, Serialize, Type, Event)]
+#[tauri_specta(event_name = "auth_login_launched")]
+pub struct AuthLoginLaunchedEvent {
+    /// 形态：`sheet` / `window` / `browser`。
+    pub mode: String,
 }
 
 /// 原生菜单请求打开设置页。
@@ -136,6 +152,17 @@ struct TransferErrorKindConstants {
     name_conflict: i32,
 }
 
+/// 目录同步作业状态常量，供前端生成同源常量。
+#[derive(Serialize, Type)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+struct FolderSyncJobStateConstants {
+    queued: i32,
+    planning: i32,
+    completed: i32,
+    failed: i32,
+    canceled: i32,
+}
+
 /// 前端自动生成 bindings 的固定位置。
 pub fn bindings_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("app/api/generated.ts")
@@ -149,6 +176,8 @@ pub fn builder() -> Builder<Wry> {
             commands::auth_restore,
             commands::auth_login,
             commands::auth_cancel_login,
+            commands::auth_login_in_browser,
+            commands::auth_login_sheet_bounds,
             commands::auth_logout,
             commands::auth_get_user_info,
             commands::auth_is_logged_in,
@@ -160,6 +189,7 @@ pub fn builder() -> Builder<Wry> {
             commands::drive_rename_file,
             commands::drive_move_file,
             commands::drive_search,
+            commands::drive_search_all,
             commands::drive_get_thumbnail,
             commands::drive_get_about,
             commands::drive_download_file,
@@ -173,12 +203,18 @@ pub fn builder() -> Builder<Wry> {
             commands::sync_free_up_batch,
             commands::sync_list_freeable_in_folder,
             commands::sync_download_on_demand,
-            commands::sync_folder_recursive,
+            commands::sync_download_enqueue,
+            commands::sync_folder_enqueue,
+            commands::sync_folder_jobs,
+            commands::sync_folder_cancel,
             commands::sync_retry_failed,
+            commands::sync_approve_mass_delete,
+            commands::sync_cleanup_placeholder,
             commands::sync_state,
             commands::sync_items_by_folder,
             commands::config_load,
             commands::config_save,
+            commands::config_save_sort,
             commands::tray_set_visible,
             commands::config_export_json,
             commands::config_import_json,
@@ -191,6 +227,7 @@ pub fn builder() -> Builder<Wry> {
             commands::transfer_overwrite_remote,
             commands::transfer_keep_both,
             commands::transfer_cancel,
+            commands::transfer_cancel_all_failed,
             commands::open_in_finder,
             commands::open_local_item,
             commands::reveal_local_item,
@@ -206,13 +243,17 @@ pub fn builder() -> Builder<Wry> {
             commands::logs_export,
             commands::logs_clear,
             commands::app_get_version,
+            commands::app_display_name,
+            commands::app_full_title,
         ])
         .events(collect_events![
             SyncStateEvent,
             FolderContentChangedEvent,
             TransferUpdateEvent,
             UploadFailedEvent,
-            FolderSyncProgressEvent,
+            TransferSettledEvent,
+            FolderSyncJobsChangedEvent,
+            AuthLoginLaunchedEvent,
             NavigateSettingsEvent,
             VirtualDriveStatusEvent,
         ])
@@ -225,6 +266,16 @@ pub fn builder() -> Builder<Wry> {
         .constant(
             "SYNC_USER_MESSAGE_RULES",
             crate::sync::user_messages::ipc_user_message_rules(),
+        )
+        .constant(
+            "FOLDER_SYNC_JOB_STATE",
+            FolderSyncJobStateConstants {
+                queued: crate::data::repository::folder_sync_jobs::job_state::QUEUED,
+                planning: crate::data::repository::folder_sync_jobs::job_state::PLANNING,
+                completed: crate::data::repository::folder_sync_jobs::job_state::COMPLETED,
+                failed: crate::data::repository::folder_sync_jobs::job_state::FAILED,
+                canceled: crate::data::repository::folder_sync_jobs::job_state::CANCELED,
+            },
         )
         .constant(
             "TRANSFER_DIR",

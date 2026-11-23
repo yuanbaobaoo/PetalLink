@@ -25,7 +25,8 @@ defineEmits<{ (e: "click"): void }>();
 </script>
 
 <template>
-  <div
+  <button
+    type="button"
     :class="['mate-nav-item', { 'is-active': active }]"
     :style="{ paddingLeft: `${indent + 14}px`, height: `${height}px` }"
     @click="$emit('click')"
@@ -33,14 +34,21 @@ defineEmits<{ (e: "click"): void }>();
     <MateIcon v-if="icon" :name="icon" :size="16" class="mate-nav-item__icon" />
     <span class="mate-nav-item__label">{{ label }}</span>
     <slot />
-  </div>
+  </button>
 </template>
 
 <style scoped>
+/* 语义化按钮同时承担导航项：清掉浏览器默认的边框/底色，保留既有视觉。 */
 .mate-nav-item {
   display: flex;
   align-items: center;
   gap: var(--space-md);
+  width: 100%;
+  margin: 0;
+  border: 0;
+  background-color: transparent;
+  font-family: inherit;
+  text-align: left;
   padding-right: 14px;
   border-radius: var(--radius-md);
   cursor: pointer;

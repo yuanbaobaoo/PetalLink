@@ -1,10 +1,13 @@
 <!-- 文件列表，表头可拖拽列宽 + 多选 + 右键菜单 -->
 <script setup lang="ts">
-import { ref, computed, watch, nextTick, onMounted, onUnmounted } from "vue";
+import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted } from "vue";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { useFileBrowserStore } from "@/stores/fileBrowser";
 import { useSyncStore } from "@/stores/sync";
+import { useFolderSyncStore } from "@/stores/folderSync";
+import { useTransferStore } from "@/stores/transfer";
+import { FOLDER_SYNC_JOB_STATE } from "@/api/folderSync";
 import { commands } from "@/api/generated";
 import type { DriveFile, FreeableItem } from "@/api/generated";
 import * as driveApi from "@/api/drive";
@@ -19,6 +22,7 @@ import { runDragImportFromDrop } from "@/composables/useDragUpload";
 import { useThumbnails } from "@/composables/useThumbnails";
 import { formatFileSize, formatDateTime } from "@/utils/format";
 import { extractErrorMessage } from "@/utils/error";
+import { loadConfig } from "@/api/config";
 
 // 同步状态文案：仅云端（未同步到本地）
 const SYNC_STATUS_CLOUD_ONLY = "仅云端（未同步到本地）";
@@ -28,11 +32,37 @@ const SYNC_STATUS_SYNCED_LOCAL = "已同步到本地";
 const SYNC_STATUS_PLACEHOLDER = "仅云端（尚未下载）";
 // 同步状态文案：文件夹
 const SYNC_STATUS_FOLDER = "文件夹";
+// 同步状态文案：该路径有传输任务在排队或执行
+const SYNC_STATUS_SYNCING = "正在同步";
+// 同步状态文案：上传完成，正在确认云端结果
+const SYNC_STATUS_VERIFYING = "正在确认结果";
+// 同步状态文案：该路径最近一次同步失败
+const SYNC_STATUS_FAILED = "同步失败";
 
 // 文件浏览器 store
 const browser = useFileBrowserStore();
 // 同步全局状态 store
 const sync = useSyncStore();
+// 目录同步作业 store（「双端对齐」入队与排队状态）
+const folderSync = useFolderSyncStore();
+// 传输队列 store（用于在同步状态变化时刷新六态）
+const transfer = useTransferStore();
+// 文件列表滚动容器（刷新时保留滚动位置）
+const fileBodyRef = ref<HTMLElement | null>(null);
+// 批量状态查询代次：只应用最新一次请求的结果
+let batchStatusSeq = 0;
+// 键盘快捷键作用的当前行（点击行即选中）
+const selectedFile = computed(() => sortedFiles.value.find((f) => f.id === selectedId.value) ?? null);
+// 单行渲染高度（px），与 tokens 里的 --file-row-height 一致，窗口化计算依赖它
+const FILE_ROW_HEIGHT = 56;
+// 触发窗口化渲染的行数阈值：小目录保持完整 DOM，行为与以前完全一致
+const VIRTUAL_ROW_THRESHOLD = 200;
+// 窗口上下各多渲染的行数，避免快速滚动时出现空白
+const VIRTUAL_OVERSCAN = 8;
+// 列表当前滚动位置与可视高度
+const listViewport = reactive({ top: 0, height: 0 });
+// 下一次列表刷新是否需要回到顶部（目录切换时为 true）
+let resetScrollOnNextRender = false;
 
 // 镜像根目录（下载目标用）
 const mountDir = computed(() => sync.mountDir);
@@ -67,9 +97,9 @@ const fileOp = useFileOperation({
   clearSelection: () => { checked.value.clear(); showCheckboxes.value = false; },
 });
 
-// 排序字段
+// 排序字段（与后端 SortField 同源，启动时从配置恢复）
 const sortField = ref<"name" | "size" | "modifiedTime">("name");
-// 排序方向（true=升序）
+// 排序方向（true=升序，与后端 SortOrder 同源）
 const sortAsc = ref(true);
 
 // 当前文件夹文件列表
@@ -116,7 +146,11 @@ let dragStartW = 0;
 const dragging = ref<"size" | "time" | null>(null);
 
 // 同步进度对话框：downloadOnDemand 到镜像目录
-const downloading = ref<{ open: boolean; name: string }>({ open: false, name: "" });
+const downloading = ref<{ open: boolean; name: string; count: number }>({
+  open: false,
+  name: "",
+  count: 0,
+});
 
 
 // 右键菜单状态
@@ -147,7 +181,7 @@ const freeUpConfirmLoading = ref(false);
 // 释放空间预览候选项总字节数
 const freeUpTotalBytes = computed(() => freeUpPreviewItems.value.reduce((sum, it) => sum + it.size, 0));
 
-// 批量文件同步状态缓存（fileId → "synced" | "placeholder" | "not_synced" | "folder"）
+// 批量文件同步状态缓存（fileId → 六态之一：folder/synced/placeholder/not_synced/syncing/verifying/failed）
 const fileStatuses = ref<Record<string, string>>({});
 
 // 外部文件拖入列表区域的高亮态
@@ -174,6 +208,16 @@ onMounted(async () => {
   } catch {
     // 拖放监听不可用时静默降级，不影响列表其余功能。
   }
+  // 恢复上次的排序偏好：没有配置或读取失败时保持默认（名称升序）。
+  try {
+    // 完整配置里只取排序两项。
+    const config = await loadConfig();
+    sortField.value = config.sort_field;
+    sortAsc.value = config.sort_order === "ascending";
+  } catch {
+    // 配置尚未就绪时静默降级，不打断列表加载。
+  }
+  window.addEventListener("keydown", handleListKeydown);
 });
 
 /**
@@ -181,14 +225,103 @@ onMounted(async () => {
  */
 onUnmounted(() => {
   unlistenDragDrop?.();
+  window.removeEventListener("keydown", handleListKeydown);
 });
 
 /**
- * 目录切换时清空缩略图与状态缓存，避免跨目录累积。
+ * 判断键盘事件是否发生在可输入控件里。
+ *
+ * @param event - 键盘事件
  */
-watch(() => browser.pathStack.length, () => {
+function isTypingTarget(event: KeyboardEvent): boolean {
+  // 事件目标元素。
+  const target = event.target as HTMLElement | null;
+  if (!target) return false;
+  const tag = target.tagName.toLowerCase();
+  return tag === "input" || tag === "textarea" || tag === "select" || target.isContentEditable;
+}
+
+/**
+ * 文件列表快捷键。
+ *
+ * 只调用既有入口：打开复用双击、重命名复用右键菜单同名动作、删除复用批量删除、
+ * 全选复用全选逻辑，不新增任何写路径（U12）。
+ *
+ * @param event - 键盘事件
+ */
+function handleListKeydown(event: KeyboardEvent): void {
+  // 有弹窗打开或正在输入时不抢按键。
+  if (isTypingTarget(event) || showRenameDialog.value || showFreeUpDialog.value) return;
+  // Cmd/Ctrl+A 全选当前目录
+  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "a") {
+    if (sortedFiles.value.length === 0) return;
+    event.preventDefault();
+    showCheckboxes.value = true;
+    checked.value.clear();
+    for (const f of sortedFiles.value) checked.value.add(f.id);
+    return;
+  }
+  // Esc 退出多选
+  if (event.key === "Escape") {
+    if (checked.value.size > 0 || showCheckboxes.value) {
+      event.preventDefault();
+      checked.value.clear();
+      showCheckboxes.value = false;
+    }
+    return;
+  }
+  // Delete / Backspace 删除选中项
+  if (event.key === "Delete" || event.key === "Backspace") {
+    // 删除目标：多选优先，否则当前行。
+    const targets = checked.value.size > 0
+      ? [...checked.value]
+      : selectedFile.value
+        ? [selectedFile.value.id]
+        : [];
+    if (targets.length === 0 || sync.isIndexing) return;
+    event.preventDefault();
+    if (checked.value.size === 0 && selectedFile.value) {
+      checked.value.clear();
+      checked.value.add(selectedFile.value.id);
+      showCheckboxes.value = true;
+    }
+    void handleBulkDelete();
+    return;
+  }
+  // 以下快捷键需要当前行
+  const current = selectedFile.value;
+  if (!current) return;
+  if (event.key === "Enter") {
+    event.preventDefault();
+    void handleDoubleClick(current);
+    return;
+  }
+  if (event.key === "F2") {
+    event.preventDefault();
+    if (sync.mountConfigured && !sync.isIndexing) handleRename(current);
+    return;
+  }
+  if (event.key === " ") {
+    // 空格切换当前行的勾选
+    event.preventDefault();
+    showCheckboxes.value = true;
+    handleToggleFile(current.id);
+  }
+}
+
+/**
+ * 目录切换时清空缩略图、状态缓存与勾选，避免跨目录累积。
+ *
+ * 监听当前目录 ID 而不是路径栈深度：同级目录跳转（A→B）深度不变，
+ * 旧实现会保留上一目录的勾选，导致「确认删 3 项、实际删 0 项」。
+ */
+watch(() => browser.current.id, () => {
   thumbs.clear();
   fileStatuses.value = {};
+  checked.value.clear();
+  showCheckboxes.value = false;
+  // 切换目录必须回到顶部，滚动位置只在同一目录内刷新时保留。
+  resetScrollOnNextRender = true;
 });
 
 /**
@@ -196,9 +329,91 @@ watch(() => browser.pathStack.length, () => {
  * 监听 files 而非 sortedFiles：仅切换排序方式不重新拉取。
  */
 watch(files, () => {
+  // 静默刷新不应把用户弹回列表顶部；目录切换才回到顶部。
+  const previousScrollTop = resetScrollOnNextRender ? 0 : (fileBodyRef.value?.scrollTop ?? 0);
+  resetScrollOnNextRender = false;
   void thumbs.loadThumbs();
   void refreshBatchStatus();
+  void nextTick(() => {
+    if (!fileBodyRef.value) return;
+    fileBodyRef.value.scrollTop = previousScrollTop;
+    // 目录内容变化后同步一次可视高度，窗口化需要正确的视口尺寸。
+    handleListScroll();
+  });
 });
+
+/**
+ * 传输活跃数变化时刷新批量状态。
+ * 任务开始/结束各刷新一次，足以让「正在同步 / 正在确认 / 失败」及时收敛。
+ */
+watch(() => transfer.active, () => {
+  void refreshBatchStatus();
+});
+
+/**
+ * 挂载配置、索引状态与同步完成时间变化时重试批量状态。
+ *
+ * 启动瞬间 `sync.init()` 可能尚未完成，首次查询因 `mountConfigured=false` 直接返回；
+ * 索引完成后基线才有数据。旧实现只在 files/transfer 变化时刷新，导致重启后整列
+ * 停在「仅云端」，直到发生一次传输才自愈（2026-11-23 压测 D6）。
+ *
+ * `immediate` 同时覆盖「从设置页返回」：组件重建时文件列表已经就绪，files watch
+ * 不会再触发，必须挂载即查询一次。
+ */
+watch(
+  () => [sync.mountConfigured, sync.isIndexing, sync.lastSyncTime],
+  () => {
+    void refreshBatchStatus();
+  },
+  { immediate: true },
+);
+
+/**
+ * 窗口化渲染的行切片。
+ *
+ * 行高固定，因此只需按滚动位置计算可视区间；小目录直接返回全量，
+ * 不引入额外 DOM 包装，避免影响既有交互与测试（U14）。
+ */
+const visibleRows = computed(() => {
+  // 当前目录的全部行。
+  const all = sortedFiles.value;
+  if (all.length <= VIRTUAL_ROW_THRESHOLD || listViewport.height <= 0) {
+    return { items: all, offset: 0, startIndex: 0 };
+  }
+  // 可视区起始下标。
+  const first = Math.floor(listViewport.top / FILE_ROW_HEIGHT);
+  // 起始下标（含 overscan）。
+  const startIndex = Math.max(0, first - VIRTUAL_OVERSCAN);
+  // 结束下标（含 overscan）。
+  const endIndex = Math.min(
+    all.length,
+    Math.ceil((listViewport.top + listViewport.height) / FILE_ROW_HEIGHT) + VIRTUAL_OVERSCAN,
+  );
+  return {
+    items: all.slice(startIndex, endIndex),
+    offset: startIndex * FILE_ROW_HEIGHT,
+    startIndex,
+  };
+});
+
+// 窗口化渲染的顶部占位高度样式
+const spacerTopStyle = computed(() => ({ height: `${visibleRows.value.offset}px` }));
+// 窗口化渲染的底部占位高度样式
+const spacerBottomStyle = computed(() => {
+  // 尚未渲染的尾部行数。
+  const tail = sortedFiles.value.length - visibleRows.value.startIndex - visibleRows.value.items.length;
+  return { height: `${Math.max(0, tail) * FILE_ROW_HEIGHT}px` };
+});
+
+/**
+ * 记录滚动位置与可视高度，驱动窗口化渲染。
+ */
+function handleListScroll(): void {
+  const el = fileBodyRef.value;
+  if (!el) return;
+  listViewport.top = el.scrollTop;
+  listViewport.height = el.clientHeight;
+}
 
 /**
  * 批量拉取当前文件列表中所有文件的同步状态。
@@ -209,12 +424,18 @@ async function refreshBatchStatus(): Promise<void> {
   // 当前列表的全部云端 ID。
   const ids = sortedFiles.value.map((f) => f.id);
   if (ids.length === 0) return;
+  // 本次状态查询的代次：目录切换或更新请求到达后，旧响应必须被丢弃，
+  // 否则会把上一目录的状态贴到新目录的同名文件上（D19）。
+  const requestSeq = ++batchStatusSeq;
   try {
     // 后端返回的 fileId 到本地状态映射。
     const map = await commands.syncBatchFileStatus(ids);
+    if (requestSeq !== batchStatusSeq) return;
     fileStatuses.value = map;
-  } catch {
-    // 批量查询失败时清空缓存，回退到默认云朵图标
+  } catch (error) {
+    if (requestSeq !== batchStatusSeq) return;
+    // 批量查询失败时清空缓存，回退到默认云朵图标；不静默吞掉原因，便于定位（D6）。
+    console.warn("[FileListView] 批量同步状态查询失败", error);
     fileStatuses.value = {};
   }
 }
@@ -311,6 +532,9 @@ const SYNC_STATUS_VIEW: Record<string, { icon: string; text: string; className: 
   placeholder: { icon: "cloud", text: SYNC_STATUS_PLACEHOLDER, className: "is-placeholder" },
   folder: { icon: "folder", text: SYNC_STATUS_FOLDER, className: "is-folder-status" },
   not_synced: { icon: "cloud", text: SYNC_STATUS_CLOUD_ONLY, className: "is-cloud-only" },
+  syncing: { icon: "sync", text: SYNC_STATUS_SYNCING, className: "is-syncing" },
+  verifying: { icon: "sync", text: SYNC_STATUS_VERIFYING, className: "is-verifying" },
+  failed: { icon: "alert", text: SYNC_STATUS_FAILED, className: "is-sync-failed" },
 };
 
 /**
@@ -441,10 +665,14 @@ async function handleSyncItem(f: DriveFile): Promise<void> {
 async function doSyncFolder(f: DriveFile): Promise<void> {
   // 后端递归同步所需的挂载相对路径。
   const rel = relPathOf(f);
-  showToast(`已开始同步文件夹「${f.name}」，进度见传输队列`);
-  // 后端命令只负责入队，等待调用结果不会阻塞实际后台同步。
+  // 作业入队即返回：排队位置与投递进度都在传输弹层可见。
   try {
-    await commands.syncFolderRecursive(f.id, rel);
+    const job = await folderSync.enqueue(f.id, rel);
+    // 同一目录已有活跃作业时后端会复用，提示词要如实反映“已在队列中”。
+    const message = job.state === FOLDER_SYNC_JOB_STATE.QUEUED
+      ? `已加入目录同步队列：「${f.name}」，在传输队列查看进度`
+      : `「${f.name}」已在目录同步队列中`;
+    showToast(message);
   } catch (e) {
     showToast("同步失败：" + extractErrorMessage(e), { variant: "error" });
   }
@@ -462,9 +690,21 @@ async function handleSyncFile(f: DriveFile, notifySuccess = true): Promise<boole
   if (!fileOp.guard({ requireMount: true })) return false;
   // 文件在挂载目录中的安全目标路径。
   const dest = `${mountDir.value}/${relPathOf(f)}`;
-  downloading.value = { open: true, name: f.name };
+  // 并发下载不再互相覆盖：弹窗显示最近一个文件名与在途数量。
+  downloading.value = {
+    open: true,
+    name: f.name,
+    count: downloading.value.count + 1,
+  };
   try {
-    await commands.syncDownloadOnDemand(f.id, dest);
+    // 后端区分「已下载完成」与「已加入传输队列」，两者都不是失败。
+    const outcome = await commands.syncDownloadOnDemand(f.id, dest);
+    if (outcome === "queued") {
+      showToast(`已加入传输队列：「${f.name}」，完成后可打开`);
+      // 入队后状态列应立刻从「仅云端」变成「正在同步」。
+      void refreshBatchStatus();
+      return false;
+    }
     if (notifySuccess) showToast(`已同步「${f.name}」`);
     // 下载完成后磁盘 xattr 已变（state=downloaded），重新拉批量状态刷新图标（云端→已同步）
     void refreshBatchStatus();
@@ -473,7 +713,13 @@ async function handleSyncFile(f: DriveFile, notifySuccess = true): Promise<boole
     showToast("同步失败：" + extractErrorMessage(e), { variant: "error" });
     return false;
   } finally {
-    downloading.value.open = false;
+    // 仅当自己这一批全部结束才关闭弹窗，避免并发下载把别人的进度关掉。
+    const remaining = Math.max(0, downloading.value.count - 1);
+    downloading.value = {
+      open: remaining > 0,
+      name: downloading.value.name,
+      count: remaining,
+    };
   }
 }
 
@@ -754,18 +1000,37 @@ async function handleBulkDownload(): Promise<void> {
   await runBulkDownload(async () => {
     if (checked.value.size === 0) return;
     if (!fileOp.guard({ requireMount: true })) return;
-    // 本轮成功入队的文件数。
-    let n = 0;
+    // 已下载完成的数量。
+    let completed = 0;
+    // 已加入传输队列的数量（后台下载，不是失败）。
+    let queued = 0;
+    // 失败明细：只保留可读原因，用于汇总提示。
+    const failures: string[] = [];
     await fileOp.runAction(
       { errorPrefix: "批量下载", refreshAfter: false, clearSelectionAfter: true },
       async () => {
         for (const f of sortedFiles.value) {
           if (!checked.value.has(f.id) || driveApi.isFolder(f)) continue;
-          try { await commands.syncDownloadOnDemand(f.id, `${mountDir.value}/${relPathOf(f)}`); n++; } catch { /* 部分失败静默 */ }
+          try {
+            // 批量路径只入队，不等待每个文件下载完成。
+            const outcome = await commands.syncDownloadEnqueue(
+              f.id,
+              `${mountDir.value}/${relPathOf(f)}`,
+            );
+            if (outcome === "queued") queued++;
+            else completed++;
+          } catch (e) {
+            failures.push(`${f.name}：${extractErrorMessage(e)}`);
+          }
         }
       },
     );
-    showToast(`已下载 ${n} 项`);
+    // 汇总提示：成功 / 已入队 / 失败三档，避免只报成功数掩盖失败。
+    const parts = [`已下载 ${completed} 项`];
+    if (queued > 0) parts.push(`${queued} 项已加入传输队列`);
+    if (failures.length > 0) parts.push(`${failures.length} 项失败（${failures[0]}）`);
+    showToast(parts.join("，"), { variant: failures.length > 0 ? "warning" : "success" });
+    void refreshBatchStatus();
   });
 }
 
@@ -811,6 +1076,13 @@ async function handleBulkFreeUp(): Promise<void> {
 function handleSort(field: "name" | "size" | "modifiedTime"): void {
   if (sortField.value === field) sortAsc.value = !sortAsc.value;
   else { sortField.value = field; sortAsc.value = true; }
+  // 排序是纯展示偏好：写回配置，下次启动保持同一视图。
+  void commands.configSaveSort(
+    sortField.value,
+    sortAsc.value ? "ascending" : "descending",
+  ).catch(() => {
+    // 保存失败不影响本次排序，仅下次启动回落到上次成功保存的值。
+  });
 }
 </script>
 
@@ -833,13 +1105,24 @@ function handleSort(field: "name" | "size" | "modifiedTime"): void {
       </button>
     </div>
 
-    <!-- 空状态 -->
+    <!-- 空状态：加载失败时必须让位给错误提示，不能把“读不到”说成“没有文件” -->
     <MateEmpty
-      v-if="files.length === 0 && !browser.loading"
+      v-if="files.length === 0 && !browser.loading && !browser.errorMessage"
       icon="folder-open"
       title="此文件夹为空"
       description="上传或拖入文件即可同步到云端"
     />
+    <!-- 加载失败状态：错误已经在信息区展示，这里给出直接重试入口 -->
+    <MateEmpty
+      v-else-if="files.length === 0 && !browser.loading && browser.errorMessage"
+      icon="alert"
+      title="无法加载此文件夹"
+      description="请检查网络后重试"
+    >
+      <template #action>
+        <MateButton variant="soft" icon="refresh" @click="browser.loadCurrent()">重新加载</MateButton>
+      </template>
+    </MateEmpty>
 
     <!-- 加载态 -->
     <div v-if="browser.loading" class="file-loading"><MateCircularProgress :size="24" /></div>
@@ -873,9 +1156,11 @@ function handleSort(field: "name" | "size" | "modifiedTime"): void {
       </div>
 
       <!-- 文件行 -->
-      <div class="file-body">
+      <div ref="fileBodyRef" class="file-body" @scroll.passive="handleListScroll">
+        <!-- 窗口化渲染的顶部占位 -->
+        <div class="file-spacer" :style="spacerTopStyle" />
         <div
-          v-for="f in sortedFiles"
+          v-for="f in visibleRows.items"
           :key="f.id"
           class="file-row"
           :class="{ 'is-selected': selectedId === f.id }"
@@ -906,11 +1191,13 @@ function handleSort(field: "name" | "size" | "modifiedTime"): void {
             <MateButton variant="icon" icon="list" tooltip="操作" @click.stop="handleShowActionMenu($event, f)" />
           </div>
         </div>
+        <!-- 窗口化渲染的底部占位 -->
+        <div class="file-spacer" :style="spacerBottomStyle" />
       </div>
     </template>
 
     <!-- 底部信息 -->
-    <div class="file-footer">{{ files.length }} 项 · 已全部加载</div>
+    <div class="file-footer">共 {{ files.length }} 项</div>
 
     <!-- 右键菜单（MateIcon 项） -->
     <Teleport to="body">
@@ -961,6 +1248,7 @@ function handleSort(field: "name" | "size" | "modifiedTime"): void {
       <div class="dl-pane">
         <MateCircularProgress :size="20" />
         <span class="dl-name">{{ downloading.name }}</span>
+        <span v-if="downloading.count > 1" class="dl-extra">还有 {{ downloading.count - 1 }} 个文件在下载</span>
       </div>
     </MateDialog>
 
@@ -1055,6 +1343,9 @@ function handleSort(field: "name" | "size" | "modifiedTime"): void {
 .file-col--status :deep(.is-synced-local) { color: var(--ok); }
 .file-col--status :deep(.is-placeholder) { color: var(--ink-600); }
 .file-col--status :deep(.is-folder-status) { color: var(--brand-500); }
+.file-col--status :deep(.is-syncing) { color: var(--brand-500); }
+.file-col--status :deep(.is-verifying) { color: var(--warn); }
+.file-col--status :deep(.is-sync-failed) { color: var(--err); }
 .file-col--actions { width: 44px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
 .file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--font-body); color: var(--ink-900); }
 
@@ -1128,14 +1419,16 @@ function handleSort(field: "name" | "size" | "modifiedTime"): void {
 /* 下载进度 */
 .dl-pane { display: flex; align-items: center; gap: var(--space-md); }
 .dl-name { font-size: var(--font-body); color: var(--ink-900); }
+.dl-extra { font-size: var(--font-caption); color: var(--ink-400); }
 
 /* 释放空间预览 */
 .freeup-pane { display: flex; flex-direction: column; gap: var(--space-sm); }
 .freeup-summary { font-size: var(--font-body-sm); color: var(--ink-600); margin: 0; }
 .freeup-summary strong { color: var(--ink-900); }
-.freeup-list { max-height: 280px; overflow-y: auto; overflow-x: auto; display: flex; flex-direction: column; gap: 2px; }
-.freeup-row { display: flex; align-items: center; gap: var(--space-sm); padding: 4px 0; font-size: var(--font-body-sm); color: var(--ink-900); width: max-content; min-width: 100%; }
-/* 路径不截断，超出弹窗宽度时整表横向滚动 */
-.freeup-row__name { flex: 1; white-space: nowrap; }
+.freeup-list { max-height: 280px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+/* 行宽跟随弹窗内容宽度：长路径用省略号收敛，不再被卡片右边缘裁掉。 */
+.freeup-row { display: flex; align-items: center; gap: var(--space-sm); padding: 4px 0; font-size: var(--font-body-sm); color: var(--ink-900); min-width: 0; }
+/* 路径单行省略：完整路径仍可通过 title 悬浮查看。 */
+.freeup-row__name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .freeup-row__size { flex-shrink: 0; color: var(--ink-400); font-variant-numeric: tabular-nums; }
 </style>

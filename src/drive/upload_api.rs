@@ -43,10 +43,13 @@ const DEFAULT_CHUNK_SIZE: u64 = 2 * 1024 * 1024;
 const MAX_CHUNK_SIZE: u64 = 64 * 1024 * 1024;
 /// 明确未提交的连接失败允许的单分片本地尝试次数。
 const CHUNK_RETRIES: u32 = 3;
-/// 分片全部发完后的最终状态查询轮询次数（华为服务端异步合并，立即查询常得 308）
-const FINAL_STATUS_MAX_POLLS: u32 = 5;
-/// 每次最终状态查询的间隔（秒）
-const FINAL_STATUS_POLL_INTERVAL_SECS: u64 = 3;
+/// 分片全部发完后的最终状态查询轮询次数
+/// （华为服务端异步合并，立即查询常得 308 或元数据未就绪）。
+const FINAL_STATUS_MAX_POLLS: u32 = 10;
+/// 每次最终状态查询的间隔（秒）；10 次约 50 秒收尾窗口。
+const FINAL_STATUS_POLL_INTERVAL_SECS: u64 = 5;
+/// 同一会话内允许的连续「范围空洞回退」次数；超过即判定会话不可用。
+const MAX_RANGE_REWINDS: u32 = 3;
 
 /// 协调小文件、覆盖更新与断点续传的上传接口。
 pub struct UploadApi {

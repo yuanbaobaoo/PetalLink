@@ -115,14 +115,14 @@ fn resolve_paths() -> (Option<PathBuf>, PathBuf) {
 ///
 /// 此函数通过 osascript 调用 System Events 删除 Login Items 中的 PetalLink。
 /// 如果 System Events 未授权或 PetalLink 不在 Login Items 中，静默忽略。
-pub fn remove_from_login_items() {
+pub fn remove_from_login_items(display_name: &str) {
     let script = format!(
         "tell application \"System Events\" to delete every login item whose name is \"{name}\"",
-        name = crate::constants::APP_NAME,
+        name = display_name,
     );
     match Command::new("osascript").arg("-e").arg(&script).output() {
         Ok(output) if output.status.success() => {
-            tracing::info!("已从 Login Items 移除 {}", crate::constants::APP_NAME);
+            tracing::info!("已从 Login Items 移除 {}", display_name);
         }
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -138,7 +138,7 @@ pub fn remove_from_login_items() {
 }
 
 /// 启用/禁用开机自启：写/删 LaunchAgent plist + launchctl bootstrap/bootout。
-pub fn set_enabled(enabled: bool) -> std::io::Result<()> {
+pub fn set_enabled(enabled: bool, display_name: &str) -> std::io::Result<()> {
     let dir = launch_agents_dir().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound, "无法获取 LaunchAgents 目录")
     })?;
@@ -157,13 +157,13 @@ pub fn set_enabled(enabled: bool) -> std::io::Result<()> {
             std::fs::remove_file(&path)?;
             tracing::info!(label, "开机自启已禁用，LaunchAgent plist 已移除");
         }
-        // 同时清理 Login Items（如果存在）
-        remove_from_login_items();
+        // 同时清理 Login Items（如果存在）；只清理本构建对应的名字。
+        remove_from_login_items(display_name);
         return Ok(());
     }
 
     // 启用：先清除 Login Items 中的重复项（防止双重启动 - 见 remove_from_login_items 文档）
-    remove_from_login_items();
+    remove_from_login_items(display_name);
 
     // 启用：先卸载旧实例（避免重复 bootstrap 报错），再写 plist，最后 bootstrap
     let label = BUNDLE_IDENTIFIER;

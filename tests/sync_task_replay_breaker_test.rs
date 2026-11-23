@@ -346,3 +346,64 @@ async fn manual_retry_resets_attempt_and_verify_counters() {
     assert_eq!(persisted.2, None);
     assert_eq!(persisted.3, None);
 }
+
+/// 注入后台调度器后，核验判定「未提交」只投递重放意图，不得在核验通道里同步上传。
+///
+/// 这是 2026-11-22「正在确认结果卡十几分钟」的直接病因：GB 级重放占死唯一周期。
+#[tokio::test]
+async fn not_committed_replay_is_dispatched_instead_of_running_inline() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mount_root, local_path) = create_local_source(&temp);
+    let database = open_database(&temp.path().join("state.db"));
+    // 构造等待核验的歧义任务，对齐现场。
+    let mut task = pending_create_task(&local_path);
+    task.state = i32::from(TransferState::VerifyingRemote);
+    task.error_kind = Some(i32::from(TransferErrorKind::RemoteAmbiguous));
+    task.error_message = Some("云端响应异常".to_string());
+    task.next_retry_at = Some(NOW_MS);
+    let task_id = insert_task(&database.lock(), &task);
+    let execute_calls = Arc::new(AtomicUsize::new(0));
+    let runner = TaskRunner::new_with_clock(
+        database.clone(),
+        mount_root,
+        Arc::new(NotCommittedReplayOperations {
+            execute_calls: execute_calls.clone(),
+            verification_calls: Arc::new(AtomicUsize::new(0)),
+        }),
+        Arc::new(|| true),
+        Arc::new(|| Ok(())),
+        None,
+        Arc::new(|| NOW_MS),
+    );
+    // 记录被投递到后台的任务 ID。
+    let dispatched = Arc::new(AtomicUsize::new(0));
+    let dispatched_writer = dispatched.clone();
+    runner.set_background_dispatcher(Arc::new(move |dispatched_id| {
+        assert_eq!(dispatched_id, task_id);
+        dispatched_writer.fetch_add(1, Ordering::SeqCst);
+    }));
+
+    runner.resume_verifying().await.unwrap();
+
+    assert_eq!(
+        execute_calls.load(Ordering::SeqCst),
+        0,
+        "核验通道不得同步执行重放上传"
+    );
+    assert_eq!(
+        dispatched.load(Ordering::SeqCst),
+        1,
+        "确认未提交必须把重放投递给执行通道"
+    );
+    // 任务已回到 Pending，等待后台执行；会话保持可续传。
+    let row: (i32, Option<String>) = database
+        .lock()
+        .query_row(
+            "SELECT state, session_url FROM transfer_queue WHERE id=?1",
+            [task_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(row.0, i32::from(TransferState::Pending));
+    assert!(row.1.is_none(), "非会话过期场景仍按原逻辑清理会话后重放");
+}

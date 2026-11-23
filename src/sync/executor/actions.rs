@@ -606,6 +606,26 @@ impl SyncExecutor {
             None => return ActionResult::fail("缺少 fileId", false),
         };
         let rel = action.relative_path.as_deref().unwrap_or("?");
+        // 执行前最后一次本地复核：规划到执行之间路径可能已经恢复（用户撤销删除、
+        // 卷重新挂载、目录被替换）。这一步与周期闸门同语义，是防误删的最后一道。
+        if let (Some(mount), Some(relative_path)) = (&self.mount, action.relative_path.as_deref()) {
+            let abs = mount.mount_dir().join(relative_path);
+            match std::fs::symlink_metadata(&abs) {
+                Ok(_) => {
+                    tracing::warn!(rel, "拒绝删除云端文件：本地路径在执行时仍然存在");
+                    return ActionResult::fail(
+                        "本地路径仍然存在，已拒绝删除云端文件",
+                        // 延后而非失败：下一轮重新规划，交给周期闸门统一判定。
+                        true,
+                    );
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    tracing::warn!(rel, %error, "无法确认本地路径不存在，拒绝删除云端文件");
+                    return ActionResult::fail("无法确认本地路径不存在，已拒绝删除云端文件", true);
+                }
+            }
+        }
         let result = match self.files_api.delete(&file_id).await {
             Ok(()) => ActionResult::ok(None),
             Err(e) => match self.files_api.verify_deleted(&file_id).await {

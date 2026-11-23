@@ -536,6 +536,23 @@ pub fn list_all_transfers(conn: &Connection) -> AppResult<Vec<TransferTask>> {
     collect_tasks(stmt.query_map([], TransferTask::from_row))
 }
 
+/// 按相对路径查询同路径的全部任务（入队仲裁用，命中 idx_transfer_relative_state）。
+///
+/// 入队是高频路径：旧实现每次都整表读取再过滤，批量上传 1000 个文件时是 O(n²)
+/// 的全表扫描。这里改为按索引点查，只取真正参与仲裁的那几行（D30）。
+pub fn list_by_relative_path(
+    conn: &Connection,
+    relative_path: &str,
+) -> AppResult<Vec<TransferTask>> {
+    let mut stmt = db_err!(
+        "查询",
+        conn.prepare(
+            "SELECT * FROM transfer_queue WHERE relative_path=?1 ORDER BY created_at DESC"
+        )
+    );
+    collect_tasks(stmt.query_map([relative_path], TransferTask::from_row))
+}
+
 /// 查询进行中的传输任务（Pending/Running，created_at 升序，托盘菜单展示用）。
 pub fn list_active_transfers(conn: &Connection) -> AppResult<Vec<TransferTask>> {
     let mut stmt = db_err!(

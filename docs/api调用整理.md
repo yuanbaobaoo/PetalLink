@@ -180,8 +180,8 @@
 | **API 端点** | `https://driveapis.cloud.huawei.com.cn/drive/v1/files?fields=*&pageSize=100&queryParam={encodedQuery}` |
 | **方法** | `GET` |
 | **调用场景** | AppBar 搜索框输入关键词搜索文件和文件夹 |
-| **关键细节** | 官方 DSL：`fileName contains 'keyword'`，可叠加 `and 'parentId' in parentFolder`；整段 query 只 URL encode 一次。官方未定义单引号/反斜线转义，当前对这两类输入 fail closed。 |
-| **代码位置** | `src/drive/files_api/read.rs:search()` |
+| **关键细节** | 官方 DSL：`fileName contains 'keyword'`，可叠加 `and 'parentId' in parentFolder`；整段 query 只 URL encode 一次。官方未定义单引号/反斜线转义，当前对这两类输入 fail closed。⚠️ 官方把 `contains` 定义为**前缀匹配**（「匹配以 name 开头的文件名或目录名」），且实测对中文名可能直接返回空数组，因此客户端搜索改为：目录内 `list_all` + 本地子串过滤，整盘用同步引擎云树快照子串匹配，服务端 DSL 仅在引擎未就绪时兜底。 |
+| **代码位置** | `src/drive/files_api/read.rs:search()`、`src/commands/drive.rs:drive_search_all()` |
 | **官方文档** | https://developer.huawei.com/consumer/en/doc/HMSCore-References/server-api-fileslist-0000001050153649 |
 
 ### 15. 缩略图

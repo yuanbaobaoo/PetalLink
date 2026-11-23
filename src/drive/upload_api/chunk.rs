@@ -7,8 +7,8 @@ use serde_json::Value;
 use crate::error::{AppError, AppResult, RequestSemantics};
 
 use super::protocol::{
-    complete_upload_file, is_remote_ambiguity, log_incomplete_final_body, parse_confirmed_offset,
-    remote_ambiguity, upload_response_error,
+    complete_upload_file, has_object_identity, is_remote_ambiguity, log_incomplete_final_body,
+    parse_confirmed_ranges, remote_ambiguity, upload_response_error,
 };
 use super::{ChunkResult, ResumeSession, UploadApi};
 
@@ -37,7 +37,7 @@ impl UploadApi {
         &self,
         session: &mut ResumeSession,
         token: &mut String,
-        chunk: &[u8],
+        chunk: &bytes::Bytes,
         offset: u64,
         chunk_len: u64,
         total_size: u64,
@@ -106,8 +106,21 @@ impl UploadApi {
                 remote_ambiguity(&format!("308 分片响应无法解析：{error}"), auth_replayed)
             })?;
             self.update_session_chunk_size(session, &body)?;
-            let uploaded = parse_confirmed_offset(&body, total_size)?;
-            if uploaded <= offset {
+            let ranges = parse_confirmed_ranges(&body, total_size)?;
+            let uploaded = ranges.prefix;
+            // 空洞导致连续前缀回退：允许调用方退回到空洞起点补发，
+            // 只补缺失区间而不是整份重传；回退次数由会话层限次。
+            if uploaded < offset {
+                tracing::warn!(
+                    offset,
+                    chunk_len,
+                    uploaded,
+                    gap = ?ranges.gap,
+                    "服务端已接收范围出现空洞，回退到连续前缀补发"
+                );
+                return Ok(incomplete_result(&body, uploaded));
+            }
+            if uploaded == offset {
                 return Err(remote_ambiguity(
                     &format!("308 未确认当前分片：本地起点 {offset}，服务端确认偏移 {uploaded}"),
                     auth_replayed,
@@ -172,12 +185,14 @@ impl UploadApi {
     }
 
     /// 原样发送一次分片 PUT，不在此层自动重试。
+    ///
+    /// 请求体直接复用调用方的 `Bytes`（引用计数），不再逐次复制整块数据。
     async fn send_chunk_request(
         &self,
         url: &str,
         token: &str,
         content_range: &str,
-        chunk: &[u8],
+        chunk: &bytes::Bytes,
     ) -> Result<reqwest::Response, reqwest::Error> {
         self.http
             .put(url)
@@ -185,7 +200,7 @@ impl UploadApi {
             .header(CONTENT_LENGTH, chunk.len().to_string())
             .header(CONTENT_TYPE, "application/octet-stream")
             .bearer_auth(token)
-            .body(chunk.to_vec())
+            .body(chunk.clone())
             .send()
             .await
     }
@@ -263,8 +278,8 @@ impl UploadApi {
                 )
             })?;
             self.update_session_chunk_size(session, &body)?;
-            let uploaded = parse_confirmed_offset(&body, total_size)?;
-            return Ok(incomplete_result(&body, uploaded));
+            let ranges = parse_confirmed_ranges(&body, total_size)?;
+            return Ok(incomplete_result(&body, ranges.prefix));
         }
 
         if !status.is_success() {
@@ -298,6 +313,20 @@ impl UploadApi {
                     process_time_ms: body.get("processTime").and_then(Value::as_u64),
                 });
             }
+        }
+        // 已有对象身份但元数据未回填：交给上层继续轮询同一会话，不要立刻判歧义。
+        if has_object_identity(&body) {
+            tracing::warn!(
+                total_size,
+                body = %body,
+                "上传收尾元数据未就绪，继续轮询同一会话"
+            );
+            return Ok(ChunkResult {
+                uploaded: total_size,
+                is_final: false,
+                final_file: None,
+                process_time_ms: body.get("processTime").and_then(Value::as_u64),
+            });
         }
         log_incomplete_final_body("上传状态查询", &body, total_size, None);
         Err(remote_ambiguity(

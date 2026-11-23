@@ -33,7 +33,36 @@ impl SyncEngine {
                 }
             }
         }));
+        // 核验判定「未提交」时把重放投递给执行通道，周期不必等待整次上传。
+        let dispatch_engine = Arc::downgrade(self);
+        task_runner.set_background_dispatcher(Arc::new(move |task_id| {
+            match dispatch_engine.upgrade() {
+                Some(engine) => engine.spawn_background_retry(task_id),
+                None => tracing::warn!(
+                    task_id,
+                    "同步引擎已停止，重放任务保留 Pending 由启动恢复接管"
+                ),
+            }
+        }));
         self.initialize_known_waiting_count();
+    }
+
+    /// 清理一个已失效的本地占位文件（供 UI 上的用户显式操作）。
+    pub fn cleanup_invalid_placeholder(self: &Arc<Self>, relative_path: &str) -> AppResult<bool> {
+        let removed = self.cleanup_invalid_placeholder_inner(relative_path)?;
+        if removed {
+            // 状态里的失效清单需要立即刷新（下一轮周期重新汇总）。
+            self.request_background_cycle("cleanup-placeholder");
+        }
+        Ok(removed)
+    }
+
+    /// 请求一次后台同步周期。
+    ///
+    /// 命令层只拿得到 `Arc<SyncEngine>`，无法访问 `pub(super)` 的调度入口；
+    /// 这个薄封装让它能按语义触发一次重规划（例如用户确认大批量删除之后）。
+    pub fn request_background_cycle(self: &Arc<Self>, triggered_by: &'static str) {
+        self.request_cycle_background(triggered_by);
     }
 
     /// 通知退避调度状态发生变化。

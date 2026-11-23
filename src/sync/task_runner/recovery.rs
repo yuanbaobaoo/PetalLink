@@ -219,15 +219,19 @@ impl TaskRunner {
                         ..Default::default()
                     };
                     if failure.target == TransferState::VerifyingRemote {
-                        let conn = self.db.lock();
-                        repository::patch_transfer_in_state(
-                            &conn,
-                            task.id,
-                            task.state_revision,
-                            TransferState::VerifyingRemote,
-                            patch,
-                        )
-                        .map_err(transition_error)?;
+                        // 事务与状态发布严格分离：发布回调会再次获取同一把 DB 锁，
+                        // parking_lot 不可重入，持锁调用必然整机挂起。
+                        {
+                            let conn = self.db.lock();
+                            repository::patch_transfer_in_state(
+                                &conn,
+                                task.id,
+                                task.state_revision,
+                                TransferState::VerifyingRemote,
+                                patch,
+                            )
+                            .map_err(transition_error)?;
+                        }
                         self.notify_best_effort();
                     } else {
                         self.transition(task.id, task.state_revision, failure.target, patch)?;
@@ -323,8 +327,18 @@ impl TaskRunner {
                         ..Default::default()
                     },
                 )?;
-                // run_expected 会自行获取同一路径许可；确认未提交后才释放核验许可。
+                // 重放属于数据面：确认未提交后只投递意图，绝不在核验通道里同步等待上传。
                 drop(activity);
+                if self.dispatch_background(pending.id) {
+                    tracing::info!(
+                        task_id = pending.id,
+                        rounds,
+                        session_expired,
+                        "远端核验确认写入未提交，重放已入队后台执行"
+                    );
+                    return Ok(None);
+                }
+                // 未注入调度器（独立运行/测试）时保持原来的同步重放语义。
                 self.run_expected(pending, true).await.map(Some)
             }
             Ok(RemoteVerification::Ambiguous(message)) => {
@@ -421,18 +435,41 @@ impl TaskRunner {
             self.notify_rejection();
             return Ok(TaskRecoverySummary::default());
         }
+        let now = (self.now_ms)();
         let tasks = self.list_states(&[TransferState::WaitingForNetwork])?;
         let mut summary = TaskRecoverySummary::default();
         for task in tasks {
-            let task_id = task.id;
-            match self.run_expected(task.clone(), true).await {
+            // 只有到期任务才唤醒：一条任务的 deadline 不应把其它等待任务一起拉起来。
+            if task
+                .next_retry_at
+                .is_some_and(|next_retry_at| next_retry_at > now)
+            {
+                continue;
+            }
+            // 只判定可运行；真正执行交给统一并发通道，避免恢复循环被单条长任务占住。
+            summary.runnable_task_ids.push(task.id);
+        }
+        // 未注入后台通道（独立测试）时退回内联执行，保持既有语义。
+        if self.has_background_dispatcher() {
+            Ok(summary)
+        } else {
+            Ok(self.run_runnable_inline(summary).await)
+        }
+    }
+
+    /// 未注入后台执行通道时内联执行可运行任务（仅供独立测试/引擎未装配场景）。
+    async fn run_runnable_inline(&self, mut summary: TaskRecoverySummary) -> TaskRecoverySummary {
+        let runnable = std::mem::take(&mut summary.runnable_task_ids);
+        for task_id in runnable {
+            let Ok(task) = self.load(task_id) else {
+                continue;
+            };
+            match self.run_prepared(task_id, true).await {
                 Ok(outcome) => Self::record_recovered_task(&mut summary, &task, &outcome),
-                Err(error) => {
-                    tracing::warn!(task_id, %error, "等待网络任务恢复失败");
-                }
+                Err(error) => tracing::warn!(task_id, %error, "恢复任务内联执行失败"),
             }
         }
-        Ok(summary)
+        summary
     }
 
     /// 记录真正完成的恢复任务，并保留远端写入的权威路径元数据。
@@ -467,21 +504,29 @@ impl TaskRunner {
             {
                 continue;
             }
-            match self.run_expected(task.clone(), true).await {
-                Ok(outcome) => Self::record_recovered_task(&mut summary, &task, &outcome),
-                Err(error) => {
-                    tracing::warn!(task_id = task.id, %error, "退避任务恢复失败");
-                }
-            }
+            // 只判定可运行；执行由调度方投递到并发通道。
+            summary.runnable_task_ids.push(task.id);
         }
-        Ok(summary)
+        // 未注入后台通道（独立测试）时退回内联执行，保持既有语义。
+        if self.has_background_dispatcher() {
+            Ok(summary)
+        } else {
+            Ok(self.run_runnable_inline(summary).await)
+        }
     }
 
     /// 返回下一次恢复截止时间。
+    ///
+    /// 覆盖退避、远端核验与等待网络三类：它们都需要一条兜底时间线，
+    /// 否则网络早恢复、核验机会已到，任务仍要等下一个恢复周期。
     pub fn next_backoff_deadline_ms(&self) -> AppResult<Option<i64>> {
         let now = (self.now_ms)();
         Ok(self
-            .list_states(&[TransferState::BackingOff, TransferState::VerifyingRemote])?
+            .list_states(&[
+                TransferState::BackingOff,
+                TransferState::VerifyingRemote,
+                TransferState::WaitingForNetwork,
+            ])?
             .into_iter()
             .map(|task| task.next_retry_at.unwrap_or(now))
             .min())
@@ -559,23 +604,39 @@ impl TaskRunner {
                 }
             }
         }
+        // 未注入后台通道（独立测试/引擎未装配）时退回内联执行；生产路径由调度方并发投递。
+        if !self.has_background_dispatcher() {
+            let runnable = std::mem::take(&mut summary.runnable_task_ids);
+            for task_id in runnable {
+                match self.run_prepared(task_id, true).await {
+                    Ok(outcome) => match outcome.disposition {
+                        TaskDisposition::Completed => summary.completed += 1,
+                        TaskDisposition::WaitingForNetwork => summary.waiting_network += 1,
+                        TaskDisposition::VerifyingRemote => summary.verifying_remote += 1,
+                        TaskDisposition::RestartRequired => summary.failed += 1,
+                        _ => {}
+                    },
+                    Err(error) => {
+                        tracing::warn!(task_id, %error, "启动任务内联恢复失败");
+                        summary.failed += 1;
+                    }
+                }
+            }
+        }
         Ok(summary)
     }
 
     /// 独立恢复一个启动期任务，避免后续任务失败丢失已经完成的恢复结果。
+    ///
+    /// 只做状态判定与准入，不内联执行传输：执行统一交给后台并发通道。
     async fn recover_startup_task(&self, task: TransferTask) -> AppResult<StartupRecoverySummary> {
         let mut summary = StartupRecoverySummary::default();
         // 逐行获取许可，确保关闭时尚未准入的任务保持原样。
         let _activity = self.begin_activity(&task)?;
         let state = task.state_kind().map_err(transition_error)?;
-        // Pending 任务从完整前置校验重新进入主链。
+        // Pending 任务保持原样，交给后台执行通道并发执行。
         if state != TransferState::Running {
-            let recovered_path = task.relative_path.clone();
-            self.record_startup_outcome(
-                self.run_expected(task, true).await,
-                recovered_path.as_deref(),
-                &mut summary,
-            );
+            summary.runnable_task_ids.push(task.id);
             return Ok(summary);
         }
 
@@ -640,12 +701,8 @@ impl TaskRunner {
                         ..Default::default()
                     },
                 )?;
-                let recovered_path = pending.relative_path.clone();
-                self.record_startup_outcome(
-                    self.run_expected(pending, true).await,
-                    recovered_path.as_deref(),
-                    &mut summary,
-                );
+                // 断点已回写，执行交给后台并发通道。
+                summary.runnable_task_ids.push(pending.id);
             }
             _ => {
                 self.transition_failure(
@@ -672,6 +729,9 @@ impl TaskRunner {
         summary
             .recovered_cloud_files
             .extend(task_summary.recovered_cloud_files);
+        summary
+            .runnable_task_ids
+            .extend(task_summary.runnable_task_ids);
     }
 
     /// 抑制启动期同路径旧任务，并保留可能的远程写入结果。
@@ -704,40 +764,5 @@ impl TaskRunner {
             "启动恢复仅保留同路径最新任务，旧任务等待重新规划",
         )?;
         Ok(false)
-    }
-
-    /// 将单任务恢复去向累计到启动统计。
-    fn record_startup_outcome(
-        &self,
-        result: AppResult<TaskExecutionOutcome>,
-        relative_path: Option<&str>,
-        summary: &mut StartupRecoverySummary,
-    ) {
-        match result {
-            Ok(outcome) => match outcome.disposition {
-                TaskDisposition::Completed => {
-                    summary.completed += 1;
-                    if let (Some(relative_path), Some(file)) =
-                        (relative_path, outcome.cloud_file.as_ref())
-                    {
-                        summary.recovered_cloud_files.push(RecoveredCloudFile {
-                            relative_path: relative_path.to_string(),
-                            file: file.clone(),
-                        });
-                    }
-                }
-                TaskDisposition::Pending
-                | TaskDisposition::Running
-                | TaskDisposition::BlockedByActiveIntent => {}
-                TaskDisposition::WaitingForNetwork => summary.waiting_network += 1,
-                TaskDisposition::VerifyingRemote => summary.verifying_remote += 1,
-                TaskDisposition::BackingOff => {}
-                TaskDisposition::RestartRequired => summary.failed += 1,
-            },
-            Err(error) => {
-                tracing::warn!(%error, "启动任务恢复失败");
-                summary.failed += 1;
-            }
-        }
     }
 }

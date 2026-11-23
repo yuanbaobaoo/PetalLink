@@ -20,6 +20,8 @@ mod conflict_actions;
 mod coordination;
 /// 执行单次同步周期的阶段编排。
 mod cycle;
+/// 目录同步作业队列与 worker。
+mod folder_queue;
 /// 管理引擎启动、监听器和关闭流程。
 mod lifecycle;
 /// 串行发布带版本号的运行时状态。
@@ -134,7 +136,7 @@ pub struct SyncEngine {
     task_runner: Option<Arc<TaskRunner>>,
     cycle: CycleCoordinator,
     syncing: Mutex<bool>,
-    /// 目录递归同步（sync_folder_recursive）互斥锁。
+    /// 目录同步作业互斥锁（`engine/folder_queue.rs` 的规划阶段使用）。
     /// 独立于 syncing：folder sync 不被启动/常规 sync cycle 的 syncing 锁阻塞
     /// （启动 scan 可能耗时几十秒，不该挡住用户点目录同步）；run_sync_cycle 会检查本锁跳过，
     /// 避免 watcher cycle 与 folder sync 并发竞争本地文件/DB。
@@ -157,6 +159,22 @@ pub struct SyncEngine {
     shutdown: Mutex<bool>,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     backoff_changed: tokio::sync::Notify,
+    /// 目录同步作业队列变化通知：worker 空闲等待与入队唤醒共用。
+    folder_queue_changed: tokio::sync::Notify,
+    /// 目录同步作业变化广播：引擎不持有 AppHandle，由运行时转发为前端事件。
+    folder_queue_tx: broadcast::Sender<()>,
+    /// 核验通道是否正在跑一轮；用于避免同一时刻两轮核验并发处理同一批任务。
+    verify_scheduler_running: AtomicBool,
+    /// 本地删除驱动的云端删除「首次观察到的缺席时间」。
+    ///
+    /// 云端删除必须等同一路径连续缺席超过 `CLOUD_DELETE_GRACE_MS` 才执行，
+    /// 给用户留出撤销误删（废纸篓恢复/Cmd+Z）的窗口；文件一旦重新出现，
+    /// 记录随之清掉，删除自然取消。
+    pending_cloud_deletes: Mutex<HashMap<String, i64>>,
+    /// 用户是否已显式确认「执行被拦下的大批量云端删除」。
+    ///
+    /// 一次性令牌：被闸门消费后立即失效；只有用户点击确认才会置位。
+    mass_delete_approved: AtomicBool,
     schedule_revision: AtomicU64,
     started: AtomicBool,
     online_check: Arc<dyn Fn() -> bool + Send + Sync>,

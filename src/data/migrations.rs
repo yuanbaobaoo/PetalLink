@@ -7,6 +7,7 @@
 //! - v4 onUpgrade from<4: TransferQueue 加 session_url（华为 resume 上传 Location 头会话 URL）
 //! - v5 onUpgrade from<5: TransferQueue 加任务状态机上下文、revision 与重试索引
 //! - v6 onUpgrade from<6: TransferQueue 加 verify_attempt_count（远端核验专用计数）
+//! - v7 onUpgrade from<7: 新增 folder_sync_jobs（目录同步作业队列）与 sync_items 路径索引
 //! - beforeOpen: PRAGMA foreign_keys = ON（已在 open 中处理）
 
 use std::path::Path;
@@ -36,7 +37,7 @@ pub fn run_with_mount(conn: &Connection, mount_root: Option<&Path>) -> AppResult
         .map_err(|e| AppError::generic(format!("开始数据库迁移事务失败：{e}")))?;
 
     if current == 0 {
-        // 全新数据库：直接建最新（v6）结构，避免先建旧结构再 ALTER。
+        // 全新数据库：直接建最新（v7）结构，避免先建旧结构再 ALTER。
         create_all(&transaction)?;
     } else {
         // 旧数据库逐步升级，全部步骤与 user_version 写入同属一个事务。
@@ -54,6 +55,9 @@ pub fn run_with_mount(conn: &Connection, mount_root: Option<&Path>) -> AppResult
         }
         if current < 6 {
             upgrade_to_v6(&transaction)?;
+        }
+        if current < 7 {
+            upgrade_to_v7(&transaction)?;
         }
     }
 
@@ -115,6 +119,27 @@ fn create_all(conn: &Connection) -> AppResult<()> {
             state_revision INTEGER NOT NULL DEFAULT 0
         );
 
+        CREATE TABLE IF NOT EXISTS folder_sync_jobs (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            folder_id      TEXT    NOT NULL,
+            rel_path       TEXT    NOT NULL,
+            state          INTEGER NOT NULL DEFAULT 0,
+            planned_total  INTEGER NOT NULL DEFAULT 0,
+            enqueued       INTEGER NOT NULL DEFAULT 0,
+            error_message  TEXT,
+            created_at     INTEGER NOT NULL,
+            started_at     INTEGER,
+            finished_at    INTEGER,
+            state_revision INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_folder_sync_jobs_state
+            ON folder_sync_jobs(state, created_at);
+        -- 同一目录同一路径只允许一个未完成作业（幂等去重）
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_folder_sync_jobs_active
+            ON folder_sync_jobs(folder_id, rel_path) WHERE state IN (0, 1);
+
+        CREATE INDEX IF NOT EXISTS idx_sync_items_local_path ON sync_items(local_path);
         CREATE INDEX IF NOT EXISTS idx_sync_items_file_id ON sync_items(file_id);
         CREATE INDEX IF NOT EXISTS idx_sync_items_status  ON sync_items(status);
         CREATE INDEX IF NOT EXISTS idx_transfer_state     ON transfer_queue(state);
@@ -161,6 +186,35 @@ fn upgrade_to_v6(conn: &Connection) -> AppResult<()> {
         "verify_attempt_count",
         "INTEGER NOT NULL DEFAULT 0",
     )?;
+    Ok(())
+}
+
+/// v7：新增目录同步作业队列与 sync_items 路径索引（只加不改，降级可忽略）。
+fn upgrade_to_v7(conn: &Connection) -> AppResult<()> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS folder_sync_jobs (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            folder_id      TEXT    NOT NULL,
+            rel_path       TEXT    NOT NULL,
+            state          INTEGER NOT NULL DEFAULT 0,
+            planned_total  INTEGER NOT NULL DEFAULT 0,
+            enqueued       INTEGER NOT NULL DEFAULT 0,
+            error_message  TEXT,
+            created_at     INTEGER NOT NULL,
+            started_at     INTEGER,
+            finished_at    INTEGER,
+            state_revision INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_folder_sync_jobs_state
+            ON folder_sync_jobs(state, created_at);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_folder_sync_jobs_active
+            ON folder_sync_jobs(folder_id, rel_path) WHERE state IN (0, 1);
+        CREATE INDEX IF NOT EXISTS idx_sync_items_local_path ON sync_items(local_path);
+        ",
+    )
+    .map_err(|error| AppError::generic(format!("升级到 v7 失败：{error}")))?;
     Ok(())
 }
 
@@ -346,4 +400,80 @@ fn set_version(conn: &Connection, version: u32) -> AppResult<()> {
     conn.execute_batch(&format!("{USER_VERSION_PRAGMA} = {version};"))
         .map_err(|e| AppError::generic(format!("写入版本失败：{e}")))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 全新数据库必须一次建成最新结构，并写入当前 schema 版本。
+    #[test]
+    fn fresh_database_creates_latest_schema() {
+        let connection = Connection::open_in_memory().unwrap();
+
+        run_with_mount(&connection, None).unwrap();
+
+        let version: u32 = connection
+            .query_row(USER_VERSION_PRAGMA, [], |row| row.get::<_, i64>(0))
+            .map(|value| value as u32)
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        assert!(table_exists(&connection, "folder_sync_jobs"));
+        assert!(index_exists(&connection, "idx_folder_sync_jobs_active"));
+        assert!(index_exists(&connection, "idx_sync_items_local_path"));
+    }
+
+    /// v6 升级到 v7 只新增作业队列与索引，不动既有数据。
+    #[test]
+    fn upgrade_from_v6_adds_job_queue_without_touching_data() {
+        let connection = Connection::open_in_memory().unwrap();
+        // 先建出完整结构，再退回 v6 形态：删掉 v7 新增对象并回写旧版本号。
+        run_with_mount(&connection, None).unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO sync_items (file_id, local_path, name, status)
+                 VALUES ('cloud-id', 'videos/a.mp4', 'a.mp4', 0);
+                 DROP TABLE folder_sync_jobs;
+                 DROP INDEX idx_sync_items_local_path;
+                 PRAGMA user_version = 6;",
+            )
+            .unwrap();
+
+        run_with_mount(&connection, None).unwrap();
+
+        assert!(table_exists(&connection, "folder_sync_jobs"));
+        assert!(index_exists(&connection, "idx_sync_items_local_path"));
+        let kept: String = connection
+            .query_row(
+                "SELECT local_path FROM sync_items WHERE file_id='cloud-id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, "videos/a.mp4", "升级不得改动既有同步基线");
+    }
+
+    /// 判断表是否存在。
+    fn table_exists(connection: &Connection, table: &str) -> bool {
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                [table],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|count| count > 0)
+            .unwrap_or(false)
+    }
+
+    /// 判断索引是否存在。
+    fn index_exists(connection: &Connection, index: &str) -> bool {
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?1",
+                [index],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|count| count > 0)
+            .unwrap_or(false)
+    }
 }

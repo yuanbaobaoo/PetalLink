@@ -187,9 +187,10 @@ async fn bulk_retry_before_start_rejects_without_mutating_failed_sync_items() {
         Some("old sync failure"),
     );
 
-    let error = engine.retry_failed().await.unwrap_err();
+    let error = Arc::new(engine).retry_all_failed().await.unwrap_err();
 
-    assert!(error.to_string().contains("正在启动"));
+    // 引擎尚未启动即没有任务执行器，批量重试必须整体失败而不是部分入队。
+    assert!(error.to_string().contains("未初始化"), "实际错误：{error}");
     let after: (i32, Option<String>) = db
         .lock()
         .query_row(

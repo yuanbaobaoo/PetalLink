@@ -6,6 +6,7 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
 import { commands } from "@/api/generated";
+import type { SheetBounds } from "@/api/generated";
 import type { UserInfo } from "@/api/generated";
 import type { AppError } from "@/api/tauri";
 import { useSyncStore } from "@/stores/sync";
@@ -70,13 +71,14 @@ export const useAuthStore = defineStore("auth", () => {
    * 发起 OAuth 登录。
    * 用户取消时静默回到 loggedOut。
    */
-  async function login(): Promise<boolean> {
+  async function login(sheetBounds?: SheetBounds): Promise<boolean> {
     if (loading.value) return false; // 防重复点击
     status.value = "authorizing";
     loading.value = true;
     errorMessage.value = null;
     try {
-      await commands.authLogin(callbackPort.value);
+      // 传入抽屉内容区矩形：后端据此把登录页 webview 嵌到主窗口底部。
+      await commands.authLogin(callbackPort.value, sheetBounds ?? null);
       status.value = "loggedIn";
       loading.value = false;
       // 登录成功后立即拉用户信息

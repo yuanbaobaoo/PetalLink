@@ -32,8 +32,31 @@ pub const PLACEHOLDER_SECRET: &str = "REPLACE_WITH_REAL_SECRET";
 /// 应用展示名（托盘标题、关于页等）
 pub const APP_NAME: &str = "PetalLink";
 
-/// 应用完整标题（窗口标题栏、关于页、任务切换器）
-pub const APP_FULL_TITLE: &str = "PetalLink - 华为云盘客户端开源版";
+/// 返回当前构建的展示名。
+///
+/// 以打包配置里的 `productName` 为准：正式版是 `PetalLink`，
+/// `tauri.dev.conf.json` 覆盖成 `PetalLink-Dev`。窗口标题、托盘菜单与 tooltip
+/// 全部走这里，开发者同时装正式版和开发版时一眼可区分。
+pub fn display_name(app: &tauri::AppHandle) -> String {
+    app.config()
+        .product_name
+        .clone()
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| APP_NAME.to_string())
+}
+
+/// 返回是否运行在开发配置（`-dev` 包）下。
+pub fn is_dev_build(app: &tauri::AppHandle) -> bool {
+    display_name(app).to_ascii_lowercase().contains("-dev")
+}
+
+/// 应用标题后缀（窗口标题栏、关于页、任务切换器）。
+pub const APP_TITLE_SUFFIX: &str = " - 华为云盘客户端开源版";
+
+/// 拼出带展示名的完整标题。
+pub fn app_full_title(display_name: &str) -> String {
+    format!("{display_name}{APP_TITLE_SUFFIX}")
+}
 
 /// 应用版本号（编译期从 Cargo.toml 注入）
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");

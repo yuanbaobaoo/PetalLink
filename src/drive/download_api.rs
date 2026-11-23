@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::fs::{File, OpenOptions};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 
 use crate::drive::client::{
     classify_transport_error, handle_error_response_with_metadata, DriveClient,
@@ -600,23 +600,32 @@ fn nonempty_string(value: Option<&Value>) -> Option<String> {
 }
 
 /// 流式计算文件 SHA-256；打开或读取失败直接返回错误。
+/// 流式计算下载产物的 SHA-256。
+///
+/// 整文件散列放到阻塞线程池执行：旧实现每读 1MB 就 hop 一次异步运行时，
+/// GB 级文件会把 async worker 占满；这里一次性交给阻塞池，读取期间不占 worker。
 async fn sha256_file(path: &Path) -> AppResult<String> {
-    let mut file = File::open(path)
-        .await
-        .map_err(|error| AppError::generic(format!("打开临时文件校验失败：{error}")))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0_u8; 1024 * 1024];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .await
-            .map_err(|error| AppError::generic(format!("读取临时文件校验失败：{error}")))?;
-        if read == 0 {
-            break;
+    // 阻塞池持有的路径副本。
+    let owned = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+        let mut file = std::fs::File::open(&owned)
+            .map_err(|error| AppError::generic(format!("打开临时文件校验失败：{error}")))?;
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0_u8; 1024 * 1024];
+        loop {
+            let read = file
+                .read(&mut buffer)
+                .map_err(|error| AppError::generic(format!("读取临时文件校验失败：{error}")))?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
         }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(hex::encode(hasher.finalize()))
+        Ok::<String, AppError>(hex::encode(hasher.finalize()))
+    })
+    .await
+    .map_err(|error| AppError::generic(format!("下载校验任务失败：{error}")))?
 }
 
 /// 尝试读取断点元数据；缺失、读失败或损坏均视为不可续传。

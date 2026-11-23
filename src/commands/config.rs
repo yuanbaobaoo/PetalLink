@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use tauri::AppHandle;
 
-use crate::core::config::AppConfig;
+use crate::core::config::{AppConfig, SortField, SortOrder};
 use crate::core::config_store::ConfigStore;
 #[cfg(target_os = "linux")]
 use crate::data::repository;
@@ -153,6 +153,21 @@ pub fn config_export_json() -> AppResult<String> {
 #[specta::specta]
 pub fn config_import_json(json_str: String) -> AppResult<AppConfig> {
     ConfigStore::import_from_json(&json_str)
+}
+
+/// 保存列表排序偏好。
+///
+/// 这是纯展示设置：只改排序字段，不触发引擎重建；单独成命令是为了避免
+/// 每次点击表头都整份读改写配置，与设置页保存互相踩踏。
+#[tauri::command]
+#[specta::specta]
+pub async fn config_save_sort(field: SortField, order: SortOrder) -> AppResult<()> {
+    let _save_transaction = CONFIG_SAVE_LOCK.lock().await;
+    // 以磁盘上的最新配置为基准，只覆盖排序字段。
+    let mut config = ConfigStore::load()?;
+    config.sort_field = field;
+    config.sort_order = order;
+    ConfigStore::save(&config)
 }
 
 /// 覆盖配置保存时引擎重建边界的核心合同。

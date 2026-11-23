@@ -17,6 +17,9 @@ macro_rules! db_err {
     };
 }
 
+/// 目录同步作业队列的 SQLite 实现。
+pub mod folder_sync_jobs;
+
 /// 同步基线记录的 SQLite 实现。
 mod sync_items;
 #[cfg(target_os = "linux")]
@@ -254,7 +257,7 @@ pub(crate) use transfer_queue::transition_transfer_in_transaction;
 #[allow(unused_imports)]
 pub use transfer_queue::{
     clear_terminal_transfers, delete_all_transfers, get_transfer_by_id, has_transfer_in_state,
-    insert_transfer, list_active_transfers, list_all_transfers, patch_transfer_in_state,
-    prune_transfer_history, transition_transfer, transition_transfer_clearing_upload_session,
-    update_running_transfer,
+    insert_transfer, list_active_transfers, list_all_transfers, list_by_relative_path,
+    patch_transfer_in_state, prune_transfer_history, transition_transfer,
+    transition_transfer_clearing_upload_session, update_running_transfer,
 };

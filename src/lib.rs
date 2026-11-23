@@ -197,6 +197,14 @@ pub fn run() {
                     let _ = std::fs::remove_file(&marker);
                 }
             }
+            // 统一展示名：dev 配置把 productName 覆盖成 `PetalLink-Dev`，
+            // 窗口标题、托盘菜单与 tooltip 全部跟着带 `-Dev`，两个包一眼可区分。
+            let display_name = crate::constants::display_name(app.handle());
+            if let Some(window) = app.get_webview_window("main") {
+                if let Err(error) = window.set_title(&crate::constants::app_full_title(&display_name)) {
+                    tracing::warn!(%error, "设置窗口标题失败");
+                }
+            }
             // 创建系统托盘
             platform::tray::setup(app.handle());
 
@@ -204,7 +212,7 @@ pub fn run() {
             //   避免「LaunchAgent 带 --hidden」+「Login Items 不带 --hidden」双重启动，
             //   Login Items 触发 single-instance 回调顶出窗口。
             if platform::launch_at_login::is_enabled() {
-                platform::launch_at_login::remove_from_login_items();
+                platform::launch_at_login::remove_from_login_items(&display_name);
             }
 
             // 手动启动 → 显示主窗口并聚焦；登录启动（--hidden）→ 仅保留托盘图标后台运行。

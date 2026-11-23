@@ -630,8 +630,66 @@ pub async fn drive_search(
     page_size: Option<u32>,
 ) -> AppResult<FileListResult> {
     FILES_API
-        .search(&keyword, parent_id.as_deref(), page_size.unwrap_or(100))
+        // 单页入口保持原语义；需要完整结果时用 drive_search_all。
+        .search(
+            &keyword,
+            parent_id.as_deref(),
+            None,
+            page_size.unwrap_or(100),
+        )
         .await
+}
+
+/// 搜索云盘文件并自动翻页，返回全部匹配项。
+///
+/// 华为服务端的 `fileName contains` 只做**前缀**匹配（官方文档定义），且实测对
+/// 中文名可能直接返回空数组；因此这里以「本地/云树子串匹配」为主：
+///
+/// 1. 目录内搜索：列出该目录全部子项后本地做子串匹配（精确、只发一次分页）；
+/// 2. 整盘搜索：优先在同步引擎的云树快照里匹配（整盘权威路径快照）；
+/// 3. 引擎未就绪或快照为空：退回服务端 DSL（前缀语义，结果可能少于预期）。
+#[tauri::command]
+#[specta::specta]
+pub async fn drive_search_all(
+    keyword: String,
+    parent_id: Option<String>,
+) -> AppResult<Vec<DriveFile>> {
+    // 空关键词不发起任何网络请求。
+    let keyword = keyword.trim().to_string();
+    if keyword.is_empty() {
+        return Ok(Vec::new());
+    }
+    // 目录内搜索：服务端 contains 是前缀匹配，改为列目录后本地子串匹配。
+    if let Some(parent) = parent_id.as_deref().filter(|id| !id.trim().is_empty()) {
+        let files = FILES_API.list_all(Some(parent)).await?;
+        return Ok(filter_search_results(files, &keyword));
+    }
+    // 整盘搜索：同步引擎的云树快照是整盘路径的权威副本。
+    if let Some(engine) = crate::runtime::try_sync_engine() {
+        let matches = engine.search_cloud_tree(&keyword, None);
+        if !matches.is_empty() {
+            return Ok(matches);
+        }
+    }
+    // 引擎未就绪：退回服务端 DSL（结果仍是前缀语义）。
+    let all = FILES_API.search_all(&keyword, None).await?;
+    Ok(filter_search_results(all, &keyword))
+}
+
+/// 按文件名做大小写不敏感的子串匹配，并按「目录优先 + 名称」排序。
+fn filter_search_results(files: Vec<DriveFile>, keyword: &str) -> Vec<DriveFile> {
+    let needle = keyword.to_lowercase();
+    let mut matches: Vec<DriveFile> = files
+        .into_iter()
+        .filter(|file| file.name.to_lowercase().contains(&needle))
+        .collect();
+    matches.sort_by(|left, right| {
+        right
+            .is_folder()
+            .cmp(&left.is_folder())
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    matches
 }
 
 /// 获取云盘文件缩略图。

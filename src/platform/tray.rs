@@ -2,24 +2,43 @@
 //!
 //! 对齐 `legacy/macos/Runner/AppDelegate.swift` 的 setupStatusItem + buildStatusMenu。
 //!
-//! 菜单项：版本标识 / 显示主窗口 / 正在传输的文件记录（动态） / 退出 PetalLink
+//! 菜单项：版本标识 / 显示主窗口 / 正在传输汇总（动态） / 退出 PetalLink
 //! 图标：assets/menubar-icon.png（双环+同步点，对齐 Flutter MenubarIcon）
 //!       以 template 方式加载（icon_as_template），macOS 按明暗自动着色，对齐 Flutter isTemplate
 //! tooltip：动态，联动同步状态
 //!
-//! 说明：Flutter 版「立即同步」为条件显示（登录 + 配好同步目录才出现），默认隐藏；
-//!       此处按需求直接不提供该项，菜单与 Flutter 默认态（canSync=false）一致。
+//! # 刷新策略（重要）
 //!
-//! 「正在传输」段：每次传输变化（transfer_update 广播）时整体重建菜单，
-//! 列出 transfer_queue 中 state IN (PENDING, RUNNING) 的全部任务，每个任务两行
-//! （文件名 / 正在上传…N% 或 正在下载…N%），disabled 仅展示。
-//! macOS 原生菜单项超出屏幕高度时自动出现上下箭头滚动，无需手写滚动条。
+//! macOS 上替换 `NSStatusItem.menu` 会结束当前菜单追踪，**已展开的菜单会被立即关闭**。
+//! 因此这里绝不在刷新时 `set_menu`：
+//!
+//! 1. 菜单结构在启动时建成固定三段式（版本 / 显示主窗口 / 退出）；
+//! 2. 有进行中传输时用 `insert_items` 就地插入「分隔 + 汇总行 + 分隔」，结束后用
+//!    `remove_at` 就地移除，两者都不替换 NSMenu，不会关闭已展开的菜单；
+//! 3. 传输进度只更新汇总行的文本（`MenuItem::set_text`），并按 `MENU_TEXT_INTERVAL_MS`
+//!    节流，避免高频查库与重绘。
+//!
+//! 「正在传输」段只显示一行汇总（方向 + 项数 + 百分比），不再逐条列出任务：
+//! 逐条列表会让菜单高度随批量任务数暴涨，且每来一条新任务就要改结构。
+//!
+//! # 线程约束（强制）
+//!
+//! `tray_icon::TrayIcon` 与 `muda` 的菜单对象内部都是 `Rc<RefCell<_>>`，tauri 只是
+//! 用 `unsafe impl Send/Sync` 把调用转发到主线程。**句柄本身**的 clone/drop 不会被
+//! 转发：在 tokio 线程上 `tray_by_id()` 或丢弃句柄会与主线程竞争 Rc 引用计数，
+//! debug 构建会直接命中 `hint::assert_unchecked` 前置条件并 abort 整个进程
+//! （2026-11-23 批量上传压测实际发生）。因此本模块约定：
+//!
+//! 1. 托盘与菜单句柄只在 `run_on_main_thread` 闭包内获取、持有和释放；
+//! 2. 跨线程只传递普通数据（`String`/`bool`），不传 `TrayIcon`/`Menu`；
+//! 3. 数据库查询留在调用线程，避免主线程被 SQLite I/O 阻塞。
 
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tauri::image::Image;
-use tauri::menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem};
+use tauri::menu::{IsMenuItem, Menu, MenuItem, MenuItemKind, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager, Wry};
 
@@ -28,24 +47,55 @@ use crate::error::AppResult;
 
 /// 托盘唯一标识
 const TRAY_ID: &str = "PetalLink-tray";
-/// 菜单中传输文件名最大显示字符数（超出截断加省略号）
-const MAX_NAME_CHARS: usize = 20;
-/// 菜单重建最小间隔（毫秒）。传输进度高频变化，过频重建会让已展开的菜单闪烁消失。
-/// 节流到 5 秒一次：用户点开菜单后有足够时间查看，不被重绘打断。
-const MENU_REBUILD_INTERVAL_MS: i64 = 5000;
-/// 上次菜单重建的 epoch 毫秒（0=从未重建，首条传输出现时立即重建）
-static LAST_MENU_REBUILD_MS: AtomicI64 = AtomicI64::new(0);
-/// 上次传输段签名（项目数 + 每个 task 的 id+state+transferred 组合 hash），相同则跳过菜单重建
-/// 防止无传输状态变化时高频重建触发 muda icon 渲染 panic
-static LAST_TRANSFER_SIGNATURE: AtomicU64 = AtomicU64::new(0);
+/// 汇总行菜单项 id（就地改文本时按此查找）
+const MENU_ID_TRANSFER_SUMMARY: &str = "transfer_summary";
+/// 传输段插入位置：版本 / 分隔线 / 显示主窗口 之后
+const TRANSFER_BLOCK_POSITION: usize = 3;
+/// 汇总文案最小刷新间隔（毫秒）：进度展示允许滞后，避免高频查库与重绘
+const MENU_TEXT_INTERVAL_MS: i64 = 2000;
+/// 传输段结构变化的最小间隔（毫秒）：合并同一批任务开始/结束时的抖动
+const STRUCTURE_CHANGE_INTERVAL_MS: i64 = 1500;
+/// 空闲时的托盘 tooltip 模板（展示名在前，dev 包会带 `-Dev`）。
+fn idle_tooltip(app: &AppHandle) -> String {
+    format!("{} — 后台同步中", crate::constants::display_name(app))
+}
 /// menubar-icon.png（编译期嵌入，对齐 Flutter Asset Catalog 的 MenubarIcon）
 /// SVG 经 qlmanage 转 PNG（Tauri 2 Image::from_bytes 不支持 SVG）
 const MENUBAR_ICON_PNG: &[u8] = include_bytes!("../../assets/menubar-icon.png");
 
+/// 托盘菜单句柄：创建后保存，所有后续刷新都在同一份菜单上就地修改。
+static TRAY_MENU: OnceLock<Mutex<Option<Menu<Wry>>>> = OnceLock::new();
+/// 上次刷新时是否存在进行中传输（决定传输段是否插入）
+static LAST_HAS_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// 上次传输段结构变化的时间（毫秒），用于合并抖动
+static LAST_STRUCTURE_CHANGE_MS: AtomicI64 = AtomicI64::new(0);
+/// 上次汇总文案刷新的时间（毫秒）
+static LAST_TEXT_UPDATE_MS: AtomicI64 = AtomicI64::new(0);
+/// 上次设置的 tooltip，相同则不重复写入
+static LAST_TOOLTIP: OnceLock<Mutex<String>> = OnceLock::new();
+
+/// 返回当前 epoch 毫秒。
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// 返回托盘菜单的全局句柄容器。
+fn tray_menu_slot() -> &'static Mutex<Option<Menu<Wry>>> {
+    TRAY_MENU.get_or_init(|| Mutex::new(None))
+}
+
+/// 返回上次 tooltip 的全局容器。
+fn last_tooltip_slot() -> &'static Mutex<String> {
+    LAST_TOOLTIP.get_or_init(|| Mutex::new(String::new()))
+}
+
 /// 创建系统托盘图标 + 菜单（对齐 Flutter buildStatusMenu）。
 pub fn setup(app: &AppHandle) {
-    // 构建菜单（对齐 AppDelegate.buildStatusMenu，内含动态「正在传输」段）
-    let menu = match build_menu(app) {
+    // 启动时只建固定三段式；传输段由 refresh_menu 就地插入。
+    let menu = match build_base_menu(app) {
         Ok(menu) => menu,
         Err(error) => {
             crate::platform::activation::set_tray_icon_visible(false);
@@ -53,32 +103,29 @@ pub fn setup(app: &AppHandle) {
             return;
         }
     };
+    // 保存句柄：之后所有刷新都在这份菜单上就地修改，绝不 set_menu 替换。
+    if let Ok(mut slot) = tray_menu_slot().lock() {
+        *slot = Some(menu.clone());
+    }
 
     // 加载 menubar 图标（PNG，对齐 Flutter MenubarIcon）
-    let icon = match Image::from_bytes(MENUBAR_ICON_PNG) {
-        Ok(icon) => icon,
-        Err(error) => {
-            tracing::warn!(%error, "menubar PNG 加载失败，回退到应用图标");
-            let Some(icon) = app.default_window_icon().cloned() else {
-                crate::platform::activation::set_tray_icon_visible(false);
-                tracing::error!("应用默认图标也不可用，将以无托盘模式运行");
-                return;
-            };
-            icon
-        }
+    let Some(icon) = load_menubar_icon(app) else {
+        crate::platform::activation::set_tray_icon_visible(false);
+        tracing::error!("可用托盘图标缺失，将以无托盘模式运行");
+        return;
     };
 
     match TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon)
         .icon_as_template(true) // 对齐 Flutter isTemplate=true：macOS 按明暗自动着色
-        .tooltip("PetalLink — 后台同步中")
+        .tooltip(idle_tooltip(app))
         .menu(&menu)
         .show_menu_on_left_click(true) // 左键显示菜单（对齐 Flutter item.menu = menu）
         .on_menu_event(|app_handle, event| {
             match event.id().as_ref() {
                 "show_window" => show_main_window(app_handle),
                 "quit" => quit_app(app_handle),
-                _ => {} // 传输记录项 disabled，不会触发事件
+                _ => {} // 传输汇总项 disabled，不会触发事件
             }
         })
         .build(app)
@@ -91,154 +138,44 @@ pub fn setup(app: &AppHandle) {
     }
 }
 
-/// 构建托盘菜单（含动态「正在传输」段）。
+/// 加载 menubar 图标；内嵌 PNG 与兜底的应用图标都必须是非零尺寸。
 ///
-/// 顺序：版本 → 分隔 → 显示主窗口 → [分隔 → 正在传输项… → 分隔] → 退出。
-/// 方括号段仅当存在进行中的传输任务时才出现，否则菜单回退到三段式（与历史一致）。
-fn build_menu(app: &AppHandle<Wry>) -> tauri::Result<Menu<Wry>> {
-    // 版本项（disabled，纯展示）
-    let version_item = MenuItem::with_id(
-        app,
-        "version",
-        "PetalLink - 华为云盘桌面客户端开源版",
-        false,
-        None::<&str>,
-    )?;
-    let sep1 = PredefinedMenuItem::separator(app)?;
-    let show_item = MenuItem::with_id(app, "show_window", "显示主窗口", true, None::<&str>)?;
-    let quit_item = MenuItem::with_id(app, "quit", "退出 PetalLink", true, None::<&str>)?;
-
-    // 进行中的传输项（每个任务两行 disabled MenuItem）
-    let transfer_items = active_transfer_menu_items(app);
-
-    // 上分隔线：仅当存在传输段时创建（分隔「显示主窗口」与传输段）
-    // 下分隔线：无条件创建（始终分隔上方内容与「退出」，对齐历史 sep2，避免无传输时丢线）
-    let has_transfers = !transfer_items.is_empty();
-    let sep_top = if has_transfers {
-        Some(PredefinedMenuItem::separator(app)?)
+/// 空尺寸图标会触发 muda 的 `ZeroWidth` panic（2026-11-22 实际崩溃），
+/// 因此这里逐一校验，全部不可用时返回 None 由调用方退回无托盘模式。
+fn load_menubar_icon<'a>(app: &'a AppHandle) -> Option<Image<'a>> {
+    if let Ok(icon) = Image::from_bytes(MENUBAR_ICON_PNG) {
+        if icon.width() > 0 && icon.height() > 0 {
+            return Some(icon);
+        }
+        tracing::warn!("menubar PNG 解码为 0 尺寸，回退到应用图标");
     } else {
-        None
-    };
+        tracing::warn!("menubar PNG 加载失败，回退到应用图标");
+    }
+    app.default_window_icon()
+        .cloned()
+        .filter(|icon| icon.width() > 0 && icon.height() > 0)
+}
+
+/// 构建固定三段式托盘菜单：版本 → 分隔 → 显示主窗口 → 分隔 → 退出。
+fn build_base_menu(app: &AppHandle<Wry>) -> tauri::Result<Menu<Wry>> {
+    // 版本项（disabled，纯展示）
+    // 首行展示名跟随 productName：dev 包显示 `PetalLink-Dev`，与正式版一眼区分。
+    let header = format!(
+        "{} - 华为云盘桌面客户端开源版",
+        crate::constants::display_name(app)
+    );
+    let version_item = MenuItem::with_id(app, "version", header, false, None::<&str>)?;
+    let sep_top = PredefinedMenuItem::separator(app)?;
+    let show_item = MenuItem::with_id(app, "show_window", "显示主窗口", true, None::<&str>)?;
     let sep_bottom = PredefinedMenuItem::separator(app)?;
+    // 退出项同样带展示名：dev 包显示「退出 PetalLink-Dev」，避免误退正式版。
+    let quit_label = format!("退出 {}", crate::constants::display_name(app));
+    let quit_item = MenuItem::with_id(app, "quit", quit_label, true, None::<&str>)?;
 
     // 异构菜单项统一收集为 &dyn IsMenuItem 交给 with_items
-    let mut items: Vec<&dyn IsMenuItem<Wry>> = Vec::new();
-    items.push(&version_item);
-    items.push(&sep1);
-    items.push(&show_item);
-
-    // 传输段：仅当有任务时插入，由 sep_top 与 sep_bottom 包夹
-    if has_transfers {
-        if let Some(ref sep) = sep_top {
-            items.push(sep);
-        }
-        for it in &transfer_items {
-            items.push(it);
-        }
-    }
-
-    items.push(&sep_bottom);
-    items.push(&quit_item);
-
+    let items: Vec<&dyn IsMenuItem<Wry>> =
+        vec![&version_item, &sep_top, &show_item, &sep_bottom, &quit_item];
     Menu::with_items(app, &items)
-}
-
-/// 查询进行中的传输任务并构造菜单项（每个任务两行：文件名 / 正在上传…N% 或 正在下载…N%）。
-///
-/// 数据源：transfer_queue 表，state IN (PENDING, RUNNING)，按 created_at 升序
-/// （最早入队的排前面，符合「先开始先显示」直觉）。
-/// 全部列出，不截断 —— macOS 原生菜单超出屏幕时自动上下箭头滚动。
-fn active_transfer_menu_items(app: &AppHandle<Wry>) -> Vec<MenuItem<Wry>> {
-    match load_active_transfers() {
-        Ok(tasks) => tasks
-            .iter()
-            .flat_map(|t| build_one_transfer_item(app, t))
-            .collect(),
-        Err(e) => {
-            tracing::warn!(error = %e, "查询进行中传输失败，托盘菜单省略传输段");
-            Vec::new()
-        }
-    }
-}
-
-/// 为单个传输任务构造两行菜单项（文件名行 + 状态行），均 disabled。
-///
-/// @param app - 应用句柄（构造 MenuItem 必需）
-/// @param task - 传输任务
-fn build_one_transfer_item(
-    app: &AppHandle<Wry>,
-    task: &repository::TransferTask,
-) -> Vec<MenuItem<Wry>> {
-    // 名字行：文件名（disabled 灰色展示），超长截断为最多 MAX_NAME_CHARS 字符 + 省略号
-    let display_name = truncate_name(&task.name, MAX_NAME_CHARS);
-    let name_item = match MenuItem::with_id(
-        app,
-        format!("transfer_name_{}", task.id),
-        display_name.as_str(),
-        false,
-        None::<&str>,
-    ) {
-        Ok(item) => item,
-        Err(e) => {
-            tracing::warn!(error = %e, id = task.id, "创建传输文件名菜单项失败，跳过该项");
-            return Vec::new();
-        }
-    };
-
-    // 状态行：正在上传…N% / 正在下载…N% / 正在删除…N%（disabled 灰色展示）
-    let status_text = format_transfer_status(task);
-    let status_item = match MenuItem::with_id(
-        app,
-        format!("transfer_status_{}", task.id),
-        status_text.as_str(),
-        false,
-        None::<&str>,
-    ) {
-        Ok(item) => item,
-        Err(e) => {
-            tracing::warn!(error = %e, id = task.id, "创建传输状态菜单项失败，跳过该项");
-            return Vec::new();
-        }
-    };
-
-    vec![name_item, status_item]
-}
-
-/// 生成传输状态文本：方向 + 百分比。
-///
-/// - UPLOAD → 「正在上传…N%」
-/// - DOWNLOAD → 「正在下载…N%」
-/// - DELETE → 「正在删除…N%」
-///
-/// total_size 缺失（0）时百分比按 0 显示，避免 0/0 噪声。
-fn format_transfer_status(task: &repository::TransferTask) -> String {
-    // 方向标签（与 transfer_direction 常量对齐）
-    let label = if task.direction == transfer_direction::UPLOAD {
-        "正在上传"
-    } else if task.direction == transfer_direction::DOWNLOAD {
-        "正在下载"
-    } else if task.direction == transfer_direction::DOWNLOAD_UPDATE {
-        "正在更新"
-    } else {
-        "正在删除"
-    };
-    // 百分比：transferred/total_size，缺失或为 0 时记 0%
-    let pct = if task.total_size > 0 {
-        std::cmp::min(100, (task.transferred * 100 / task.total_size) as i32)
-    } else {
-        0
-    };
-    format!("{label}…{pct}%")
-}
-
-/// 截断文件名至最多 `max_chars` 个字符（按字符计，非字节），超出追加省略号。
-/// 用 chars() 而非字节切片，避免中文字符被切断。
-fn truncate_name(name: &str, max_chars: usize) -> String {
-    if name.chars().count() <= max_chars {
-        return name.to_string();
-    }
-    let truncated: String = name.chars().take(max_chars).collect();
-    format!("{truncated}…")
 }
 
 /// 从全局 DB 查询进行中的传输任务（state IN PENDING/RUNNING，created_at 升序）。
@@ -247,81 +184,185 @@ fn load_active_transfers() -> AppResult<Vec<repository::TransferTask>> {
     repository::list_active_transfers(&conn)
 }
 
-/// 重建托盘菜单（在传输变化时调用，刷新「正在传输」段）。
-///
-/// 复用 transfer_update 广播触发：入队/进度更新/结算/引擎状态推送均会调用。
-/// **节流**：传输进度高频变化（500ms 一次进度回调），过频重建会让已展开的菜单闪烁消失。
-/// 故按 MENU_REBUILD_INTERVAL_MS（5 秒）节流。仅当「无进行中传输」时不节流，
-/// 以保证任务完成时立即清掉传输段（不残留已完成项）。
-/// 容错：重建失败仅告警不中断，对齐 update_tooltip 的容错风格。
-/// 计算传输任务的签名（项目数 + 每个 task 的 id+state+transferred 组合 hash）。
-/// 签名相同 → 传输段无变化 → 可跳过重建。
-fn transfer_signature(tasks: &[repository::TransferTask]) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    tasks.len().hash(&mut hasher);
-    for t in tasks {
-        t.id.hash(&mut hasher);
-        t.state.hash(&mut hasher);
-        t.transferred.hash(&mut hasher);
-        t.total_size.hash(&mut hasher);
-    }
-    hasher.finish()
+/// 生成汇总文案：方向 + 项数 + 总体百分比。
+fn summary_text(tasks: &[repository::TransferTask]) -> String {
+    // 汇总总量与已传字节；总量为 0 时百分比按 0 显示。
+    let total: i64 = tasks.iter().map(|task| task.total_size.max(0)).sum();
+    let transferred: i64 = tasks.iter().map(|task| task.transferred.max(0)).sum();
+    // 百分比：只做展示，不参与任何调度判断。
+    let pct = if total > 0 {
+        ((transferred.min(total) * 100) / total) as i32
+    } else {
+        0
+    };
+    // 全部同向时才用具体方向，混合方向用「正在传输」。
+    let directions = tasks
+        .iter()
+        .map(|task| task.direction)
+        .collect::<std::collections::BTreeSet<_>>();
+    let label = match directions.len() {
+        1 if directions.contains(&transfer_direction::UPLOAD) => "正在上传",
+        1 if directions.contains(&transfer_direction::DOWNLOAD) => "正在下载",
+        1 if directions.contains(&transfer_direction::DOWNLOAD_UPDATE) => "正在更新",
+        1 => "正在删除",
+        _ => "正在传输",
+    };
+    format!("{label} {} 项 · {pct}%", tasks.len())
 }
 
-/// 传输任务变化时重建托盘菜单，并对高频活动更新节流。
-pub fn refresh_menu(app: &AppHandle) {
-    let Some(tray) = app.tray_by_id(TRAY_ID) else {
-        return;
-    };
+/// 按 id 取回汇总菜单项。
+fn summary_item(menu: &Menu<Wry>) -> Option<MenuItem<Wry>> {
+    match menu.get(MENU_ID_TRANSFER_SUMMARY) {
+        Some(MenuItemKind::MenuItem(item)) => Some(item),
+        _ => None,
+    }
+}
 
-    // 先查传输任务（用于签名判等 + 节流）
+/// 就地插入传输段（分隔线 + 汇总行 + 分隔线）。
+fn insert_transfer_block(app: &AppHandle<Wry>, menu: &Menu<Wry>, text: &str) -> tauri::Result<()> {
+    let sep_top = PredefinedMenuItem::separator(app)?;
+    let summary = MenuItem::with_id(app, MENU_ID_TRANSFER_SUMMARY, text, false, None::<&str>)?;
+    let sep_bottom = PredefinedMenuItem::separator(app)?;
+    let items: [&dyn IsMenuItem<Wry>; 3] = [&sep_top, &summary, &sep_bottom];
+    menu.insert_items(&items, TRANSFER_BLOCK_POSITION)
+}
+
+/// 就地移除传输段（汇总行两侧的分隔线一并移除）。
+fn remove_transfer_block(menu: &Menu<Wry>) -> tauri::Result<()> {
+    let Ok(items) = menu.items() else {
+        return Ok(());
+    };
+    let Some(index) = items
+        .iter()
+        .position(|item| item.id() == MENU_ID_TRANSFER_SUMMARY)
+    else {
+        return Ok(());
+    };
+    // 先删汇总行之后的分隔线，再删汇总行，最后删它之前的分隔线，索引依次回收。
+    if index + 1 < items.len() {
+        menu.remove_at(index + 1)?;
+    }
+    menu.remove_at(index)?;
+    if index > 0 {
+        menu.remove_at(index - 1)?;
+    }
+    Ok(())
+}
+
+/// 传输任务变化时刷新托盘菜单（就地改文本 / 就地增删传输段，绝不替换 NSMenu）。
+///
+/// 这里只做「查库 + 计算 + 节流判断」；所有托盘/菜单句柄都在主线程闭包内获取，
+/// 见文件头的线程约束。
+pub fn refresh_menu(app: &AppHandle) {
+    // 先查进行中传输：决定传输段是否存在以及汇总文案。
     let tasks = match load_active_transfers() {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::warn!(error = %e, "查询进行中传输失败，托盘菜单省略传输段");
-            Vec::new()
+        Ok(tasks) => tasks,
+        Err(error) => {
+            tracing::warn!(%error, "查询进行中传输失败，托盘菜单保持上次状态");
+            return;
         }
     };
     let has_active = !tasks.is_empty();
+    let text = summary_text(&tasks);
+    let now = now_ms();
+    let last_active = LAST_HAS_ACTIVE.load(Ordering::Relaxed);
 
-    // ★ 签名判等：传输段无变化时跳过重建（防止高频 sync_state 广播触发 muda icon panic）
-    let sig = transfer_signature(&tasks);
-    if sig == LAST_TRANSFER_SIGNATURE.load(Ordering::Relaxed) {
-        return; // 传输段完全没变，不重建
+    // 结构变化：合并短时间内的抖动；进入空闲必须立即清理，不留在菜单里。
+    let structure_due = if has_active {
+        !last_active
+            && now - LAST_STRUCTURE_CHANGE_MS.load(Ordering::Relaxed)
+                >= STRUCTURE_CHANGE_INTERVAL_MS
+    } else {
+        last_active
+    };
+    // 文本刷新只对已存在的传输段生效，并按间隔节流。
+    let text_due = has_active
+        && !structure_due
+        && now - LAST_TEXT_UPDATE_MS.load(Ordering::Relaxed) >= MENU_TEXT_INTERVAL_MS;
+
+    // tooltip 跟随当前活跃状态，内容相同不重复写入。
+    let tooltip = if has_active {
+        text.clone()
+    } else {
+        idle_tooltip(app)
+    };
+    let tooltip_due = last_tooltip_slot()
+        .lock()
+        .map(|last| last.as_str() != tooltip)
+        .unwrap_or(false);
+
+    if !structure_due && !text_due && !tooltip_due {
+        return;
+    }
+    // 先占住节流窗口再提交，多个并发事件只会产生一次主线程更新。
+    LAST_STRUCTURE_CHANGE_MS.store(now, Ordering::Relaxed);
+    LAST_TEXT_UPDATE_MS.store(now, Ordering::Relaxed);
+    if structure_due {
+        LAST_HAS_ACTIVE.store(has_active, Ordering::Relaxed);
     }
 
-    // 有进行中传输 → 节流（避免高频重绘打断用户查看菜单）；无传输 → 立即重建（清场）
-    if has_active {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
-        let last = LAST_MENU_REBUILD_MS.load(Ordering::Relaxed);
-        if last != 0 && now - last < MENU_REBUILD_INTERVAL_MS {
-            return; // 节流窗口内，跳过本次重建
+    // 只在主线程获取并释放托盘/菜单句柄：底层是 Rc<RefCell<_>>，跨线程 clone/drop 不安全。
+    let app_handle = app.clone();
+    if let Err(error) = app.run_on_main_thread(move || {
+        let Some(tray) = app_handle.tray_by_id(TRAY_ID) else {
+            return;
+        };
+        if tooltip_due {
+            set_tooltip_if_changed(&tray, &tooltip);
         }
-        LAST_MENU_REBUILD_MS.store(now, Ordering::Relaxed);
-    }
-
-    match build_menu(app) {
-        Ok(menu) => {
-            if let Err(e) = tray.set_menu(Some(menu)) {
-                tracing::warn!(error = %e, "托盘菜单重建失败");
+        let Some(menu) = tray_menu_slot()
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().cloned())
+        else {
+            return;
+        };
+        let outcome = if structure_due {
+            if has_active {
+                insert_transfer_block(&app_handle, &menu, &text)
             } else {
-                // ★ 签名仅在成功重建后更新，避免"签名已更新但菜单未重建"的语义偏差
-                LAST_TRANSFER_SIGNATURE.store(sig, Ordering::Relaxed);
+                remove_transfer_block(&menu)
             }
+        } else if let Some(item) = summary_item(&menu) {
+            item.set_text(&text)
+        } else {
+            Ok(())
+        };
+        match outcome {
+            Ok(()) => tracing::debug!(has_active, structure_due, "托盘菜单已就地更新"),
+            Err(error) => tracing::warn!(%error, has_active, "就地更新托盘菜单失败"),
         }
-        Err(e) => tracing::warn!(error = %e, "构造托盘菜单失败"),
+    }) {
+        tracing::warn!(%error, "提交托盘菜单更新到主线程失败");
     }
+}
+
+/// 仅在 tooltip 内容变化时写入，避免高频调用。
+///
+/// 只允许在主线程调用：`tray` 句柄本身不是跨线程安全的。
+fn set_tooltip_if_changed(tray: &tauri::tray::TrayIcon<Wry>, tooltip: &str) {
+    let Ok(mut last) = last_tooltip_slot().lock() else {
+        return;
+    };
+    if last.as_str() == tooltip {
+        return;
+    }
+    if let Err(error) = tray.set_tooltip(Some(tooltip)) {
+        tracing::warn!(%error, "设置托盘 tooltip 失败");
+        return;
+    }
+    *last = tooltip.to_string();
 }
 
 /// 更新托盘 tooltip（联动同步状态）。
 pub fn update_tooltip(app: &AppHandle, tooltip: &str) {
-    if let Some(tray) = app.tray_by_id(TRAY_ID) {
-        let _ = tray.set_tooltip(Some(tooltip));
-    }
+    let app_handle = app.clone();
+    let tooltip = tooltip.to_string();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(tray) = app_handle.tray_by_id(TRAY_ID) {
+            set_tooltip_if_changed(&tray, &tooltip);
+        }
+    });
 }
 
 /// 切换托盘图标可见性，并同步更新退出拦截依据的全局标志。
@@ -329,7 +370,8 @@ pub fn update_tooltip(app: &AppHandle, tooltip: &str) {
 /// 托盘隐藏后后台保活失去退出入口，activation 层的 Cmd+Q/Dock 退出拦截
 /// 会据此放行真退出（见 `activation::is_tray_icon_visible`）。
 pub fn set_tray_visible(app: &AppHandle, visible: bool) {
-    match app.tray_by_id(TRAY_ID) {
+    let app_handle = app.clone();
+    let _ = app.run_on_main_thread(move || match app_handle.tray_by_id(TRAY_ID) {
         Some(tray) => {
             if let Err(e) = tray.set_visible(visible) {
                 crate::platform::activation::set_tray_icon_visible(false);
@@ -343,7 +385,7 @@ pub fn set_tray_visible(app: &AppHandle, visible: bool) {
             crate::platform::activation::set_tray_icon_visible(false);
             tracing::warn!("托盘图标不存在，关窗将直接退出");
         }
-    }
+    });
 }
 
 /// 显示主窗口并恢复普通应用激活策略。

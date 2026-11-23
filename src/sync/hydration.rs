@@ -83,10 +83,13 @@ impl HydrationService {
     ///
     /// 相同下载意图的并发请求由 [`crate::sync::task_runner::TaskRunner`] 复用，
     /// 因此调用方无需另建下载器或直接操作传输数据库。
+    /// `wait` 为真时等待本次任务结算（FUSE 读取与「下载后立即打开」必需）；
+    /// 为假时只入队并立即返回，执行交给后台调度（批量下载使用）。
     pub(crate) async fn ensure_local(
         &self,
         file_id: &str,
         relative_path: &str,
+        wait: bool,
     ) -> AppResult<HydrationOutcome> {
         crate::core::paths::validate_relative_path(relative_path, false)?;
         let _activity = self.engine.begin_external_activity()?;
@@ -131,6 +134,18 @@ impl HydrationService {
         );
 
         let runner = self.engine.task_runner()?;
+        // 只入队模式：批量场景不能为每个文件阻塞等待传输完成。
+        if !wait {
+            let enqueued = runner.enqueue(task)?;
+            if enqueued.disposition != TaskDisposition::BlockedByActiveIntent {
+                self.engine.spawn_background_transfer(enqueued.task_id);
+            }
+            return Ok(HydrationOutcome {
+                local_path: dest,
+                task_id: enqueued.task_id,
+                disposition: enqueued.disposition,
+            });
+        }
         let requested_task = task.clone();
         let mut result = runner.enqueue_and_run(task).await?;
         if result.outcome.disposition == TaskDisposition::BlockedByActiveIntent {
@@ -312,7 +327,10 @@ impl Hydrator for HydrationService {
         // 另一条同步意图可能暂时占用同一路径；其结算后重新规划 hydration，
         // 而不是让普通应用看见 TaskRunner 的内部 EAGAIN。
         for _ in 0..8 {
-            let outcome = match self.ensure_local(&request.file_id, &relative_path).await {
+            let outcome = match self
+                .ensure_local(&request.file_id, &relative_path, true)
+                .await
+            {
                 Ok(outcome) => outcome,
                 Err(error) => {
                     let errno = hydration_error_errno(&error);

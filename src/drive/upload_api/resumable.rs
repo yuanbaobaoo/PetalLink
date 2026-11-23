@@ -16,7 +16,7 @@ use super::protocol::{
 };
 use super::{
     ChunkResult, ProgressFn, ResumeProgressFn, ResumeSession, UploadApi, CHUNK_RETRIES,
-    FINAL_STATUS_MAX_POLLS, FINAL_STATUS_POLL_INTERVAL_SECS,
+    FINAL_STATUS_MAX_POLLS, FINAL_STATUS_POLL_INTERVAL_SECS, MAX_RANGE_REWINDS,
 };
 
 impl UploadApi {
@@ -159,6 +159,8 @@ impl UploadApi {
 
         // 分片阶段与最终状态轮询共用同一会话和认证令牌。
         let mut final_status_polls = 0;
+        // 连续空洞回退计数：反复回退说明该会话已无法推进，交给任务层清会话重建。
+        let mut range_rewinds = 0;
         loop {
             if offset < total_size {
                 final_status_polls = 0;
@@ -167,10 +169,14 @@ impl UploadApi {
                 file.seek(SeekFrom::Start(offset))
                     .await
                     .map_err(|e| AppError::generic(format!("文件定位失败：{e}")))?;
+                // 直接用 Bytes 承载已读缓冲区：请求体重用时只增加引用计数，
+                // 不再为每个分片复制一份完整数据（D17）。
                 let mut chunk = vec![0u8; chunk_len as usize];
                 file.read_exact(&mut chunk)
                     .await
                     .map_err(|e| AppError::generic(format!("读取分片失败：{e}")))?;
+                // 零拷贝转到引用计数缓冲，后续重试与请求体共享同一份内存。
+                let chunk = bytes::Bytes::from(chunk);
 
                 // 单分片仅对确定可本地重试的错误有限重试。
                 let mut last_err: Option<AppError> = None;
@@ -232,6 +238,22 @@ impl UploadApi {
                         "服务端状态查询未确认当前分片，停止本地偏移推进",
                         false,
                     ));
+                }
+                // 服务端报告连续前缀回退（空洞）：允许退回去补发，但同一会话内限次，
+                // 反复回退说明会话状态已损坏，交由任务层清理并重建会话。
+                if result.uploaded < offset {
+                    range_rewinds += 1;
+                    if range_rewinds > MAX_RANGE_REWINDS {
+                        tracing::warn!(
+                            offset,
+                            uploaded = result.uploaded,
+                            range_rewinds,
+                            "同一会话连续出现范围空洞回退，判定会话不可用"
+                        );
+                        return Err(AppError::drive_upload_session_expired(308, false));
+                    }
+                } else {
+                    range_rewinds = 0;
                 }
                 offset = result.uploaded;
                 notify_resume_progress(

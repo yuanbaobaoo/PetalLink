@@ -8,6 +8,7 @@
  * 4. 注册 Tauri 事件监听（sync_state / folder_content_changed / transfer_update）
  */
 import { createApp } from "vue";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { createPinia } from "pinia";
 
 // 全局样式（顺序：reset → tokens → animations）
@@ -37,6 +38,7 @@ if (import.meta.env.PROD) {
 import { useSyncStore } from "@/stores/sync";
 import { useFileBrowserStore } from "@/stores/fileBrowser";
 import { useTransferStore } from "@/stores/transfer";
+import { useFolderSyncStore } from "@/stores/folderSync";
 import { throttleTrailing } from "@/utils/debounce";
 import { showToast } from "@/components/mate";
 
@@ -70,6 +72,20 @@ async function reloadTransfers(): Promise<void> {
 }
 
 /**
+ * 把失败数量同步到 Dock 角标。
+ *
+ * 窗口不在前台时这是唯一能看见「有东西失败了」的系统级提示；
+ * 角标只是提醒，真实状态与重试入口仍在传输队列里（U09）。
+ */
+async function syncDockBadge(failed: number): Promise<void> {
+  try {
+    await getCurrentWindow().setBadgeCount(failed > 0 ? failed : undefined);
+  } catch {
+    // 平台不支持角标时静默降级，不影响其余反馈。
+  }
+}
+
+/**
  * 注册后端事件监听器。
  */
 async function registerGlobalListeners(): Promise<void> {
@@ -80,6 +96,7 @@ async function registerGlobalListeners(): Promise<void> {
       const sync = useSyncStore();
       // sync_state 只承载完整权威状态；队列变化由独立事件重载。
       sync.applyState(state);
+      void syncDockBadge(state.failed);
     });
   } catch {}
 
@@ -100,6 +117,25 @@ async function registerGlobalListeners(): Promise<void> {
     }, 300);
     await events.transferUpdate.listen(() => {
       scheduleTransferReload();
+    });
+  } catch {}
+
+  try {
+    // 传输成功结算后主动刷新当前目录：不必再等云轮询周期（默认 60 秒）。
+    // 批量上传时结算事件很密集，用 800ms 拖尾节流合并为一次列表重载。
+    const scheduleSettledRefresh = throttleTrailing(() => {
+      void refreshBrowser();
+    }, 800);
+    await events.transferSettled.listen(() => {
+      scheduleSettledRefresh();
+    });
+  } catch {}
+
+  try {
+    // 目录同步作业变化（入队/开始规划/完成/失败）都整表重载：
+    // 作业数量天然很小，整表重载比增量合并更不容易出错。
+    await events.folderSyncJobsChanged.listen(() => {
+      void useFolderSyncStore().loadAll();
     });
   } catch {}
 

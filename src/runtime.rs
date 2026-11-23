@@ -777,9 +777,7 @@ fn ensure_engine_started_owned(app: &AppHandle) -> AppResult<()> {
     executor.set_conflict(Arc::new(std::sync::Mutex::new(
         crate::sync::conflict::ConflictResolver::new(),
     )));
-    executor.set_stability(Arc::new(tokio::sync::Mutex::new(
-        crate::sync::stability::StabilityChecker::new(),
-    )));
+    executor.set_stability(Arc::new(crate::sync::stability::StabilityChecker::new()));
     executor.set_db(DB.clone());
     // 传输进度实时推送通道：每次传输结算时触发前端刷新
     let (transfer_update_tx, mut transfer_update_rx) = tokio::sync::broadcast::channel::<()>(64);
@@ -815,11 +813,50 @@ fn ensure_engine_started_owned(app: &AppHandle) -> AppResult<()> {
         config.poll_interval_sec,
     );
     engine.set_mount(mount.clone());
+    // 传输动作的后台投递入口：先用弱引用占位，Arc 建好后回填引擎句柄。
+    // 注入之后周期不再等待传输完成（16b），传输统一在传输队列里按并发槽执行。
+    let transfer_dispatch_slot: Arc<std::sync::Mutex<Option<std::sync::Weak<SyncEngine>>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    {
+        let slot = transfer_dispatch_slot.clone();
+        executor.set_background_dispatcher(Arc::new(move |task_id| {
+            let engine = slot
+                .lock()
+                .ok()
+                .and_then(|guard| guard.as_ref().cloned())
+                .and_then(|weak| weak.upgrade());
+            match engine {
+                Some(engine) => engine.spawn_background_transfer(task_id),
+                // 引擎正在关闭：任务保持 Pending，由下次启动恢复接管。
+                None => tracing::warn!(task_id, "同步引擎不可用，任务保留在队列等待启动恢复"),
+            }
+        }));
+    }
     engine.set_executor(executor);
 
     let engine = Arc::new(engine);
+    if let Ok(mut guard) = transfer_dispatch_slot.lock() {
+        *guard = Some(Arc::downgrade(&engine));
+    }
     engine.bind_task_runner_state_sink(&task_runner);
     set_sync_engine(engine.clone());
+
+    // 目录同步作业变化转发监听器：引擎只广播，前端事件在这里产生。
+    {
+        let app_for_jobs = app.clone();
+        let mut folder_queue_rx = engine.subscribe_folder_queue();
+        tauri::async_runtime::spawn(async move {
+            loop {
+                match folder_queue_rx.recv().await {
+                    Ok(()) => {
+                        let _ = crate::ipc::FolderSyncJobsChangedEvent.emit(&app_for_jobs);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                }
+            }
+        });
+    }
 
     // 异步启动引擎（start 内含 BFS + watcher，不阻塞调用方）
     let app_handle = app.clone();

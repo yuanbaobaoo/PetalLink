@@ -30,10 +30,11 @@ mod user_actions;
 /// 持久传输任务的公开合同类型。
 pub use crate::data::repository::TransferTask;
 pub use contracts::{
-    BackendPreflightFailure, EnqueuedTaskOutcome, NowMs, OnlineCheck, RecoveredCloudFile,
-    RemoteVerification, StartupRecoverySummary, TaskActivityGate, TaskDisposition,
-    TaskExecutionError, TaskExecutionOutcome, TaskRecoverySummary, TaskStateSink,
-    TransferOperations, UploadFailedNotifier,
+    BackendPreflightFailure, BackgroundTaskDispatcher, EnqueuedTask, EnqueuedTaskOutcome, NowMs,
+    OnlineCheck, RecoveredCloudFile, RemoteVerification, RetryAllPlan, RetryAllSummary,
+    RetryEnqueued, StartupRecoverySummary, TaskActivityGate, TaskDisposition, TaskExecutionError,
+    TaskExecutionOutcome, TaskRecoverySummary, TaskStateSink, TransferOperations,
+    TransferSettledNotifier, UploadFailedNotifier,
 };
 pub use progress::TaskProgressReporter;
 
@@ -51,6 +52,10 @@ pub struct TaskRunner {
     transfer_update_tx: Option<tokio::sync::broadcast::Sender<()>>,
     // 上传终态失败的用户通知（构造后注入，未注入时不通知）。
     upload_failed_notifier: Arc<RwLock<Option<UploadFailedNotifier>>>,
+    // 传输成功结算后的通知（构造后注入；用于前端主动刷新文件列表）。
+    transfer_settled_notifier: Arc<RwLock<Option<TransferSettledNotifier>>>,
+    // 后台执行投递通道（构造后注入；未注入时重放保持同步执行）。
+    background_dispatcher: Arc<RwLock<Option<BackgroundTaskDispatcher>>>,
     // 所有传输入口共享的执行槽；既约束 planner，也约束 FUSE hydration/手动重试。
     execution_slots: Arc<RwLock<Arc<Semaphore>>>,
     // 任务生命周期准入门。
@@ -99,6 +104,8 @@ impl TaskRunner {
             state_sink: Arc::new(RwLock::new(state_sink)),
             transfer_update_tx,
             upload_failed_notifier: Arc::new(RwLock::new(None)),
+            transfer_settled_notifier: Arc::new(RwLock::new(None)),
+            background_dispatcher: Arc::new(RwLock::new(None)),
             // 测试/独立构造保持宽松默认；生产由 SyncExecutor 在发布 runner 前覆盖。
             execution_slots: Arc::new(RwLock::new(Arc::new(Semaphore::new(64)))),
             activity_gate: Arc::new(RwLock::new(None)),

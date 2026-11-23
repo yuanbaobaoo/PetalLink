@@ -80,10 +80,17 @@ impl TaskRunner {
         )))
     }
 
-    /// 执行已通过静态与后端前置校验的手动重试。
-    pub async fn run_prepared(&self, task_id: i64) -> AppResult<TaskExecutionOutcome> {
+    /// 执行已通过入队准入的任务。
+    ///
+    /// `run_backend_preflight` 为真时在后台执行链内完成稳定性窗口等后端前置校验；
+    /// 用户重试入口把这项耗时校验放在这里，命令路径因此可以毫秒级返回。
+    pub async fn run_prepared(
+        &self,
+        task_id: i64,
+        run_backend_preflight: bool,
+    ) -> AppResult<TaskExecutionOutcome> {
         let current = self.load(task_id)?;
-        self.run_expected(current, false).await
+        self.run_expected(current, run_backend_preflight).await
     }
 
     /// 按预期状态执行任务主链。

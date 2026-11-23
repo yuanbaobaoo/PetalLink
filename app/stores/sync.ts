@@ -39,6 +39,12 @@ export const useSyncStore = defineStore("sync", () => {
   const failedItems = computed<FailedItem[]>(() => state.value?.failed_items ?? []);
   // 冲突项数量。
   const conflict = computed(() => state.value?.conflict ?? 0);
+  // 被安全闸门拦下的云端删除条目数（>0 时需用户显式确认才会执行）。
+  const blockedCloudDeletes = computed(() => state.value?.blocked_cloud_deletes ?? 0);
+  // 因同路径仍有活动任务而暂缓的同步动作数（不是失败，任务结束后自动重试）。
+  const deferredActions = computed(() => state.value?.deferred_actions ?? 0);
+  // 本地已失效的占位文件（云端副本已删除，本地恢复无效）。
+  const invalidPlaceholders = computed(() => state.value?.invalid_placeholders ?? []);
   // 编辑中项目数量。
   const editing = computed(() => state.value?.editing ?? 0);
   // 同步引擎是否运行。
@@ -215,27 +221,23 @@ export const useSyncStore = defineStore("sync", () => {
    * 触发全量刷新
    */
   async function triggerManualRefresh(): Promise<void> {
-    try {
-      await commands.syncManualRefresh();
-    } catch {
-      // handled by event update
-    }
+    // 失败必须让调用方看见：否则「点了刷新按钮没反应」无从排查（D22）。
+    await commands.syncManualRefresh();
   }
 
   /**
    * 重试失败项
    */
   async function retryFailed(): Promise<void> {
-    try {
-      await commands.syncRetryFailed();
-    } catch {
-      // handled by event update
-    }
+    // 失败向上抛：批量重试被拒绝时用户需要看到真实原因。
+    await commands.syncRetryFailed();
   }
 
   return {
     revision, total, completed, uploading, downloading, waitingNetwork,
-    failed, transferFailed, failedItems, conflict, editing,
+    failed, transferFailed, failedItems, conflict, editing, blockedCloudDeletes,
+    deferredActions,
+    invalidPlaceholders,
     isRunning, isIndexing, indexingScannedFolders, indexingDiscoveredItems,
     syncPhase, lastSyncTime, contentChanged,
     mountConfigured, setupPhase, mountDir,

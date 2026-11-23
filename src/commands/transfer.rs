@@ -6,6 +6,7 @@ use crate::data::repository;
 use crate::error::AppResult;
 use crate::sync::state::SyncGlobalState;
 use crate::sync::status_aggregator::{RuntimeStatus, StatusAggregator};
+use crate::sync::task_runner::RetryEnqueued;
 
 use super::{emit_sync_state, sync_engine, try_sync_engine, DB, STATUS_AGGREGATOR};
 
@@ -81,9 +82,11 @@ pub fn transfer_clear_finished(app: AppHandle) -> AppResult<()> {
 }
 
 /// 重试传输任务。
+///
+/// 只做幂等入队并立即返回，执行由后台调度；重复点击返回 `AlreadyQueued`。
 #[tauri::command]
 #[specta::specta]
-pub async fn transfer_retry(task_id: i64) -> AppResult<()> {
+pub async fn transfer_retry(task_id: i64) -> AppResult<RetryEnqueued> {
     let engine = sync_engine()?;
     engine.retry_transfer(task_id).await
 }
@@ -110,4 +113,15 @@ pub async fn transfer_keep_both(task_id: i64) -> AppResult<()> {
 pub async fn transfer_cancel(task_id: i64) -> AppResult<()> {
     let engine = sync_engine()?;
     engine.cancel_transfer_task(task_id).await
+}
+
+/// 批量取消全部失败任务，返回实际取消数量。
+///
+/// 队列里几百条失败任务只有「重试全部」时，用户无法清走已知脏任务；
+/// 取消保留历史行但释放路径占用，让被隔离的同步动作继续执行。
+#[tauri::command]
+#[specta::specta]
+pub async fn transfer_cancel_all_failed() -> AppResult<u32> {
+    let engine = sync_engine()?;
+    engine.cancel_all_failed_tasks().await
 }

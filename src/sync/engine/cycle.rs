@@ -20,10 +20,14 @@ use crate::sync::transfer_state::TransferState;
 use super::action_filters::{
     add_rescue_folder_recreations, dedupe_directory_deletes, dedupe_local_descendants,
     fill_parent_file_ids, filter_active_transfer_actions, filter_anti_oscillation,
-    filter_blocked_path_changes, filter_skipped_paths, preserve_dirs_with_pending_backups,
+    filter_blocked_path_changes, filter_failed_transfer_actions, filter_skipped_paths,
+    preserve_dirs_with_pending_backups, suppress_rehydration_under_delete_intents,
 };
 use super::coordination::CycleRequest;
 use super::{recoverable_cycle_retry_delay, ResetFlag, SyncEngine};
+
+/// 失效占位文件在状态里的展示上限（与失败明细同级，避免事件负载无界）。
+const INVALID_PLACEHOLDER_LIMIT: usize = 20;
 
 /// 返回周期刚取得 owner 时应发布的活动阶段。
 fn active_phase_for_trigger(triggered_by: &str) -> &'static str {
@@ -186,6 +190,7 @@ impl SyncEngine {
             "retry-failed" => {
                 CycleRequest::LOCAL_RESCAN | CycleRequest::CLOUD_INCREMENTAL | CycleRequest::RETRY
             }
+            "approve-mass-delete" => CycleRequest::LOCAL_RESCAN | CycleRequest::CLOUD_INCREMENTAL,
             "retry-replan" => {
                 CycleRequest::LOCAL_RESCAN | CycleRequest::CLOUD_INCREMENTAL | CycleRequest::REPLAN
             }
@@ -200,7 +205,7 @@ impl SyncEngine {
     }
 
     /// 提交一组恢复结果；失败时强制下一轮重建本地与云端可信视图。
-    fn commit_recovery_checkpoint(
+    pub(super) fn commit_recovery_checkpoint(
         &self,
         recovered: &[crate::sync::task_runner::RecoveredCloudFile],
     ) -> AppResult<()> {
@@ -240,7 +245,18 @@ impl SyncEngine {
                 return Ok(());
             }
             if let Err(error) = self.run_coordinated_cycle(request).await {
-                self.cycle.complete(cycle_sequence, Some(&error));
+                // 可恢复失败（网络/限流/5xx）必须把请求位放回去：
+                // 裸 `?` 会把这一轮的 sticky 意图整块丢掉，一次瞬时错误就吞掉
+                // 恢复/重扫意图。确定性失败才作为终态结束本次请求（D11）。
+                if Self::is_recoverable_cycle_error(&error) {
+                    self.cycle.restore(request);
+                    tracing::warn!(%error, "同步周期可恢复失败，保留请求等待重试");
+                    // 后台 drain 路径会按退避自动重试（`schedule_background_drain`
+                    // 在 recoverable 且仍有 pending 时继续循环）；直接 await 的路径
+                    // 由下一次触发（定时刷新/事件）把恢复出的请求位一起消费。
+                } else {
+                    self.cycle.complete(cycle_sequence, Some(&error));
+                }
                 self.restore_idle_runtime_after_error();
                 return Err(error);
             }
@@ -407,10 +423,15 @@ impl SyncEngine {
                 let summary = self.recover_interrupted_transfers().await;
                 completed_recoveries += summary.completed;
                 self.commit_recovery_checkpoint(&summary.recovered_cloud_files)?;
+                // 恢复只做准入：待执行任务并发投递，周期不再逐条上传。
+                self.dispatch_recovered_tasks(&summary.runnable_task_ids);
             }
 
-            // 路径恢复先隔离活动任务，再核验远端写入。核验不能提前到这里之前，
-            // 否则 Changes 尚未可见时，新基线可能被旧云树反向重键。
+            // 路径恢复先隔离活动任务，再恢复等待网络/退避到期的任务。
+            //
+            // 远端核验已迁出本分支：它有自己的 10 秒节拍（`start_verify_scheduler`），
+            // 不再和规划、传输抢同一个 owner。核验写回云端检查点时仍然要求检查点可信，
+            // 失败会退化成一次全量重建，语义与原来一致。
             if request.contains(CycleRequest::ONLINE_RECOVERY) {
                 if !self.is_online() {
                     self.cycle.restore(request);
@@ -418,17 +439,15 @@ impl SyncEngine {
                 }
                 self.ensure_cycle_active()?;
                 if let Some(task_runner) = &self.task_runner {
-                    let verifying = task_runner.resume_verifying().await?;
-                    completed_recoveries += verifying.completed;
-                    self.commit_recovery_checkpoint(&verifying.recovered_cloud_files)?;
-                    self.ensure_cycle_active()?;
                     let waiting = task_runner.resume_waiting().await?;
                     completed_recoveries += waiting.completed;
                     self.commit_recovery_checkpoint(&waiting.recovered_cloud_files)?;
+                    self.dispatch_recovered_tasks(&waiting.runnable_task_ids);
                     self.ensure_cycle_active()?;
                     let backing_off = task_runner.resume_due_backoff().await?;
                     completed_recoveries += backing_off.completed;
                     self.commit_recovery_checkpoint(&backing_off.recovered_cloud_files)?;
+                    self.dispatch_recovered_tasks(&backing_off.runnable_task_ids);
                 }
             }
             if completed_recoveries > 0 {
@@ -451,7 +470,9 @@ impl SyncEngine {
                     for task_id in failed_task_ids {
                         match task_runner.prepare_retry(task_id).await {
                             Ok(prepared) => {
-                                if let Err(error) = task_runner.run_prepared(prepared.id).await {
+                                // prepare_retry 已完成后端前置校验，这里不再重复。
+                                if let Err(error) = task_runner.run_prepared(prepared.id, false).await
+                                {
                                     tracing::warn!(task_id, %error, "全局重试执行失败，状态已由任务机保留");
                                 }
                             }
@@ -589,12 +610,15 @@ impl SyncEngine {
             tracing::warn!("云端树不可信，跳过 DB reconcile、失败复核与残余清理");
         }
 
+        // 三份快照的长度先取出来，随后把 local/cloud 直接移入快照。
         let db_len = db.len();
         let local_len = local.len();
         let cloud_len = cloud.len();
+        // local 与 cloud 在快照之后不再被使用，直接移动而不是各复制一份：
+        // 27k 文件的目录树每周期少两次全量深拷贝（D26）。
         let snapshot = SyncSnapshot {
-            local: local.clone(),
-            cloud: cloud.clone(),
+            local,
+            cloud,
             db,
             is_startup_resume: triggered_by == "startup-resume",
             cloud_tree_trusted,
@@ -608,6 +632,15 @@ impl SyncEngine {
         let planner_started = Instant::now();
         let mut actions = self.planner.plan(&snapshot);
         let planner_ms = planner_started.elapsed().as_millis() as u64;
+        // 规划期给出的云端删除意图先记下来：即使随后被活动任务/安全闸门过滤或降级，
+        // 它们的子树也不允许反向物化成占位符（否则「删目录」会被镜像撤销，D3）。
+        let cloud_delete_intents: Vec<String> = actions
+            .iter()
+            .filter(|action| {
+                action.action_type == crate::sync::state::SyncActionType::DeleteFromCloud
+            })
+            .filter_map(|action| action.relative_path.clone())
+            .collect();
         let skip_filter_started = Instant::now();
         filter_skipped_paths(&mut actions, &self.skip_matcher);
         let skip_filter_ms = skip_filter_started.elapsed().as_millis() as u64;
@@ -620,15 +653,58 @@ impl SyncEngine {
         let rename_ms = rename_started.elapsed().as_millis() as u64;
         let other_filters_started = Instant::now();
         let transfer_tasks = repository::list_all_transfers(&self.db.lock())?;
-        filter_active_transfer_actions(&mut actions, &snapshot.db, &transfer_tasks);
+        let deferred_actions =
+            filter_active_transfer_actions(&mut actions, &snapshot.db, &transfer_tasks);
+        filter_failed_transfer_actions(&mut actions, &transfer_tasks);
         filter_anti_oscillation(&mut actions, &self.recently_deleted_paths.lock());
         fill_parent_file_ids(&mut actions, &self.cloud.lock().path_to_id);
         // 为云端已删但仍需救援内容的路径补建目录链。
         add_rescue_folder_recreations(&mut actions, &snapshot, &self.recently_deleted_paths.lock());
         filter_blocked_path_changes(&mut actions, blocked_path_changes);
 
-        // 实际复核本地路径，避免漏扫导致误删云端。
-        self.validate_delete_from_cloud(&mut actions);
+        // 云端删除必须先过安全闸门（空扫描 / 批量阈值 / 逐条本地复核 / 执行侧复核），
+        // 任何一道不通过都会被降级为 Skip，绝不让「本地看不见」变成「删用户云端」。
+        let blocked_cloud_deletes = self.guard_cloud_deletes(
+            &mut actions,
+            snapshot.local.len(),
+            snapshot.db.len(),
+            &snapshot.cloud,
+        );
+        // 删除意图优先：抑制同一子树里「云端→本地」的占位/建目录动作。
+        suppress_rehydration_under_delete_intents(&mut actions, &cloud_delete_intents);
+        // 失效占位文件：本地只剩 0 字节占位符而云端副本已不存在。
+        // 这类路径不产生同步动作，但必须让用户看到「本地这次恢复是无效的」。
+        let invalid_placeholders: Vec<crate::sync::state::InvalidPlaceholder> = snapshot
+            .local
+            .iter()
+            .filter(|(path, entry)| entry.is_placeholder && !snapshot.cloud.contains_key(*path))
+            .take(INVALID_PLACEHOLDER_LIMIT)
+            .map(|(path, _)| crate::sync::state::InvalidPlaceholder {
+                relative_path: path.clone(),
+            })
+            .collect();
+        let previous_invalid = self.state.lock().invalid_placeholders.clone();
+        if previous_invalid != invalid_placeholders {
+            self.update_runtime_and_broadcast(|runtime| {
+                runtime
+                    .invalid_placeholders
+                    .clone_from(&invalid_placeholders);
+            })?;
+        }
+        // 把闸门结果同步到对外状态：>0 时前端展示「已阻止 N 项云端删除」与确认入口。
+        let previous_blocked = self.state.lock().blocked_cloud_deletes;
+        if previous_blocked != blocked_cloud_deletes as u64 {
+            self.update_runtime_and_broadcast(|runtime| {
+                runtime.blocked_cloud_deletes = blocked_cloud_deletes as u64;
+            })?;
+        }
+        // 被活动任务隔离的动作数同样要可见：否则用户只看到「删除点了没反应」。
+        let previous_deferred = self.state.lock().deferred_actions;
+        if previous_deferred != deferred_actions as u64 {
+            self.update_runtime_and_broadcast(|runtime| {
+                runtime.deferred_actions = deferred_actions as u64;
+            })?;
+        }
         // DeleteFromLocal 由 executor 在 unlink 前复核远端删除事实与本地版本。
 
         // 目录云端删除会级联子树，仅保留祖先动作以维持回收站层级。
@@ -1028,5 +1104,34 @@ mod settlement_activity_tests {
         ]);
 
         assert!(structural_settlement_paths(&actions, &db).is_err());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::{AppError, DriveTransportKind, RequestSemantics};
+
+    /// 可恢复失败必须保留请求位；确定性失败才允许作为终态结束本次请求。
+    #[test]
+    fn only_recoverable_cycle_errors_restore_sticky_requests() {
+        // 网络/解码类传输错误属于瞬时失败。
+        assert!(SyncEngine::is_recoverable_cycle_error(
+            &AppError::drive_transport_with_submission(DriveTransportKind::Network, false, false)
+        ));
+        // 限流与服务端 5xx 可恢复。
+        assert!(SyncEngine::is_recoverable_cycle_error(
+            &AppError::drive_from_response(503, "{}", None, RequestSemantics::Read, false)
+        ));
+        assert!(SyncEngine::is_recoverable_cycle_error(
+            &AppError::drive_from_response(429, "{}", None, RequestSemantics::Read, false)
+        ));
+        // 4xx 与本地配置错误不可恢复，不应无限重试。
+        assert!(!SyncEngine::is_recoverable_cycle_error(
+            &AppError::drive_from_response(403, "{}", None, RequestSemantics::Read, false)
+        ));
+        assert!(!SyncEngine::is_recoverable_cycle_error(&AppError::generic(
+            "云端检查点不可信"
+        )));
     }
 }

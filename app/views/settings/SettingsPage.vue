@@ -2,6 +2,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from "vue";
 import { MateNavItem, MateSectionHeader, MateStepper, MateNumberField, MateTextField, MateSwitch, MateButton, MateInfoBanner, MateLogoWithText, MateIcon } from "@/components/mate";
+import { useAppIdentity } from "@/composables/useAppIdentity";
 import { confirmDialog, showToast } from "@/components/mate";
 import { commands } from "@/api/generated";
 import type { DriveAbout } from "@/api/generated";
@@ -28,6 +29,8 @@ const transfer = useTransferStore();
 type TabKey = "syncDir" | "transfer" | "advanced" | "account" | "logs" | "about";
 // 当前激活的 Tab
 const activeTab = ref<TabKey>("syncDir");
+// 应用展示名（dev 包带 -Dev，关于页 logo 文案随之变化）。
+const { displayName } = useAppIdentity();
 // 平台决定目录设置的含义；Linux 只让用户选择 FUSE 可见目录。
 const isLinux = isLinuxPlatform();
 
@@ -612,7 +615,7 @@ function fmtSize(bytes: number): string {
         <section v-if="activeTab === 'about'" class="settings-section">
           <MateSectionHeader icon="cloud" text="关于" />
           <div class="card card--about">
-            <MateLogoWithText :height="30" />
+            <MateLogoWithText :height="30" :text="displayName" />
             <div class="about-version-row">
               <span class="about-version">版本 {{ appVersion || "..." }}</span>
               <MateButton

@@ -295,7 +295,12 @@ impl TokenRefresher {
             scope,
         };
 
-        global_store().save(&new_token)?;
+        // 持久化是文件 I/O（含原子替换与权限收紧），放到阻塞线程池执行，
+        // 不占用异步运行时线程（D29）。
+        let to_persist = new_token.clone();
+        tokio::task::spawn_blocking(move || global_store().save(&to_persist))
+            .await
+            .map_err(|error| AppError::generic(format!("token 持久化任务失败：{error}")))??;
         *self.current.lock() = Some(new_token.clone());
         tracing::info!("token 刷新成功");
         let _ = status; // 状态码已隐含在 data 解析中

@@ -37,17 +37,20 @@ export function fileTypeIcon(f: DriveFile): string {
 }
 
 /**
- * 列举目录内容（folders-first 排序）
+ * 列举目录全部内容（folders-first 排序）
+ *
+ * 单页接口最多返回 100 条，目录很大时只取第一页会让用户以为「文件不见了」；
+ * 这里用后端已实现的自动翻页命令取全量。
  *
  * @param parentId - 父目录 ID，null 表示根目录
  */
 export async function listFiles(parentId?: string): Promise<DriveFile[]> {
-  // 首屏列表结果。
-  const result = await commands.driveList(parentId || null, null, null);
+  // 自动翻页后的全部条目。
+  const all = await commands.driveListAll(parentId || null);
   // folders-first 排序
-  const folders = result.files.filter(isFolder);
+  const folders = all.filter(isFolder);
   // 非目录内容保留服务端原有顺序。
-  const others = result.files.filter((f) => !isFolder(f));
+  const others = all.filter((f) => !isFolder(f));
   return [...folders, ...others];
 }
 
@@ -58,12 +61,12 @@ export async function listFiles(parentId?: string): Promise<DriveFile[]> {
  * @param parentId - 父目录 ID，null 表示全局搜索
  */
 export async function searchFiles(keyword: string, parentId?: string): Promise<DriveFile[]> {
-  // 搜索结果仍按目录优先展示。
-  const result = await commands.driveSearch(keyword, parentId || null, null);
+  // 自动翻页后的全部匹配项：宽泛关键词不会只看到前 100 条。
+  const all = await commands.driveSearchAll(keyword, parentId || null);
   // 匹配的目录。
-  const folders = result.files.filter(isFolder);
+  const folders = all.filter(isFolder);
   // 匹配的普通文件。
-  const others = result.files.filter((f) => !isFolder(f));
+  const others = all.filter((f) => !isFolder(f));
   return [...folders, ...others];
 }
 

@@ -101,10 +101,33 @@ pub struct SyncGlobalState {
     pub indexing_discovered_items: u64,
     /// 是否有目录结构变更（触发前端目录重拉）
     pub content_changed: bool,
+    /// 本地已失效的占位文件（云端副本已不存在）。
+    ///
+    /// 这些路径本地只剩 0 字节占位符，云端内容已被删除：既不能上传成空文件，
+    /// 也不应静默清理。UI 展示出来让用户决定「恢复云端副本」还是「清理本地残留」。
+    pub invalid_placeholders: Vec<InvalidPlaceholder>,
+    /// 本轮被安全闸门拦下的云端删除条目数。
+    ///
+    /// 大于 0 表示存在「疑似误删」的批量删除（例如挂载目录被清空、卷未挂载、
+    /// 或一次要删掉超过阈值的文件），引擎已拒绝执行，必须由用户显式确认。
+    pub blocked_cloud_deletes: u64,
+    /// 本轮因同路径仍有活动任务而被暂缓的**结构性**同步动作数。
+    ///
+    /// 只统计删除/建目录/移动/占位等结构动作（文件传输的暂缓由传输队列自身展示）。
+    /// 这些动作不是失败：等占用路径的传输任务结算（或被取消）后，下一轮会自动重试。
+    /// 大于 0 时 UI 必须提示「N 项同步等待任务结束」，避免用户把暂缓当成按钮失灵。
+    pub deferred_actions: u64,
     /// 当前同步阶段（供前端状态条精确显示）。None = 空闲。
     /// 值由本模块 `SYNC_PHASE_*` 常量定义；运行中不得为空。
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub sync_phase: Option<String>,
+}
+
+/// 失效占位文件明细（前端提示用）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+pub struct InvalidPlaceholder {
+    /// 相对挂载根的路径。
+    pub relative_path: String,
 }
 
 /// 失败项详情（前端失败项弹窗用）
@@ -114,6 +137,9 @@ pub struct FailedItem {
     pub relative_path: String,
     /// 错误信息
     pub error_message: Option<String>,
+    /// 该路径对应的传输任务 ID；没有对应任务（纯基线失败）时为 None。
+    /// 前端据此提供「单条重试」，无需再去传输队列里翻。
+    pub task_id: Option<i64>,
 }
 
 impl SyncGlobalState {

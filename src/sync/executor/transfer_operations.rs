@@ -31,7 +31,7 @@ struct ExecutorTransferOperations {
     download_api: Arc<DownloadApi>,
     upload_api: Arc<UploadApi>,
     mount: Arc<MountManager>,
-    stability: Option<Arc<tokio::sync::Mutex<StabilityChecker>>>,
+    stability: Option<Arc<StabilityChecker>>,
 }
 
 /// 确认上传源的类型、修改时间与大小仍匹配持久任务。
@@ -149,24 +149,27 @@ impl ExecutorTransferOperations {
         Ok(true)
     }
 
-    /// 将已确认的上传结果收敛为提交状态；fileId 必须可靠回写后才允许结算。
+    /// 将已确认的上传结果收敛为提交状态。
+    ///
+    /// fileId xattr 只是本地配对优化：远端结果已确认时，即使本地源在写入前发生变化
+    /// （被编辑或被删除），也必须按「已提交」结算。否则任务会在核验态里重试到上限，
+    /// 期间永久占用路径，阻塞父目录删除等同步动作（2026-11-23 压测 D4）。
+    ///
+    /// 结算写入的基线是**任务快照**（`source_mtime`/`source_size`），不是当前本地
+    /// 状态：下一轮 planner 会据此发现本地变化并重新规划（编辑 → Update；删除 →
+    /// 删除云端），不会把已上传内容误判成与当前文件一致。
     async fn committed_upload(
         &self,
         task: &TransferTask,
         file: DriveFile,
     ) -> AppResult<RemoteVerification> {
-        match self.set_upload_file_id_if_current(task, &file.id).await {
-            Ok(true) => {}
-            Ok(false) => {
-                return Err(AppError::generic(
-                    "远端上传已确认，但本地源在身份落盘前发生变化；保留核验态，禁止重复上传",
-                ));
-            }
-            Err(error) => {
-                return Err(AppError::generic(format!(
-                    "远端上传已确认，但 fileId xattr 尚未可靠落盘：{error}"
-                )));
-            }
+        if let Err(error) = self.set_upload_file_id_if_current(task, &file.id).await {
+            // xattr 写入失败不改变远端事实，仅记录告警。
+            tracing::warn!(
+                task_id = task.id,
+                %error,
+                "远端上传已确认，但 fileId xattr 写入失败，仍按已提交结算"
+            );
         }
         Ok(RemoteVerification::Committed(file))
     }
@@ -201,11 +204,17 @@ impl TransferOperations for ExecutorTransferOperations {
         let Some(stability) = &self.stability else {
             return Ok(());
         };
-        for delay in [0_u64, 2, 3, 5] {
+        // 先精确等到 mtime 满 5 秒再进 3 秒稳定窗口：固定阶梯会在新文件上
+        // 额外空睡最多 5 秒（批量上传时每个文件都付一次，直接压低吞吐）。
+        if let Some(wait) = stability.mtime_wait(&path) {
+            tokio::time::sleep(wait).await;
+        }
+        for delay in [0_u64, 2, 3] {
             if delay > 0 {
                 tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
             }
-            match stability.lock().await.check(&path).await {
+            // 稳定性检查不再持有全局锁：并发上传的前置校验可以真正并行。
+            match stability.check(&path).await {
                 crate::sync::stability::StabilityResult::Stable => return Ok(()),
                 crate::sync::stability::StabilityResult::Editing => {
                     return Err(BackendPreflightFailure::restart_required(
@@ -609,15 +618,32 @@ impl TransferOperations for ExecutorTransferOperations {
                 if candidates.len() == 1 {
                     return self.committed_upload(task, candidates.remove(0)).await;
                 }
-                match candidates.len() {
-                    0 if !missing_time_candidates.is_empty() => Ok(RemoteVerification::Ambiguous(
-                        "发现同名同大小资源但缺少创建时间，无法排除重复文件".to_string(),
-                    )),
-                    0 => Ok(RemoteVerification::NotCommitted),
-                    _ => Ok(RemoteVerification::Ambiguous(
+                if !candidates.is_empty() {
+                    return Ok(RemoteVerification::Ambiguous(
                         "父目录内存在多个符合创建任务的远端资源".to_string(),
-                    )),
+                    ));
                 }
+                // 候选缺创建时间：单候选时补查一次权威元数据再判定，
+                // 不为一个缺失字段空等 60 秒 × 60 次的核验退避。
+                if let [only] = missing_time_candidates.as_slice() {
+                    let refreshed = self.files_api.get(&only.id).await?;
+                    if refreshed.id == only.id
+                        && refreshed.name == task.name
+                        && refreshed.size == expected_size
+                        && content_hash_matches(&refreshed, local_sha256.as_deref())
+                    {
+                        return self.committed_upload(task, refreshed).await;
+                    }
+                    return Ok(RemoteVerification::Ambiguous(
+                        "同名同大小资源缺少创建时间，补查元数据后仍无法证明本次写入".to_string(),
+                    ));
+                }
+                if !missing_time_candidates.is_empty() {
+                    return Ok(RemoteVerification::Ambiguous(
+                        "发现同名同大小资源但缺少创建时间，无法排除重复文件".to_string(),
+                    ));
+                }
+                Ok(RemoteVerification::NotCommitted)
             }
             TransferOperation::Update => {
                 // Update 必须沿用原 fileId，绝不能降级成 Create。
@@ -707,7 +733,7 @@ impl SyncExecutor {
         runner.set_execution_limit(self.concurrency as usize);
         // 上传终态失败才通知 UI；可恢复结算（远端核验/退避/等待网络）不打扰用户。
         if let Some(app) = &self.app_handle {
-            let app = app.clone();
+            let failed_app = app.clone();
             runner.set_upload_failed_notifier(Arc::new(move |task, user_message| {
                 use tauri_specta::Event;
                 let relative_path = task.relative_path.as_deref().unwrap_or(&task.name);
@@ -715,6 +741,15 @@ impl SyncExecutor {
                     rel_path: relative_path.to_string(),
                     name: task.name.clone(),
                     error: user_message.to_string(),
+                }
+                .emit(&failed_app);
+            }));
+            // 成功结算后通知前端刷新当前目录，避免最长等 60 秒的云轮询。
+            let app = app.clone();
+            runner.set_transfer_settled_notifier(Arc::new(move |relative_path| {
+                use tauri_specta::Event;
+                let _ = crate::ipc::TransferSettledEvent {
+                    relative_path: relative_path.to_string(),
                 }
                 .emit(&app);
             }));
@@ -724,12 +759,33 @@ impl SyncExecutor {
     }
 
     /// 将上传/下载动作转为持久任务并交给 TaskRunner 执行。
+    ///
+    /// 注入了后台投递器时只做准入与入队（16b）：周期立刻返回，传输在传输队列里
+    /// 按并发槽执行，结算结果由 TaskRunner 直接写回云端缓存与基线。
+    /// 未注入时保持原来的同步执行语义。
     pub(super) async fn execute_transfer_action(&self, action: &SyncAction) -> ActionResult {
         let runner = match self.task_runner() {
             Ok(runner) => runner,
             Err(error) => return ActionResult::fail(error.to_string(), false),
         };
         let task = self.pending_task_for_action(action);
+        if let Some(dispatcher) = &self.background_dispatcher {
+            return match runner.enqueue(task) {
+                Ok(enqueued) => {
+                    if enqueued.disposition != TaskDisposition::BlockedByActiveIntent {
+                        dispatcher(enqueued.task_id);
+                    }
+                    ActionResult {
+                        success: false,
+                        // 入队不是失败：记为延后结算，下一轮由传输队列的权威状态决定。
+                        error_message: Some("已加入传输队列，等待后台执行".to_string()),
+                        deferred: true,
+                        cloud_file: None,
+                    }
+                }
+                Err(error) => ActionResult::fail(error.to_string(), false),
+            };
+        }
         match runner.enqueue_and_run(task).await {
             Ok(enqueued) => match enqueued.outcome.disposition {
                 TaskDisposition::Completed => ActionResult::ok(enqueued.outcome.cloud_file),

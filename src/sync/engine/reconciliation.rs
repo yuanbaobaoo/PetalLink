@@ -1,6 +1,7 @@
 //! 同步记录收敛。
 
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 
 use crate::data::repository;
 use crate::drive::models::DriveFile;
@@ -1064,8 +1065,197 @@ impl SyncEngine {
         }
     }
 
-    /// 云端删除前复核本地路径，存在内容或无法证明缺失时改为 Skip。
-    /// 占位符没有唯一内容，可以继续删除。
+    /// 清理「本地已失效的占位文件」。
+    ///
+    /// 只在以下条件同时成立时删除本地文件，避免把用户刚恢复的内容二次删掉：
+    /// 1. 本地仍是 0 字节占位符（xattr 标记未变）；
+    /// 2. 云端确实没有该路径（以当前可信云树为准）；
+    /// 3. 调用方传入了该相对路径（必须来自 UI 上用户看到的那一条）。
+    ///
+    /// 返回实际清理数量。
+    pub(super) fn cleanup_invalid_placeholder_inner(&self, relative_path: &str) -> AppResult<bool> {
+        crate::core::paths::validate_relative_path(relative_path, false)?;
+        let mount_dir = self
+            .mount_dir
+            .lock()
+            .clone()
+            .ok_or_else(|| AppError::generic("同步挂载目录未就绪"))?;
+        let mount_dir = std::path::PathBuf::from(crate::core::paths::expand_tilde(&mount_dir));
+        // 云端仍存在 → 占位符有效，拒绝清理。
+        if self.cloud.lock().tree.contains_key(relative_path) {
+            return Err(AppError::generic("该文件的云端副本仍然存在，无需清理"));
+        }
+        let abs = mount_dir.join(relative_path);
+        let metadata = std::fs::symlink_metadata(&abs)
+            .map_err(|error| AppError::generic(format!("读取占位文件失败：{error}")))?;
+        // 只允许删除 0 字节且带 placeholder 标记的文件：真实内容绝不在这里被删。
+        if !metadata.is_file()
+            || metadata.len() != 0
+            || !crate::mount::manager::is_placeholder_file(&abs)
+        {
+            return Err(AppError::generic("该路径已不是失效占位文件，拒绝删除"));
+        }
+        std::fs::remove_file(&abs)
+            .map_err(|error| AppError::generic(format!("清理占位文件失败：{error}")))?;
+        tracing::info!(rel = relative_path, "已清理失效占位文件");
+        Ok(true)
+    }
+
+    /// 云端删除前的四道闸门，返回被拦下的条目数。
+    ///
+    /// 失效方向是**最危险**的那一侧：一旦本地树被误判成「文件都没了」
+    /// （挂载卷被卸载、目录被清空/替换、权限变化），planner 会为整库文件生成
+    /// `DeleteFromCloud`，用户云端数据就被真正删除。因此这里宁可拒绝：
+    ///
+    /// 1. 空扫描闸门：本地扫描为空而基线非空 → 整体拒绝（典型未挂载/空目录）；
+    /// 2. 批量闸门：单轮要删的云端条目超过阈值且用户未确认 → 整体拒绝；
+    /// 3. 逐条复核：删除前重新 stat 本地路径，存在（含占位符）或无法证明缺失 → 拒绝；
+    /// 4. 执行侧还有一次同样语义的复核（`do_delete_from_cloud`）。
+    pub(super) fn guard_cloud_deletes(
+        &self,
+        actions: &mut [crate::sync::state::SyncAction],
+        local_len: usize,
+        db_len: usize,
+        cloud: &std::collections::HashMap<String, crate::drive::models::DriveFile>,
+    ) -> usize {
+        // 本批涉及的云端删除动作下标。
+        let delete_indexes: Vec<usize> = actions
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.action_type == crate::sync::state::SyncActionType::DeleteFromCloud)
+            .map(|(index, _)| index)
+            .collect();
+        if delete_indexes.is_empty() {
+            // 本轮没有任何云端删除提议：清空宽限期记录（文件已恢复或删除已执行）。
+            self.pending_cloud_deletes.lock().clear();
+            return 0;
+        }
+        // 没有挂载目录就无法做任何本地核验：一律拒绝，绝不盲删云端。
+        if self.mount_dir.lock().is_none() {
+            tracing::error!(
+                deletes = delete_indexes.len(),
+                "同步挂载目录缺失，拒绝全部云端删除"
+            );
+            for index in &delete_indexes {
+                downgrade_to_skip(
+                    &mut actions[*index],
+                    "同步挂载目录未就绪，无法核验本地状态，已拒绝云端删除",
+                );
+            }
+            return delete_indexes.len();
+        }
+        // 这批删除会波及的云端条目数（目录按子树展开）。
+        let affected = affected_cloud_entries(actions, &delete_indexes, cloud);
+        // 用户确认是一次性令牌：只有真正放行本批时才消费。
+        let approved = self.mass_delete_approved.swap(false, Ordering::AcqRel);
+        match cloud_delete_gate(local_len, db_len, affected, approved) {
+            CloudDeleteGate::Allow => {}
+            CloudDeleteGate::BlockEmptyScan => {
+                tracing::error!(
+                    local_len,
+                    db_len,
+                    affected,
+                    "本地扫描为空但同步基线非空，拒绝全部云端删除（疑似挂载目录未挂载或被清空）"
+                );
+                for index in &delete_indexes {
+                    downgrade_to_skip(
+                        &mut actions[*index],
+                        "本地扫描为空，拒绝批量删除云端（疑似挂载目录异常）",
+                    );
+                }
+                return affected;
+            }
+            CloudDeleteGate::BlockMassDelete { threshold } => {
+                tracing::error!(
+                    affected,
+                    threshold,
+                    local_len,
+                    db_len,
+                    "单轮云端删除超过安全阈值且未获确认，已全部拦下"
+                );
+                for index in &delete_indexes {
+                    downgrade_to_skip(
+                        &mut actions[*index],
+                        "批量删除超出安全阈值，需用户确认后才会执行",
+                    );
+                }
+                return affected;
+            }
+        }
+        // 宽限期：给用户留出撤销误删的窗口（本地删了又马上恢复）。
+        // 只有同一路径「连续」缺席超过阈值才真正删除；文件一旦回来，记录被清掉。
+        if self.defer_undeleted_paths(actions, &delete_indexes, approved) {
+            // 本批全部处于宽限期：不做逐条复核，也不计入「被阻止」。
+            return 0;
+        }
+        self.validate_delete_from_cloud(actions);
+        0
+    }
+
+    /// 对首次观察到缺席的路径延迟删除，返回是否仍有路径处于宽限期。
+    ///
+    /// 已获用户确认（`approved`）时跳过宽限：用户已经明确表态。
+    fn defer_undeleted_paths(
+        &self,
+        actions: &mut [crate::sync::state::SyncAction],
+        delete_indexes: &[usize],
+        approved: bool,
+    ) -> bool {
+        // 本批提出的路径集合，用于清理已经恢复/已删除的旧记录。
+        let proposed: std::collections::HashSet<String> = delete_indexes
+            .iter()
+            .filter_map(|index| actions[*index].relative_path.clone())
+            .collect();
+        // 当前时间（毫秒），同时驱动宽限期判断与过期记录清理。
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut pending = self.pending_cloud_deletes.lock();
+        // 只保留本批仍在提的路径，文件恢复后记录自动消失。
+        pending.retain(|path, _| proposed.contains(path));
+        if approved {
+            pending.clear();
+            return false;
+        }
+        let mut deferred = 0usize;
+        for index in delete_indexes {
+            let Some(path) = actions[*index].relative_path.clone() else {
+                continue;
+            };
+            match pending.get(&path).copied() {
+                Some(first_seen) if now.saturating_sub(first_seen) >= CLOUD_DELETE_GRACE_MS => {
+                    // 已连续缺席超过宽限期，允许进入逐条复核。
+                }
+                Some(first_seen) => {
+                    deferred += 1;
+                    tracing::info!(
+                        rel = %path,
+                        absent_ms = now.saturating_sub(first_seen),
+                        grace_ms = CLOUD_DELETE_GRACE_MS,
+                        "本地删除处于宽限期，暂不删除云端"
+                    );
+                    downgrade_to_skip(
+                        &mut actions[*index],
+                        "本地删除处于宽限期，暂时保留云端文件（可撤销误删）",
+                    );
+                }
+                None => {
+                    // 首次观察到缺席：先记账，本轮绝不删除。
+                    pending.insert(path.clone(), now);
+                    deferred += 1;
+                    tracing::info!(rel = %path, "首次观察到本地删除，进入宽限期等待确认");
+                    downgrade_to_skip(
+                        &mut actions[*index],
+                        "首次检测到本地删除，等待宽限期结束后再同步删除云端",
+                    );
+                }
+            }
+        }
+        deferred > 0
+    }
+
+    /// 云端删除前逐条复核本地路径，存在内容或无法证明缺失时改为 Skip。
+    ///
+    /// 占位符同样视为「本地仍存在」：占位符代表该条目的内容本来就在云端，
+    /// 用户并没有在本地删除它，因此不能据此删掉云端唯一副本。
     pub(super) fn validate_delete_from_cloud(
         &self,
         actions: &mut [crate::sync::state::SyncAction],
@@ -1085,28 +1275,30 @@ impl SyncEngine {
             match std::fs::symlink_metadata(&abs) {
                 Ok(meta) => {
                     let size = meta.len();
-                    // 占位符（0 字节 + xattr state=placeholder）→ 仍执行删除（无实际内容）
-                    // 其余（size>0 或无 xattr）→ 本地文件实际存在，跳过删除
-                    if size == 0 && crate::mount::manager::is_placeholder_file(&abs) {
-                        continue;
-                    }
+                    // 占位符（0 字节 + xattr state=placeholder）也计入「本地存在」：
+                    // 它的内容本来就只在云端，删掉云端就等于删掉唯一副本。
+                    let placeholder = size == 0 && crate::mount::manager::is_placeholder_file(&abs);
                     tracing::info!(
                         rel = %rel,
                         size,
+                        placeholder,
                         reason = a.reason.as_deref().unwrap_or("?"),
-                        "DeleteFromCloud 防误删：本地文件实际存在，改为 Skip"
+                        "DeleteFromCloud 防误删：本地路径仍存在，改为 Skip"
                     );
-                    a.action_type = crate::sync::state::SyncActionType::Skip;
-                    a.reason = Some(format!(
-                        "防误删：本地文件实际存在（{} 字节），跳过 DeleteFromCloud",
-                        size,
-                    ));
+                    downgrade_to_skip(
+                        a,
+                        if placeholder {
+                            "防误删：本地占位符仍在，拒绝对唯一云端副本执行删除"
+                        } else {
+                            "防误删：本地文件实际存在，跳过 DeleteFromCloud"
+                        },
+                    );
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => {
                     tracing::warn!(rel = %rel, %error, "无法确认本地文件不存在，拒绝云端删除");
-                    a.action_type = crate::sync::state::SyncActionType::Skip;
-                    a.reason = Some(format!("本地路径访问异常，无法证明文件已删除：{error}"));
+                    downgrade_to_skip(a, "本地路径访问异常，无法证明文件已删除，拒绝云端删除");
+                    let _ = error;
                 }
             }
         }
@@ -1692,5 +1884,539 @@ mod tests {
             .unwrap();
 
         assert_eq!(resolved, 0);
+    }
+}
+
+/// 单轮云端删除的安全阈值：超过这个条目数就必须由用户显式确认。
+///
+/// 阈值不是「性能阈值」，而是「误删爆炸半径」：一次误判最多影响这么多条云端文件。
+/// 正常的逐文件删除远低于它；删整棵子树会按子树条目数计入。
+const MASS_DELETE_CONFIRM_THRESHOLD: usize = 100;
+/// 本地删除到云端删除之间的宽限期（毫秒）。
+///
+/// 用户误删后常常在几秒到几十秒内从废纸篓恢复；宽限期让这类操作完全无害。
+/// 取 60 秒：与默认自动周期一致，正常情况下删除会延后一轮周期执行。
+const CLOUD_DELETE_GRACE_MS: i64 = 60_000;
+/// 相对阈值：一次要删掉一半以上的同步基线时也必须确认。
+///
+/// 覆盖「挂载目录被清空但有少量残留文件」的形态：此时绝对阈值可能不触发，
+/// 但「一半以上的文件同时消失」在真实使用里几乎只可能是环境异常。
+/// 条目数下限避免小目录（如只有 4 个文件）频繁打扰。
+const MASS_DELETE_RATIO_MIN_ENTRIES: usize = 10;
+
+/// 云端删除闸门的判定结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloudDeleteGate {
+    /// 允许继续逐条复核。
+    Allow,
+    /// 本地扫描为空而基线非空：整体拒绝。
+    BlockEmptyScan,
+    /// 超出批量删除阈值且未获用户确认：整体拒绝。
+    BlockMassDelete {
+        /// 当前生效的阈值，便于日志与前端提示对齐。
+        threshold: usize,
+    },
+}
+
+/// 计算一批删除动作波及的云端条目数（目录按子树展开）。
+fn affected_cloud_entries(
+    actions: &[crate::sync::state::SyncAction],
+    delete_indexes: &[usize],
+    cloud: &std::collections::HashMap<String, crate::drive::models::DriveFile>,
+) -> usize {
+    let mut affected = 0usize;
+    for index in delete_indexes {
+        let Some(relative_path) = actions[*index].relative_path.as_deref() else {
+            affected += 1;
+            continue;
+        };
+        // 目录删除会被云端级联到整棵子树，按实际条目计入爆炸半径。
+        let is_folder = cloud
+            .get(relative_path)
+            .map(|file| file.is_folder())
+            .unwrap_or(false);
+        if !is_folder {
+            affected += 1;
+            continue;
+        }
+        // 子树前缀。
+        let prefix = format!("{relative_path}/");
+        affected += 1 + cloud
+            .keys()
+            .filter(|path| path.starts_with(&prefix))
+            .count();
+    }
+    affected
+}
+
+/// 计算闸门判定，纯函数便于单测覆盖。
+fn cloud_delete_gate(
+    local_len: usize,
+    db_len: usize,
+    affected: usize,
+    approved: bool,
+) -> CloudDeleteGate {
+    // 空扫描 + 非空基线：唯一可能是本地树不可见（未挂载/被清空/权限变化）。
+    if local_len == 0 && db_len > 0 {
+        return CloudDeleteGate::BlockEmptyScan;
+    }
+    // 绝对阈值：一次误判的爆炸半径过大。
+    if affected >= MASS_DELETE_CONFIRM_THRESHOLD && !approved {
+        return CloudDeleteGate::BlockMassDelete {
+            threshold: MASS_DELETE_CONFIRM_THRESHOLD,
+        };
+    }
+    // 相对阈值：一次删掉一半以上基线，通常意味着本地树不可见而不是用户手删。
+    if !approved
+        && affected >= MASS_DELETE_RATIO_MIN_ENTRIES
+        && affected.saturating_mul(2) >= db_len
+    {
+        return CloudDeleteGate::BlockMassDelete {
+            threshold: MASS_DELETE_RATIO_MIN_ENTRIES,
+        };
+    }
+    CloudDeleteGate::Allow
+}
+
+/// 把云端删除动作降级为 Skip，并记录面向用户的原因。
+fn downgrade_to_skip(action: &mut crate::sync::state::SyncAction, reason: &str) {
+    action.action_type = crate::sync::state::SyncActionType::Skip;
+    action.reason = Some(reason.to_string());
+}
+
+#[cfg(test)]
+mod delete_gate_tests {
+    use super::{affected_cloud_entries, cloud_delete_gate, CloudDeleteGate};
+    use crate::drive::models::DriveFile;
+    use crate::sync::state::{SyncAction, SyncActionType};
+    use std::collections::HashMap;
+
+    /// 构造最小动作。
+    fn action(action_type: SyncActionType, path: &str) -> SyncAction {
+        SyncAction {
+            action_type,
+            relative_path: Some(path.to_string()),
+            file_id: Some(format!("id-{path}")),
+            parent_file_id: None,
+            local_path: None,
+            cloud_file: None,
+            reason: None,
+        }
+    }
+
+    /// 构造最小云端条目（目录或文件）。
+    fn cloud_file(id: &str, name: &str, folder: bool) -> DriveFile {
+        DriveFile {
+            id: id.to_string(),
+            name: name.to_string(),
+            category: if folder {
+                crate::drive::models::FileCategory::Folder
+            } else {
+                crate::drive::models::FileCategory::Video
+            },
+            size: 0,
+            parent_folder: None,
+            description: None,
+            created_time: None,
+            edited_time: None,
+            mime_type: None,
+            content_hash: None,
+            thumbnail_link: None,
+        }
+    }
+
+    /// 空扫描 + 非空基线必须整体拒绝：这是「挂载目录被清空」的典型形态。
+    #[test]
+    fn empty_scan_blocks_every_cloud_delete() {
+        assert_eq!(
+            cloud_delete_gate(0, 1024, 1, false),
+            CloudDeleteGate::BlockEmptyScan
+        );
+        // 用户确认也不能放行：空扫描不是「用户要删很多」，而是「本地看不见」。
+        assert_eq!(
+            cloud_delete_gate(0, 1024, 1, true),
+            CloudDeleteGate::BlockEmptyScan
+        );
+        // 基线也为空（首轮同步）时没有可删的东西，放行。
+        assert_eq!(cloud_delete_gate(0, 0, 0, false), CloudDeleteGate::Allow);
+    }
+
+    /// 一次删掉一半以上基线也要确认：覆盖「目录被清空但有残留」的形态。
+    #[test]
+    fn deleting_half_of_baseline_requires_approval() {
+        // 80 / 85：绝对阈值没到，但超过一半 → 拦下。
+        assert!(matches!(
+            cloud_delete_gate(85, 85, 80, false),
+            CloudDeleteGate::BlockMassDelete { .. }
+        ));
+        // 少量删除（低于条目下限）不打扰。
+        assert_eq!(cloud_delete_gate(85, 85, 9, false), CloudDeleteGate::Allow);
+        // 大库里删少量文件不受影响。
+        assert_eq!(
+            cloud_delete_gate(1000, 1000, 50, false),
+            CloudDeleteGate::Allow
+        );
+        // 用户确认后放行。
+        assert_eq!(cloud_delete_gate(85, 85, 80, true), CloudDeleteGate::Allow);
+    }
+
+    /// 批量删除超过阈值必须等用户确认。
+    #[test]
+    fn mass_delete_requires_explicit_approval() {
+        assert_eq!(
+            cloud_delete_gate(1024, 1024, 99, false),
+            CloudDeleteGate::Allow
+        );
+        assert!(matches!(
+            cloud_delete_gate(1024, 1024, 100, false),
+            CloudDeleteGate::BlockMassDelete { .. }
+        ));
+        // 用户确认后放行。
+        assert_eq!(
+            cloud_delete_gate(1024, 1024, 100, true),
+            CloudDeleteGate::Allow
+        );
+    }
+
+    /// 目录删除按整棵子树计入爆炸半径：一条动作可能代表上千个文件。
+    #[test]
+    fn folder_delete_counts_whole_subtree() {
+        let cloud = HashMap::from([
+            ("photos".to_string(), cloud_file("f-photos", "photos", true)),
+            (
+                "photos/a.jpg".to_string(),
+                cloud_file("f-a", "a.jpg", false),
+            ),
+            (
+                "photos/b.jpg".to_string(),
+                cloud_file("f-b", "b.jpg", false),
+            ),
+            (
+                "photos/sub/c.jpg".to_string(),
+                cloud_file("f-c", "c.jpg", false),
+            ),
+            (
+                "other.txt".to_string(),
+                cloud_file("f-other", "other.txt", false),
+            ),
+        ]);
+        let actions = vec![
+            action(SyncActionType::DeleteFromCloud, "photos"),
+            action(SyncActionType::DeleteFromCloud, "other.txt"),
+        ];
+
+        // photos 自身 + 3 个后代，加 other.txt 共 5 条。
+        assert_eq!(affected_cloud_entries(&actions, &[0, 1], &cloud), 5);
+    }
+}
+
+/// 云端删除「逐条本地复核」的回归测试：只有本地确实不存在（且不是占位符）才允许删云端。
+#[cfg(test)]
+mod local_presence_guard_tests {
+    use super::*;
+    use crate::drive::models::FileCategory;
+    use crate::sync::state::{SyncAction, SyncActionType};
+    use std::sync::Arc;
+
+    /// 建一个带挂载目录的最小引擎。
+    fn engine_with_mount(root: &std::path::Path) -> SyncEngine {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE sync_items (
+                    file_id TEXT NOT NULL, local_path TEXT NOT NULL, parent_folder_id TEXT,
+                    name TEXT NOT NULL, is_folder INTEGER NOT NULL DEFAULT 0,
+                    size INTEGER NOT NULL DEFAULT 0, local_size INTEGER, sha256 TEXT,
+                    local_mtime INTEGER, cloud_edited_time INTEGER, last_sync_time INTEGER,
+                    status INTEGER NOT NULL DEFAULT 0, error_message TEXT,
+                    PRIMARY KEY (file_id, local_path)
+                );
+                CREATE TABLE transfer_queue (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, direction INTEGER NOT NULL,
+                    file_id TEXT, local_path TEXT, name TEXT NOT NULL,
+                    total_size INTEGER NOT NULL DEFAULT 0, transferred INTEGER NOT NULL DEFAULT 0,
+                    state INTEGER NOT NULL DEFAULT 0, error_message TEXT,
+                    created_at INTEGER NOT NULL, finished_at INTEGER, server_id TEXT,
+                    upload_id TEXT, resume_offset INTEGER NOT NULL DEFAULT 0, session_url TEXT,
+                    relative_path TEXT, parent_file_id TEXT, operation INTEGER,
+                    source_mtime INTEGER, source_size INTEGER, expected_cloud_edited_time INTEGER,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    verify_attempt_count INTEGER NOT NULL DEFAULT 0, next_retry_at INTEGER,
+                    error_kind INTEGER, remote_result_file_id TEXT,
+                    state_revision INTEGER NOT NULL DEFAULT 0
+                );",
+            )
+            .unwrap();
+        let db = Arc::new(parking_lot::Mutex::new(connection));
+        let auth = Arc::new(crate::auth::service::AuthService::new());
+        let client = Arc::new(crate::drive::client::DriveClient::new(auth));
+        let files_api = Arc::new(crate::drive::files_api::FilesApi::new(client.clone()));
+        let changes_api = Arc::new(crate::drive::changes_api::ChangesApi::new(client));
+        let mut engine = SyncEngine::new(
+            files_api,
+            changes_api,
+            db,
+            Arc::new(crate::sync::status_aggregator::StatusAggregator::default()),
+            Vec::new(),
+            3,
+            0,
+        );
+        engine.set_mount(Arc::new(crate::mount::manager::MountManager::new(root)));
+        engine
+    }
+
+    /// 构造一条云端删除动作。
+    fn delete_action(path: &str) -> SyncAction {
+        SyncAction {
+            action_type: SyncActionType::DeleteFromCloud,
+            relative_path: Some(path.to_string()),
+            file_id: Some(format!("id-{path}")),
+            parent_file_id: None,
+            local_path: None,
+            cloud_file: None,
+            reason: Some("会话内删除 → 双向删除云端".to_string()),
+        }
+    }
+
+    /// 构造云端缓存：单文件 + 一个目录子树。
+    fn cloud_tree() -> HashMap<String, DriveFile> {
+        // 最小 DriveFile。
+        let file = |id: &str, name: &str, folder: bool| DriveFile {
+            id: id.to_string(),
+            name: name.to_string(),
+            category: if folder {
+                FileCategory::Folder
+            } else {
+                FileCategory::Video
+            },
+            size: 0,
+            parent_folder: None,
+            description: None,
+            created_time: None,
+            edited_time: None,
+            mime_type: None,
+            content_hash: None,
+            thumbnail_link: None,
+        };
+        HashMap::from([
+            ("gone.txt".to_string(), file("f-gone", "gone.txt", false)),
+            ("docs".to_string(), file("f-docs", "docs", true)),
+            ("docs/a.txt".to_string(), file("f-a", "a.txt", false)),
+        ])
+    }
+
+    /// 没有挂载目录时无法核验本地状态，必须一律拒绝。
+    #[test]
+    fn missing_mount_blocks_every_delete() {
+        // 与 engine_with_mount 相同的构造，但不绑定挂载目录。
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE sync_items (
+                    file_id TEXT NOT NULL, local_path TEXT NOT NULL, parent_folder_id TEXT,
+                    name TEXT NOT NULL, is_folder INTEGER NOT NULL DEFAULT 0,
+                    size INTEGER NOT NULL DEFAULT 0, local_size INTEGER, sha256 TEXT,
+                    local_mtime INTEGER, cloud_edited_time INTEGER, last_sync_time INTEGER,
+                    status INTEGER NOT NULL DEFAULT 0, error_message TEXT,
+                    PRIMARY KEY (file_id, local_path)
+                );",
+            )
+            .unwrap();
+        let db = Arc::new(parking_lot::Mutex::new(connection));
+        let auth = Arc::new(crate::auth::service::AuthService::new());
+        let client = Arc::new(crate::drive::client::DriveClient::new(auth));
+        let files_api = Arc::new(crate::drive::files_api::FilesApi::new(client.clone()));
+        let changes_api = Arc::new(crate::drive::changes_api::ChangesApi::new(client));
+        let engine = SyncEngine::new(
+            files_api,
+            changes_api,
+            db,
+            Arc::new(crate::sync::status_aggregator::StatusAggregator::default()),
+            Vec::new(),
+            3,
+            0,
+        );
+        let cloud = cloud_tree();
+        let mut actions = vec![delete_action("gone.txt")];
+
+        let blocked = engine.guard_cloud_deletes(&mut actions, 10, 10, &cloud);
+
+        assert_eq!(blocked, 1);
+        assert_eq!(actions[0].action_type, SyncActionType::Skip);
+    }
+
+    /// 失效占位清理必须三重守卫：真文件、云端仍存在、已不是占位符都不能删。
+    #[test]
+    fn cleanup_only_removes_genuinely_stale_placeholder() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = engine_with_mount(temp.path());
+        // 云端仍存在该路径 → 拒绝清理。
+        let existing = temp.path().join("kept.txt");
+        std::fs::write(&existing, b"").unwrap();
+        assert!(engine
+            .cleanup_invalid_placeholder_inner("gone.txt")
+            .is_err());
+
+        // 云端不存在，但本地是普通空文件（无 placeholder 标记）→ 拒绝清理。
+        let empty_file = temp.path().join("empty.txt");
+        std::fs::write(&empty_file, b"").unwrap();
+        assert!(engine
+            .cleanup_invalid_placeholder_inner("empty.txt")
+            .is_err());
+
+        // 本地是真实内容 → 拒绝清理。
+        let real_file = temp.path().join("real.txt");
+        std::fs::write(&real_file, b"content").unwrap();
+        assert!(engine
+            .cleanup_invalid_placeholder_inner("real.txt")
+            .is_err());
+        assert!(real_file.exists(), "真实内容绝不能被这里删掉");
+    }
+
+    /// 场景一：本地误删后很快恢复 —— 宽限期挡住删除，恢复后不再提出删除且记录清空。
+    #[test]
+    fn quick_restore_within_grace_window_cancels_cloud_delete() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = engine_with_mount(temp.path());
+        let cloud = cloud_tree();
+        let mut actions = vec![delete_action("gone.txt")];
+
+        // 第一次观察：进入宽限期，拒绝删除。
+        let blocked = engine.guard_cloud_deletes(&mut actions, 10, 10, &cloud);
+        assert_eq!(blocked, 0, "宽限期不算「被安全闸门阻止」");
+        assert_eq!(actions[0].action_type, SyncActionType::Skip);
+
+        // 用户在宽限期内恢复文件：planner 不再为该路径提出删除。
+        std::fs::write(temp.path().join("gone.txt"), b"restored").unwrap();
+        let mut no_actions: Vec<SyncAction> = Vec::new();
+        engine.guard_cloud_deletes(&mut no_actions, 10, 10, &cloud);
+        assert!(
+            engine.pending_cloud_deletes.lock().is_empty(),
+            "文件恢复后宽限期记录必须清空"
+        );
+
+        // 即使某轮仍然错误地提出了删除，逐条复核也会因文件存在而拦住。
+        let mut stale_actions = vec![delete_action("gone.txt")];
+        engine.guard_cloud_deletes(&mut stale_actions, 10, 10, &cloud);
+        assert_eq!(stale_actions[0].action_type, SyncActionType::Skip);
+    }
+
+    /// 宽限期到期后才允许真正删除云端。
+    #[test]
+    fn cloud_delete_proceeds_after_grace_window() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = engine_with_mount(temp.path());
+        let cloud = cloud_tree();
+        let mut actions = vec![delete_action("gone.txt")];
+        engine.guard_cloud_deletes(&mut actions, 10, 10, &cloud);
+
+        // 把首次观察时间改成「很久以前」，模拟宽限期已过。
+        {
+            let mut pending = engine.pending_cloud_deletes.lock();
+            let first_seen = pending.get("gone.txt").copied().expect("应已记账");
+            pending.insert("gone.txt".to_string(), first_seen - 120_000);
+        }
+        let mut actions = vec![delete_action("gone.txt")];
+        engine.guard_cloud_deletes(&mut actions, 10, 10, &cloud);
+
+        assert_eq!(actions[0].action_type, SyncActionType::DeleteFromCloud);
+    }
+
+    /// 本地文件仍在 → 拒绝云端删除；本地确实不存在 → 允许（需已过宽限期）。
+    #[test]
+    fn existing_local_file_blocks_cloud_delete() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("gone.txt"), b"still here").unwrap();
+        let engine = engine_with_mount(temp.path());
+        // 预先让宽限期过期，聚焦「逐条本地复核」这一层。
+        {
+            let mut pending = engine.pending_cloud_deletes.lock();
+            for path in ["gone.txt", "docs"] {
+                pending.insert(path.to_string(), 0);
+            }
+        }
+        let cloud = cloud_tree();
+        let mut actions = vec![
+            delete_action("gone.txt"),
+            // 本地不存在的目录可以删。
+            delete_action("docs"),
+        ];
+
+        let blocked = engine.guard_cloud_deletes(&mut actions, 10, 10, &cloud);
+
+        assert_eq!(blocked, 0, "逐条复核不产生「批量拦截」计数");
+        assert_eq!(
+            actions[0].action_type,
+            SyncActionType::Skip,
+            "本地文件仍存在时必须降级为 Skip"
+        );
+        assert_eq!(actions[1].action_type, SyncActionType::DeleteFromCloud);
+    }
+
+    /// 本地为空而基线非空 → 整批拒绝（挂载目录被清空/未挂载的典型形态）。
+    #[test]
+    fn empty_local_scan_blocks_every_delete() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = engine_with_mount(temp.path());
+        let cloud = cloud_tree();
+        let mut actions = vec![delete_action("gone.txt"), delete_action("docs")];
+
+        let blocked = engine.guard_cloud_deletes(&mut actions, 0, 500, &cloud);
+
+        // gone.txt 1 条 + docs 子树（docs 自身 + docs/a.txt）2 条。
+        assert_eq!(blocked, 3);
+        assert!(actions
+            .iter()
+            .all(|action| action.action_type == SyncActionType::Skip));
+    }
+
+    /// 批量阈值：未确认时整批拦下，确认后放行（确认同时跳过宽限期）。
+    #[test]
+    fn mass_delete_requires_approval_then_allows() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = engine_with_mount(temp.path());
+        // 构造 100 个云端文件。
+        let mut cloud = HashMap::new();
+        for index in 0..100 {
+            // 每个云端条目的路径。
+            let path = format!("bulk-{index}.txt");
+            cloud.insert(
+                path.clone(),
+                DriveFile {
+                    id: format!("f-{index}"),
+                    name: path.clone(),
+                    category: FileCategory::Video,
+                    size: 0,
+                    parent_folder: None,
+                    description: None,
+                    created_time: None,
+                    edited_time: None,
+                    mime_type: None,
+                    content_hash: None,
+                    thumbnail_link: None,
+                },
+            );
+        }
+        let mut actions: Vec<SyncAction> = (0..100)
+            .map(|index| delete_action(&format!("bulk-{index}.txt")))
+            .collect();
+
+        // 未确认：全部拦下。
+        let blocked = engine.guard_cloud_deletes(&mut actions, 1000, 1000, &cloud);
+        assert_eq!(blocked, 100);
+        assert!(actions
+            .iter()
+            .all(|action| action.action_type == SyncActionType::Skip));
+
+        // 用户确认后放行（本地均不存在）。
+        let mut actions: Vec<SyncAction> = (0..100)
+            .map(|index| delete_action(&format!("bulk-{index}.txt")))
+            .collect();
+        engine.approve_mass_delete();
+        let blocked = engine.guard_cloud_deletes(&mut actions, 1000, 1000, &cloud);
+        assert_eq!(blocked, 0);
+        assert!(actions
+            .iter()
+            .all(|action| action.action_type == SyncActionType::DeleteFromCloud));
     }
 }

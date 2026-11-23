@@ -3,7 +3,7 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-use crate::constants::{APP_NAME, BUNDLE_IDENTIFIER};
+use crate::constants::BUNDLE_IDENTIFIER;
 
 /// 用户级 Autostart 文件名；沿用 bundle id 避免与其他应用冲突。
 fn desktop_entry_name() -> String {
@@ -78,13 +78,13 @@ fn escape_exec_argument(value: &OsStr) -> std::io::Result<String> {
 }
 
 /// 生成桌面环境登录后以隐藏模式启动应用的 Desktop Entry。
-fn desktop_entry(executable: &Path) -> std::io::Result<String> {
+fn desktop_entry(executable: &Path, display_name: &str) -> std::io::Result<String> {
     let exec = expected_exec_value(executable)?;
     Ok(format!(
         "[Desktop Entry]\n\
          Type=Application\n\
          Version=1.0\n\
-         Name={APP_NAME}\n\
+         Name={display_name}\n\
          Comment=PetalLink background sync\n\
          Exec={exec}\n\
          Terminal=false\n\
@@ -149,7 +149,7 @@ fn desktop_entry_is_enabled(content: &str, executable: &Path) -> bool {
 }
 
 /// 启用时写入用户级 Autostart 文件，禁用时幂等删除。
-pub(super) fn set_enabled(enabled: bool) -> std::io::Result<()> {
+pub(super) fn set_enabled(enabled: bool, display_name: &str) -> std::io::Result<()> {
     let path = desktop_entry_path().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound, "无法获取 XDG Autostart 目录")
     })?;
@@ -164,7 +164,7 @@ pub(super) fn set_enabled(enabled: bool) -> std::io::Result<()> {
     }
 
     let executable = executable_path()?;
-    let content = desktop_entry(&executable)?;
+    let content = desktop_entry(&executable, display_name)?;
     let directory = path.parent().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "Autostart 路径缺少父目录")
     })?;

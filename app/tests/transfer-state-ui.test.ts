@@ -34,6 +34,9 @@ function makeState(overrides: Partial<SyncGlobalState> = {}): SyncGlobalState {
     transfer_failed: 0,
     failed_items: [],
     conflict: 0,
+    blocked_cloud_deletes: 0,
+    deferred_actions: 0,
+    invalid_placeholders: [],
     editing: 0,
     is_running: false,
     last_sync_time: null,
@@ -145,13 +148,15 @@ describe("TransferPopover 后端状态呈现", () => {
     ]));
     expect(retriableNames).toHaveLength(2);
 
-    // 可取消行渲染更多操作菜单：普通「需要重新检查」（取消出口）与不可重试的失败删除。
+    // 所有可取消行（失败 / 需要重新检查）都渲染更多操作菜单：
+    // 失败行既是重试锚点，也必须提供取消出口释放路径占用（D12）。
     const menuNames = wrapper
       .findAll(".tp-item")
       .filter((item) => item.find(".tp-item__menu").exists())
       .map((item) => item.find(".tp-item__name").text());
     expect(menuNames).toEqual([
       expect.stringContaining("task-6"),
+      expect.stringContaining("task-8"),
       expect.stringContaining("task-10"),
     ]);
   });

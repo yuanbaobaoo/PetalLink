@@ -142,12 +142,47 @@ export const useTransferStore = defineStore("transfer", () => {
   }
 
   /**
-   * 后端非阻塞接受重试；队列靠 transfer_update 重载，主页靠 sync_state 更新。
+   * 幂等入队单条重试；命令返回后立即以权威状态刷新，不等待任务执行。
+   *
+   * @param taskId - 传输任务 ID
+   * @returns 后端的入队结果，供调用方区分「新入队」与「已在队列中」
+   */
+  async function retry(taskId: number): Promise<transferApi.RetryEnqueued> {
+    // 后端只做静态校验与 CAS，毫秒级返回。
+    const result = await commands.transferRetry(taskId);
+    // 乐观置为「等待开始」：仅在本次真的推进到 Pending 时生效，事件回填后以权威状态为准。
+    if (transferApi.isNewlyQueued(result)) markQueuedOptimistically(taskId);
+    // 权威列表随后台事件刷新，这里不阻塞用户下一次点击。
+    void loadAll();
+    return result;
+  }
+
+  /**
+   * 一键重试全部失败项。
+   *
+   * @returns 入队/跳过/拒绝的数量汇总
+   */
+  async function retryAll(): Promise<transferApi.RetryAllSummary> {
+    // 后端遍历失败项入队后立即返回，执行由后台调度。
+    const summary = await transferApi.retryAllFailedTransfers();
+    await loadAll();
+    return summary;
+  }
+
+  /**
+   * 把任务乐观标记为「等待开始」。
+   *
+   * 只在后端已接受入队后调用；下一次权威刷新会覆盖此临时状态。
    *
    * @param taskId - 传输任务 ID
    */
-  async function retry(taskId: number): Promise<void> {
-    await runAndReload(() => commands.transferRetry(taskId));
+  function markQueuedOptimistically(taskId: number): void {
+    // 命中的本地任务；不存在时不做任何猜测。
+    const task = tasks.value.find((item) => item.id === taskId);
+    if (!task) return;
+    task.state = TRANSFER_STATE.PENDING;
+    task.error_message = null;
+    task.transferred = 0;
   }
 
   /**
@@ -177,11 +212,23 @@ export const useTransferStore = defineStore("transfer", () => {
     await runAndReload(() => commands.transferCancel(taskId));
   }
 
+  /**
+   * 批量取消全部失败任务，保留历史行但释放路径占用。
+   *
+   * @returns 实际取消的数量
+   */
+  async function cancelAllFailed(): Promise<number> {
+    // 后端逐条 CAS，返回后刷新权威列表。
+    const canceled = await commands.transferCancelAllFailed();
+    await loadAll();
+    return canceled;
+  }
+
   return {
     tasks, uploads, downloads,
     running, pending, waitingNetwork, backingOff, verifyingRemote, restartRequired,
     completed, failed, canceled, processing, waiting, active, hasActiveTasks,
-    loadAll, clearCompleted, clearFailed, clearFinished, retry,
-    overwriteRemote, keepBoth, cancel,
+    loadAll, clearCompleted, clearFailed, clearFinished, retry, retryAll,
+    overwriteRemote, keepBoth, cancel, cancelAllFailed,
   };
 });

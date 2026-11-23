@@ -78,6 +78,9 @@ where
 
     let mut summary = PathRecoverySummary::default();
     let mut rekeyed_subtrees = Vec::<(String, String)>::new();
+    // 基线只读一次：大多数候选本轮不可恢复，旧实现每个候选都整表重读（D27）。
+    // 成功重键会改动数据库，因此只在那之后再重载。
+    let mut records = repository::load_all(conn)?;
     for (candidate, new_path, cloud_file) in candidates {
         // 目录根成功重键时已原子覆盖全部后代；跳过失效候选，避免大目录反复全表读取。
         if rekeyed_subtrees.iter().any(|(old_root, new_root)| {
@@ -104,10 +107,14 @@ where
             }
             continue;
         }
-        let records = repository::load_all(conn)?;
-        let Some(current) = records.iter().find(|record| {
-            record.file_id == candidate.file_id && record.local_path == candidate.local_path
-        }) else {
+        // 只克隆命中的那一行，避免把整表借用在后面重载时卡住。
+        let Some(current) = records
+            .iter()
+            .find(|record| {
+                record.file_id == candidate.file_id && record.local_path == candidate.local_path
+            })
+            .cloned()
+        else {
             continue;
         };
         // 从最终身份校验到文件系统重命名与 DB 事务全程持有源/目标租约。
@@ -136,7 +143,7 @@ where
             cloud_tree,
             &cloud_by_id,
             &records,
-            current,
+            &current,
             &new_path,
             &cloud_file,
         ) {
@@ -160,6 +167,8 @@ where
                     rekeyed_subtrees.push((current.local_path.clone(), new_path.clone()));
                 }
                 summary.rekeyed_roots += 1;
+                // 重键已改动数据库，后续候选必须基于最新基线判断。
+                records = repository::load_all(conn)?;
             }
             Ok(RecoveryOutcome::Unmarked) => summary.skipped_unmarked += 1,
             Ok(RecoveryOutcome::BlockedByActiveTransfer) => {

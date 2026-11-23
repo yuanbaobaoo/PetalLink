@@ -24,6 +24,11 @@ mod transfer_operations;
 pub(crate) use local_delete::verify_local_delete_snapshot;
 pub(crate) use transfer_operations::verify_source_snapshot;
 
+/// 后台执行投递器：把已入队的传输任务交给执行通道。
+///
+/// 注入后周期不再等待传输完成（16b）；未注入时退回同步执行，便于独立测试。
+pub type BackgroundTransferDispatcher = Arc<dyn Fn(i64) + Send + Sync>;
+
 /// 同步执行器 —— 持有全部外部依赖。
 pub struct SyncExecutor {
     concurrency: u32,
@@ -32,7 +37,7 @@ pub struct SyncExecutor {
     upload_api: Arc<UploadApi>,
     mount: Option<Arc<MountManager>>,
     conflict: Option<Arc<std::sync::Mutex<ConflictResolver>>>,
-    stability: Option<Arc<tokio::sync::Mutex<StabilityChecker>>>,
+    stability: Option<Arc<StabilityChecker>>,
     db: Option<Arc<parking_lot::Mutex<rusqlite::Connection>>>,
     /// 传输更新通知发送端（每次传输结算时触发前端刷新）
     transfer_update_tx: Option<tokio::sync::broadcast::Sender<()>>,
@@ -41,6 +46,8 @@ pub struct SyncExecutor {
     task_runner: Option<Arc<TaskRunner>>,
     /// 动作取得并发槽后检查的引擎活动门。
     action_activity_gate: Option<Arc<dyn crate::sync::task_runner::TaskActivityGate>>,
+    /// 传输动作的后台投递入口；未注入时同步执行。
+    background_dispatcher: Option<BackgroundTransferDispatcher>,
 }
 
 impl SyncExecutor {
@@ -65,6 +72,7 @@ impl SyncExecutor {
             app_handle: None,
             task_runner: None,
             action_activity_gate: None,
+            background_dispatcher: None,
         }
     }
 
@@ -77,8 +85,27 @@ impl SyncExecutor {
         self.conflict = Some(conflict);
     }
 
-    pub fn set_stability(&mut self, s: Arc<tokio::sync::Mutex<StabilityChecker>>) {
+    pub fn set_stability(&mut self, s: Arc<StabilityChecker>) {
         self.stability = Some(s);
+    }
+
+    /// 注入传输动作的后台投递入口。
+    pub fn set_background_dispatcher(&mut self, dispatcher: BackgroundTransferDispatcher) {
+        self.background_dispatcher = Some(dispatcher);
+    }
+
+    /// 将单个已落库为可执行状态的任务投递到后台执行通道。
+    ///
+    /// 恢复入口只返回可运行 ID，由这里投递；未注入投递器（独立测试）时返回 false，
+    /// 任务保持 Pending，不会在周期内被同步执行。
+    pub fn dispatch_background(&self, task_id: i64) -> bool {
+        match &self.background_dispatcher {
+            Some(dispatcher) => {
+                dispatcher(task_id);
+                true
+            }
+            None => false,
+        }
     }
 
     pub fn set_db(&mut self, db: Arc<parking_lot::Mutex<rusqlite::Connection>>) {
@@ -125,6 +152,7 @@ impl SyncExecutor {
             app_handle: self.app_handle.clone(),
             task_runner: self.task_runner.clone(),
             action_activity_gate: self.action_activity_gate.clone(),
+            background_dispatcher: self.background_dispatcher.clone(),
         }
     }
 }

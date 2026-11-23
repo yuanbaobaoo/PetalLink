@@ -2,6 +2,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { MateAppLogo, MateIcon } from "@/components/mate";
+import { useAppIdentity } from "@/composables/useAppIdentity";
 import SidebarTreeNode from "./SidebarTreeNode.vue";
 import { useFileBrowserStore, ROOT } from "@/stores/fileBrowser";
 import { useAuthStore } from "@/stores/auth";
@@ -22,6 +23,8 @@ const browser = useFileBrowserStore();
 const auth = useAuthStore();
 // 应用更新状态。
 const updater = useUpdaterStore();
+// 应用展示名（dev 包带 -Dev，侧边栏 logo 文案随之变化）。
+const { displayName } = useAppIdentity();
 
 // 当前账号展示名。
 const userLabel = computed(() => authApi.primaryLabel(auth.userInfo) ?? LOADING_LABEL);
@@ -62,7 +65,7 @@ function fmtSize(bytes: number): string {
   <aside class="sidebar">
     <!-- Logo 区 -->
     <div class="sidebar__logo">
-      <MateAppLogo :size="28" />
+      <MateAppLogo :size="28" :text="displayName" />
     </div>
 
     <!-- 位置分组 -->

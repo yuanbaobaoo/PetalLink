@@ -286,6 +286,25 @@ async fn write_not_found(stream: &mut (impl tokio::io::AsyncWrite + Unpin)) -> s
     Ok(())
 }
 
+/// 对 HTML 文本做最小转义，防止回调参数里的脚本被浏览器执行。
+///
+/// 授权失败原因来自回调 query（攻击者可控制），必须按 HTML 文本语义转义，
+/// 否则构造一个带 `<script>` 的 error 参数即可在本机回环源上执行脚本（D25）。
+fn escape_html(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            other => escaped.push(other),
+        }
+    }
+    escaped
+}
+
 /// 构建回写浏览器的友好页面。对齐 dart `_buildResponsePage`。
 fn build_response_page(result: &OauthCallbackResult) -> String {
     if result.is_success() {
@@ -297,7 +316,8 @@ h1{color:#1a7f37}</style></head>
 <p>已成功登录华为云盘，现在可以关闭此页面并返回 App。</p></body></html>"#
             .to_string()
     } else {
-        let reason = result.error.as_deref().unwrap_or("未知错误");
+        // 失败原因必须转义后再插入 HTML。
+        let reason = escape_html(result.error.as_deref().unwrap_or("未知错误"));
         format!(
             r#"<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>授权失败</title>
@@ -307,5 +327,25 @@ h1{{color:#d73a49}}</style></head>
 <p>{reason}</p>
 <p>请返回 App 重新登录。</p></body></html>"#
         )
+    }
+}
+
+#[cfg(test)]
+mod escape_tests {
+    use super::escape_html;
+
+    /// 回调参数里的一切 HTML 元字符都必须被转义，避免反射型脚本执行（D25）。
+    #[test]
+    fn error_text_is_escaped_before_rendering() {
+        let escaped = escape_html("<script>alert('x')</script>\"&");
+        assert!(!escaped.contains('<'));
+        assert!(!escaped.contains('>'));
+        assert!(!escaped.contains('"'));
+        assert_eq!(
+            escaped,
+            "&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt;&quot;&amp;"
+        );
+        // 正常中文与空格保持原样。
+        assert_eq!(escape_html("授权被拒绝"), "授权被拒绝");
     }
 }

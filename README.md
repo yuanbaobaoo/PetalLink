@@ -46,7 +46,7 @@
 | <div style="width:75px">模块</div> | 能力 |
 |----------------------------------|---|
 | **授权登录**                         | OAuth 2.0 + PKCE（S256）；`openid profile drive` 全盘访问；Token 自动刷新 + 机器码绑定的 `token.bin` 加密存储 |
-| **网盘主界面**                        | 双栏布局（侧边栏递归目录树 + 文件列表）；面包屑导航；搜索；新建文件夹 |
+| **网盘主界面**                        | 双栏布局（侧边栏递归目录树 + 文件列表）；面包屑导航；名称子串搜索（当前目录/整盘，回车提交）；新建文件夹 |
 | **文件操作**                         | 上传（≤20MB multipart + >20MB 分片续传）、Range 断点下载、删除、重命名、移动、缩略图；写操作按 fileId 核验后才结算 |
 | **拖拽上传**                         | 文件/文件夹拖入文件列表即复制进同步目录（`.tmp` 原子落盘、同名拒绝覆盖），随后自动上传到云端；传输队列实时可见进度 |
 | **双向同步**                         | 本地 FSEvents/inotify + 3s debounce；华为 Changes 增量同步 + BFS 兜底；tree/path/cursor 原子可信 checkpoint；三段式稳定性检查 |
@@ -56,7 +56,7 @@
 | **安全更新**                         | 官方 macOS 与 Linux AppImage 使用同一更新公钥校验签名；AUR/发行版软件包不在应用内自更新，继续由包管理器维护 |
 | **冲突处理**                         | 自动重命名副本（60s 容忍窗口 + 副本去重 + 云端删除时保护本地修改） |
 | **配置管理**                         | 集中设置页：OAuth 回调地址、云盘目录、并发数（默认 6）、debounce 时长（默认 3s）、跳过文件列表、是否显示托盘图标 |
-| **传输队列**                         | 持久化状态机；上传/下载排队执行，主页删除完成后留痕可见；等待网络、退避、远端核验、需重新规划、永久失败分开展示；网络恢复自动续跑 |
+| **传输队列**                         | 持久化状态机；上传/下载排队执行，主页删除完成后留痕可见；等待网络、退避、远端核验、需重新规划、永久失败分开展示；失败行可单条取消、汇总条可「重试全部 / 取消全部」；网络恢复自动续跑 |
 | **释放空间**                         | 支持文件与目录（递归子树）；执行前弹窗列出可释放文件名与大小供二次确认；逐项复核可信云树、远端 fileId、成功基线、本地 mtime/size 与活动任务，防止 TOCTOU 误删 |
 | **日志系统**                         | 三层输出（终端 + 滚动文件 + 环形缓冲）；日志查看导出页面 |
 
@@ -134,6 +134,22 @@ cp .env.example .env
 ```
 
 前端运行在 `http://localhost:1420`（HMR 热更新），Rust 后端自动编译启动。
+
+`tauri.dev.conf.json` 让开发版与正式版**完全隔离**，可以同时安装、同时运行：
+
+| 维度 | 正式版 | 开发版 |
+|---|---|---|
+| 应用标识 | `io.github.yuanbaobaoo.PetalLink` | `io.github.yuanbaobaoo.PetalLink-dev` |
+| 展示名（`productName`） | `PetalLink` | `PetalLink-Dev` |
+| 窗口标题 | `PetalLink - 华为云盘客户端开源版` | `PetalLink-Dev - 华为云盘客户端开源版` |
+| 托盘菜单 / tooltip | `PetalLink - …` | `PetalLink-Dev - …` |
+| 登录页标题、侧边栏与关于页 logo 文案 | `PetalLink` | `PetalLink-Dev` |
+| 开机自启项名称 | `PetalLink` | `PetalLink-Dev` |
+| 数据目录（`~/Library/Application Support/<标识>` 等） | 正式目录 | `…/PetalLink-dev` |
+
+展示名统一由 `productName` 驱动（`constants::display_name`），所以新增的 UI 文案只要走它就会自动带 `-Dev`。
+注意：裸二进制 `tauri dev` 的 Dock 进程名来自可执行文件，仍显示 `PetalLink`；窗口标题、托盘与界面内文案均为 `PetalLink-Dev`。
+打包后的开发版 `PetalLink-Dev.app` 由 `productName` 决定，Dock 与访达里同样是 `PetalLink-Dev`。
 
 ### Rust / TypeScript IPC 类型
 
@@ -296,6 +312,7 @@ PetalLink/
 │   ├── auth/                    # OAuth + PKCE + token.bin 加密存储
 │   ├── drive/                   # 华为 Drive REST API 客户端（Files/Upload 已按职责拆分）
 │   ├── sync/                    # 同步引擎（engine/executor/TaskRunner 均按职责拆分）
+│   │   └── engine/              # 规划周期 + 目录同步作业 worker + 独立核验通道
 │   ├── mount/                   # 本地镜像 + FSEvents/inotify 监听
 │   ├── data/                    # SQLite 数据层
 │   ├── core/                    # 配置/日志/缓存
@@ -306,7 +323,7 @@ PetalLink/
 │   ├── api/                     # 生成的 IPC bindings + 少量业务适配
 │   │   ├── generated.ts         # tauri-specta 自动生成，禁止手动修改
 │   │   ├── tauri.ts             # generated commands 的 invoke 与 AppError 归一化
-│   │   └── auth/config/drive/sync/transfer 等展示、校验或类型收窄适配
+│   │   └── auth/config/drive/sync/transfer/folderSync 等展示、校验或类型收窄适配
 │   ├── components/mate/         # Mate 组件库
 │   └── styles/                  # design token
 ├── assets/                      # 品牌图标资源（唯一图源）
