@@ -226,7 +226,8 @@ mod tests {
     /// 生成内容以隐藏模式启动且不打开终端。
     #[test]
     fn desktop_entry_launches_hidden() {
-        let content = desktop_entry(Path::new("/usr/bin/PetalLink")).unwrap();
+        let content = desktop_entry(Path::new("/usr/bin/PetalLink"), "PetalLink").unwrap();
+        assert!(content.contains("Name=PetalLink\n"));
         assert!(content.contains("Exec=\"/usr/bin/PetalLink\" --hidden"));
         assert!(content.contains("Terminal=false"));
     }

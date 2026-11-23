@@ -41,4 +41,7 @@ pub fn set_enabled(_enabled: bool, _display_name: &str) -> std::io::Result<()> {
 pub fn remove_from_login_items(display_name: &str) {
     #[cfg(target_os = "macos")]
     implementation::remove_from_login_items(display_name);
+    // Linux 等平台不维护独立 Login Items 列表，参数仅为跨平台签名一致。
+    #[cfg(not(target_os = "macos"))]
+    let _ = display_name;
 }
