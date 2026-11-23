@@ -263,7 +263,9 @@ impl TaskRunner {
         failure: PreflightFailure,
     ) -> AppResult<TransferTask> {
         let user_message = failure.user_message();
-        tracing::warn!(
+        // 单条拒绝不占用 INFO/WARN：原因已写入任务行并由 UI 展示；
+        // 批量场景下逐条 WARN 会把日志刷成噪声（2026-11-23 压测）。
+        tracing::debug!(
             task_id = task.id,
             relative_path = ?task.relative_path,
             target_state = ?failure.target,

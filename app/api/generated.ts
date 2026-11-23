@@ -198,8 +198,8 @@ export const commands = {
 	appRelaunch: () => __TAURI_INVOKE<null>("app_relaunch"),
 	// 清空应用缓存。
 	appClearCache: () => __TAURI_INVOKE<null>("app_clear_cache"),
-	// 读取最近日志。
-	logsList: () => __TAURI_INVOKE<LogRecord[]>("logs_list"),
+	// 读取最近日志；`since_ms` 只返回不早于该时间戳的记录（日志页时间筛选）。
+	logsList: (sinceMs: number | null) => __TAURI_INVOKE<LogRecord[]>("logs_list", { sinceMs }),
 	// 导出完整日志。
 	// 逐文件流式写入（临时文件 + 原子替换），不再把全部日志拼成一个字符串进内存：
 	// 日志量大时旧实现会一次性占用与日志总量相等（甚至翻倍）的内存（D24）。

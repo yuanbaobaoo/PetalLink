@@ -1,6 +1,6 @@
-<!-- 日志查看页，级别筛选 + 清空 + 导出。inline 模式下不显示 AppBar，直接嵌入父容器。 -->
+<!-- 日志查看页，级别 + 时间范围筛选，清空 / 导出。inline 模式下不显示 AppBar，直接嵌入父容器。 -->
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from "vue";
+import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import { save } from "@tauri-apps/plugin-dialog";
 import { MateButton, MateTag, MateEmpty, MateCircularProgress } from "@/components/mate";
 import { showToast } from "@/components/mate";
@@ -19,8 +19,21 @@ withDefaults(defineProps<{
 });
 
 type Level = "ALL" | "INFO" | "WARN" | "ERROR";
+type TimeRange = "all" | "5m" | "30m" | "1h" | "24h";
+
+// 时间范围选项：windowMs=0 表示不限时间（后端不下发 since_ms）
+const TIME_RANGE_OPTIONS: { value: TimeRange; label: string; windowMs: number }[] = [
+  { value: "all", label: "不限", windowMs: 0 },
+  { value: "5m", label: "5 分钟", windowMs: 5 * 60_000 },
+  { value: "30m", label: "30 分钟", windowMs: 30 * 60_000 },
+  { value: "1h", label: "1 小时", windowMs: 60 * 60_000 },
+  { value: "24h", label: "24 小时", windowMs: 24 * 60 * 60_000 },
+];
+
 // 日志级别筛选
 const filter = ref<Level>("ALL");
+// 时间范围筛选：切换后重新拉取，时间窗口由后端截断
+const timeRange = ref<TimeRange>("all");
 // 原始日志记录
 const records = ref<LogRecord[]>([]);
 // 加载状态（仅首次加载显示 spinner）
@@ -60,12 +73,23 @@ onUnmounted(() => {
 });
 
 /**
+ * 时间范围变化后立即重新拉取，避免等下一次轮询才生效。
+ */
+watch(timeRange, () => {
+  void load();
+});
+
+/**
  * 重新读取并展示最近日志。
  */
 async function load(): Promise<void> {
   try {
+    // 当前时间范围对应的窗口毫秒数（0 表示不限）。
+    const windowMs = TIME_RANGE_OPTIONS.find((opt) => opt.value === timeRange.value)?.windowMs ?? 0;
+    // 时间下界：只让后端下发窗口内记录，窗口越快越省 IPC。
+    const sinceMs = windowMs > 0 ? Date.now() - windowMs : null;
     // 后端返回的日志数据。
-    const data = await commands.logsList();
+    const data = await commands.logsList(sinceMs);
     records.value = data;
   } catch {
     // 轮询失败静默保留旧数据，不覆盖为空
@@ -155,6 +179,16 @@ async function handleExportLogs(): Promise<void> {
           @click="filter = lv"
         />
       </div>
+      <div class="log-time">
+        <span class="log-time__label">时间</span>
+        <MateTag v-for="opt in TIME_RANGE_OPTIONS" :key="opt.value"
+          :label="opt.label"
+          outline
+          :active="timeRange === opt.value"
+          @click="timeRange = opt.value"
+        />
+      </div>
+      <span class="log-count">共 {{ filtered.length }} 条</span>
       <MateButton variant="icon" icon="download" tooltip="导出" :loading="exportLoading" :disabled="exportLoading || clearLoading" @click="handleExportLogs" />
       <MateButton variant="icon" icon="trash" tooltip="清空" :loading="clearLoading" :disabled="exportLoading || clearLoading" @click="handleClearLogs" />
     </div>
@@ -162,7 +196,7 @@ async function handleExportLogs(): Promise<void> {
     <!-- 列表（v2：白卡容器） -->
     <div class="log-body">
       <div v-if="loading" class="log-loading"><MateCircularProgress :size="24" /></div>
-      <MateEmpty v-else-if="filtered.length === 0" icon="list" title="暂无日志" />
+      <MateEmpty v-else-if="filtered.length === 0" icon="list" title="当前筛选下暂无日志" />
       <div v-else class="log-list">
         <div v-for="(r, i) in filtered" :key="i" class="log-item">
           <MateTag :label="r.level" :theme="tagTheme(r.level)" size="small" />
@@ -184,9 +218,13 @@ async function handleExportLogs(): Promise<void> {
 .log-appbar { height: 56px; display: flex; align-items: center; gap: var(--space-sm); padding: 0 20px; border-bottom: 1px solid var(--line); background: var(--bg-card); flex-shrink: 0; }
 .log-appbar__back { transform: rotate(180deg); }
 .log-appbar__title { font-size: var(--font-title-sm); font-weight: var(--fw-semibold); color: var(--ink-900); }
-.log-toolbar { display: flex; align-items: center; gap: var(--space-sm); padding: 14px 20px; flex-shrink: 0; }
+.log-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-sm); row-gap: var(--space-sm); padding: 14px 20px; flex-shrink: 0; }
 .log-filters { display: flex; gap: var(--space-sm); flex: 1; }
 .log-filters :deep(.mate-tag) { cursor: pointer; user-select: none; }
+.log-time { display: flex; align-items: center; gap: var(--space-sm); }
+.log-time :deep(.mate-tag) { cursor: pointer; user-select: none; }
+.log-time__label { font-size: var(--font-body-sm); color: var(--ink-400); }
+.log-count { font-size: var(--font-body-sm); color: var(--ink-400); font-variant-numeric: tabular-nums; }
 .log-body { flex: 1; overflow-y: auto; margin: 0 20px 20px; }
 .log-list {
   background: var(--bg-card);

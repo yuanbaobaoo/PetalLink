@@ -79,10 +79,18 @@ pub(super) fn filter_active_transfer_actions(
         }
     }
     *actions = retained;
-    if skipped > 0 {
-        tracing::warn!(
+    // 只有结构性动作被隔离才值得 INFO（用户可能看到「删除没反应」）；
+    // 文件传输被隔离属正常去重，压到 debug 避免批量上传时每周期刷一条 WARN。
+    if deferred_structural > 0 {
+        tracing::info!(
             skipped,
             structural = deferred_structural,
+            active = active_tasks.len(),
+            "已隔离尚有持久活动任务的同步动作"
+        );
+    } else if skipped > 0 {
+        tracing::debug!(
+            skipped,
             active = active_tasks.len(),
             "已隔离尚有持久活动任务的同步动作"
         );

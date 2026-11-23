@@ -462,11 +462,11 @@ pub async fn app_clear_cache(app: AppHandle) -> AppResult<()> {
     Ok(())
 }
 
-/// 读取最近日志。
+/// 读取最近日志；`since_ms` 只返回不早于该时间戳的记录（日志页时间筛选）。
 #[tauri::command]
 #[specta::specta]
-pub fn logs_list() -> AppResult<Vec<crate::core::logging::LogRecord>> {
-    Ok(crate::core::logging::snapshot())
+pub fn logs_list(since_ms: Option<i64>) -> AppResult<Vec<crate::core::logging::LogRecord>> {
+    Ok(crate::core::logging::snapshot_since(since_ms))
 }
 
 /// 校验日志导出目标路径。

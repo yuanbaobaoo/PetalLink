@@ -63,7 +63,27 @@ static LOG_BUFFER: Mutex<Vec<LogRecord>> = Mutex::new(Vec::new());
 /// 返回缓冲中所有日志的快照（newest-first）。
 /// 对齐 dart `logBuffer`（直接读取全局 List）。
 pub fn snapshot() -> Vec<LogRecord> {
-    LOG_BUFFER.lock().clone()
+    snapshot_since(None)
+}
+
+/// 返回缓冲中不早于 `since_ms` 的日志快照（newest-first）。
+///
+/// 日志页按时间范围筛选时只取窗口内记录，避免每 2 秒把整段缓冲全量传给前端。
+pub fn snapshot_since(since_ms: Option<i64>) -> Vec<LogRecord> {
+    let buffer = LOG_BUFFER.lock();
+    filter_since(&buffer, since_ms)
+}
+
+/// 在给定缓冲上按时间下界截断（纯函数，便于单测）。
+fn filter_since(records: &[LogRecord], since_ms: Option<i64>) -> Vec<LogRecord> {
+    match since_ms {
+        Some(since) => records
+            .iter()
+            .filter(|record| record.time_ms >= since)
+            .cloned()
+            .collect(),
+        None => records.to_vec(),
+    }
 }
 
 /// 追加一条日志到缓冲（newest-first，溢出裁剪尾部）。
@@ -213,5 +233,51 @@ pub fn cleanup_old_logs() {
             max_days = MAX_LOG_DAYS,
             "清理超期日志文件"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 构造指定时间戳的测试记录。
+    fn record(time_ms: i64) -> LogRecord {
+        LogRecord {
+            level: LogLevel::Info,
+            logger_name: "test".to_string(),
+            message: format!("t{time_ms}"),
+            time_ms,
+        }
+    }
+
+    /// 时间下界只保留窗口内记录，且保持 newest-first 顺序。
+    #[test]
+    fn filter_since_keeps_window_in_order() {
+        let buffer = vec![record(300), record(200), record(100)];
+
+        let kept = filter_since(&buffer, Some(150));
+        assert_eq!(
+            kept.iter().map(|record| record.time_ms).collect::<Vec<_>>(),
+            vec![300, 200]
+        );
+        // 不传下界等价于全量。
+        assert_eq!(filter_since(&buffer, None).len(), 3);
+        // 下界晚于全部记录时返回空集，而不是回退成全量。
+        assert!(filter_since(&buffer, Some(400)).is_empty());
+    }
+
+    /// 环形缓冲保持 newest-first，且溢出时裁剪最旧记录。
+    #[test]
+    fn buffer_is_newest_first_and_trimmed() {
+        let mut buffer = Vec::new();
+        push_into(&mut buffer, record(1));
+        push_into(&mut buffer, record(2));
+        assert_eq!(buffer[0].time_ms, 2);
+        for time in 3..=(MAX_BUFFER_SIZE as i64 + 2) {
+            push_into(&mut buffer, record(time));
+        }
+        assert_eq!(buffer.len(), MAX_BUFFER_SIZE);
+        assert_eq!(buffer[0].time_ms, MAX_BUFFER_SIZE as i64 + 2);
+        assert_eq!(buffer[MAX_BUFFER_SIZE - 1].time_ms, 3);
     }
 }

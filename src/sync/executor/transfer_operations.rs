@@ -142,7 +142,7 @@ impl ExecutorTransferOperations {
         };
         let local_path = PathBuf::from(local_path);
         if let Err(error) = verify_source_snapshot(task, &local_path) {
-            tracing::info!(task_id = task.id, %error, "上传源已变化，跳过 fileId xattr 写入");
+            tracing::debug!(task_id = task.id, %error, "上传源已变化，跳过 fileId xattr 写入");
             return Ok(false);
         }
         self.mount.set_file_id_xattr(&local_path, file_id).await?;

@@ -389,7 +389,7 @@ impl TaskRunner {
             }
             Err(error) => {
                 // 核验基础设施暂不可用不改变写入事实，只缩短重试间隔。
-                tracing::warn!(task_id = task.id, %error, "远端写入核验暂不可用，保留歧义状态");
+                tracing::debug!(task_id = task.id, %error, "远端写入核验暂不可用，保留歧义状态");
                 // 核验不可用达到上限后转 Failed 交人工重试，避免网络长期异常时永久重试。
                 // 计数用独立的 verify_attempt_count，不消耗全局重试预算。
                 let attempts = task.verify_attempt_count.saturating_add(1);
@@ -599,7 +599,7 @@ impl TaskRunner {
             match self.recover_startup_task(task).await {
                 Ok(task_summary) => Self::merge_startup_summary(&mut summary, task_summary),
                 Err(error) => {
-                    tracing::warn!(task_id, %error, "单个启动任务恢复失败，继续处理其他任务");
+                    tracing::debug!(task_id, %error, "单个启动任务恢复失败，继续处理其他任务");
                     summary.failed += 1;
                 }
             }

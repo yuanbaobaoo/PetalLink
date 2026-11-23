@@ -392,7 +392,7 @@ impl UploadApi {
                 &e.to_string(),
             )
         })?;
-        tracing::info!(status = status_code, has_location = !session_url.is_empty(), response = %init, file = %file_name, size = total_size, "resume 会话初始化响应");
+        tracing::debug!(status = status_code, has_location = !session_url.is_empty(), response = %init, file = %file_name, size = total_size, "resume 会话初始化响应");
 
         // 解析 body 中的标识字段（旧 API 兼容）
         let server_id = init

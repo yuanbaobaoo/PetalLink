@@ -597,15 +597,34 @@ impl SyncEngine {
                 None => 0,
             };
             db = self.load_db_snapshot()?;
-            tracing::info!(
-                healed = reconciliation.healed,
-                purged = reconciliation.purged,
-                stale_cancelled,
-                resolved_conflicts,
-                remaining_failed = reconciliation.remaining_failed,
-                blocked = blocked_path_changes.len(),
-                "可信同步周期已完成失败状态复核与残余清理"
-            );
+            // 全零的清扫结果没有信息量：按 debug 记录，只有真的清扫/遗留时才升到 INFO。
+            let sweep_changed = reconciliation.healed > 0
+                || reconciliation.purged > 0
+                || stale_cancelled > 0
+                || resolved_conflicts > 0
+                || reconciliation.remaining_failed > 0
+                || !blocked_path_changes.is_empty();
+            if sweep_changed {
+                tracing::info!(
+                    healed = reconciliation.healed,
+                    purged = reconciliation.purged,
+                    stale_cancelled,
+                    resolved_conflicts,
+                    remaining_failed = reconciliation.remaining_failed,
+                    blocked = blocked_path_changes.len(),
+                    "可信同步周期已完成失败状态复核与残余清理"
+                );
+            } else {
+                tracing::debug!(
+                    healed = reconciliation.healed,
+                    purged = reconciliation.purged,
+                    stale_cancelled,
+                    resolved_conflicts,
+                    remaining_failed = reconciliation.remaining_failed,
+                    blocked = blocked_path_changes.len(),
+                    "可信同步周期已完成失败状态复核与残余清理"
+                );
+            }
         } else {
             tracing::warn!("云端树不可信，跳过 DB reconcile、失败复核与残余清理");
         }
@@ -717,16 +736,30 @@ impl SyncEngine {
         preserve_dirs_with_pending_backups(&mut actions);
         let other_filters_ms = other_filters_started.elapsed().as_millis() as u64;
         let planning_total_ms = planning_started.elapsed().as_millis() as u64;
-        tracing::info!(
-            triggered_by,
-            actions = actions.len(),
-            planner_ms,
-            skip_filter_ms,
-            rename_ms,
-            other_filters_ms,
-            planning_total_ms,
-            "同步规划完成"
-        );
+        // 空规划是常态心跳：降到 debug，只有真的产生动作时才记 INFO。
+        if actions.is_empty() {
+            tracing::debug!(
+                triggered_by,
+                actions = 0,
+                planner_ms,
+                skip_filter_ms,
+                rename_ms,
+                other_filters_ms,
+                planning_total_ms,
+                "同步规划完成（无动作）"
+            );
+        } else {
+            tracing::info!(
+                triggered_by,
+                actions = actions.len(),
+                planner_ms,
+                skip_filter_ms,
+                rename_ms,
+                other_filters_ms,
+                planning_total_ms,
+                "同步规划完成"
+            );
+        }
 
         // 无动作时清零计数并发布空闲状态。
         if actions.is_empty() {
@@ -739,7 +772,7 @@ impl SyncEngine {
                 runtime.sync_phase = None;
                 runtime.last_sync_time = Some(chrono::Utc::now().timestamp_millis());
             })?;
-            tracing::info!(
+            tracing::debug!(
                 triggered_by,
                 local = local_len,
                 cloud = cloud_len,

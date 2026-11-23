@@ -1,5 +1,7 @@
 //! 断点上传会话地址、服务端偏移与错误恢复语义。
 
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+
 use reqwest::header::{LOCATION, RETRY_AFTER};
 use serde_json::Value;
 
@@ -62,6 +64,34 @@ impl UploadApi {
     }
 }
 
+/// 「收尾响应未回填 size」告警的最小输出间隔（毫秒）。
+///
+/// 批量上传时每个文件都缺 `size`，逐条 WARN 会把日志刷成噪声；这里按分钟聚合，
+/// 保留可统计性（`suppressed` 为期间被抑制的条数）。
+const MISSING_SIZE_LOG_INTERVAL_MS: i64 = 60_000;
+/// 上次输出「未回填 size」告警的时间。
+static MISSING_SIZE_LOG_LAST_MS: AtomicI64 = AtomicI64::new(0);
+/// 自上次输出以来被抑制的条数。
+static MISSING_SIZE_LOG_SUPPRESSED: AtomicU64 = AtomicU64::new(0);
+
+/// 按分钟节流记录「收尾响应未回填 size」，避免批量上传刷屏。
+fn log_missing_size_rate_limited(id: &str, expected_size: u64) {
+    let now = chrono::Utc::now().timestamp_millis();
+    let last = MISSING_SIZE_LOG_LAST_MS.load(Ordering::Relaxed);
+    if now.saturating_sub(last) < MISSING_SIZE_LOG_INTERVAL_MS {
+        MISSING_SIZE_LOG_SUPPRESSED.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    let suppressed = MISSING_SIZE_LOG_SUPPRESSED.swap(0, Ordering::Relaxed);
+    MISSING_SIZE_LOG_LAST_MS.store(now, Ordering::Relaxed);
+    tracing::warn!(
+        id,
+        expected_size,
+        suppressed,
+        "收尾响应未回填 size，按本地快照补全（同窗口其余告警已聚合）"
+    );
+}
+
 /// 收尾响应是否显式声明了 `size`。
 ///
 /// 华为收尾 2xx 有时只回 `id`/`fileName`，缺 `size` 与「回填 0」语义完全不同：
@@ -93,11 +123,7 @@ pub(super) fn complete_upload_file(
         }
     } else {
         // 未回填长度：按任务快照补全，避免结算层把 0 当成真实长度。
-        tracing::warn!(
-            id = %file.id,
-            expected_size,
-            "收尾响应未回填 size，按本地快照补全"
-        );
+        log_missing_size_rate_limited(&file.id, expected_size);
         file.size = i64::try_from(expected_size).unwrap_or(i64::MAX);
     }
     Some(file)

@@ -242,11 +242,16 @@ impl ChangesApi {
                     all.len()
                 )));
             }
-            tracing::info!(
-                pages = page_number,
-                total = all.len(),
-                "Changes:list 已完整追平"
-            );
+            // 空增量是每分钟常态：debug，只有真的拉到变更才 INFO。
+            if all.is_empty() {
+                tracing::debug!(pages = page_number, "Changes:list 已完整追平（无变更）");
+            } else {
+                tracing::info!(
+                    pages = page_number,
+                    total = all.len(),
+                    "Changes:list 已完整追平"
+                );
+            }
             return Ok((all, final_cursor));
         }
 
