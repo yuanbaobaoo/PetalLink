@@ -100,7 +100,9 @@ jobs:
   build-macos:
     name: Build macOS arm64
     needs: validate
-    runs-on: macos-14
+    # macos-14 镜像已于 2026-11-02 退役（actions/runner-images#13518），
+    # 使用其 arm64 替代标签 macos-15；不要退回 macos-latest 之外的模糊标签。
+    runs-on: macos-15
     steps:
       - name: Checkout release tag
         uses: actions/checkout@v4
