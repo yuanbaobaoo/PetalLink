@@ -146,7 +146,7 @@ impl TaskDisposition {
     pub fn user_message(self) -> &'static str {
         match self {
             Self::Completed => "同步已完成。",
-            Self::Pending => "任务已加入传输队列，稍后会自动开始。",
+            Self::Pending => "已加入队列，稍后会自动开始。",
             Self::Running => "文件正在同步。",
             Self::BlockedByActiveIntent => "该文件正在执行其他同步任务，请稍后再试。",
             Self::WaitingForNetwork => "网络不可用，恢复后会自动继续。",

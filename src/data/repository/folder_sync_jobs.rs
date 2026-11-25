@@ -229,23 +229,61 @@ pub fn mark_failed(conn: &Connection, id: i64, message: &str, now: i64) -> AppRe
     Ok(())
 }
 
-/// 用户取消排队的作业；已在规划的作业会先标记取消，由 worker 自行收敛。
+/// 取消一个作业：排队中 / 规划中的立即收敛；失败的作业也能取消，
+/// 表示用户不再关心这次失败（保留为已取消历史，不自动重试）。
 pub fn cancel(conn: &Connection, id: i64, now: i64) -> AppResult<bool> {
     let changed = conn
         .execute(
             "UPDATE folder_sync_jobs
              SET state=?1, finished_at=?2, state_revision=state_revision+1
-             WHERE id=?3 AND state IN (?4, ?5)",
+             WHERE id=?3 AND state IN (?4, ?5, ?6)",
             params![
                 job_state::CANCELED,
                 now,
                 id,
                 job_state::QUEUED,
-                job_state::PLANNING
+                job_state::PLANNING,
+                job_state::FAILED
             ],
         )
         .map_err(|error| AppError::generic(format!("取消目录同步作业失败：{error}")))?;
     Ok(changed == 1)
+}
+
+/// 清除终态作业，按「已完成」「失败与已取消」两组开关取并集，返回删除条数。
+///
+/// 目录同步作业是队列任务的一种：它和传输任务共用一套筛选、计数与清除语义，
+/// 因此这里与 `transfer_queue::clear_terminal_transfers` 保持同样的两个开关。
+/// 活跃作业（排队 / 规划中）永不删除。
+pub fn clear_terminal(
+    conn: &Connection,
+    include_completed: bool,
+    include_failed: bool,
+) -> AppResult<usize> {
+    let removed = conn
+        .execute(
+            "DELETE FROM folder_sync_jobs
+             WHERE (?1=1 AND state=?2) OR (?3=1 AND state IN (?4, ?5))",
+            params![
+                include_completed as i32,
+                job_state::COMPLETED,
+                include_failed as i32,
+                job_state::FAILED,
+                job_state::CANCELED,
+            ],
+        )
+        .map_err(|error| AppError::generic(format!("清除目录同步记录失败：{error}")))?;
+    Ok(removed)
+}
+
+/// 清空全部作业（账号切换 / 清空缓存时使用）。
+///
+/// 作业属于当前账号的运行队列，换账号后必须一起清掉，
+/// 否则新账号会在任务列表里看到上一个账号的目录同步记录。
+pub fn delete_all_folder_sync_jobs(conn: &Connection) -> AppResult<()> {
+    conn.execute("DELETE FROM folder_sync_jobs", [])
+        .map_err(|error| AppError::generic(format!("清空目录同步作业失败：{error}")))?;
+    Ok(())
 }
 
 /// 修剪超过保留上限的终态作业，避免历史无限增长。
@@ -355,6 +393,103 @@ mod tests {
         assert_eq!(after.state, job_state::COMPLETED);
         assert_eq!(after.finished_at, Some(300));
         assert!(!cancel(&connection, job.id, 400).unwrap());
+    }
+
+    /// 失败的作业可以被取消：表示用户不再关心这次失败，落为已取消历史。
+    #[test]
+    fn failed_job_can_be_canceled() {
+        let connection = open_database();
+        let job = enqueue(&connection, "folder-a", "a", 100).unwrap();
+        take_next_queued(&connection, 200).unwrap();
+        mark_failed(&connection, job.id, "读取云端失败", 300).unwrap();
+
+        assert!(cancel(&connection, job.id, 400).unwrap());
+
+        let after = get(&connection, job.id).unwrap().unwrap();
+        assert_eq!(after.state, job_state::CANCELED);
+        assert_eq!(after.finished_at, Some(400));
+        assert!(!cancel(&connection, job.id, 500).unwrap());
+    }
+
+    /// 清除只删终态作业，排队与规划中的作业必须保留。
+    #[test]
+    fn clear_terminal_keeps_active_jobs() {
+        let connection = open_database();
+        // 已完成回执。
+        let completed = enqueue(&connection, "folder-a", "a", 100).unwrap();
+        take_next_queued(&connection, 200).unwrap();
+        mark_completed(&connection, completed.id, 7, 300).unwrap();
+        // 失败回执。
+        let failed = enqueue(&connection, "folder-b", "b", 400).unwrap();
+        take_next_queued(&connection, 500).unwrap();
+        mark_failed(&connection, failed.id, "读取云端失败", 600).unwrap();
+        // 用户取消的回执。
+        let canceled = enqueue(&connection, "folder-c", "c", 700).unwrap();
+        cancel(&connection, canceled.id, 800).unwrap();
+        // 仍在排队、不能被清除的作业。
+        let queued = enqueue(&connection, "folder-d", "d", 900).unwrap();
+
+        let removed = clear_terminal(&connection, true, true).unwrap();
+
+        assert_eq!(removed, 3, "三条终态回执都应被删除");
+        let remaining = list_recent(&connection, 10).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, queued.id);
+        assert_eq!(remaining[0].state, job_state::QUEUED);
+    }
+
+    /// 两个清除开关各自只覆盖自己那组终态，与传输历史的清除语义一致。
+    #[test]
+    fn clear_terminal_respects_scope_switches() {
+        let connection = open_database();
+        // 已完成回执。
+        let completed = enqueue(&connection, "folder-a", "a", 100).unwrap();
+        take_next_queued(&connection, 200).unwrap();
+        mark_completed(&connection, completed.id, 1, 300).unwrap();
+        // 失败回执。
+        let failed = enqueue(&connection, "folder-b", "b", 400).unwrap();
+        take_next_queued(&connection, 500).unwrap();
+        mark_failed(&connection, failed.id, "读取云端失败", 600).unwrap();
+        // 取消回执（归入「失败与已取消」组）。
+        let canceled = enqueue(&connection, "folder-c", "c", 700).unwrap();
+        cancel(&connection, canceled.id, 800).unwrap();
+
+        // 只清已完成：失败与取消都留下。
+        assert_eq!(clear_terminal(&connection, true, false).unwrap(), 1);
+        assert!(get(&connection, completed.id).unwrap().is_none());
+        assert!(get(&connection, failed.id).unwrap().is_some());
+        assert!(get(&connection, canceled.id).unwrap().is_some());
+
+        // 只清失败与取消：这两条一起消失。
+        assert_eq!(clear_terminal(&connection, false, true).unwrap(), 2);
+        assert!(get(&connection, failed.id).unwrap().is_none());
+        assert!(get(&connection, canceled.id).unwrap().is_none());
+    }
+
+    /// 清空作业必须同时覆盖活跃作业与终态历史（账号切换依赖这一点）。
+    #[test]
+    fn delete_all_covers_active_and_terminal_jobs() {
+        let connection = open_database();
+        let completed = enqueue(&connection, "folder-a", "a", 100).unwrap();
+        take_next_queued(&connection, 200).unwrap();
+        mark_completed(&connection, completed.id, 1, 300).unwrap();
+        let queued = enqueue(&connection, "folder-b", "b", 400).unwrap();
+
+        delete_all_folder_sync_jobs(&connection).unwrap();
+
+        assert!(get(&connection, queued.id).unwrap().is_none());
+        assert!(list_recent(&connection, 10).unwrap().is_empty());
+    }
+
+    /// 没有终态作业时清除是幂等的空操作。
+    #[test]
+    fn clear_terminal_is_noop_without_terminal_jobs() {
+        let connection = open_database();
+        let queued = enqueue(&connection, "folder-a", "a", 100).unwrap();
+
+        assert_eq!(clear_terminal(&connection, true, true).unwrap(), 0);
+        assert_eq!(clear_terminal(&connection, true, true).unwrap(), 0);
+        assert!(get(&connection, queued.id).unwrap().is_some());
     }
 
     /// 规划进度必须能累加到作业行上，供 UI 展示「已投递 N/M 项」。

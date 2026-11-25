@@ -311,7 +311,7 @@ async function handleClearCache(): Promise<void> {
     // 高风险操作必须由用户显式确认。
     const ok = await confirmDialog({
       title: "清空缓存并重启", titleIcon: "alert", danger: true, confirmText: "确认清空",
-      content: "此操作将清除：\n• 登录状态（需重新登录）\n• 同步数据库与传输队列\n• 应用管理的本地文件缓存（尚未上传的本地更改也会丢失）\n• 同步快照、云端树缓存和配置文件\n\n已经上传到云盘的文件不会被删除。",
+      content: "此操作将清除：\n• 登录状态（需重新登录）\n• 同步数据库与任务队列\n• 应用管理的本地文件缓存（尚未上传的本地更改也会丢失）\n• 同步快照、云端树缓存和配置文件\n\n已经上传到云盘的文件不会被删除。",
     });
     if (!ok) return;
     // 后端 app_clear_cache 会停引擎+删 config+relaunch（进程将替换），先提示再调，不依赖返回

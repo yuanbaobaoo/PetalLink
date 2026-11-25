@@ -30,7 +30,7 @@ pub async fn sync_folder_enqueue(
     Ok(job)
 }
 
-/// 列出目录同步作业（活跃在前，其后是最近的终态历史）。
+/// 列出最近的目录同步作业（含活跃与终态；按创建时间倒序）。
 #[tauri::command]
 #[specta::specta]
 pub fn sync_folder_jobs() -> AppResult<Vec<FolderSyncJob>> {
@@ -38,7 +38,7 @@ pub fn sync_folder_jobs() -> AppResult<Vec<FolderSyncJob>> {
     engine.list_folder_sync_jobs()
 }
 
-/// 取消一个排队中或规划中的目录同步作业。
+/// 取消一个排队中 / 规划中的目录同步作业；失败的作业也可取消（保留为已取消历史）。
 #[tauri::command]
 #[specta::specta]
 pub async fn sync_folder_cancel(app: AppHandle, job_id: i64) -> AppResult<bool> {
@@ -48,4 +48,23 @@ pub async fn sync_folder_cancel(app: AppHandle, job_id: i64) -> AppResult<bool> 
         let _ = FolderSyncJobsChangedEvent.emit(&app);
     }
     Ok(cancelled)
+}
+
+/// 清除已结束的目录同步作业（目录同步与传输任务共用同一套清除语义）。
+///
+/// `include_completed` 覆盖已完成，`include_failed` 覆盖失败与已取消；
+/// 返回实际删除的作业条数。排队中与规划中的作业不受影响。
+#[tauri::command]
+#[specta::specta]
+pub fn sync_folder_clear(
+    app: AppHandle,
+    include_completed: bool,
+    include_failed: bool,
+) -> AppResult<usize> {
+    let engine = sync_engine()?;
+    let removed = engine.clear_folder_sync_history(include_completed, include_failed)?;
+    if removed > 0 {
+        let _ = FolderSyncJobsChangedEvent.emit(&app);
+    }
+    Ok(removed)
 }

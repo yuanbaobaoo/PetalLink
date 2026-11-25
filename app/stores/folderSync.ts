@@ -1,14 +1,14 @@
 /**
  * 目录同步作业 Store —— 「双端对齐」的排队与进度。
+ *
+ * 作业是队列任务的一种：弹层把它和传输任务放在同一个列表里筛选、计数与清除，
+ * 所以这里只维护完整的作业快照和队列操作，不再单独裁剪展示条数。
  */
 import { defineStore } from "pinia";
 import { ref, computed } from "vue";
 import * as folderSyncApi from "@/api/folderSync";
 import type { FolderSyncJob } from "@/api/folderSync";
 import { FOLDER_SYNC_JOB_STATE, isActiveFolderSyncJob } from "@/api/folderSync";
-
-// 最近终态作业在弹层里的展示条数（失败优先，其次最近完成）。
-const TERMINAL_JOB_DISPLAY_LIMIT = 3;
 
 // 目录同步作业 Store。
 export const useFolderSyncStore = defineStore("folderSync", () => {
@@ -17,16 +17,10 @@ export const useFolderSyncStore = defineStore("folderSync", () => {
 
   // 排队中 / 规划中的作业
   const activeJobs = computed(() => jobs.value.filter(isActiveFolderSyncJob));
-  // 需要用户注意的终态作业：失败优先，其次最近完成的
-  const recentTerminalJobs = computed(() => {
-    // 失败作业排在前面，便于用户第一眼看到问题。
-    const failed = jobs.value.filter((job) => job.state === FOLDER_SYNC_JOB_STATE.FAILED);
-    // 最近完成的作业。
-    const completed = jobs.value.filter((job) => job.state === FOLDER_SYNC_JOB_STATE.COMPLETED);
-    return [...failed, ...completed].slice(0, TERMINAL_JOB_DISPLAY_LIMIT);
-  });
-  // 弹层需要展示的作业行：活跃作业全量 + 有限条终态
-  const visibleJobs = computed(() => [...activeJobs.value, ...recentTerminalJobs.value]);
+  // 失败作业：需要用户选择重新入队或取消，弹层据此决定是否展示失败汇总条
+  const failedJobs = computed(
+    () => jobs.value.filter((job) => job.state === FOLDER_SYNC_JOB_STATE.FAILED),
+  );
   // 是否存在活跃作业
   const hasActiveJobs = computed(() => activeJobs.value.length > 0);
 
@@ -60,7 +54,7 @@ export const useFolderSyncStore = defineStore("folderSync", () => {
   }
 
   /**
-   * 取消一个排队中或规划中的作业
+   * 取消一个作业：排队中 / 规划中立即收敛，失败的作业表示用户放弃这次失败
    *
    * @param jobId - 作业 ID
    * @returns 后端是否真的取消了作业
@@ -71,5 +65,74 @@ export const useFolderSyncStore = defineStore("folderSync", () => {
     return cancelled;
   }
 
-  return { jobs, activeJobs, visibleJobs, hasActiveJobs, loadAll, enqueue, cancel };
+  /**
+   * 清除已结束的作业（与传输历史的清除共用一套开关）
+   *
+   * @param includeCompleted - 是否清除已完成
+   * @param includeFailed - 是否清除失败与已取消
+   * @returns 后端实际删除的作业条数
+   */
+  async function clear(includeCompleted: boolean, includeFailed: boolean): Promise<number> {
+    const removed = await folderSyncApi.clearFolderSyncJobs(includeCompleted, includeFailed);
+    await loadAll();
+    return removed;
+  }
+
+  /**
+   * 批量重试失败作业：逐条重新入队，结束时只重载一次
+   *
+   * @returns 成功入队与未能入队的作业条数
+   */
+  async function retryFailed(): Promise<{ queued: number; failed: number }> {
+    // 本次待重试的失败作业快照（重载后列表会变化）。
+    const targets = failedJobs.value;
+    // 成功重新入队的条数。
+    let queued = 0;
+    // 仍然失败（例如云端目录已被删除）的条数。
+    let failed = 0;
+    for (const job of targets) {
+      try {
+        await folderSyncApi.enqueueFolderSync(job.folder_id, job.rel_path);
+        queued += 1;
+      } catch {
+        failed += 1;
+      }
+    }
+    if (targets.length > 0) await loadAll();
+    return { queued, failed };
+  }
+
+  /**
+   * 批量取消失败作业（保留为已取消历史），结束时只重载一次
+   *
+   * @returns 实际取消的作业条数
+   */
+  async function cancelFailed(): Promise<number> {
+    // 本次待取消的失败作业快照。
+    const targets = failedJobs.value;
+    // 取消成功的条数。
+    let canceled = 0;
+    for (const job of targets) {
+      try {
+        if (await folderSyncApi.cancelFolderSyncJob(job.id)) canceled += 1;
+      } catch {
+        // 单条取消失败不影响其它作业；下一次事件刷新会纠正状态。
+      }
+    }
+    if (targets.length > 0) await loadAll();
+    return canceled;
+  }
+
+  return {
+    jobs,
+    activeJobs,
+    failedJobs,
+    hasActiveJobs,
+    loadAll,
+    enqueue,
+    cancel,
+    clear,
+    retryFailed,
+    cancelFailed,
+  };
 });

@@ -63,13 +63,13 @@ impl SyncEngine {
         Ok(job)
     }
 
-    /// 列出目录同步作业：活跃作业在前，其后是最近的终态历史。
+    /// 列出最近的目录同步作业：活跃与终态一起按创建时间倒序返回，交互侧再做置顶与筛选。
     pub fn list_folder_sync_jobs(&self) -> AppResult<Vec<FolderSyncJob>> {
         let conn = self.db.lock();
         folder_sync_jobs::list_recent(&conn, JOB_LIST_LIMIT)
     }
 
-    /// 取消一个排队中或规划中的目录同步作业。
+    /// 取消一个排队中 / 规划中的目录同步作业；失败的作业也可取消（不再自动重试）。
     pub fn cancel_folder_sync_job(&self, job_id: i64) -> AppResult<bool> {
         let now = chrono::Utc::now().timestamp_millis();
         let cancelled = {
@@ -81,6 +81,31 @@ impl SyncEngine {
             self.notify_folder_queue_changed();
         }
         Ok(cancelled)
+    }
+
+    /// 清除已结束的目录同步作业，返回删除条数。
+    ///
+    /// 两个开关与传输历史的清除保持同一套语义：`include_completed` 覆盖已完成，
+    /// `include_failed` 覆盖失败与已取消。排队中与规划中的作业永远不会被清除。
+    pub fn clear_folder_sync_history(
+        &self,
+        include_completed: bool,
+        include_failed: bool,
+    ) -> AppResult<usize> {
+        let removed = {
+            let conn = self.db.lock();
+            folder_sync_jobs::clear_terminal(&conn, include_completed, include_failed)?
+        };
+        if removed > 0 {
+            tracing::info!(
+                removed,
+                include_completed,
+                include_failed,
+                "目录同步历史已清除"
+            );
+            self.notify_folder_queue_changed();
+        }
+        Ok(removed)
     }
 
     /// 广播目录同步作业变化，并唤醒 worker。

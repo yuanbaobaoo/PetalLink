@@ -18,6 +18,7 @@ fn clear_account_caches() {
         let conn = DB.lock();
         let _ = repository::delete_all(&conn);
         let _ = repository::delete_all_transfers(&conn);
+        let _ = repository::delete_all_folder_sync_jobs(&conn);
     }
     crate::core::cache_paths::clear_all_cache_files();
 }

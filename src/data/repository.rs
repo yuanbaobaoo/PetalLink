@@ -19,6 +19,8 @@ macro_rules! db_err {
 
 /// 目录同步作业队列的 SQLite 实现。
 pub mod folder_sync_jobs;
+#[allow(unused_imports)]
+pub use folder_sync_jobs::delete_all_folder_sync_jobs;
 
 /// 同步基线记录的 SQLite 实现。
 mod sync_items;

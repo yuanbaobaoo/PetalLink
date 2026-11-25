@@ -440,6 +440,7 @@ pub async fn app_clear_cache(app: AppHandle) -> AppResult<()> {
         let conn = DB.lock();
         let _ = repository::delete_all(&conn);
         let _ = repository::delete_all_transfers(&conn);
+        let _ = repository::delete_all_folder_sync_jobs(&conn);
     }
     if let Ok(p) = crate::data::db_file_path() {
         let _ = std::fs::remove_file(&p);

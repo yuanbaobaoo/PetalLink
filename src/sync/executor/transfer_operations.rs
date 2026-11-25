@@ -778,7 +778,7 @@ impl SyncExecutor {
                     ActionResult {
                         success: false,
                         // 入队不是失败：记为延后结算，下一轮由传输队列的权威状态决定。
-                        error_message: Some("已加入传输队列，等待后台执行".to_string()),
+                        error_message: Some("已加入队列，等待后台执行".to_string()),
                         deferred: true,
                         cloud_file: None,
                     }

@@ -207,6 +207,7 @@ pub fn builder() -> Builder<Wry> {
             commands::sync_folder_enqueue,
             commands::sync_folder_jobs,
             commands::sync_folder_cancel,
+            commands::sync_folder_clear,
             commands::sync_retry_failed,
             commands::sync_approve_mass_delete,
             commands::sync_cleanup_placeholder,

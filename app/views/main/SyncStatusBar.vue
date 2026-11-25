@@ -129,7 +129,7 @@ async function handleRetryFailedItem(item: FailedItem): Promise<void> {
   try {
     // 后端只入队并立即返回，执行交给传输队列。
     await transfer.retry(item.task_id);
-    showToast("已加入传输队列");
+    showToast("已加入任务队列");
   } catch (e) {
     showToast("重试失败：" + extractErrorMessage(e), { variant: "error" });
   } finally {
@@ -344,7 +344,7 @@ async function handleRetryAllFailed(): Promise<void> {
       </template>
     </MateDialog>
 
-    <!-- 同名冲突：直接给出三选一决策，不必再去传输队列里翻 -->
+    <!-- 同名冲突：直接给出三选一决策，不必再去任务队列里翻 -->
     <MateDialog
       :open="showConflictDialog"
       title-icon="alert"

@@ -29,7 +29,7 @@ export async function enqueueFolderSync(folderId: string, relPath: string): Prom
 }
 
 /**
- * 列出目录同步作业（活跃在前，其后是最近的终态历史）。
+ * 列出最近的目录同步作业（含活跃与终态，按创建时间倒序）。
  */
 export async function listFolderSyncJobs(): Promise<FolderSyncJob[]> {
   return await commands.syncFolderJobs();
@@ -42,6 +42,22 @@ export async function listFolderSyncJobs(): Promise<FolderSyncJob[]> {
  */
 export async function cancelFolderSyncJob(jobId: number): Promise<boolean> {
   return await commands.syncFolderCancel(jobId);
+}
+
+/**
+ * 清除已结束的作业，与传输历史的清除共用同一套开关。
+ *
+ * 作业只是「投递」这一步，清除不会影响已经在传输队列里的任务。
+ *
+ * @param includeCompleted - 是否清除已完成
+ * @param includeFailed - 是否清除失败与已取消
+ * @returns 实际删除的作业条数
+ */
+export async function clearFolderSyncJobs(
+  includeCompleted: boolean,
+  includeFailed: boolean,
+): Promise<number> {
+  return await commands.syncFolderClear(includeCompleted, includeFailed);
 }
 
 /**

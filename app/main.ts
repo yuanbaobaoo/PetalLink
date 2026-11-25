@@ -75,7 +75,7 @@ async function reloadTransfers(): Promise<void> {
  * 把失败数量同步到 Dock 角标。
  *
  * 窗口不在前台时这是唯一能看见「有东西失败了」的系统级提示；
- * 角标只是提醒，真实状态与重试入口仍在传输队列里（U09）。
+ * 角标只是提醒，真实状态与重试入口仍在任务队列里（U09）。
  */
 async function syncDockBadge(failed: number): Promise<void> {
   try {

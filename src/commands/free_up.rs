@@ -591,14 +591,14 @@ pub async fn sync_free_up_batch(items: Vec<FreeableItem>) -> AppResult<FreeUpBat
 
 /// 按需下载的处理结果。
 ///
-/// 「已加入传输队列」不是失败：文件会在队列里完成落盘，UI 必须给出可继续的提示，
+/// 「已加入任务队列」不是失败：文件会在队列里完成落盘，UI 必须给出可继续的提示，
 /// 而不是把成功入队渲染成红色的「同步失败」。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum DownloadOnDemandOutcome {
     /// 本次已下载完成，可以立即打开。
     Completed,
-    /// 已加入传输队列，完成后自动落盘。
+    /// 已加入任务队列，完成后自动落盘。
     Queued,
 }
 

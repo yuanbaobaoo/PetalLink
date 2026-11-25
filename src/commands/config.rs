@@ -133,6 +133,7 @@ fn reset_legacy_linux_sync_state_if_required() -> AppResult<()> {
         let conn = DB.lock();
         repository::delete_all(&conn)?;
         repository::delete_all_transfers(&conn)?;
+        repository::delete_all_folder_sync_jobs(&conn)?;
     }
     crate::core::cache_paths::clear_all_cache_files();
     crate::core::config_store::finish_linux_sync_reset()?;

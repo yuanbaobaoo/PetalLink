@@ -657,20 +657,20 @@ async function handleSyncItem(f: DriveFile): Promise<void> {
 /**
  * 递归同步文件夹子树（在 runSyncItem 内调用，不再自裹防重复）。
  *
- * 后台异步执行：后端立即返回，不阻塞 UI。进度实时出现在传输队列（托盘图标 + 传输弹窗），
- * 用户可继续操作其他功能。完成无需 toast（传输队列本身显示完成态 + 后端会广播目录刷新）。
+ * 后台异步执行：后端立即返回，不阻塞 UI。进度实时出现在任务队列（托盘图标 + 任务队列弹窗），
+ * 用户可继续操作其他功能。完成无需 toast（任务队列本身显示完成态 + 后端会广播目录刷新）。
  *
  * @param f - 文件对象
  */
 async function doSyncFolder(f: DriveFile): Promise<void> {
   // 后端递归同步所需的挂载相对路径。
   const rel = relPathOf(f);
-  // 作业入队即返回：排队位置与投递进度都在传输弹层可见。
+  // 作业入队即返回：排队位置与投递进度都在任务队列弹层可见。
   try {
     const job = await folderSync.enqueue(f.id, rel);
     // 同一目录已有活跃作业时后端会复用，提示词要如实反映“已在队列中”。
     const message = job.state === FOLDER_SYNC_JOB_STATE.QUEUED
-      ? `已加入目录同步队列：「${f.name}」，在传输队列查看进度`
+      ? `已加入目录同步队列：「${f.name}」，在任务队列查看进度`
       : `「${f.name}」已在目录同步队列中`;
     showToast(message);
   } catch (e) {
@@ -697,10 +697,10 @@ async function handleSyncFile(f: DriveFile, notifySuccess = true): Promise<boole
     count: downloading.value.count + 1,
   };
   try {
-    // 后端区分「已下载完成」与「已加入传输队列」，两者都不是失败。
+    // 后端区分「已下载完成」与「已加入任务队列」，两者都不是失败。
     const outcome = await commands.syncDownloadOnDemand(f.id, dest);
     if (outcome === "queued") {
-      showToast(`已加入传输队列：「${f.name}」，完成后可打开`);
+      showToast(`已加入任务队列：「${f.name}」，完成后可打开`);
       // 入队后状态列应立刻从「仅云端」变成「正在同步」。
       void refreshBatchStatus();
       return false;
@@ -1002,7 +1002,7 @@ async function handleBulkDownload(): Promise<void> {
     if (!fileOp.guard({ requireMount: true })) return;
     // 已下载完成的数量。
     let completed = 0;
-    // 已加入传输队列的数量（后台下载，不是失败）。
+    // 已加入任务队列的数量（后台下载，不是失败）。
     let queued = 0;
     // 失败明细：只保留可读原因，用于汇总提示。
     const failures: string[] = [];
@@ -1027,7 +1027,7 @@ async function handleBulkDownload(): Promise<void> {
     );
     // 汇总提示：成功 / 已入队 / 失败三档，避免只报成功数掩盖失败。
     const parts = [`已下载 ${completed} 项`];
-    if (queued > 0) parts.push(`${queued} 项已加入传输队列`);
+    if (queued > 0) parts.push(`${queued} 项已加入任务队列`);
     if (failures.length > 0) parts.push(`${failures.length} 项失败（${failures[0]}）`);
     showToast(parts.join("，"), { variant: failures.length > 0 ? "warning" : "success" });
     void refreshBatchStatus();

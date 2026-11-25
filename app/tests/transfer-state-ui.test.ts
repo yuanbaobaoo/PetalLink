@@ -150,14 +150,15 @@ describe("TransferPopover 后端状态呈现", () => {
 
     // 所有可取消行（失败 / 需要重新检查）都渲染更多操作菜单：
     // 失败行既是重试锚点，也必须提供取消出口释放路径占用（D12）。
+    // 列表与后端一致按 created_at 倒序（新任务在上），故 task-10 在前。
     const menuNames = wrapper
       .findAll(".tp-item")
       .filter((item) => item.find(".tp-item__menu").exists())
       .map((item) => item.find(".tp-item__name").text());
     expect(menuNames).toEqual([
-      expect.stringContaining("task-6"),
-      expect.stringContaining("task-8"),
       expect.stringContaining("task-10"),
+      expect.stringContaining("task-8"),
+      expect.stringContaining("task-6"),
     ]);
   });
 });
@@ -275,7 +276,7 @@ describe("SyncStatusBar 活动态与失败事实", () => {
     expect(wrapper.text()).not.toContain("同步完成");
   });
 
-  it("主页只显示当前同步失败，历史失败留在传输队列", () => {
+  it("主页只显示当前同步失败，历史失败留在任务队列", () => {
     // 当前同步状态。
     const sync = useSyncStore();
     sync.applyState({

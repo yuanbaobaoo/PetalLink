@@ -35,7 +35,7 @@ const searchInCurrentFolder = ref(true);
 const searchFieldRef = ref<HTMLElement | null>(null);
 // 同步目录是否已配置
 const mountConfigured = computed(() => sync.mountConfigured);
-// 传输队列 Popover
+// 任务队列 Popover
 const showTransferPopover = ref(false);
 // 异步按钮 loading + 防重复点击
 const { loading: refreshLoading, run: runRefresh } = useAsyncAction();
@@ -176,7 +176,7 @@ async function handleRefreshAll(): Promise<void> {
         </div>
         <div class="app-bar__tools">
           <MateButton v-if="mountConfigured" variant="primary" icon="refresh" tooltip="读取云端文件并同步到本地" :loading="refreshLoading || sync.isIndexing" :disabled="refreshLoading || sync.isIndexing" @click="handleRefreshAll">同步索引</MateButton>
-          <MateButton variant="soft" icon="transfer" tooltip="传输队列" @click="showTransferPopover = !showTransferPopover">传输队列</MateButton>
+          <MateButton variant="soft" icon="transfer" tooltip="任务队列" @click="showTransferPopover = !showTransferPopover">任务队列</MateButton>
           <MateButton
             v-if="mountConfigured"
             variant="icon-text"
@@ -230,7 +230,7 @@ async function handleRefreshAll(): Promise<void> {
         <div v-if="browser.loading" class="loading-overlay"><MateCircularProgress :size="24" /></div>
       </div>
 
-      <!-- 传输队列 Popover（点击外部关闭） -->
+      <!-- 任务队列 Popover（点击外部关闭） -->
       <div v-if="showTransferPopover" class="tp-capture" @click="showTransferPopover = false" />
       <TransferPopover v-if="showTransferPopover" class="transfer-popover-anchor" @close="showTransferPopover = false" />
     </div>
@@ -257,7 +257,7 @@ async function handleRefreshAll(): Promise<void> {
 .search-row__sub { font-size: var(--font-caption); color: var(--ink-400); font-variant-numeric: tabular-nums; }
 .search-row :deep(.is-folder) { color: var(--brand-500); }
 
-/* 传输队列 popover 定位：贴工具栏下方右侧 */
+/* 任务队列 popover 定位：贴工具栏下方右侧 */
 .tp-capture { position: fixed; inset: 0; z-index: 90; }
 .transfer-popover-anchor { position: absolute; top: calc(var(--appbar-height) + 12px); right: 20px; z-index: 100; }
 </style>

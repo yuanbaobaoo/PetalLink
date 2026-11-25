@@ -112,10 +112,14 @@ export const commands = {
 	// 入队一次目录双端对齐。
 	// 返回作业快照（含排队状态）；同一目录重复点击会复用活跃作业。
 	syncFolderEnqueue: (folderId: string, relPath: string) => __TAURI_INVOKE<FolderSyncJob>("sync_folder_enqueue", { folderId, relPath }),
-	// 列出目录同步作业（活跃在前，其后是最近的终态历史）。
+	// 列出最近的目录同步作业（含活跃与终态；按创建时间倒序）。
 	syncFolderJobs: () => __TAURI_INVOKE<FolderSyncJob[]>("sync_folder_jobs"),
-	// 取消一个排队中或规划中的目录同步作业。
+	// 取消一个排队中 / 规划中的目录同步作业；失败的作业也可取消（保留为已取消历史）。
 	syncFolderCancel: (jobId: number) => __TAURI_INVOKE<boolean>("sync_folder_cancel", { jobId }),
+	// 清除已结束的目录同步作业（目录同步与传输任务共用同一套清除语义）。
+	// `include_completed` 覆盖已完成，`include_failed` 覆盖失败与已取消；
+	// 返回实际删除的作业条数。排队中与规划中的作业不受影响。
+	syncFolderClear: (includeCompleted: boolean, includeFailed: boolean) => __TAURI_INVOKE<number>("sync_folder_clear", { includeCompleted, includeFailed }),
 	// 重试全部失败任务：全部入队后立即返回汇总，不等待执行。
 	syncRetryFailed: () => __TAURI_INVOKE<RetryAllSummary>("sync_retry_failed"),
 	// 确认执行本轮被安全闸门拦下的大批量云端删除。
@@ -315,12 +319,12 @@ export type AuthState = {
 };
 
 // 按需下载的处理结果。
-// 「已加入传输队列」不是失败：文件会在队列里完成落盘，UI 必须给出可继续的提示，
+// 「已加入任务队列」不是失败：文件会在队列里完成落盘，UI 必须给出可继续的提示，
 // 而不是把成功入队渲染成红色的「同步失败」。
 export type DownloadOnDemandOutcome =
 // 本次已下载完成，可以立即打开。
 "completed" |
-// 已加入传输队列，完成后自动落盘。
+// 已加入任务队列，完成后自动落盘。
 "queued";
 
 // Drive 配额信息。对齐 dart `DriveAbout`。
